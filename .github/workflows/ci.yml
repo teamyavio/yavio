@@ -103,10 +103,13 @@ jobs:
           --health-retries 5
       clickhouse:
         image: clickhouse/clickhouse-server:24.3
+        env:
+          CLICKHOUSE_PASSWORD: test
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
         ports:
           - 8123:8123
         options: >-
-          --health-cmd "clickhouse-client --query 'SELECT 1'"
+          --health-cmd "clickhouse-client --password test --query 'SELECT 1'"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 5
@@ -118,6 +121,7 @@ jobs:
         env:
           DATABASE_URL: postgres://yavio_service:test@localhost:5432/yavio_test
           CLICKHOUSE_URL: http://localhost:8123
+          CLICKHOUSE_PASSWORD: test
 
   # ── Build ──────────────────────────────────────────────────────────
   build:
