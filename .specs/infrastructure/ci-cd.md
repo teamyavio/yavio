@@ -15,7 +15,7 @@ The Yavio platform is a monorepo with multiple independently deployable packages
     deploy-cloud.yml        # Deploy to Yavio Cloud staging/production (Cloud only)
     scheduled.yml           # Weekly load tests + dependency audit
   actions/
-    setup/action.yml        # Composite action: checkout, Node.js, npm ci, cache
+    setup/action.yml        # Composite action: checkout, Node.js, pnpm install, cache
     detect-changes/action.yml # Composite action: monorepo change detection
   PULL_REQUEST_TEMPLATE.md
   ISSUE_TEMPLATE/
@@ -38,7 +38,7 @@ The monorepo contains multiple packages with different dependency chains. Runnin
 | `packages/dashboard/**` | dashboard-lint, dashboard-typecheck, dashboard-test, dashboard-build, integration-test |
 | `packages/cli/**` | cli-lint, cli-typecheck, cli-test, cli-build |
 | `packages/shared/**` | All jobs (shared types affect everything) |
-| `migrations/**` | integration-test |
+| `packages/db/**` | ingest, dashboard, integration-test (shared database layer, includes migrations) |
 | `docker-compose*.yml` | integration-test |
 | `.github/**` | All jobs (CI config changes affect everything) |
 
@@ -85,16 +85,16 @@ lint:
   steps:
     - uses: actions/checkout@v4
     - uses: ./.github/actions/setup
-    - run: npx biome check .
+    - run: pnpm exec biome check .
 ```
 
-**Failure mode:** Any formatting or lint violation fails the job. No auto-fix in CI — contributors run `npx biome check --write` locally.
+**Failure mode:** Any formatting or lint violation fails the job. No auto-fix in CI — contributors run `pnpm exec biome check --write` locally.
 
 ### 2.4 Type Check
 
 **Runner:** `ubuntu-latest`, Node.js 22
 
-Runs `tsc --noEmit` per package in dependency order. The `shared` package is built first since other packages depend on its type exports.
+Runs `tsc --noEmit` per package in dependency order. The `shared` and `db` packages are built first since other packages depend on their type exports.
 
 ```yaml
 typecheck:
@@ -102,11 +102,12 @@ typecheck:
   steps:
     - uses: actions/checkout@v4
     - uses: ./.github/actions/setup
-    - run: npm run typecheck -w packages/shared
-    - run: npm run typecheck -w packages/sdk
-    - run: npm run typecheck -w packages/ingest
-    - run: npm run typecheck -w packages/dashboard
-    - run: npm run typecheck -w packages/cli
+    - run: pnpm --filter @yavio/shared typecheck
+    - run: pnpm --filter @yavio/db typecheck
+    - run: pnpm --filter @yavio/sdk typecheck
+    - run: pnpm --filter @yavio/ingest typecheck
+    - run: pnpm --filter @yavio/dashboard typecheck
+    - run: pnpm --filter @yavio/cli typecheck
 ```
 
 Each `package.json` defines a `typecheck` script: `"typecheck": "tsc --noEmit"`.
@@ -125,7 +126,7 @@ test-sdk:
   steps:
     - uses: actions/checkout@v4
     - uses: ./.github/actions/setup
-    - run: npm test -w packages/sdk
+    - run: pnpm --filter @yavio/sdk test
 ```
 
 Repeated for `ingest`, `dashboard`, and `cli` with their respective change detection gates.
@@ -141,12 +142,13 @@ Verifies that all packages build successfully. Build artifacts are uploaded for 
 | Package | Build Command | Output |
 |---------|--------------|--------|
 | `shared` | `tsup` | `dist/` (CJS + ESM type definitions) |
+| `db` | `tsup` | `dist/` (CJS + ESM, Drizzle schema + clients) |
 | `sdk` | `tsup` | `dist/` (CJS + ESM bundles + `.d.ts`) |
 | `ingest` | `tsup` | `dist/` (CJS bundle) |
 | `dashboard` | `next build` | `.next/` (standalone output) |
 | `cli` | `tsup` | `dist/` (single executable ESM bundle) |
 
-Build order respects dependency chain: `shared` → `sdk` / `ingest` / `cli` → `dashboard`.
+Build order respects dependency chain: `shared` / `db` → `sdk` / `ingest` / `cli` → `dashboard`.
 
 ### 2.7 Integration Tests
 
@@ -185,11 +187,11 @@ integration-test:
   steps:
     - uses: actions/checkout@v4
     - uses: ./.github/actions/setup
-    - run: npm run migrate
+    - run: pnpm run migrate
       env:
         DATABASE_URL: postgres://yavio_service:test@localhost:5432/yavio_test
         CLICKHOUSE_URL: http://localhost:8123
-    - run: npm run test:integration
+    - run: pnpm run test:integration
       env:
         DATABASE_URL: postgres://yavio_service:test@localhost:5432/yavio_test
         CLICKHOUSE_URL: http://localhost:8123
@@ -204,7 +206,7 @@ Run on every PR. Validates that no secrets are committed and that PII redaction,
 | Check | Tool | Trigger |
 |-------|------|---------|
 | Secret scanning | GitHub Advanced Security (built-in) | Every push |
-| Dependency vulnerabilities | `npm audit --audit-level=high` | Every PR |
+| Dependency vulnerabilities | `pnpm audit --audit-level=high` | Every PR |
 | PII redaction tests | Vitest (ingest test suite) | Every PR |
 | Auth/isolation tests | Vitest (ingest + dashboard test suites) | Every PR |
 
@@ -232,13 +234,13 @@ release-npm:
   steps:
     - uses: actions/checkout@v4
     - uses: ./.github/actions/setup
-    - run: npm run build -w packages/shared
-    - run: npm run build -w packages/sdk
-    - run: npm run build -w packages/cli
-    - run: npm publish -w packages/sdk --provenance --access public
+    - run: pnpm --filter @yavio/shared build
+    - run: pnpm --filter @yavio/sdk build
+    - run: pnpm --filter @yavio/cli build
+    - run: pnpm --filter @yavio/sdk publish --provenance --access public --no-git-checks
       env:
         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-    - run: npm publish -w packages/cli --provenance --access public
+    - run: pnpm --filter @yavio/cli publish --provenance --access public --no-git-checks
       env:
         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 ```
@@ -313,7 +315,8 @@ All open-source packages share a single version number. When any publishable pac
 | `@yavio/cli` | Yes | npm |
 | `yavio/dashboard` | Yes | GHCR (Docker) |
 | `yavio/ingest` | Yes | GHCR (Docker) |
-| `packages/shared` | No (internal) | Not published |
+| `@yavio/shared` | No (internal) | Not published |
+| `@yavio/db` | No (internal) | Not published |
 
 **Versioning scheme:** [Semantic Versioning 2.0.0](https://semver.org/).
 
@@ -361,28 +364,31 @@ CI speed is critical for contributor experience. The pipeline caches aggressivel
 
 | Cache | Key | Scope | Typical Savings |
 |-------|-----|-------|-----------------|
-| npm dependencies | `hashFiles('**/package-lock.json')` | Per-branch, fallback to `main` | 30–60s (avoids full `npm ci`) |
+| pnpm dependencies | `hashFiles('**/pnpm-lock.yaml')` | Per-branch, fallback to `main` | 30–60s (avoids full `pnpm install`) |
 | Next.js build cache | `.next/cache` | Per-branch | 30–90s (incremental builds) |
 | Docker layer cache | GitHub Actions cache (GHA) | Cross-branch | 1–3 min (avoids rebuilding base layers) |
 | Biome binary | `~/.cache/biome` | Global | 5s (avoids download) |
 
 ### 6.1 Setup Composite Action
 
-The shared `.github/actions/setup/action.yml` composite action standardizes Node.js setup and npm caching across all jobs:
+The shared `.github/actions/setup/action.yml` composite action standardizes Node.js and pnpm setup across all jobs:
 
 ```yaml
 # .github/actions/setup/action.yml
 name: Setup
-description: Checkout, install Node.js, restore npm cache, install dependencies
+description: Checkout, install pnpm, Node.js, restore store cache, install dependencies
 runs:
   using: composite
   steps:
+    - uses: pnpm/action-setup@v4
+      with:
+        version: 10
     - uses: actions/setup-node@v4
       with:
         node-version: 22
         registry-url: https://registry.npmjs.org
-        cache: npm
-    - run: npm ci
+        cache: 'pnpm'
+    - run: pnpm install --frozen-lockfile
       shell: bash
 ```
 
@@ -459,7 +465,7 @@ Production deployment requires **manual approval** via GitHub Actions environmen
 | Schedule | Job | Purpose | Timeout |
 |----------|-----|---------|---------|
 | Weekly (Sunday 02:00 UTC) | `load-test` | Run k6 load tests against a dedicated load-test environment. See [testing.md §Load Tests](./testing.md). | 30 min |
-| Daily (06:00 UTC) | `dependency-audit` | `npm audit --audit-level=high`. Opens a GitHub issue if vulnerabilities are found. | 5 min |
+| Daily (06:00 UTC) | `dependency-audit` | `pnpm audit --audit-level=high`. Opens a GitHub issue if vulnerabilities are found. | 5 min |
 | Weekly (Monday 08:00 UTC) | `dependency-update` | Check for outdated dependencies. Opens a PR with updates if available (via Renovate or Dependabot). | 10 min |
 
 ### 9.1 Dependency Management
@@ -485,7 +491,7 @@ These status checks must pass before a PR can merge to `main`:
 | Integration Tests | `integration-test` | Yes |
 | Security Checks | `security` | Yes |
 | No secrets in committed files | GitHub secret scanning | Yes |
-| Dependency audit | `npm audit` | Yes (high/critical only) |
+| Dependency audit | `pnpm audit` | Yes (high/critical only) |
 
 **Note:** Jobs that are skipped by change detection (e.g., SDK tests when only dashboard files changed) count as passing. GitHub Actions reports skipped jobs as successful when used with `if:` conditions on required checks.
 
@@ -497,20 +503,20 @@ Contributors can run the full CI pipeline locally before pushing:
 
 ```bash
 # Lint + format
-npx biome check .
+pnpm exec biome check .
 
 # Type check
-npm run typecheck --workspaces
+pnpm turbo typecheck
 
 # Unit tests
-npm test --workspaces
+pnpm turbo test
 
 # Build
-npm run build --workspaces
+pnpm turbo build
 
 # Integration tests (requires Docker)
 docker compose -f docker-compose.test.yml up -d
-npm run test:integration
+pnpm run test:integration
 docker compose -f docker-compose.test.yml down
 ```
 
@@ -584,7 +590,8 @@ GitHub Actions and third-party actions used by the pipeline:
 | Action | Version | Purpose |
 |--------|---------|---------|
 | `actions/checkout` | v4 | Repository checkout |
-| `actions/setup-node` | v4 | Node.js setup with npm caching |
+| `pnpm/action-setup` | v4 | Install pnpm |
+| `actions/setup-node` | v4 | Node.js setup with pnpm store caching |
 | `actions/upload-artifact` | v4 | Upload build artifacts between jobs |
 | `actions/download-artifact` | v4 | Download build artifacts between jobs |
 | `docker/setup-buildx-action` | v3 | Docker Buildx for multi-arch builds |

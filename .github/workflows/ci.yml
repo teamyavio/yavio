@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Change Detection ───────────────────────────────────────────────
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      shared: ${{ steps.filter.outputs.shared }}
+      db: ${{ steps.filter.outputs.db }}
+      sdk: ${{ steps.filter.outputs.sdk }}
+      ingest: ${{ steps.filter.outputs.ingest }}
+      dashboard: ${{ steps.filter.outputs.dashboard }}
+      cli: ${{ steps.filter.outputs.cli }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        id: filter
+        with:
+          filters: |
+            shared:
+              - 'packages/shared/**'
+              - '.github/**'
+            db:
+              - 'packages/db/**'
+              - 'packages/shared/**'
+              - '.github/**'
+            sdk:
+              - 'packages/sdk/**'
+              - 'packages/shared/**'
+              - '.github/**'
+            ingest:
+              - 'packages/ingest/**'
+              - 'packages/shared/**'
+              - 'packages/db/**'
+              - '.github/**'
+            dashboard:
+              - 'packages/dashboard/**'
+              - 'packages/shared/**'
+              - 'packages/db/**'
+              - '.github/**'
+            cli:
+              - 'packages/cli/**'
+              - 'packages/shared/**'
+              - '.github/**'
+
+  # ── Lint & Format ──────────────────────────────────────────────────
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup
+      - run: pnpm exec biome check .
+
+  # ── Type Check ─────────────────────────────────────────────────────
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup
+      - run: pnpm --filter @yavio/shared typecheck
+      - run: pnpm --filter @yavio/db typecheck
+
+  # ── Unit Tests: shared ─────────────────────────────────────────────
+  test-shared:
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.shared == 'true'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup
+      - run: pnpm --filter @yavio/shared test
+
+  # ── Tests: db (requires PostgreSQL + ClickHouse) ───────────────────
+  test-db:
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.db == 'true'
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: yavio_test
+          POSTGRES_USER: yavio_service
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U yavio_service"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.3
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "clickhouse-client --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup
+      - run: pnpm --filter @yavio/db test
+        env:
+          DATABASE_URL: postgres://yavio_service:test@localhost:5432/yavio_test
+          CLICKHOUSE_URL: http://localhost:8123
+
+  # ── Build ──────────────────────────────────────────────────────────
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup
+      - run: pnpm turbo build
+
+  # ── Security ───────────────────────────────────────────────────────
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup
+      - run: pnpm audit --audit-level=high
