@@ -87,12 +87,19 @@ yavio-platform/
 │   │   │   ├── commands/        # Command implementations
 │   │   │   └── util/            # Shared helpers (Docker, config discovery)
 │   │   └── package.json         # "bin": { "yavio": "./dist/cli.mjs" }
-│   └── shared/                 # Shared types between dashboard and ingest
-│       ├── events.ts           # Event schema & types
-│       └── validation.ts       # Shared validation schemas
-├── migrations/
-│   ├── clickhouse/             # ClickHouse schema migrations
-│   └── postgres/               # PostgreSQL schema migrations
+│   ├── shared/                 # Shared types between dashboard and ingest
+│   │   ├── events.ts           # Event schema & types
+│   │   └── validation.ts       # Shared validation schemas
+│   └── db/                     # Shared database layer (@yavio/db)
+│       ├── src/
+│       │   ├── index.ts         # Public API: clients, helpers
+│       │   ├── schema.ts        # Drizzle ORM schema (PostgreSQL)
+│       │   ├── client.ts        # PostgreSQL + ClickHouse clients
+│       │   └── rls.ts           # Row-Level Security helpers
+│       ├── drizzle/             # Drizzle-managed PostgreSQL migrations
+│       ├── migrations/
+│       │   └── clickhouse/      # ClickHouse schema migrations
+│       └── package.json         # "@yavio/db"
 └── config/
     ├── clickhouse/             # ClickHouse server config
     └── nginx/                  # Optional reverse proxy config
