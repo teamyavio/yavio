@@ -1,0 +1,55 @@
+# Yavio Platform — Docker Compose (Development)
+# Starts PostgreSQL + ClickHouse for local development.
+# See: .specs/infrastructure/deployment.md §9.1.1
+#
+# Usage:
+#   cp .env.example .env   # fill in required secrets
+#   docker compose up -d
+#   docker compose ps      # verify health checks pass
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: yavio
+      POSTGRES_USER: yavio_service
+      POSTGRES_PASSWORD: ${POSTGRES_SERVICE_PASSWORD:-yavio_dev}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yavio_service"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-yavio_dev}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--password", "${CLICKHOUSE_PASSWORD:-yavio_dev}", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+
+networks:
+  frontend:    # Public-facing services (ingest, dashboard) — added when app services are introduced
+  backend:     # Internal services (databases)
