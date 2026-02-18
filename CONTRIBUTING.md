@@ -166,6 +166,48 @@ Format: `type(scope): description`
 - **scope** (optional): package name (`sdk`, `ingest`, `dashboard`, `cli`, `docs`)
 - **description**: imperative mood, lowercase, no period
 
+## Error Handling
+
+All errors use the `YavioError` class from `@yavio/shared/errors`. Never throw a bare `Error` in service code.
+
+### Creating Errors
+
+```typescript
+import { YavioError, ErrorCode } from "@yavio/shared/errors";
+
+// Throw with a stable code, message, HTTP status, and optional metadata
+throw new YavioError(
+  ErrorCode.DASHBOARD.WORKSPACE_NOT_FOUND,
+  "Workspace not found",
+  404,
+  { slug: "my-workspace" },
+);
+```
+
+### Error Code Ranges
+
+Each service owns a range of codes (defined in `packages/shared/src/error-codes.ts`):
+
+| Range | Service | Object |
+|-------|---------|--------|
+| `YAVIO-1000` – `1999` | SDK | `ErrorCode.SDK` |
+| `YAVIO-2000` – `2999` | Ingestion API | `ErrorCode.INGEST` |
+| `YAVIO-3000` – `3999` | Dashboard | `ErrorCode.DASHBOARD` |
+| `YAVIO-4000` – `4999` | Intelligence | `ErrorCode.INTELLIGENCE` |
+| `YAVIO-5000` – `5999` | Database | `ErrorCode.DB` |
+| `YAVIO-6000` – `6999` | CLI | `ErrorCode.CLI` |
+| `YAVIO-7000` – `7999` | Infrastructure | `ErrorCode.INFRA` |
+
+### Rules
+
+- **Always use `YavioError`** with a code from the catalog — no bare `Error` in service code
+- **Wrap unknown errors** — if you catch an unknown error, re-throw it as a `YavioError` (preserve if already one)
+- **Include metadata** — pass context like variable names, slugs, or filenames in the `metadata` field
+- **Codes are permanent** — never reuse or reassign an existing code
+- **Adding a new code:** pick the next unused number in the service range, add it to `packages/shared/src/error-codes.ts`, and document it in `.specs/07_error-catalog.md`
+
+See `.specs/07_error-catalog.md` for the full error specification.
+
 ## Development Tips
 
 ### Working with ClickHouse

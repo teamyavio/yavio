@@ -166,6 +166,89 @@ Application tables: `users`, `oauth_accounts`, `sessions`, `workspaces`, `worksp
 - The ingestion API is permissive on input: unknown fields silently dropped, missing optional fields default to NULL
 - Fields are never removed within a MAJOR version — deprecation lifecycle applies
 
+## Error Handling
+
+All errors across the platform use the `YavioError` class from `@yavio/shared/errors`. Every error carries a stable code, human-readable message, HTTP status, and optional metadata.
+
+### YavioError
+
+```typescript
+import { YavioError, ErrorCode } from "@yavio/shared/errors";
+
+throw new YavioError(
+  ErrorCode.DB.PG_MIGRATION_FAILED,  // stable code (never reused)
+  "PostgreSQL migration failed",      // human-readable message
+  500,                                 // HTTP status
+  { cause: err },                      // optional metadata
+);
+```
+
+The type guard `isYavioError(err)` checks whether an unknown value is a `YavioError`.
+
+### Error Code Catalog
+
+Codes are organized by service range in `packages/shared/src/error-codes.ts`:
+
+| Range | Service | Object |
+|-------|---------|--------|
+| `YAVIO-1000` – `1999` | SDK (`@yavio/sdk`) | `ErrorCode.SDK` |
+| `YAVIO-2000` – `2999` | Ingestion API | `ErrorCode.INGEST` |
+| `YAVIO-3000` – `3999` | Dashboard | `ErrorCode.DASHBOARD` |
+| `YAVIO-4000` – `4999` | Intelligence Service | `ErrorCode.INTELLIGENCE` |
+| `YAVIO-5000` – `5999` | Database / Storage | `ErrorCode.DB` |
+| `YAVIO-6000` – `6999` | CLI (`@yavio/cli`) | `ErrorCode.CLI` |
+| `YAVIO-7000` – `7999` | Infrastructure | `ErrorCode.INFRA` |
+
+Full specification: `.specs/07_error-catalog.md`
+
+### Patterns
+
+**Always use a code from the catalog** — never throw a bare `Error` in service code.
+
+**Wrap unknown errors** — preserve `YavioError` if already caught, wrap otherwise:
+
+```typescript
+main().catch((err) => {
+  if (err instanceof YavioError) throw err;
+  throw new YavioError(
+    ErrorCode.DB.CH_MIGRATION_FAILED,
+    err instanceof Error ? err.message : "ClickHouse migration failed",
+    500,
+    { cause: err },
+  );
+});
+```
+
+**Include metadata** for debugging context (variable names, filenames, slugs, etc.).
+
+### HTTP Error Response Format
+
+All HTTP services return errors in this shape:
+
+```json
+{
+  "error": {
+    "code": "YAVIO-2003",
+    "message": "API key has been revoked",
+    "status": 401,
+    "requestId": "req_a1b2c3"
+  }
+}
+```
+
+### Observability Integration
+
+- **Logs:** error code in `err.code` field
+- **Sentry:** code included as tag `yavio_error_code`
+- **Prometheus:** error counters labeled by code
+
+### Adding New Error Codes
+
+1. Pick the next unused code in the appropriate service range
+2. Add the constant to `packages/shared/src/error-codes.ts`
+3. Document it in `.specs/07_error-catalog.md` (severity, status, message, recovery)
+4. Codes are permanent — never reuse or reassign a code
+
 ## Important Implementation Notes
 
 - The SDK uses `AsyncLocalStorage` for context propagation — `ctx.yavio` in handlers, singleton for deep utilities
