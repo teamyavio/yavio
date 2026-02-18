@@ -1,0 +1,35 @@
+{
+  "name": "@yavio/ingest",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "test": "vitest run",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@clickhouse/client": "^1.8.1",
+    "@fastify/cors": "^11.0.0",
+    "@yavio/db": "workspace:*",
+    "@yavio/shared": "workspace:*",
+    "drizzle-orm": "^0.38.4",
+    "fastify": "^5.2.1",
+    "fastify-plugin": "^5.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

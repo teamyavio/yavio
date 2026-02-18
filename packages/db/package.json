@@ -23,6 +23,11 @@
       "types": "./dist/rls.d.ts",
       "import": "./dist/rls.js",
       "require": "./dist/rls.cjs"
+    },
+    "./clickhouse": {
+      "types": "./dist/clickhouse-client.d.ts",
+      "import": "./dist/clickhouse-client.js",
+      "require": "./dist/clickhouse-client.cjs"
     }
   },
   "scripts": {
