@@ -1,0 +1,57 @@
+name: Feature Request
+description: Suggest a new feature or improvement for Yavio
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature! Please describe the problem and your proposed solution.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem are you trying to solve? Why is this needed?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: How do you think this should work?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Have you considered any other approaches?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: package
+    attributes:
+      label: Affected Package
+      description: Which package would this feature belong to?
+      multiple: true
+      options:
+        - "@yavio/sdk"
+        - "Ingestion API (ingest)"
+        - "Dashboard"
+        - "@yavio/cli"
+        - "Docker / Infrastructure"
+        - "Documentation"
+        - "Other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Any other context, mockups, or references.
+    validations:
+      required: false

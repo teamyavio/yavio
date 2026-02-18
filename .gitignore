@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+dist/
+.next/
+out/
+*.tsbuildinfo
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Yavio SDK config (contains API keys)
+.yaviorc.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker data (local volumes)
+postgres_data/
+clickhouse_data/
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Sentry
+.sentryclirc
+
+# Turbo
+.turbo/
+
+# Biome
+biome-socket-*
+
+# claude
+.claude/
+
