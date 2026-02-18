@@ -196,12 +196,15 @@ ClickHouse does not support session-variable-based RLS like PostgreSQL. Instead,
 
 #### Users & Roles
 
-Two ClickHouse users separate the read and write paths:
+Three ClickHouse users separate the admin, write, and read paths:
 
 | User | Used By | Access | Row Policies |
 |------|---------|--------|-------------|
+| `default` | Migrations, user/grant management | Full admin (`access_management=1`) | None |
 | `yavio_ingest` | Ingestion API (`yavio-ingest`) | INSERT on `events` and `tool_registry` only | None — write path is pre-validated by API key → workspace/project lookup |
 | `yavio_dashboard` | Dashboard (`yavio-dashboard`) | SELECT on all tables | Enforced — every SELECT must provide tenant context |
+
+The `default` user password is set at container startup by `config/clickhouse/init-default-password.sh`, which reads `CLICKHOUSE_ADMIN_PASSWORD` and writes a SHA-256 hash into `/etc/clickhouse-server/users.d/default-password.xml`.
 
 ```sql
 CREATE USER yavio_ingest IDENTIFIED BY '${CLICKHOUSE_INGEST_PASSWORD}';

@@ -156,6 +156,7 @@ A `docker-compose.prod.yml` provides production-ready overrides:
 |----------|----------|---------|-------------|
 | `POSTGRES_SERVICE_PASSWORD` | Yes (prod) | `yavio_dev` | PostgreSQL password for `yavio_service` role (table owner, bypasses RLS). Used by migrations, background jobs, NextAuth, and ingestion API. |
 | `POSTGRES_APP_PASSWORD` | Yes (prod) | `yavio_dev` | PostgreSQL password for `yavio_app` role (RLS enforced). Used by dashboard API routes and Server Components. |
+| `CLICKHOUSE_ADMIN_PASSWORD` | Yes (prod) | `yavio_dev` | ClickHouse password for the `default` admin user. Used for migrations and user/grant management. Set at container startup by `init-default-password.sh`. |
 | `CLICKHOUSE_INGEST_PASSWORD` | Yes (prod) | `yavio_dev` | ClickHouse password for `yavio_ingest` user (INSERT only, no row policies). |
 | `CLICKHOUSE_DASHBOARD_PASSWORD` | Yes (prod) | `yavio_dev` | ClickHouse password for `yavio_dashboard` user (SELECT only, row policies enforced). |
 | `NEXTAUTH_SECRET` | **Yes** | - | Session encryption secret. Compose will refuse to start if unset (`?` syntax). |
@@ -163,7 +164,7 @@ A `docker-compose.prod.yml` provides production-ready overrides:
 | `API_KEY_HASH_SECRET` | **Yes** | - | HMAC-SHA256 secret for API key hashing. Prevents precomputation attacks if the database is compromised. Generate with: `openssl rand -base64 32`. Compose will refuse to start if unset (`?` syntax). |
 | `ENCRYPTION_KEY` | **Yes** | - | AES-256-GCM key for encrypting OAuth tokens at rest in PostgreSQL. Generate with: `openssl rand -base64 32`. Compose will refuse to start if unset (`?` syntax). |
 | `NEXTAUTH_URL` | Yes | `http://localhost:3000` | Dashboard public URL |
-| `CLICKHOUSE_URL` | No | `http://clickhouse:8123` | ClickHouse HTTP endpoint |
+| `CLICKHOUSE_URL` | No | `http://default:yavio_dev@clickhouse:8123` | ClickHouse HTTP endpoint (includes credentials) |
 | `DATABASE_URL` | No | Auto-constructed | PostgreSQL connection string |
 | `YAVIO_RETENTION_DAYS` | No | `90` | ClickHouse event retention in days. Self-hosted only — applied via `ALTER TABLE ... MODIFY TTL` at startup. Ignored on Cloud (hardcoded to 365). |
 | `SMTP_HOST` | No | - | SMTP server hostname. If unset, email features are disabled (verification skipped, password reset/invites unavailable). See [dashboard/architecture.md §7.11](../dashboard/architecture.md#711-email-sending). |
@@ -205,8 +206,9 @@ ENCRYPTION_KEY=            # AES-256-GCM key for OAuth token encryption (generat
 # === Database Roles (see storage-layer.md §5.1.8 and §5.2.10) ===
 POSTGRES_SERVICE_PASSWORD=yavio_dev    # yavio_service: table owner, bypasses RLS
 POSTGRES_APP_PASSWORD=yavio_dev        # yavio_app: RLS enforced for user-facing queries
-CLICKHOUSE_INGEST_PASSWORD=yavio_dev   # yavio_ingest: INSERT only, no row policies
-CLICKHOUSE_DASHBOARD_PASSWORD=yavio_dev # yavio_dashboard: SELECT only, row policies enforced
+CLICKHOUSE_ADMIN_PASSWORD=yavio_dev      # default: admin user, runs migrations
+CLICKHOUSE_INGEST_PASSWORD=yavio_dev     # yavio_ingest: INSERT only, no row policies
+CLICKHOUSE_DASHBOARD_PASSWORD=yavio_dev  # yavio_dashboard: SELECT only, row policies enforced
 
 # === Application ===
 NEXTAUTH_URL=http://localhost:3000
