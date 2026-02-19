@@ -168,4 +168,12 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: ./.github/actions/setup
-      - run: pnpm audit --audit-level=high
+      - name: Audit dependencies
+        run: |
+          OUTPUT=$(pnpm audit --audit-level=high 2>&1) && { echo "$OUTPUT"; exit 0; }
+          echo "$OUTPUT"
+          if echo "$OUTPUT" | grep -q "ERR_PNPM_AUDIT_BAD_RESPONSE"; then
+            echo "::warning::pnpm audit skipped — npm registry returned a server error"
+            exit 0
+          fi
+          exit 1
