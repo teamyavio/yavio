@@ -22,6 +22,22 @@ export class YavioError extends Error {
     super(message);
     this.name = "YavioError";
   }
+
+  /**
+   * Serialize the error into the standard API error envelope shape.
+   *
+   * @param requestId  Optional Fastify request ID to include for traceability.
+   * @returns `{ code, message, status, requestId?, metadata? }`
+   */
+  toJSON(requestId?: string) {
+    return {
+      code: this.code,
+      message: this.message,
+      status: this.status,
+      ...(requestId ? { requestId } : {}),
+      ...(this.metadata ? { metadata: this.metadata } : {}),
+    };
+  }
 }
 
 /**
