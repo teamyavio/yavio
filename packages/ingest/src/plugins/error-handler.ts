@@ -1,25 +1,36 @@
-import { ErrorCode, isYavioError } from "@yavio/shared/errors";
+import { ErrorCode, YavioError, isYavioError } from "@yavio/shared/errors";
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 
 const errorHandler: FastifyPluginAsync = async (app) => {
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
     if (isYavioError(error)) {
+      const extras = error as unknown as Record<string, unknown>;
+
+      // Set Retry-After header for rate limit and backpressure errors
+      if (
+        (error.status === 429 || error.status === 503) &&
+        typeof extras.retryAfterMs === "number"
+      ) {
+        reply.header("Retry-After", Math.ceil(extras.retryAfterMs / 1000).toString());
+      }
+
+      // Top-level sibling data (e.g. batch errors/accepted/rejected counts)
+      const responseData =
+        typeof extras.responseData === "object" && extras.responseData !== null
+          ? (extras.responseData as Record<string, unknown>)
+          : {};
+
       return reply.status(error.status).send({
-        error: {
-          code: error.code,
-          message: error.message,
-          ...(error.metadata ? { metadata: error.metadata } : {}),
-        },
+        error: error.toJSON(request.id),
+        ...responseData,
       });
     }
 
     app.log.error(error, "Unhandled error");
+    const fallback = new YavioError(ErrorCode.INGEST.INTERNAL_ERROR, "Internal server error", 500);
     return reply.status(500).send({
-      error: {
-        code: ErrorCode.INGEST.INTERNAL_ERROR,
-        message: "Internal server error",
-      },
+      error: fallback.toJSON(request.id),
     });
   });
 };

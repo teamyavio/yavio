@@ -21,7 +21,8 @@ const healthRoute: FastifyPluginAsync = async (app) => {
       clickhouse: chUp ? "up" : "down",
     };
 
-    return reply.status(200).send(response);
+    const statusCode = pgUp && chUp ? 200 : 503;
+    return reply.status(statusCode).send(response);
   });
 };
 

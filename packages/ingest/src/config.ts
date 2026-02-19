@@ -4,12 +4,17 @@ export interface AppConfig {
   port: number;
   databaseUrl: string;
   clickhouseUrl: string;
+  apiKeyHashSecret: string;
+  jwtSecret: string;
+  corsOrigins: string[];
 }
 
 export function loadConfig(): AppConfig {
   const port = Number.parseInt(process.env.PORT ?? "3001", 10);
   const databaseUrl = process.env.DATABASE_URL;
   const clickhouseUrl = process.env.CLICKHOUSE_URL;
+  const apiKeyHashSecret = process.env.API_KEY_HASH_SECRET;
+  const jwtSecret = process.env.JWT_SECRET;
 
   if (!databaseUrl) {
     throw new YavioError(
@@ -29,5 +34,24 @@ export function loadConfig(): AppConfig {
     );
   }
 
-  return { port, databaseUrl, clickhouseUrl };
+  if (!apiKeyHashSecret) {
+    throw new YavioError(
+      ErrorCode.INFRA.REQUIRED_ENV_VAR_MISSING,
+      "API_KEY_HASH_SECRET is required",
+      500,
+      { variable: "API_KEY_HASH_SECRET" },
+    );
+  }
+
+  if (!jwtSecret) {
+    throw new YavioError(ErrorCode.INFRA.REQUIRED_ENV_VAR_MISSING, "JWT_SECRET is required", 500, {
+      variable: "JWT_SECRET",
+    });
+  }
+
+  const corsOrigins = process.env.CORS_ORIGINS
+    ? process.env.CORS_ORIGINS.split(",").map((o) => o.trim())
+    : ["*"];
+
+  return { port, databaseUrl, clickhouseUrl, apiKeyHashSecret, jwtSecret, corsOrigins };
 }
