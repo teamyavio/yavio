@@ -42,7 +42,7 @@ pnpm dev
 
 ```
 packages/
-  dashboard/    # Next.js 15 dashboard
+  dashboard/    # Next.js 16 dashboard
   ingest/       # Fastify ingestion API
   sdk/          # @yavio/sdk (server + widget)
   cli/          # @yavio/cli

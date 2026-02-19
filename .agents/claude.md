@@ -20,7 +20,7 @@ Developer's MCP Server              Yavio Platform
                                         ├── Schema validation
                                         └── ClickHouse write
                                               │
-  Browser ──────────────────────────► Dashboard (Next.js 15)
+  Browser ──────────────────────────► Dashboard (Next.js 16)
                                         │
                                         ├── ClickHouse (analytics)
                                         └── PostgreSQL (app data)
@@ -33,7 +33,7 @@ Developer's MCP Server              Yavio Platform
 | SDK (`@yavio/sdk`) | TypeScript, npm package. Server: `withYavio()` proxy. Widget: `useYavio()` React hook |
 | CLI (`@yavio/cli`) | TypeScript, npm package. Commands: `init`, `up`, `down`, `status`, `doctor` |
 | Ingestion API (`packages/ingest`) | Fastify (or Hono), TypeScript |
-| Dashboard (`packages/dashboard`) | Next.js 15 (App Router), React, TypeScript |
+| Dashboard (`packages/dashboard`) | Next.js 16 (App Router), React, TypeScript |
 | Analytics DB | ClickHouse (ReplacingMergeTree engine) |
 | Application DB | PostgreSQL 16 (Drizzle ORM) |
 | Auth | NextAuth.js v5 (email+password + OAuth) |
@@ -46,7 +46,7 @@ Developer's MCP Server              Yavio Platform
 
 ```
 packages/
-  dashboard/        # Next.js 15 dashboard (App Router)
+  dashboard/        # Next.js 16 dashboard (App Router)
     app/            # Routes: (auth)/, (dashboard)/[workspace]/[project]/...
     lib/            # auth/, clickhouse/, db/, queries/, email/
     components/     # charts/, layout/, ui/

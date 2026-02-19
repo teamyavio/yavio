@@ -6,8 +6,8 @@ The documentation site is a **Fumadocs** (Next.js) application living in the pla
 
 | Criterion | Fumadocs | Docusaurus | Nextra | Mintlify |
 |-----------|----------|------------|--------|----------|
-| Framework | Next.js 15 (RSC) | React (CSR) | Next.js | Hosted SaaS |
-| Matches platform stack | Yes — same Next.js 15, Tailwind, shadcn | No | Partial | No |
+| Framework | Next.js 16 (RSC) | React (CSR) | Next.js | Hosted SaaS |
+| Matches platform stack | Yes — same Next.js 16, Tailwind, shadcn | No | Partial | No |
 | Server Components | Yes | No | Partial | N/A |
 | Built-in search | Yes (API route) | Plugin (Algolia) | Yes | Yes (AI) |
 | MDX support | Yes | Yes | Yes | Yes |
@@ -15,7 +15,7 @@ The documentation site is a **Fumadocs** (Next.js) application living in the pla
 | Cost | Free (MIT) | Free (MIT) | Free (MIT) | $0–300+/mo |
 | OpenAPI auto-gen | Plugin (`fumadocs-openapi`) | Plugin | No | Built-in |
 
-Fumadocs is the natural choice: it runs on the same stack as the dashboard (Next.js 15, Tailwind, RSC), can share UI components via the monorepo, supports OpenAPI-driven API reference generation, and is free.
+Fumadocs is the natural choice: it runs on the same stack as the dashboard (Next.js 16, Tailwind, RSC), can share UI components via the monorepo, supports OpenAPI-driven API reference generation, and is free.
 
 ## Monorepo Placement
 
@@ -24,7 +24,7 @@ The docs site lives alongside the dashboard, ingestion API, and CLI in the platf
 ```
 yavio-platform/
 ├── packages/
-│   ├── dashboard/          # Next.js 15 dashboard
+│   ├── dashboard/          # Next.js 16 dashboard
 │   ├── ingest/             # Ingestion API
 │   ├── cli/                # CLI tool
 │   ├── shared/             # Shared types

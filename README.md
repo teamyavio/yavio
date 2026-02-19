@@ -39,7 +39,7 @@ Developer's MCP Server          Yavio Platform
                                     ├── Schema validation
                                     └── ClickHouse write
                                           │
-  Browser ──────────────────────► Dashboard (Next.js 15)
+  Browser ──────────────────────► Dashboard (Next.js 16)
                                     │
                                     ├── ClickHouse (analytics)
                                     └── PostgreSQL (app data)
@@ -50,7 +50,7 @@ Developer's MCP Server          Yavio Platform
 | **@yavio/sdk** | npm package — server-side `withYavio()` proxy + React `useYavio()` hook |
 | **@yavio/cli** | CLI for SDK setup (`yavio init`) and self-hosted management (`yavio up/down/status`) |
 | **Ingestion API** | High-throughput Fastify service for event collection |
-| **Dashboard** | Next.js 15 web app with auth, workspaces, and analytics views |
+| **Dashboard** | Next.js 16 web app with auth, workspaces, and analytics views |
 | **ClickHouse** | Analytics event storage (MergeTree engine) |
 | **PostgreSQL** | Application data (users, workspaces, projects, API keys) |
 

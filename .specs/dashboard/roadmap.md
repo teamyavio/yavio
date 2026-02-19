@@ -2,7 +2,7 @@
 
 ## Phase 4: Auth & Workspace Management
 
-- Next.js 15 project setup (App Router)
+- Next.js 16 project setup (App Router)
 - NextAuth.js v5 integration
 - Auth pages: login, register, forgot password, email verification
 - OAuth providers: GitHub, Google

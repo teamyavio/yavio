@@ -26,7 +26,7 @@
 
 | Package | Purpose | Why This One |
 |---------|---------|-------------|
-| next | Web framework | Next.js 15 (App Router). Server Components for direct DB queries. |
+| next | Web framework | Next.js 16 (App Router). Server Components for direct DB queries. |
 | next-auth | Authentication | NextAuth.js v5. Industry-standard auth for Next.js. OAuth + credentials. Built-in Drizzle adapter for PostgreSQL sessions. |
 | drizzle-orm | PostgreSQL ORM | Type-safe, lightweight, excellent DX. Migrations included. |
 | @clickhouse/client | ClickHouse queries | Same client as ingestion API. |

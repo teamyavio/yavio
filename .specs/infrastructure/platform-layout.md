@@ -8,7 +8,7 @@ The platform ships as a set of Docker images orchestrated by `docker-compose`. A
 
 | Service | Image | Role |
 |---------|-------|------|
-| `yavio-dashboard` | `yavio/dashboard:latest` | Next.js 15 web app: auth, workspace management, analytics views |
+| `yavio-dashboard` | `yavio/dashboard:latest` | Next.js 16 web app: auth, workspace management, analytics views |
 | `yavio-ingest` | `yavio/ingest:latest` | Fastify HTTP service: event ingestion, PII stripping, ClickHouse writes |
 | - | `@yavio/sdk` (npm) | SDK: wraps MCP tools with analytics tracking, ships events to ingest API |
 | `clickhouse` | `clickhouse/clickhouse-server` | Analytics event storage (MergeTree engine) |
@@ -30,7 +30,7 @@ yavio-platform/
 ├── docker-compose.pro.yml      # Adds yavio-intelligence service (Pro/Enterprise)
 ├── docker-compose.prod.yml     # Production overrides (volumes, resource limits)
 ├── packages/
-│   ├── dashboard/              # Next.js 15 (App Router)
+│   ├── dashboard/              # Next.js 16 (App Router)
 │   │   ├── app/                # App Router pages
 │   │   │   ├── (auth)/         # Login, register, invite acceptance
 │   │   │   ├── (dashboard)/    # Protected dashboard routes

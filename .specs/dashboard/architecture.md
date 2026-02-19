@@ -1,6 +1,6 @@
 # 7. Dashboard
 
-The dashboard is a **Next.js 15 (App Router)** web application providing workspace management, team collaboration, and analytics visualization. It reads event data from ClickHouse and manages application state in PostgreSQL.
+The dashboard is a **Next.js 16 (App Router)** web application providing workspace management, team collaboration, and analytics visualization. It reads event data from ClickHouse and manages application state in PostgreSQL.
 
 ## 7.1 Architecture
 
@@ -10,7 +10,7 @@ The dashboard is a **Next.js 15 (App Router)** web application providing workspa
 Browser
   │
   ▼
-Next.js 15 (yavio-dashboard container, port 3000)
+Next.js 16 (yavio-dashboard container, port 3000)
   │
   ├─ App Router (Pages)
   │   ├─ (auth)/                              → Login, register, invite, forgot password (SSR)
@@ -57,7 +57,7 @@ Next.js 15 (yavio-dashboard container, port 3000)
                               Session cookie │ (httpOnly, secure, SameSite=Lax)
                                             │
                     ┌───────────────────────▼─────────────────────────────┐
-                    │         yavio-dashboard (Next.js 15, :3000)         │
+                    │         yavio-dashboard (Next.js 16, :3000)         │
                     │                                                     │
                     │  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │
                     │  │  Server   │  │  API     │  │  NextAuth.js v5  │  │
@@ -94,7 +94,7 @@ Next.js 15 (yavio-dashboard container, port 3000)
 
 | Component | Technology | Rationale |
 |-----------|-----------|-----------|
-| Framework | Next.js 15 (App Router) | Server Components for direct DB queries. SSR for auth pages. Single container. |
+| Framework | Next.js 16 (App Router) | Server Components for direct DB queries. SSR for auth pages. Single container. |
 | Auth | NextAuth.js v5 | Session management, OAuth providers, email+password. Industry-standard, well-maintained, with built-in Drizzle adapter. |
 | ClickHouse client | @clickhouse/client | Official Node.js client. Streaming support. |
 | PostgreSQL ORM | Drizzle ORM | Type-safe, lightweight, great DX. Migrations included. |

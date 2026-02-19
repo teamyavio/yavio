@@ -15,7 +15,7 @@ The platform ships as a `docker-compose` stack for self-hosting, with an identic
 - **User identification:** `.identify(userId, traits)` ties events to known users, enabling retention, cohorts, and per-user analytics
 - **Widget SDK:** React hook (`useYavio`) pushing events directly to the ingestion API
 - **Ingestion API:** Lightweight HTTP service (Fastify/Hono) receiving event batches, validating, stripping PII, writing to ClickHouse
-- **Dashboard:** Next.js 15 web application with auth, workspaces, projects, and analytics views
+- **Dashboard:** Next.js 16 web application with auth, workspaces, projects, and analytics views
 - **Storage:** ClickHouse (events/analytics), PostgreSQL (users, workspaces, projects, API keys)
 - **CLI:** `@yavio/cli` — developer-facing command-line tool for SDK setup (`yavio init`) and self-hosted platform management (`yavio up`, `yavio down`, `yavio status`, `yavio logs`, `yavio doctor`)
 - **Docker deployment:** `docker-compose` stack with all services pre-configured
@@ -60,7 +60,7 @@ Self-hosted and Cloud run the same codebase. Cloud monetizes through usage-based
 | Event transport (widget) | Direct HTTP to ingestion API | Widget sends events directly to ingestion endpoint using short-lived JWT (minted by server-side proxy). Project API key never reaches the browser. |
 | Analytics storage | ClickHouse (MergeTree engine) | Purpose-built for analytics. Blazing fast aggregations over billions of rows. Column-oriented. |
 | Application storage | PostgreSQL | Users, workspaces, API keys, app state. Battle-tested, great ecosystem. |
-| Dashboard | Next.js 15 (App Router) | Server components for ClickHouse queries. SSR for auth pages. Single deployable container. |
+| Dashboard | Next.js 16 (App Router) | Server components for ClickHouse queries. SSR for auth pages. Single deployable container. |
 | Ingestion API | Separate Fastify/Hono service | High-throughput event ingestion isolated from dashboard. Stateless, horizontally scalable. |
 | SDK auth | Project API key | Each project gets a unique API key. SDK sends it as `Authorization` header. Simple, stateless. Like Mixpanel/PostHog. |
 | User auth | Email+password + OAuth | Full team auth with workspaces, roles, invites. NextAuth.js v5 for session management. |
