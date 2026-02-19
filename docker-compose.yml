@@ -71,6 +71,21 @@ services:
       timeout: 5s
       retries: 5
 
+  docs:
+    build:
+      context: .
+      dockerfile: packages/docs/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${DOCS_PORT:-3002}:3000"
+    networks:
+      - frontend
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000').then(r=>{process.exit(r.ok?0:1)}).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
 volumes:
   postgres_data:
   clickhouse_data:

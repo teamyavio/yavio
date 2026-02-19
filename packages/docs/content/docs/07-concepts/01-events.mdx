@@ -1,0 +1,115 @@
+---
+title: Events
+description: Event types, session semantics, and what gets captured automatically
+---
+
+Everything in Yavio starts with **events**. An event is a single data point representing something that happened — a tool was called, a widget was rendered, a user converted. All events are stored in a single ClickHouse `events` table and share a common set of fields.
+
+## Common Event Fields
+
+Every event carries these fields:
+
+| Field | Description |
+|-------|-------------|
+| `event_id` | Unique identifier (UUID), used for deduplication |
+| `event_type` | The type of event (e.g., `tool_call`, `step`, `widget_render`) |
+| `trace_id` | Correlation key linking server and widget events for the same tool invocation |
+| `session_id` | Represents a single MCP connection (`ses_` prefix) |
+| `timestamp` | When the event occurred |
+| `platform` | Which AI platform initiated the action (e.g., `chatgpt`, `claude`, `cursor`) |
+| `source` | Whether the event originated from `server` or `widget` |
+
+## Session Semantics
+
+A `session_id` represents a single MCP connection, derived from the MCP `initialize` handshake. Both server and widget events share the same session ID — the server propagates it to the widget via the configuration injection. Multiple traces (tool invocations) can share the same session.
+
+## Server-Side Auto-Captured Events
+
+These events are captured automatically by the `withYavio()` proxy without any code changes:
+
+### tool_call
+
+Fires on every tool invocation. This is the core event that powers most analytics.
+
+| Field | Description |
+|-------|-------------|
+| `event_name` | Tool name |
+| `latency_ms` | Execution time in milliseconds |
+| `status` | `success` or `error` |
+| `error_category` | Classification: `auth`, `validation`, `timeout`, `rate_limit`, `server`, `unknown` |
+| `is_retry` | `1` if the preceding event was a `tool_call` with the same name |
+| `input_keys` | Parameter key names (JSON) |
+| `input_types` | Key-to-type mapping (JSON) |
+| `tokens_in` / `tokens_out` | Estimated prompt and completion tokens |
+| `country_code` | ISO 3166-1 alpha-2 from CDN headers |
+
+### connection
+
+Fires on transport connect and disconnect. Captures `protocol_version`, `client_name`, `client_version`, and `connection_duration_ms`.
+
+### resource_access
+
+Fires on `resources/read` and `resources/list` interception. Tracks which resources are accessed and how often.
+
+### prompt_usage
+
+Fires on `prompts/list` and `prompts/get` interception. Records prompt name and argument patterns.
+
+### sampling_call
+
+Fires on `sampling/createMessage` interception (server-to-client). Captures latency and token counts.
+
+### elicitation
+
+Fires on `elicitation/requestInput` interception. Tracks response latency and field schema.
+
+### widget_response
+
+Fires when the server-side proxy detects a widget response in a tool call return value. This is the server-side counterpart to the widget's `widget_render` event.
+
+### tool_discovery
+
+Fires on `tools/list` requests. Tracks how often clients request the tool catalog, which tools are listed, and client capabilities.
+
+## Server-Side Explicit Events
+
+These events require developer code using `ctx.yavio` within a tool handler:
+
+### step
+
+Funnel progression point. Called via `ctx.yavio.step("step_name")`. Each step receives an auto-incrementing `step_sequence` for deterministic ordering.
+
+### track
+
+Generic custom event. Called via `ctx.yavio.track("event_name", properties)`. An escape hatch for anything not auto-captured.
+
+### conversion
+
+Revenue attribution event. Called via `ctx.yavio.conversion("name", { value, currency })`. Powers ROI analytics.
+
+### identify
+
+User identification event. Called via `ctx.yavio.identify(userId, traits)`. Ties the session to a known user.
+
+## Widget Auto-Captured Events
+
+These events are captured automatically by the `useYavio()` React hook in ChatGPT widgets:
+
+| Event | Trigger |
+|-------|---------|
+| `widget_render` | First `useYavio()` initialization — captures viewport, device info, network type |
+| `widget_error` | Unhandled JS error or promise rejection |
+| `widget_visibility` | Widget enters or exits viewport (IntersectionObserver) |
+| `widget_click` | Click or tap event — captures target element and click count |
+| `widget_scroll` | Scroll within widget container — captures max scroll depth |
+| `widget_form_field` | Focus and blur of form inputs — captures time spent, not values |
+| `widget_form_submit` | Form submission attempt — captures success/error status |
+| `widget_link_click` | Click on anchor or external link — captures destination domain |
+| `widget_navigation` | View or route change within multi-step widget |
+| `widget_focus` | Widget iframe gains or loses focus |
+| `widget_performance` | PerformanceObserver data on widget load (time to interactive, first paint) |
+| `widget_rage_click` | 3+ clicks within 500ms on the same element |
+
+## Widget Explicit Events
+
+The widget SDK also exposes `step()`, `track()`, `conversion()`, and `identify()` via the `useYavio()` hook. These share the same schema as server-side explicit events but are sent with `source: "widget"`.

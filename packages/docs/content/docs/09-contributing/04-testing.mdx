@@ -1,0 +1,105 @@
+---
+title: Testing
+description: Run and write tests
+---
+
+Yavio uses [Vitest](https://vitest.dev/) for testing across all packages. Tests are colocated with source files (`*.test.ts`).
+
+## Running Tests
+
+```bash
+# Run all tests
+pnpm test
+
+# Run tests for a specific package
+pnpm --filter @yavio/shared test
+pnpm --filter @yavio/db test
+pnpm --filter @yavio/ingest test
+
+# Run tests in watch mode
+pnpm test:watch
+
+# Run with coverage
+pnpm test:coverage
+```
+
+## Test Categories
+
+Testing is organized per service, with each service defining its own test categories and priorities.
+
+| Service | Focus Areas |
+|---------|-------------|
+| SDK | Unit tests for proxy instrumentation, explicit API, batch transport (P0). React widget SDK tests (P1). |
+| Ingestion API | Unit tests for auth, validation, PII stripping. API-level tests with Fastify `inject()`. Integration tests with real databases (all P0). |
+| Dashboard | Auth and workspace tests (P0). API routes and component tests (P1). End-to-end tests (P2). |
+| Database | Schema migration tests, query builder tests, ClickHouse materialized view tests. |
+
+## Writing Tests
+
+### Test Structure
+
+Tests follow the Arrange-Act-Assert pattern:
+
+```typescript
+import { describe, expect, it } from "vitest";
+
+describe("myFunction", () => {
+  it("should do the expected thing", () => {
+    // Arrange
+    const input = "test";
+
+    // Act
+    const result = myFunction(input);
+
+    // Assert
+    expect(result).toBe("expected");
+  });
+});
+```
+
+### Dependency Injection
+
+The ingestion API uses a factory pattern for testability. Instead of importing global singletons, tests create app instances with injected dependencies:
+
+```typescript
+import { createApp } from "../src/app.js";
+
+const app = await createApp({
+  db: mockDb,
+  clickhouse: mockClickhouse,
+});
+
+const response = await app.inject({
+  method: "GET",
+  url: "/health",
+});
+```
+
+### Database Tests
+
+Tests that require PostgreSQL and ClickHouse use the test Docker Compose configuration (`docker-compose.test.yml`), which runs databases with `tmpfs` volumes for speed.
+
+```bash
+# Start test databases
+docker compose -f docker-compose.test.yml up -d
+
+# Run database tests
+pnpm --filter @yavio/db test
+```
+
+## Coverage Requirements
+
+All new code must maintain a **minimum of 80% test coverage**. PRs that drop coverage below this threshold will not be merged.
+
+```bash
+# Check coverage
+pnpm test:coverage
+```
+
+## CI Integration
+
+Tests run automatically in CI via GitHub Actions. The CI pipeline uses change detection to only run tests for packages affected by the PR:
+
+- `test-shared` — runs when `packages/shared/**` changes
+- `test-db` — runs when `packages/db/**` or `packages/shared/**` changes (requires PostgreSQL + ClickHouse services)
+- `test-ingest` — runs when `packages/ingest/**`, `packages/shared/**`, or `packages/db/**` changes

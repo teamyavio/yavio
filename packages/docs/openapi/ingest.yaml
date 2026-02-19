@@ -1,0 +1,351 @@
+openapi: 3.1.0
+info:
+  title: Yavio Ingestion API
+  version: 0.0.1
+  description: |
+    High-throughput event ingestion API for the Yavio analytics platform.
+    Receives event batches from the server SDK and widget SDK, validates them,
+    strips PII, and writes to ClickHouse.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: https://ingest.yavio.ai
+    description: Yavio Cloud
+  - url: http://localhost:3001
+    description: Local development
+
+security:
+  - apiKey: []
+  - widgetJwt: []
+
+paths:
+  /v1/events:
+    post:
+      operationId: ingestEvents
+      summary: Ingest event batch
+      description: |
+        Receives a batch of analytics events from the server SDK or widget SDK.
+        Events are validated, PII-stripped, and written to ClickHouse.
+      tags:
+        - Events
+      security:
+        - apiKey: []
+        - widgetJwt: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EventBatchRequest"
+      responses:
+        "200":
+          description: All events accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventBatchResponse"
+        "207":
+          description: Partial success — some events accepted, others rejected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartialEventBatchResponse"
+        "400":
+          description: All events failed validation or empty request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing, invalid, expired, or revoked credential
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Batch exceeds maximum allowed size (500 KB)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limit exceeded
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds to wait before retrying
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Backpressure — ClickHouse write buffer full
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds to wait before retrying
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/widget-tokens:
+    post:
+      operationId: createWidgetToken
+      summary: Mint widget JWT
+      description: |
+        Mints a short-lived JWT for widget-side event ingestion. The JWT is
+        scoped to a single trace and session, and expires after 15 minutes.
+        Requires a valid project API key.
+      tags:
+        - Widget Tokens
+      security:
+        - apiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WidgetTokenRequest"
+      responses:
+        "200":
+          description: Widget token minted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WidgetTokenResponse"
+        "400":
+          description: Missing or invalid traceId
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Invalid or revoked API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limited
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds to wait before retrying
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      description: |
+        Liveness probe. Returns 200 if the service is running and can reach
+        both PostgreSQL and ClickHouse.
+      tags:
+        - Health
+      security: []
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Service is unhealthy — one or more dependencies are unreachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: |
+        Project API key with `yav_proj_` prefix. Obtained from the Yavio dashboard.
+        Used by the server SDK for event ingestion and widget token minting.
+
+    widgetJwt:
+      type: http
+      scheme: bearer
+      description: |
+        Short-lived JWT minted by the server-side proxy via POST /v1/widget-tokens.
+        Used by the widget SDK for event ingestion. Scoped to a single trace,
+        expires after 15 minutes.
+
+  schemas:
+    EventBatchRequest:
+      type: object
+      required:
+        - batch
+      properties:
+        batch:
+          type: array
+          items:
+            $ref: "#/components/schemas/Event"
+          minItems: 1
+          maxItems: 1000
+        sdk_version:
+          type: string
+          example: "1.0.0"
+        sent_at:
+          type: string
+          format: date-time
+
+    Event:
+      type: object
+      required:
+        - event_type
+        - timestamp
+        - trace_id
+        - session_id
+        - source
+      properties:
+        event_type:
+          type: string
+          enum:
+            - tool_call
+            - connection
+            - resource_access
+            - prompt_usage
+            - sampling_call
+            - elicitation
+            - widget_response
+            - tool_discovery
+            - step
+            - track
+            - conversion
+            - identify
+            - widget_render
+            - widget_error
+            - widget_visibility
+            - widget_click
+            - widget_scroll
+            - widget_form_field
+            - widget_form_submit
+            - widget_link_click
+            - widget_navigation
+            - widget_focus
+            - widget_performance
+            - widget_rage_click
+        event_name:
+          type: string
+          maxLength: 256
+        timestamp:
+          type: string
+          format: date-time
+        trace_id:
+          type: string
+          maxLength: 128
+        session_id:
+          type: string
+          maxLength: 128
+        platform:
+          type: string
+          enum: [chatgpt, claude, cursor, vscode, unknown]
+        source:
+          type: string
+          enum: [server, widget]
+        latency_ms:
+          type: number
+        status:
+          type: string
+          enum: [success, error]
+        error_category:
+          type: string
+          enum: [auth, validation, timeout, rate_limit, server, unknown]
+        error_message:
+          type: string
+          maxLength: 2048
+        user_id:
+          type: string
+          maxLength: 256
+        conversion_value:
+          type: number
+        conversion_currency:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+
+    EventBatchResponse:
+      type: object
+      properties:
+        accepted:
+          type: integer
+          description: Number of events accepted
+
+    PartialEventBatchResponse:
+      type: object
+      properties:
+        accepted:
+          type: integer
+        rejected:
+          type: integer
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              status:
+                type: string
+                enum: [accepted, rejected]
+              error:
+                type: string
+
+    WidgetTokenRequest:
+      type: object
+      required:
+        - traceId
+        - sessionId
+      properties:
+        traceId:
+          type: string
+        sessionId:
+          type: string
+
+    WidgetTokenResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: Short-lived JWT for widget event ingestion
+        expiresAt:
+          type: string
+          format: date-time
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, error]
+        postgres:
+          type: string
+          enum: [ok, error]
+        clickhouse:
+          type: string
+          enum: [ok, error]
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+          description: Yavio error code (e.g., YAVIO-2001)
+        message:
+          type: string

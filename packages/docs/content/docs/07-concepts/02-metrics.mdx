@@ -1,0 +1,78 @@
+---
+title: Metrics
+description: How KPIs are computed from raw events at query time
+---
+
+All metrics in Yavio are **derived at query time** from the raw events stored in ClickHouse. Nothing in this page represents a separately stored value — each metric is a query over the events table.
+
+## Overview KPIs
+
+The dashboard overview shows these high-level metrics:
+
+| Metric | How It's Computed |
+|--------|-------------------|
+| Total invocations | Count of all `tool_call` events |
+| Unique sessions | Count of distinct `session_id` values |
+| Error rate | Ratio of failed `tool_call` events to total `tool_call` events |
+| Avg latency | Average `latency_ms` across all `tool_call` events |
+| Invocations over time | `tool_call` events grouped by time bucket (line chart) |
+| Platform breakdown | `tool_call` events grouped by `platform` (pie chart) |
+| Top tools | `tool_call` events grouped by `event_name`, ordered by count |
+| Total conversions | Count of all `conversion` events |
+| Total revenue | Sum of `conversion_value` across all `conversion` events |
+
+## Business KPIs
+
+| Metric | How It's Computed |
+|--------|-------------------|
+| Session-to-conversion rate | Sessions with at least one conversion / total sessions |
+| Widget engagement rate | Sessions with any `widget_click` or `widget_form_field` / sessions with `widget_render` |
+
+## Tool Explorer Metrics
+
+Per-tool deep-dive analytics:
+
+| Metric | Description |
+|--------|-------------|
+| Per-tool invocation count | How often each tool is called |
+| Latency distribution | Histogram of execution times for a selected tool |
+| Error rate over time | Error ratio per time bucket for a selected tool |
+| Error category breakdown | Distribution of error types (`auth`, `validation`, `timeout`, etc.) |
+| Parameter fill rates | How often each parameter key appears in tool calls |
+| Top parameter values | Most frequent values per input key |
+| Common parameter combinations | Frequent patterns in `input_keys` |
+| Zero-result rate | Percentage of tool calls that returned empty results |
+| Tool discovery-to-invocation ratio | How often a discovered tool is actually called |
+
+## Funnel Metrics
+
+Funnels stitch `step` and `conversion` events within a trace to visualize user journeys:
+
+| Metric | Description |
+|--------|-------------|
+| Step progression | Ordered sequence of steps and conversions within a trace |
+| Drop-off rates | Percentage of traces that don't progress from step N to step N+1 |
+| Example traces | Full event timeline for individual traces |
+
+## Timing Metrics
+
+| Metric | Description |
+|--------|-------------|
+| Time-to-first-interaction (TTFI) | Time from `widget_render` to first `widget_click` |
+| Time-to-first-tool-call | Time from session start to first tool invocation |
+| Latency percentiles | p50, p95, and p99 latency across tool calls |
+
+## Session Aggregates
+
+Sessions are continuously materialized by ClickHouse as events arrive. There is no explicit "session close" event — sessions are implicit aggregates over events sharing the same `session_id`.
+
+| Field | Description |
+|-------|-------------|
+| `tool_count` | Distinct tools used in the session |
+| `invocation_count` | Total tool calls in the session |
+| `event_count` | Total events in the session |
+| `conversion_count` | Conversions in the session |
+| `total_revenue` | Sum of conversion values |
+| `duration_ms` | Time from first to last event |
+| `has_widget` | Whether any widget was rendered |
+| `ttfi_ms` | Time to first interaction in widget |

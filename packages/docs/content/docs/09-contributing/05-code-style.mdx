@@ -1,0 +1,101 @@
+---
+title: Code Style
+description: Formatting, linting, and TypeScript conventions
+---
+
+Yavio uses [Biome](https://biomejs.dev/) for linting and formatting. A single `biome.json` at the repo root configures all packages.
+
+## Biome Configuration
+
+| Setting | Value |
+|---------|-------|
+| Indent style | Spaces |
+| Indent width | 2 |
+| Line width | 100 characters |
+| Import sorting | Enabled (alphabetical by module specifier) |
+| Lint rules | Recommended preset |
+
+```bash
+# Check formatting and lint
+pnpm lint
+
+# Auto-fix issues
+pnpm lint:fix
+```
+
+## TypeScript Conventions
+
+- **Strict mode** is enabled for all packages
+- **No `any`** — use typed alternatives. In tests, use `as unknown as Type` when needed.
+- **No non-null assertions** (`!`) — use `as Type` or proper null checks instead
+- **ES2022 target** — use modern JavaScript features
+- **NodeNext modules** — use `.js` extensions in imports for library packages
+
+## Naming Conventions
+
+| Context | Convention | Example |
+|---------|-----------|---------|
+| Variables / functions | `camelCase` | `getUserById`, `eventCount` |
+| Types / interfaces / components | `PascalCase` | `EventPayload`, `DocsLayout` |
+| Constants | `SCREAMING_SNAKE_CASE` | `MAX_BATCH_SIZE`, `DEFAULT_PORT` |
+| Files | `kebab-case` | `error-handler.ts`, `batch-writer.ts` |
+| Test files | `*.test.ts` | `health.test.ts` |
+
+## Import Ordering
+
+Biome enforces strict import sorting. Imports must be ordered alphabetically by module specifier, with `@`-scoped packages before relative imports:
+
+```typescript
+import { createClient } from "@clickhouse/client";
+import { sql } from "drizzle-orm";
+import { YavioError } from "@yavio/shared/errors";
+import { createApp } from "../src/app.js";
+```
+
+## Error Handling
+
+All errors use the `YavioError` class from `@yavio/shared/errors`. Never throw a bare `Error` in service code.
+
+```typescript
+import { YavioError, ErrorCode } from "@yavio/shared/errors";
+
+throw new YavioError(
+  ErrorCode.INGEST.INVALID_API_KEY,
+  "Invalid or revoked API key",
+  401,
+  { keyPrefix: key.slice(0, 12) },
+);
+```
+
+Each service owns a range of error codes:
+
+| Range | Service |
+|-------|---------|
+| YAVIO-1000–1999 | SDK |
+| YAVIO-2000–2999 | Ingestion API |
+| YAVIO-3000–3999 | Dashboard |
+| YAVIO-4000–4999 | Intelligence |
+| YAVIO-5000–5999 | Database |
+| YAVIO-6000–6999 | CLI |
+| YAVIO-7000–7999 | Infrastructure |
+
+## Commit Messages
+
+Use [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+feat(sdk): add .identify() method for user tracking
+fix(ingest): handle malformed event payloads gracefully
+docs: update self-hosting guide with TLS instructions
+test(dashboard): add integration tests for funnel view
+```
+
+Format: `type(scope): description` — imperative mood, lowercase, no period.
+
+## Pull Request Process
+
+1. Fill out the PR template completely
+2. Ensure all CI checks pass (lint, type check, tests)
+3. Keep PRs focused — one feature or fix per PR
+4. Update documentation if your change affects public APIs
+5. A maintainer will review and may request changes

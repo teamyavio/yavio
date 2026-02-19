@@ -1,0 +1,32 @@
+---
+title: Contributing
+description: Build and extend the Yavio platform
+---
+
+import { Card, Cards } from "fumadocs-ui/components/card";
+
+Thanks for your interest in contributing to Yavio! The entire platform is open source (MIT) and we welcome contributions of all kinds — bug fixes, features, documentation, and more.
+
+## Code of Conduct
+
+By participating, you agree to uphold our [Code of Conduct](https://github.com/teamyavio/yavio/blob/main/CODE_OF_CONDUCT.md). Be respectful, constructive, and collaborative.
+
+## Where to Start
+
+<Cards>
+  <Card title="Development Setup" href="/docs/09-contributing/01-development-setup" description="Clone, install, and run Yavio locally" />
+  <Card title="Architecture" href="/docs/09-contributing/02-architecture" description="Understand the platform's components and data flow" />
+  <Card title="Project Structure" href="/docs/09-contributing/03-project-structure" description="Navigate the monorepo layout" />
+  <Card title="Testing" href="/docs/09-contributing/04-testing" description="Run and write tests" />
+  <Card title="Code Style" href="/docs/09-contributing/05-code-style" description="Formatting, linting, and TypeScript conventions" />
+  <Card title="Specs Guide" href="/docs/09-contributing/06-specs-guide" description="Read and update the /specs directory" />
+</Cards>
+
+## How to Contribute
+
+1. **Check existing issues** — look for an open issue or create one before starting work
+2. **Fork the repo** and create a branch from `main`
+3. **Follow the branch naming convention** — `feat/`, `fix/`, `docs/`, `refactor/`, `test/`, `chore/`
+4. **Write tests** for any new functionality
+5. **Run the checks** before pushing (`pnpm turbo run build typecheck lint && pnpm test`)
+6. **Open a pull request** using the PR template

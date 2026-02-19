@@ -24,6 +24,7 @@
       "drizzle",
       "migrations",
       ".turbo",
+      ".source",
       "pnpm-lock.yaml"
     ]
   }

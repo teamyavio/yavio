@@ -1,0 +1,67 @@
+---
+title: Traces
+description: Cross-layer correlation with trace IDs and combined funnels
+---
+
+The **trace ID** is the correlation key that stitches server-side and widget-side events into a single end-to-end funnel. This cross-layer visibility is what makes Yavio unique — you can follow a user's journey from the initial tool call on the server through to the final conversion in the widget UI.
+
+## Trace Lifecycle
+
+Here's what happens when a user interacts with your MCP app:
+
+1. User sends a prompt to the AI platform (ChatGPT, Claude, Cursor, etc.)
+2. The AI platform invokes an MCP tool — `withYavio()` intercepts the call
+3. The proxy generates a `trace_id` (e.g., `tr_` + a random ID) and inherits the `session_id` from the current MCP connection
+4. The tool handler executes — any `ctx.yavio.step()` calls inherit the trace ID
+5. If the tool returns a widget response, the proxy mints a short-lived widget JWT
+6. The proxy injects `window.__YAVIO__` with the trace ID, session ID, widget JWT, and endpoint
+7. The widget renders and initializes `useYavio()`, which reads the injected config
+8. Widget events are sent directly to the ingestion API with the same trace ID
+9. All events with the same trace ID form one combined funnel in the dashboard
+
+## Combined Funnel Example
+
+A single trace might contain events from both server and widget:
+
+| Step | Source | Event Type | Data |
+|------|--------|------------|------|
+| 1 | Server (auto) | `tool_call` | tool: "search_rooms", latency: 234ms |
+| 2 | Server (explicit) | `step` | name: "rooms_found", count: 12 |
+| 3 | Server (auto) | `widget_response` | widget token minted |
+| 4 | Widget (auto) | `widget_render` | viewport: 400x600 |
+| 5 | Widget (explicit) | `step` | name: "room_selected" |
+| 6 | Widget (explicit) | `step` | name: "details_completed" |
+| 7 | Widget (explicit) | `conversion` | name: "booking_completed", value: 567 EUR |
+
+## Session vs Trace Hierarchy
+
+Sessions and traces have a one-to-many relationship. A single MCP connection (session) typically serves multiple tool invocations, each with its own trace:
+
+```
+Session (ses_xxx) ← one MCP connection
+  ├── Trace 1 (tr_aaa) ← tool_call "search_rooms"
+  │   ├── step: "rooms_found"              (server)
+  │   ├── widget_render                    (widget)
+  │   ├── step: "room_selected"            (widget)
+  │   └── conversion: "booking_completed"  (widget)
+  ├── Trace 2 (tr_bbb) ← tool_call "check_availability"
+  │   └── step: "availability_checked"     (server)
+  └── Trace 3 (tr_ccc) ← tool_call "cancel_booking"
+```
+
+Both server and widget events share the same `session_id`. The `trace_id` provides the finer-grained correlation between a specific tool call and the widget it spawned.
+
+## Step Sequencing
+
+When you call `ctx.yavio.step()` or `useYavio().step()`, each step receives an auto-incrementing `step_sequence` number. On the server, the sequence starts at 0 and increments with each step call within the trace. On the widget, the sequence continues from where the server left off (the starting value is passed via the trace ID context).
+
+This enables deterministic ordering even when multiple steps share the same millisecond timestamp, and ensures the combined funnel view displays steps in the correct order across server and widget boundaries.
+
+## Funnel Analytics
+
+The dashboard's funnel view uses trace IDs to:
+
+- **Visualize step progression** — see how users move through your defined funnel steps
+- **Calculate drop-off rates** — identify where users abandon the journey
+- **Inspect individual traces** — drill into a specific trace to see every event that occurred
+- **Compare funnels across platforms** — see if ChatGPT users convert differently than Claude users

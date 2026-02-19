@@ -1,0 +1,25 @@
+---
+title: Yavio Documentation
+description: Product analytics for MCP Apps and ChatGPT Apps
+---
+
+import { Card, Cards } from "fumadocs-ui/components/card";
+
+Yavio gives developers complete visibility into how users interact with their MCP-powered apps — from server-side tool calls to widget conversions — with zero-config instrumentation, combined funnels, and real-time analytics.
+
+## What is Yavio?
+
+Yavio is an open-source product analytics platform purpose-built for the MCP (Model Context Protocol) ecosystem. It tracks how AI platforms like ChatGPT, Claude, and Cursor invoke your tools, how users interact with your widgets, and where they convert — all stitched together with a single trace ID.
+
+### Key Features
+
+- **Auto-instrumented tool calls** — wrap your MCP server with `withYavio()` and every tool invocation is tracked automatically
+- **Combined server + widget funnels** — see the full user journey from tool call to widget conversion
+- **User identification** — `.identify()` ties events to known users for retention and cohort analysis
+- **PII stripping** — personal data is automatically redacted before storage
+- **Self-hosted or Cloud** — run the full stack with `docker compose up` or use Yavio Cloud
+
+<Cards>
+  <Card title="Concepts" href="/docs/07-concepts" description="Understand events, metrics, traces, and the security model" />
+  <Card title="Contributing" href="/docs/09-contributing" description="Set up your development environment and start contributing" />
+</Cards>

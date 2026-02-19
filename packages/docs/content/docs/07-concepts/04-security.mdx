@@ -1,0 +1,105 @@
+---
+title: Security
+description: PII stripping, API key scoping, widget JWT auth, and rate limiting
+---
+
+Yavio is designed with a security-first approach. This page covers how the platform protects sensitive data and prevents abuse.
+
+## PII Stripping
+
+The PII stripping engine runs on every event before it reaches ClickHouse. It is **ON by default** and cannot be disabled in Community or Cloud Free tiers.
+
+### What Gets Redacted
+
+| Pattern | Detection Method | Replacement |
+|---------|-----------------|-------------|
+| Email addresses | RFC 5322 regex | `[EMAIL_REDACTED]` |
+| Credit card numbers | Luhn algorithm + format check | `[CC_REDACTED]` |
+| SSN / Tax IDs | NNN-NN-NNNN patterns | `[SSN_REDACTED]` |
+| Phone numbers | International format detection (E.164 + common formats) | `[PHONE_REDACTED]` |
+| Physical addresses | Heuristic: number + street name patterns | `[ADDRESS_REDACTED]` |
+
+The engine scans all string fields in the event, including nested JSON in `metadata`. It targets identity data — business values like prices, cities, dates, and quantities are preserved.
+
+### Defense in Depth
+
+PII stripping uses a two-layer strategy:
+
+1. **SDK layer** — a lightweight, non-configurable best-effort pass strips common PII patterns before events leave the developer's process
+2. **Ingestion API layer** — a full configurable scrub runs as the authoritative safety net before writing to ClickHouse
+
+This ensures PII is caught regardless of SDK version and provides redundancy if either layer has a bug.
+
+## API Key Authentication
+
+Server-side SDKs authenticate with a **project API key** (`yav_proj_...` prefix). Each project gets a unique key, managed from the dashboard.
+
+- API keys are sent as `Authorization: Bearer <key>` headers
+- The ingestion API validates keys against PostgreSQL with an in-memory LRU cache (60s TTL, 10,000 entries)
+- Revoked keys are rejected within 60 seconds of revocation
+
+### Key Scoping
+
+Each API key is scoped to a single project within a workspace. A key can only write events to its own project — it cannot read data, access other projects, or perform administrative actions.
+
+## Widget JWT Authentication
+
+Widgets never receive the project API key. Instead, the server-side proxy mints a **short-lived JWT** for each widget interaction:
+
+| Property | Value |
+|----------|-------|
+| Algorithm | HMAC-SHA256 |
+| Expiry | 15 minutes |
+| Scope | Single trace ID |
+| Permissions | Write-only event ingestion |
+
+### JWT Claims
+
+| Claim | Description |
+|-------|-------------|
+| `pid` | Project ID |
+| `wid` | Workspace ID |
+| `tid` | Trace ID (events must match this trace) |
+| `sid` | Session ID (shared with the server) |
+
+Even if a widget JWT is extracted from the browser iframe, it is useless after 15 minutes and cannot be used to send events for other traces.
+
+### Trace Validation
+
+Every event in a widget JWT batch must have a `traceId` matching the JWT's `tid` claim. The ingestion API rejects the entire batch if any event has a mismatched trace ID.
+
+## Rate Limiting
+
+| Scope | Limit | Purpose |
+|-------|-------|---------|
+| Per API key | 1,000 events/second | Prevents abuse from leaked keys |
+| Per API key burst | 5,000 events | Allows short spikes (e.g., batch imports) |
+| Per IP (unauthenticated) | 10 requests/second | Protects against brute-force key scanning |
+
+Rate limit state is stored in memory. Exceeded limits return `429 Too Many Requests` with a `Retry-After` header.
+
+## Event Field Size Limits
+
+Individual event fields are validated against maximum size limits to prevent storage exhaustion:
+
+| Field | Max Size | Behavior |
+|-------|----------|----------|
+| `metadata` (JSON) | 10 KB | Truncated |
+| `user_traits` (JSON) | 5 KB | Truncated |
+| `error_message` | 2 KB | Truncated |
+| `event_name` | 256 chars | Event rejected |
+| `user_id` | 256 chars | Event rejected |
+| Total event size | 50 KB | Event rejected |
+| Batch size | 500 KB | Batch rejected (413) |
+
+Truncation is preferred over rejection for non-critical fields to avoid data loss.
+
+## Pipeline Guarantees
+
+| Guarantee | How |
+|-----------|-----|
+| At-least-once delivery | SDK retries + ClickHouse deduplication |
+| Ordering | Millisecond timestamps + ClickHouse sort order |
+| No data loss on restart | Retry with exponential backoff |
+| No data loss on shutdown | Synchronous final flush from SDK |
+| Backpressure | 503 response when buffer exceeds 100K events |

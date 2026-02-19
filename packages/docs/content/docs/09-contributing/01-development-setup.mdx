@@ -1,0 +1,114 @@
+---
+title: Development Setup
+description: Clone, install, and run Yavio locally
+---
+
+This guide walks you through setting up the Yavio development environment from scratch.
+
+## Prerequisites
+
+| Tool | Version | Purpose |
+|------|---------|---------|
+| Node.js | 20+ LTS | Runtime |
+| Docker | v24+ | PostgreSQL and ClickHouse |
+| docker-compose | v2.20+ | Service orchestration |
+| pnpm | 10+ | Package manager |
+
+## Clone and Install
+
+```bash
+# Clone the repo
+git clone https://github.com/teamyavio/yavio.git
+cd yavio
+
+# Install dependencies
+pnpm install
+```
+
+pnpm is the only supported package manager. The repo uses a `pnpm-workspace.yaml` to manage all packages.
+
+## Environment Setup
+
+```bash
+# Copy environment config
+cp .env.example .env
+# Fill in the required secrets (see comments in .env.example)
+```
+
+## Start Infrastructure
+
+The platform requires PostgreSQL 16 and ClickHouse 24.3 for development. These run in Docker:
+
+```bash
+# Start databases
+docker compose up postgres clickhouse -d
+
+# Verify they're healthy
+docker compose ps
+```
+
+## Run Database Migrations
+
+```bash
+# Run PostgreSQL migrations (Drizzle)
+pnpm db:migrate
+
+# ClickHouse migrations run automatically on first connect
+```
+
+## Build All Packages
+
+The monorepo uses Turborepo to orchestrate builds. Packages have dependencies — `@yavio/shared` and `@yavio/db` must build before packages that depend on them.
+
+```bash
+# Build everything
+pnpm turbo build
+
+# Or build a specific package and its dependencies
+pnpm turbo build --filter=@yavio/ingest...
+```
+
+## Start Development Servers
+
+```bash
+# Start the ingestion API (port 3001)
+pnpm --filter @yavio/ingest dev
+
+# Start the docs site (port 3002)
+pnpm --filter @yavio/docs dev
+```
+
+## Verify Your Setup
+
+```bash
+# Run all checks
+pnpm turbo run build typecheck lint
+
+# Run all tests
+pnpm test
+
+# Run tests for a specific package
+pnpm --filter @yavio/db test
+pnpm --filter @yavio/ingest test
+```
+
+If all commands pass, your development environment is ready.
+
+## Common Issues
+
+### pnpm not found
+
+Install pnpm via corepack (included with Node.js 20+):
+
+```bash
+corepack enable
+corepack prepare pnpm@latest --activate
+```
+
+### Docker services not starting
+
+Check that ports 5432 (PostgreSQL), 8123 (ClickHouse HTTP), and 9000 (ClickHouse native) are not already in use. You can customize ports via environment variables in `.env`.
+
+### Build failures
+
+Always build from the repo root with `pnpm turbo build`. Building individual packages without their dependencies will fail.

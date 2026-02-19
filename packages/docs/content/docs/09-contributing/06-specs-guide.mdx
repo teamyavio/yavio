@@ -1,0 +1,78 @@
+---
+title: Specs Guide
+description: How to read and update the /specs directory
+---
+
+The `.specs/` directory in the repository root contains the **pre-build technical architecture specification** — the source of truth for implementation decisions. This is separate from the documentation site you're reading now, which is the **post-build user-facing documentation**.
+
+## Specs vs Docs
+
+| Aspect | `.specs/` | `packages/docs/` |
+|--------|-----------|-------------------|
+| Audience | Internal (builders) | External (users + contributors) |
+| Content | Architecture decisions, schemas, data flow | How-to guides, API reference, tutorials |
+| Format | Markdown (GitHub-rendered) | MDX (Fumadocs site) |
+| Lifecycle | Written before code, updated as decisions change | Written alongside code, updated with releases |
+
+Some content flows from specs to docs: event schemas, API route tables, and architecture diagrams originate in specs and are adapted (not copied) into user-facing docs with appropriate context and examples.
+
+## Document Structure
+
+### Platform-Wide
+
+| File | Description |
+|------|-------------|
+| `01_executive-summary.md` | Scope, key architecture decisions, pricing tiers |
+| `02_package-architecture.md` | Package overview with links to per-service specs |
+| `03_testing.md` | Testing strategy overview |
+| `04_roadmap.md` | Implementation roadmap |
+| `05_appendix.md` | Dependencies, performance targets, open questions |
+| `07_error-catalog.md` | Error code catalog (YAVIO-1000 through YAVIO-7999) |
+| `metrics/events.md` | All captured event types and their fields |
+| `metrics/metrics.md` | Derived metrics computed from events |
+
+### Per-Service
+
+Each service has its own directory with focused specs:
+
+| Directory | Contents |
+|-----------|----------|
+| `sdk/` | SDK architecture, server proxy, widget hook, testing, roadmap |
+| `ingest/` | Event pipeline, testing, roadmap |
+| `dashboard/` | Dashboard architecture, design guide, testing, roadmap |
+| `cli/` | CLI architecture, roadmap |
+| `infrastructure/` | Platform layout, storage layer, deployment, CI/CD, observability |
+| `pricing/` | Pricing tiers, Stripe billing integration |
+| `docs/` | Documentation site architecture and roadmap |
+
+## Reading Specs
+
+When working on a feature, start with:
+
+1. **`04_roadmap.md`** — find which phase your feature belongs to
+2. **The relevant service spec** — understand the architecture decisions
+3. **`metrics/events.md`** — if your feature involves event capture
+4. **`07_error-catalog.md`** — if you need to add error codes
+
+## Updating Specs
+
+Specs are living documents. Update them when:
+
+- **An architecture decision changes** — update the relevant spec file and note the change
+- **A new feature is designed** — write the spec before implementing
+- **Implementation reveals a spec inaccuracy** — fix the spec to match reality
+
+### Guidelines
+
+- Keep specs concise and focused on **decisions**, not implementation details
+- Use tables for structured data (schemas, configurations, comparisons)
+- Link between specs rather than duplicating content
+- Number files for ordering within directories (e.g., `01-events.mdx`)
+- Status should be clear: is this decided, proposed, or implemented?
+
+## Adding New Specs
+
+1. Determine the appropriate directory (service-specific or platform-wide)
+2. Create a new markdown file with a descriptive name
+3. Add a link from the parent `README.md` or the relevant overview spec
+4. Follow the existing format — title, overview, tables, code examples

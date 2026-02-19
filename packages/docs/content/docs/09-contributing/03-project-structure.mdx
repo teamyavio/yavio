@@ -1,0 +1,94 @@
+---
+title: Project Structure
+description: Navigate the monorepo layout
+---
+
+Yavio is a pnpm monorepo managed by Turborepo. All packages live under `packages/` and share common build tooling.
+
+## Top-Level Layout
+
+```
+yavio/
+├── .github/               # GitHub Actions CI/CD workflows
+│   ├── actions/setup/     # Shared setup action (Node.js + pnpm)
+│   └── workflows/ci.yml   # CI pipeline
+├── .specs/                # Technical architecture specifications
+├── packages/
+│   ├── shared/            # @yavio/shared — types, validation, error codes
+│   ├── db/                # @yavio/db — Drizzle schema, ClickHouse client
+│   ├── ingest/            # @yavio/ingest — Fastify ingestion API
+│   └── docs/              # @yavio/docs — Fumadocs documentation site
+├── biome.json             # Linter/formatter config (shared)
+├── docker-compose.yml     # Development Docker services
+├── docker-compose.test.yml # Test Docker services (tmpfs)
+├── pnpm-workspace.yaml    # Workspace configuration
+├── tsconfig.base.json     # Base TypeScript config
+├── turbo.json             # Turborepo pipeline config
+├── CONTRIBUTING.md        # Contribution guidelines
+└── package.json           # Root scripts
+```
+
+## Package Dependencies
+
+```
+@yavio/shared  ←── @yavio/ingest
+               ←── @yavio/db
+               ←── @yavio/sdk (planned)
+               ←── @yavio/dashboard (planned)
+               ←── @yavio/cli (planned)
+
+@yavio/db      ←── @yavio/ingest
+               ←── @yavio/dashboard (planned)
+```
+
+`@yavio/shared` and `@yavio/db` are internal packages (not published to npm). They must build before dependent packages can typecheck or build.
+
+## Build Tooling
+
+| Tool | Purpose | Config |
+|------|---------|--------|
+| **pnpm** | Package management | `pnpm-workspace.yaml` |
+| **Turborepo** | Build orchestration | `turbo.json` |
+| **tsup** | TypeScript bundler (ESM + CJS) | Per-package `tsup.config.ts` |
+| **Biome** | Linting + formatting | `biome.json` (root) |
+| **Vitest** | Testing | Per-package `vitest.config.ts` |
+| **TypeScript** | Type checking | `tsconfig.base.json` + per-package overrides |
+
+## Package Scripts
+
+Every package exposes standard scripts:
+
+| Script | Command | Purpose |
+|--------|---------|---------|
+| `build` | `tsup` or `next build` | Build the package |
+| `typecheck` | `tsc --noEmit` | Type check without emitting |
+| `test` | `vitest run` | Run tests |
+| `lint` | `biome check .` | Lint and format check |
+| `dev` | varies | Start development server |
+
+Run across all packages from the root:
+
+```bash
+pnpm turbo build        # Build all packages (respects dependency graph)
+pnpm turbo typecheck    # Type check all packages
+pnpm test               # Run all tests
+pnpm lint               # Lint all packages
+```
+
+## Package Exports
+
+All library packages use subpath exports with triple output (ESM, CJS, types):
+
+```json
+{
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  }
+}
+```
+
+Some packages expose additional subpath exports (e.g., `@yavio/shared/error-codes`, `@yavio/db/clickhouse`).

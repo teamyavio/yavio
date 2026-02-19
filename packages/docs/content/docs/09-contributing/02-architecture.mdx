@@ -1,0 +1,83 @@
+---
+title: Architecture
+description: Understand the platform's components and data flow
+---
+
+Yavio is a product analytics platform for MCP Apps and ChatGPT Apps. It consists of an open-source SDK, a high-throughput event ingestion API, and a full-featured web dashboard — all backed by ClickHouse for analytics and PostgreSQL for application state.
+
+## Components
+
+| Component | Package | Role |
+|-----------|---------|------|
+| **SDK** | `@yavio/sdk` | Wraps MCP servers with auto-instrumentation, provides explicit tracking API |
+| **Ingestion API** | `@yavio/ingest` | Receives event batches, validates, strips PII, writes to ClickHouse |
+| **Dashboard** | `@yavio/dashboard` | Next.js 16 web app with auth, workspaces, and analytics views |
+| **CLI** | `@yavio/cli` | Developer tool for SDK setup and self-hosted platform management |
+| **Shared** | `@yavio/shared` | Shared types, validation schemas, and error codes |
+| **Database** | `@yavio/db` | Drizzle ORM schema, ClickHouse client, migration helpers |
+
+## Data Flow
+
+```
+User → AI Platform → MCP Tool Call
+                        ↓
+                   withYavio() proxy
+                   (auto-capture + enrich)
+                        ↓
+                   SDK batch buffer
+                   (10s flush / 100 events)
+                        ↓
+              POST /v1/events (HTTP)
+              Authorization: Bearer <API key>
+                        ↓
+                   Ingestion API
+                   ├── Auth (API key lookup)
+                   ├── Rate limiting
+                   ├── Schema validation
+                   ├── PII stripping
+                   └── ClickHouse batch write
+                        ↓
+                   ClickHouse (events table)
+                        ↓
+                   Dashboard queries
+```
+
+## Storage Architecture
+
+### ClickHouse (Analytics)
+
+All events are stored in a single `events` table using the `ReplacingMergeTree` engine. This provides:
+
+- Blazing fast aggregations over billions of rows
+- Column-oriented storage optimized for analytical queries
+- Built-in deduplication via `event_id`
+- Materialized views for session aggregates
+
+### PostgreSQL (Application Data)
+
+Application state lives in PostgreSQL via Drizzle ORM:
+
+- Users, authentication, sessions
+- Workspaces and team membership
+- Projects and API keys
+- Billing and subscription data
+
+## Key Architecture Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Instrumentation | Proxy pattern (`withYavio()`) | 3 lines of code, zero config |
+| Event transport | HTTP batch POST | Stateless, retryable, zero latency impact |
+| Analytics storage | ClickHouse | Purpose-built for analytics workloads |
+| Widget auth | Short-lived JWT (15 min) | API key never reaches the browser |
+| Multi-tenancy | Shared infrastructure, data isolated by workspace/project IDs | Simple, cost-effective |
+| Open source | Fully MIT licensed | Entire platform is open source |
+
+## Deployment Modes
+
+| Mode | Description |
+|------|-------------|
+| **Self-hosted** | `docker compose up` starts all services. Free, full feature set. |
+| **Cloud** | SDK points to Yavio's hosted ingestion endpoint. 1M events/month free. |
+
+Both modes run the same codebase.
