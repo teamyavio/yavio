@@ -31,6 +31,7 @@ describe("GET /health", () => {
     app = await createApp({
       db: mockDb(),
       clickhouse: mockClickHouse(),
+      jwtSecret: "test-secret",
       logger: false,
     });
 
@@ -43,15 +44,16 @@ describe("GET /health", () => {
     expect(body.clickhouse).toBe("up");
   });
 
-  it("returns degraded when postgres is down", async () => {
+  it("returns 503 degraded when postgres is down", async () => {
     app = await createApp({
       db: mockDb(true),
       clickhouse: mockClickHouse(),
+      jwtSecret: "test-secret",
       logger: false,
     });
 
     const response = await app.inject({ method: "GET", url: "/health" });
-    expect(response.statusCode).toBe(200);
+    expect(response.statusCode).toBe(503);
 
     const body = response.json();
     expect(body.status).toBe("degraded");
@@ -59,15 +61,16 @@ describe("GET /health", () => {
     expect(body.clickhouse).toBe("up");
   });
 
-  it("returns degraded when clickhouse is down", async () => {
+  it("returns 503 degraded when clickhouse is down", async () => {
     app = await createApp({
       db: mockDb(),
       clickhouse: mockClickHouse(true),
+      jwtSecret: "test-secret",
       logger: false,
     });
 
     const response = await app.inject({ method: "GET", url: "/health" });
-    expect(response.statusCode).toBe(200);
+    expect(response.statusCode).toBe(503);
 
     const body = response.json();
     expect(body.status).toBe("degraded");
@@ -75,30 +78,20 @@ describe("GET /health", () => {
     expect(body.clickhouse).toBe("down");
   });
 
-  it("returns degraded when both databases are down", async () => {
+  it("returns 503 degraded when both databases are down", async () => {
     app = await createApp({
       db: mockDb(true),
       clickhouse: mockClickHouse(true),
+      jwtSecret: "test-secret",
       logger: false,
     });
 
     const response = await app.inject({ method: "GET", url: "/health" });
-    expect(response.statusCode).toBe(200);
+    expect(response.statusCode).toBe(503);
 
     const body = response.json();
     expect(body.status).toBe("degraded");
     expect(body.postgres).toBe("down");
     expect(body.clickhouse).toBe("down");
-  });
-
-  it("always returns 200 regardless of dependency health", async () => {
-    app = await createApp({
-      db: mockDb(true),
-      clickhouse: mockClickHouse(true),
-      logger: false,
-    });
-
-    const response = await app.inject({ method: "GET", url: "/health" });
-    expect(response.statusCode).toBe(200);
   });
 });
