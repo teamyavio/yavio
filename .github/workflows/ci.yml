@@ -24,6 +24,7 @@ jobs:
       ingest: ${{ steps.filter.outputs.ingest }}
       dashboard: ${{ steps.filter.outputs.dashboard }}
       cli: ${{ steps.filter.outputs.cli }}
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
@@ -54,6 +55,9 @@ jobs:
             cli:
               - 'packages/cli/**'
               - 'packages/shared/**'
+              - '.github/**'
+            docs:
+              - 'packages/docs/**'
               - '.github/**'
 
   # ── Lint & Format ──────────────────────────────────────────────────
@@ -123,16 +127,32 @@ jobs:
           CLICKHOUSE_URL: http://localhost:8123
           CLICKHOUSE_PASSWORD: test
 
-  # ── Tests: ingest ──────────────────────────────────────────────────
+  # ── Tests: ingest (requires ClickHouse for e2e) ────────────────────
   test-ingest:
     runs-on: ubuntu-latest
     needs: detect
     if: needs.detect.outputs.ingest == 'true'
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.3
+        env:
+          CLICKHOUSE_PASSWORD: test
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "clickhouse-client --password test --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: ./.github/actions/setup
       - run: pnpm turbo build --filter=@yavio/ingest...
       - run: pnpm --filter @yavio/ingest test
+        env:
+          CLICKHOUSE_URL: http://localhost:8123
+          CLICKHOUSE_PASSWORD: test
 
   # ── Build ──────────────────────────────────────────────────────────
   build:
