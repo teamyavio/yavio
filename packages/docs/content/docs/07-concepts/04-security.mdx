@@ -9,18 +9,6 @@ Yavio is designed with a security-first approach. This page covers how the platf
 
 The PII stripping engine runs on every event before it reaches ClickHouse. It is **ON by default** and cannot be disabled in Community or Cloud Free tiers.
 
-### What Gets Redacted
-
-| Pattern | Detection Method | Replacement |
-|---------|-----------------|-------------|
-| Email addresses | RFC 5322 regex | `[EMAIL_REDACTED]` |
-| Credit card numbers | Luhn algorithm + format check | `[CC_REDACTED]` |
-| SSN / Tax IDs | NNN-NN-NNNN patterns | `[SSN_REDACTED]` |
-| Phone numbers | International format detection (E.164 + common formats) | `[PHONE_REDACTED]` |
-| Physical addresses | Heuristic: number + street name patterns | `[ADDRESS_REDACTED]` |
-
-The engine scans all string fields in the event, including nested JSON in `metadata`. It targets identity data — business values like prices, cities, dates, and quantities are preserved.
-
 ### Defense in Depth
 
 PII stripping uses a two-layer strategy:
@@ -30,9 +18,21 @@ PII stripping uses a two-layer strategy:
 
 This ensures PII is caught regardless of SDK version and provides redundancy if either layer has a bug.
 
+### What Gets Redacted
+
+| Pattern | Detection Method | Replacement | Layer |
+|---------|-----------------|-------------|-------|
+| Email addresses | RFC 5322 regex | `[EMAIL_REDACTED]` | SDK + Ingest |
+| Credit card numbers | Luhn algorithm + format check | `[CC_REDACTED]` | SDK + Ingest |
+| SSN / Tax IDs | NNN-NN-NNNN patterns | `[SSN_REDACTED]` | SDK + Ingest |
+| Phone numbers | International format detection (E.164 + common formats) | `[PHONE_REDACTED]` | SDK + Ingest |
+| Physical addresses | Heuristic: number + street name patterns | `[ADDRESS_REDACTED]` | Ingest only |
+
+Both layers scan all string fields in the event, including nested JSON in `metadata`. They target identity data — business values like prices, cities, dates, and quantities are preserved.
+
 ## API Key Authentication
 
-Server-side SDKs authenticate with a **project API key** (`yav_proj_...` prefix). Each project gets a unique key, managed from the dashboard.
+Server-side SDKs authenticate with a **project API key** (`yav_...` prefix). Each project gets a unique key, managed from the dashboard.
 
 - API keys are sent as `Authorization: Bearer <key>` headers
 - The ingestion API validates keys against PostgreSQL with an in-memory LRU cache (60s TTL, 10,000 entries)
@@ -77,6 +77,26 @@ Every event in a widget JWT batch must have a `traceId` matching the JWT's `tid`
 | Per IP (unauthenticated) | 10 requests/second | Protects against brute-force key scanning |
 
 Rate limit state is stored in memory. Exceeded limits return `429 Too Many Requests` with a `Retry-After` header.
+
+### Reverse Proxy Requirement
+
+IP-based rate limiting relies on the `X-Forwarded-For` header to identify clients, since the application sits behind a reverse proxy and cannot see the original socket address directly.
+
+Your reverse proxy **must overwrite** (not append to) the `X-Forwarded-For` header with the client's real IP. If the proxy merely appends, a client can send a forged header value to get a fresh rate-limit bucket on every request.
+
+Example Nginx configuration:
+
+```nginx
+proxy_set_header X-Forwarded-For $remote_addr;
+```
+
+Example Caddy configuration:
+
+```txt
+header_up X-Forwarded-For {remote_host}
+```
+
+Without this, IP-based rate limits can be bypassed trivially.
 
 ## Event Field Size Limits
 

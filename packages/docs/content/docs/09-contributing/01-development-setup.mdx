@@ -31,8 +31,11 @@ pnpm is the only supported package manager. The repo uses a `pnpm-workspace.yaml
 
 ```bash
 # Copy environment config
-cp .env.example .env
-# Fill in the required secrets (see comments in .env.example)
+cp .env.example .env                              # Docker Compose / shared secrets
+cp packages/dashboard/.env.example packages/dashboard/.env
+cp packages/ingest/.env.example packages/ingest/.env
+cp packages/db/.env.example packages/db/.env
+# Fill in the required secrets (see comments in each .env.example)
 ```
 
 ## Start Infrastructure
