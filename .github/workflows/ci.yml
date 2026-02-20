@@ -195,6 +195,17 @@ jobs:
           CLICKHOUSE_URL: http://localhost:8123
           CLICKHOUSE_PASSWORD: test
 
+  # ── Tests: cli ─────────────────────────────────────────────────────
+  test-cli:
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.cli == 'true'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup
+      - run: pnpm turbo build --filter=@yavio/cli...
+      - run: pnpm --filter @yavio/cli test
+
   # ── Tests: sdk ─────────────────────────────────────────────────────
   test-sdk:
     runs-on: ubuntu-latest
