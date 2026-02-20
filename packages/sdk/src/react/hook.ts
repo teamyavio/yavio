@@ -118,15 +118,24 @@ function createState(config: WidgetConfig): WidgetState {
  * If no configuration is found, returns a no-op instance that silently
  * discards all events (prevents widget crashes in dev/test).
  */
-export function useYavio(config?: Partial<WidgetConfig>): YavioWidget {
+export function useYavio(config?: Partial<WidgetConfig> | Record<string, unknown>): YavioWidget {
+  // Capture whether current state is noop before resolution might change cachedConfig
+  const wasNoop = state !== null && cachedConfig === null;
+
   // Resolve and cache config once (survives strict-mode remount)
   if (cachedConfig === undefined) {
     cachedConfig = resolveWidgetConfig(config);
+  } else if (cachedConfig === null && config) {
+    // Re-attempt resolution (e.g. tool result with _meta.yavio arrived)
+    cachedConfig = resolveWidgetConfig(config);
   }
 
-  // Create singleton state if needed
+  // Create singleton state if needed, or upgrade from noop → active
   if (!state) {
     state = cachedConfig ? createState(cachedConfig) : { widget: NOOP_WIDGET, cleanup: () => {} };
+  } else if (wasNoop && cachedConfig) {
+    state.cleanup();
+    state = createState(cachedConfig);
   }
 
   useEffect(() => {

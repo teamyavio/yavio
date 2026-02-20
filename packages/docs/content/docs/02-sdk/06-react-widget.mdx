@@ -1,0 +1,173 @@
+---
+title: React Widget SDK
+description: Track user interactions inside ChatGPT App widgets with useYavio()
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+## Installation
+
+The React widget SDK is included in the same `@yavio/sdk` package — import from the `/react` subpath:
+
+```bash
+npm install @yavio/sdk
+```
+
+Peer dependencies: `react` >= 18, `react-dom` >= 18.
+
+## Quick start
+
+```tsx
+import { useYavio } from "@yavio/sdk/react";
+
+function BookingWidget({ userId }: { userId: string }) {
+  const yavio = useYavio(); // zero config — auto-detects injected config
+
+  const handleSelect = (room: { type: string }) => {
+    yavio.step("room_selected", { roomType: room.type });
+  };
+
+  const handleBooking = (booking: { price: number }) => {
+    yavio.conversion("booking_completed", {
+      value: booking.price,
+      currency: "EUR",
+    });
+  };
+
+  return <div>{/* widget UI */}</div>;
+}
+```
+
+<Callout type="info">
+  The widget SDK uses the same method names as the server SDK: `.identify()`, `.step()`, `.track()`, and `.conversion()`. See the [Tracking API](/docs/02-sdk/02-tracking-api) for method signatures.
+</Callout>
+
+## How configuration works
+
+The server-side `withYavio()` proxy automatically injects widget configuration into every tool result. The widget SDK picks it up without any manual setup.
+
+### Server-side injection
+
+After each tool handler returns, the proxy:
+
+1. Mints a short-lived JWT via `POST /v1/widget-tokens`
+2. Injects `{ token, endpoint, traceId, sessionId }` into the result's `_meta.yavio` field
+
+The project API key never reaches the widget — only the short-lived JWT is forwarded.
+
+### Client-side detection
+
+`useYavio()` resolves configuration from the first available source:
+
+| Priority | Source | Description |
+|----------|--------|-------------|
+| 1 | `window.__YAVIO__` | Global injected by the server into the widget HTML bundle |
+| 2 | `<meta name="yavio-config">` | JSON meta tag for non-standard setups |
+| 3 | `_meta.yavio` / `.yavio` | Extracted from tool result metadata passed to the hook |
+| 4 | Explicit config | `useYavio({ token, endpoint, traceId, sessionId })` |
+
+If no configuration is found, the hook returns a no-op instance that silently discards all events.
+
+## Using with tool results
+
+When your widget receives a tool result containing `_meta.yavio`, you can pass it directly to `useYavio()`:
+
+```tsx
+import { useYavio } from "@yavio/sdk/react";
+
+function Widget({ toolResult }: { toolResult: Record<string, unknown> }) {
+  // Config is extracted from toolResult._meta.yavio automatically
+  const yavio = useYavio(toolResult);
+
+  return <div>{/* widget UI */}</div>;
+}
+```
+
+### `extractWidgetConfig()`
+
+For cases where you need to extract the config separately (e.g., to check if it exists before rendering):
+
+```tsx
+import { extractWidgetConfig, useYavio } from "@yavio/sdk/react";
+
+function Widget({ toolResult }: { toolResult: Record<string, unknown> }) {
+  const config = extractWidgetConfig(toolResult);
+  const yavio = useYavio(config ?? undefined);
+
+  if (!config) {
+    return <div>Analytics not available</div>;
+  }
+
+  return <div>{/* widget UI */}</div>;
+}
+```
+
+`extractWidgetConfig()` checks for config at `.yavio` (Skybridge responseMetadata) or `._meta.yavio` (raw MCP tool result) and returns a validated `WidgetConfig` or `null`.
+
+## Noop-to-active upgrade
+
+If the hook is first called without config (e.g., tool result not yet available), it starts in no-op mode. When a valid config arrives on a subsequent render, the hook automatically upgrades to an active widget with a real transport.
+
+```tsx
+function Widget({ toolResult }: { toolResult?: Record<string, unknown> }) {
+  // First render: no config → no-op mode
+  // After tool result arrives: upgrades to active mode
+  const yavio = useYavio(toolResult);
+
+  yavio.track("widget_loaded"); // silently discarded until config arrives
+  return <div />;
+}
+```
+
+## Transport behavior
+
+| Parameter | Value |
+|-----------|-------|
+| Flush interval | 5 seconds |
+| Early flush | 20 buffered events |
+| Buffer cap | 200 events (oldest dropped on overflow) |
+| Retry | 3 attempts with exponential backoff (1s, 2s, 4s) |
+| Auth failure | 401 stops retrying immediately |
+| Teardown | `navigator.sendBeacon()` on `visibilitychange` and `pagehide` |
+| Authentication | `Authorization: Bearer <widgetJwt>` (short-lived, trace-scoped) |
+
+## Auto-captured events
+
+The widget SDK automatically captures these events when initialized:
+
+| Event | Trigger |
+|-------|---------|
+| `widget_render` | Once on init (viewport, device info, timezone) |
+| `widget_error` | `window.onerror` + `unhandledrejection` |
+| `widget_click` | Click/tap on any element |
+| `widget_scroll` | Throttled scroll (250ms) |
+| `widget_form_field` | Focus/blur on inputs |
+| `widget_form_submit` | Form submission |
+| `widget_link_click` | Anchor element clicks |
+| `widget_navigation` | `popstate` + History API |
+| `widget_focus` | Widget focus/blur |
+| `widget_visibility` | IntersectionObserver |
+| `widget_performance` | PerformanceObserver (navigation timing) |
+| `widget_rage_click` | 3+ clicks within 500ms on same element |
+
+Auto-capture uses feature detection — unsupported APIs are silently skipped.
+
+## Session sharing
+
+Widget events share the server's session ID. The `traceId` correlates a specific tool call with the widget it spawned, while the shared `sessionId` ensures session-level analytics (duration, tool count, retention) include both server and widget activity.
+
+```
+Session (ses_xxx) ← shared by server + widget
+  ├── Trace 1 (tr_aaa) ← tool_call "search_rooms"
+  │   ├── step: "rooms_found"           (source: server)
+  │   ├── widget_render                  (source: widget)
+  │   └── conversion: "booking_completed" (source: widget)
+  └── Trace 2 (tr_bbb) ← tool_call "cancel_booking"
+```
+
+## Security
+
+- The widget never receives the project API key
+- The JWT is trace-scoped, write-only, and expires after 15 minutes
+- `window.__YAVIO__` is deleted after reading to reduce XSS exposure
+- Events from widget JWTs are rate-limited per token

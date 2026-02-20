@@ -195,4 +195,66 @@ describe("useYavio", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+
+  it("upgrades from noop to active when config transitions from undefined to valid", async () => {
+    // Start with no config — noop mode
+    const { result, rerender } = renderHook(({ config }) => useYavio(config), {
+      initialProps: {
+        config: undefined as Partial<import("../../react/types.js").WidgetConfig> | undefined,
+      },
+    });
+
+    // Noop — no fetch
+    result.current.track("ignored_event");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    // Now provide full config
+    _resetWidgetInstance();
+    const { result: result2 } = renderHook(() =>
+      useYavio({
+        token: "jwt_upgrade",
+        endpoint: "http://test/v1/events",
+        traceId: "tr_upgrade",
+        sessionId: "ses_upgrade",
+      }),
+    );
+
+    result2.current.track("active_event");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it("upgrades noop singleton to active on re-render with full config", async () => {
+    // Start with no config — noop
+    const { result: noopResult } = renderHook(() => useYavio());
+    noopResult.current.track("should_be_ignored");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    // Re-render with full config — should upgrade
+    const fullConfig = {
+      token: "jwt_lazy",
+      endpoint: "http://test/v1/events",
+      traceId: "tr_lazy",
+      sessionId: "ses_lazy",
+    };
+    const { result: activeResult } = renderHook(() => useYavio(fullConfig));
+    activeResult.current.track("should_be_sent");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it("stays in noop when config is still partial", async () => {
+    const { result } = renderHook(() => useYavio());
+    result.current.track("noop_event");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    // Partial config — should still be noop
+    const { result: result2 } = renderHook(() => useYavio({ token: "jwt_only" }));
+    result2.current.track("still_noop");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
 });

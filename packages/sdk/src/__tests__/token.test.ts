@@ -62,7 +62,7 @@ describe("mintWidgetToken", () => {
     expect(body).toEqual({ traceId: "tr_abc", sessionId: "ses_def" });
   });
 
-  it("returns null on non-ok response", async () => {
+  it("returns error with status on non-ok response", async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 401 });
     const result = await mintWidgetToken(
       "http://localhost:3001/v1/events",
@@ -71,7 +71,7 @@ describe("mintWidgetToken", () => {
       "ses_456",
       mockFetch,
     );
-    expect(result).toBeNull();
+    expect(result).toEqual({ status: 401 });
   });
 
   it("handles endpoint with trailing slash", async () => {

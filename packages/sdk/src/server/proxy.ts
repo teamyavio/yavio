@@ -5,6 +5,43 @@ import { detectPlatform } from "../core/platform.js";
 import type { SessionState, YavioConfig } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
 import { type RequestStore, createYavioContext, runInContext } from "./context.js";
+import { type MintResult, mintWidgetToken } from "./token.js";
+
+/** Cached widget token with parsed expiry for reuse across tool calls. */
+interface CachedWidgetToken {
+  token: string;
+  expiresAt: number;
+}
+
+function isMintResult(result: unknown): result is MintResult {
+  return result !== null && typeof result === "object" && "token" in result;
+}
+
+/**
+ * Get a widget token, reusing a cached one if still valid (30s buffer).
+ * Invalidates cache on 401/403 (key rotation, revocation).
+ * Returns null if minting fails — callers should skip injection silently.
+ */
+async function getWidgetToken(
+  cache: { current: CachedWidgetToken | null },
+  config: YavioConfig,
+  traceId: string,
+  sessionId: string,
+): Promise<string | null> {
+  if (cache.current && Date.now() < cache.current.expiresAt - 30_000) {
+    return cache.current.token;
+  }
+  const result = await mintWidgetToken(config.endpoint, config.apiKey, traceId, sessionId);
+  if (isMintResult(result)) {
+    cache.current = { token: result.token, expiresAt: Date.parse(result.expiresAt) };
+    return result.token;
+  }
+  // Auth failure — invalidate any stale cached token
+  if (result && "status" in result && (result.status === 401 || result.status === 403)) {
+    cache.current = null;
+  }
+  return null;
+}
 
 /**
  * Wrap a tool callback with Yavio instrumentation.
@@ -20,6 +57,7 @@ function wrapToolCallback(
   config: YavioConfig,
   transport: Transport,
   sdkVersion: string,
+  tokenCache: { current: CachedWidgetToken | null },
 ): (...cbArgs: unknown[]) => Promise<unknown> {
   return async (...cbArgs: unknown[]) => {
     const session = getSession();
@@ -84,6 +122,31 @@ function wrapToolCallback(
       );
       transport.send([toolCallEvent]);
 
+      if (result && typeof result === "object") {
+        try {
+          const token = await getWidgetToken(
+            tokenCache,
+            config,
+            store.traceId,
+            store.session.sessionId,
+          );
+          if (token) {
+            const res = result as Record<string, unknown>;
+            if (!res._meta || typeof res._meta !== "object") {
+              res._meta = {};
+            }
+            (res._meta as Record<string, unknown>).yavio = {
+              token,
+              endpoint: config.endpoint,
+              traceId: store.traceId,
+              sessionId: store.session.sessionId,
+            };
+          }
+        } catch {
+          // Widget token minting failed — don't break the tool call
+        }
+      }
+
       return result;
     } catch (error) {
       const latencyMs = Math.round(performance.now() - startTime);
@@ -130,6 +193,9 @@ export function createProxy<T extends McpServer>(
     stepSequence: 0,
   };
 
+  // Widget token cache — shared across tool calls, reset on reconnect
+  const tokenCache: { current: CachedWidgetToken | null } = { current: null };
+
   const getSession = () => session;
   const originalTool = server.tool.bind(server);
   const originalRegisterTool = server.registerTool.bind(server);
@@ -154,6 +220,7 @@ export function createProxy<T extends McpServer>(
             config,
             transport,
             sdkVersion,
+            tokenCache,
           );
 
           return (originalTool as (...a: unknown[]) => unknown)(...args);
@@ -175,6 +242,7 @@ export function createProxy<T extends McpServer>(
               config,
               transport,
               sdkVersion,
+              tokenCache,
             );
           }
 
@@ -198,6 +266,7 @@ export function createProxy<T extends McpServer>(
             }),
             stepSequence: 0,
           };
+          tokenCache.current = null;
 
           const result = await originalConnect(
             mcpTransport as Parameters<typeof originalConnect>[0],

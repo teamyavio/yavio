@@ -40,33 +40,57 @@ function BookingWidget({ userId }: { userId: string }) {
 
 ## 4.3 Auto-Configuration Injection
 
-When a tool call returns a widget response, the server-side `withYavio()` proxy intercepts the response and injects configuration into the widget bundle automatically. The developer never handles API keys, tokens, or endpoints.
+The server-side `withYavio()` proxy automatically injects widget configuration into every tool result via `_meta.yavio`. The developer never handles API keys, tokens, or endpoints.
 
 ### 4.3.1 Server-Side Injection
 
-The proxy detects widget responses (via `_meta.ui.resourceUri`), mints a short-lived widget JWT via `POST /v1/widget-tokens` (see [Section 3.4.1](server-sdk.md#341-widget-token-minting)), and injects a global config object into the served widget HTML/JS:
+After each tool handler returns, the proxy mints a short-lived widget JWT via `POST /v1/widget-tokens` (see [Section 3.4.1](server-sdk.md#341-widget-token-minting)) and injects a `yavio` config object into the result's `_meta` field:
 
-```javascript
-// Injected by withYavio() into the widget bundle at serve time
-window.__YAVIO__ = {
-  token: "eyJhbGciOiJIUzI1NiJ9...",              // short-lived widget JWT (15 min)
-  endpoint: "https://ingest.yavio.ai/v1/events",  // ingestion API URL
-  traceId: "tr_8f2a...",                           // current request trace
-  sessionId: "ses_abc..."                           // server session (shared by widget)
-};
+```json
+{
+  "content": [{ "type": "text", "text": "..." }],
+  "_meta": {
+    "yavio": {
+      "token": "eyJhbGciOiJIUzI1NiJ9...",
+      "endpoint": "https://ingest.yavio.ai/v1/events",
+      "traceId": "tr_8f2a...",
+      "sessionId": "ses_abc..."
+    }
+  }
+}
 ```
 
-The project API key never reaches the widget. The JWT is trace-scoped and short-lived (see [Security Model](#45-security-model)). The `sessionId` ensures widget events share the same session as the server-side events that spawned them.
+The project API key never reaches the widget. The JWT is trace-scoped and short-lived (see [Security Model](#45-security-model)). The `sessionId` ensures widget events share the same session as the server-side events that spawned them. The token is cached and reused across tool calls (see [Section 3.4.1](server-sdk.md#341-widget-token-minting)).
+
+For widget-serving setups where the server controls the HTML bundle, the `window.__YAVIO__` global is also supported (see [Section 3.4.3](server-sdk.md#343-legacy-windowyavio-injection)).
 
 ### 4.3.2 Client-Side Detection
 
 `useYavio()` resolves configuration in this order:
 
-1. **`window.__YAVIO__`:** Global object injected by `withYavio()` at serve time. This is the primary and expected path. The hook reads `token`, `endpoint`, `traceId`, and `sessionId`.
+1. **`window.__YAVIO__`:** Global object injected by `withYavio()` at serve time. This is the primary path for widget-serving setups. The hook reads `token`, `endpoint`, `traceId`, and `sessionId`. Deleted after reading to reduce XSS exposure.
 2. **Meta tag:** `<meta name="yavio-config" content="...">` — alternative injection point for non-standard widget serving setups. The content attribute is a JSON string with the same `{ token, endpoint, traceId, sessionId }` shape.
-3. **Explicit config:** `useYavio({ token, endpoint })` — manual override for edge cases. Not documented as the primary API.
+3. **Tool result metadata:** `input._meta.yavio` or `input.yavio` — extracted from the tool result passed to `useYavio()`. Handles both raw MCP results (`_meta.yavio`) and platform-transformed results (`.yavio`, e.g., Skybridge responseMetadata).
+4. **Explicit config:** `useYavio({ token, endpoint, traceId, sessionId })` — manual override for edge cases. Not documented as the primary API.
+5. **`null`:** No config found → no-op mode.
 
 If no configuration is found, `useYavio()` returns a no-op instance that silently discards all events. This prevents widget crashes in development or testing environments where `withYavio()` is not running.
+
+#### `extractWidgetConfig()` Helper
+
+For consumers who handle tool results outside the hook, `@yavio/sdk/react` exports a standalone `extractWidgetConfig(input)` function. It checks for config at `.yavio` or `._meta.yavio` and returns a validated `WidgetConfig` or `null`. This is the same logic used internally by `resolveWidgetConfig()`.
+
+```tsx
+import { extractWidgetConfig, useYavio } from "@yavio/sdk/react";
+
+// Extract config from a tool result
+const config = extractWidgetConfig(toolResult);
+const yavio = useYavio(config ?? undefined);
+```
+
+### 4.3.3 Noop-to-Active Upgrade
+
+`useYavio()` supports lazy configuration: if the hook is first called with no config (returning a no-op widget), it can be upgraded to an active widget on a subsequent render when valid config arrives (e.g., when a tool result containing `_meta.yavio` becomes available). The hook re-attempts config resolution when the `config` argument transitions from absent to present, tears down the no-op instance, and creates a real transport-backed widget.
 
 ## 4.4 Hook Internals
 

@@ -201,11 +201,11 @@ Content-Type: application/json
 
 ## 3.4 Widget Configuration Injection
 
-When a tool call returns a widget response, the server-side `withYavio()` proxy intercepts the response and injects the ingestion API configuration into the widget bundle. The proxy mints a short-lived widget token via the ingestion API so that the project API key never leaves the server.
+When a tool call returns, the server-side `withYavio()` proxy injects ingestion API configuration into the tool result's `_meta.yavio` field. The proxy mints a short-lived widget token via the ingestion API so that the project API key never leaves the server.
 
 ### 3.4.1 Widget Token Minting
 
-Before injecting the config, the proxy requests a short-lived JWT from the ingestion API:
+After the tool handler returns, the proxy requests a short-lived JWT from the ingestion API:
 
 ```http
 POST /v1/widget-tokens HTTP/1.1
@@ -227,11 +227,40 @@ Response:
 
 The returned JWT is scoped to a single trace and session, and expires after 15 minutes. It grants write-only access to the ingestion API for that trace only. The `sessionId` is included in the JWT claims so the widget SDK can stamp all outgoing events with the server's session ID. The project API key is used to authenticate this request but is never forwarded to the widget.
 
-If the token request fails (network error, invalid key), the proxy injects no config and the widget falls back to no-op mode.
+If the token request fails (network error, invalid key), the proxy skips injection and the widget falls back to no-op mode.
 
-### 3.4.2 Injection
+#### Token Caching
 
-The proxy detects widget responses (via `_meta.ui.resourceUri`) and injects a global config object:
+The proxy caches the minted token and reuses it across tool calls within the same connection, refreshing only when the token is within 30 seconds of expiry. The cache is invalidated on:
+
+- **Reconnect:** A new `connect()` call clears the cache, since the session and trace context change.
+- **Auth failure:** A `401` or `403` response from the token endpoint clears the cache immediately, handling key rotation or revocation.
+
+### 3.4.2 Injection into Tool Results
+
+After the tool handler returns and a widget token is available, the proxy injects a `yavio` config object into the result's `_meta` field:
+
+```json
+{
+  "content": [{ "type": "text", "text": "..." }],
+  "_meta": {
+    "yavio": {
+      "token": "eyJhbGciOiJIUzI1NiJ9...",
+      "endpoint": "https://ingest.yavio.ai/v1/events",
+      "traceId": "tr_8f2a...",
+      "sessionId": "ses_abc..."
+    }
+  }
+}
+```
+
+If the result already has a `_meta` object, the proxy preserves existing fields and adds `yavio` alongside them. If minting fails or the result is not an object, the result is returned unchanged.
+
+The AI platform (e.g., ChatGPT, Claude) may surface `_meta.yavio` directly in the tool result or transform it into a top-level `.yavio` field in the response metadata (e.g., Skybridge). The React widget SDK handles both shapes (see [Section 4.3.2](react-widget-sdk.md#432-client-side-detection)).
+
+### 3.4.3 Legacy: `window.__YAVIO__` Injection
+
+For widget-serving setups where the server controls the HTML bundle, the `window.__YAVIO__` global remains supported as the highest-priority config source on the client side:
 
 ```javascript
 // Injected by withYavio() into the widget bundle at serve time
