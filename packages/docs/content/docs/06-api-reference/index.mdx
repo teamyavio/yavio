@@ -1,0 +1,25 @@
+---
+title: API Reference
+description: HTTP API documentation for the Yavio Ingestion API
+---
+
+import { Card, Cards } from "fumadocs-ui/components/card";
+
+The Yavio Ingestion API is the HTTP interface used by the server SDK and widget SDK to send analytics events. All endpoints are served by the `@yavio/ingest` service (default port 3001).
+
+You typically don't need to call these endpoints directly — the SDK handles event batching and delivery automatically. This reference is useful for building custom integrations or debugging.
+
+## Authentication
+
+All endpoints (except `/health`) require a Bearer token in the `Authorization` header:
+
+- **Server SDK** — uses a project API key (`yav_...`) obtained from the Yavio dashboard
+- **Widget SDK** — uses a short-lived JWT minted by the server via `POST /v1/widget-tokens`
+
+## Endpoints
+
+<Cards>
+  <Card title="POST /v1/events" href="/docs/06-api-reference/events/ingestEvents" description="Submit a batch of analytics events for processing" />
+  <Card title="POST /v1/widget-tokens" href="/docs/06-api-reference/widget-tokens/createWidgetToken" description="Mint a short-lived JWT for widget event ingestion" />
+  <Card title="GET /health" href="/docs/06-api-reference/health/healthCheck" description="Liveness probe for service health monitoring" />
+</Cards>
