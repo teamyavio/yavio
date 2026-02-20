@@ -172,7 +172,7 @@ components:
       type: http
       scheme: bearer
       description: |
-        Project API key with `yav_proj_` prefix. Obtained from the Yavio dashboard.
+        Project API key with `yav_` prefix. Obtained from the Yavio dashboard.
         Used by the server SDK for event ingestion and widget token minting.
 
     widgetJwt:
@@ -187,20 +187,14 @@ components:
     EventBatchRequest:
       type: object
       required:
-        - batch
+        - events
       properties:
-        batch:
+        events:
           type: array
           items:
             $ref: "#/components/schemas/Event"
           minItems: 1
           maxItems: 1000
-        sdk_version:
-          type: string
-          example: "1.0.0"
-        sent_at:
-          type: string
-          format: date-time
 
     Event:
       type: object
@@ -252,7 +246,7 @@ components:
           maxLength: 128
         platform:
           type: string
-          enum: [chatgpt, claude, cursor, vscode, unknown]
+          enum: [chatgpt, claude, cursor, vscode, windsurf, unknown]
         source:
           type: string
           enum: [server, widget]
@@ -284,6 +278,17 @@ components:
         accepted:
           type: integer
           description: Number of events accepted
+        rejected:
+          type: integer
+          description: Number of events rejected (always 0 for 200)
+        requestId:
+          type: string
+          description: Unique request identifier for tracing
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Field truncation warnings (omitted when empty)
 
     PartialEventBatchResponse:
       type: object
@@ -292,18 +297,25 @@ components:
           type: integer
         rejected:
           type: integer
-        results:
+        errors:
           type: array
           items:
             type: object
             properties:
               index:
                 type: integer
-              status:
-                type: string
-                enum: [accepted, rejected]
-              error:
-                type: string
+              issues:
+                type: array
+                items:
+                  type: string
+        requestId:
+          type: string
+          description: Unique request identifier for tracing
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Field truncation warnings (omitted when empty)
 
     WidgetTokenRequest:
       type: object
@@ -331,21 +343,33 @@ components:
       properties:
         status:
           type: string
-          enum: [ok, error]
+          enum: [ok, degraded]
         postgres:
           type: string
-          enum: [ok, error]
+          enum: [up, down]
         clickhouse:
           type: string
-          enum: [ok, error]
+          enum: [up, down]
 
     ErrorResponse:
       type: object
       properties:
         error:
-          type: string
-        code:
-          type: string
-          description: Yavio error code (e.g., YAVIO-2001)
-        message:
-          type: string
+          type: object
+          description: Nested error envelope
+          properties:
+            code:
+              type: string
+              description: Yavio error code (e.g., YAVIO-2001)
+            message:
+              type: string
+            status:
+              type: integer
+              description: HTTP status code
+            requestId:
+              type: string
+              description: Unique request identifier for tracing
+            metadata:
+              type: object
+              additionalProperties: true
+              description: Additional error context (optional)
