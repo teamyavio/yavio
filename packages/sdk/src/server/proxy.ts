@@ -115,12 +115,12 @@ function wrapToolCallback(
  * Create a Proxy around McpServer that intercepts tool()/registerTool() and connect()
  * to inject Yavio instrumentation transparently.
  */
-export function createProxy(
-  server: McpServer,
+export function createProxy<T extends McpServer>(
+  server: T,
   config: YavioConfig,
   transport: Transport,
   sdkVersion: string,
-): McpServer {
+): T {
   // Session state (set on connect, shared across all tool calls in this connection)
   let session: SessionState = {
     sessionId: generateSessionId(),
@@ -135,7 +135,7 @@ export function createProxy(
   const originalRegisterTool = server.registerTool.bind(server);
   const originalConnect = server.connect.bind(server);
 
-  return new Proxy(server, {
+  return new Proxy<T>(server, {
     get(target, prop, receiver) {
       if (prop === "tool") {
         return (...args: unknown[]) => {

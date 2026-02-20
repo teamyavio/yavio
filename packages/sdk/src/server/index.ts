@@ -16,7 +16,7 @@ export const SDK_VERSION = "0.0.1";
  *
  * If no API key is found, returns the original server unchanged (transparent no-op).
  */
-export function withYavio(server: McpServer, options?: WithYavioOptions): McpServer {
+export function withYavio<T extends McpServer>(server: T, options?: WithYavioOptions): T {
   const config = resolveConfig(options);
 
   if (!config) {
