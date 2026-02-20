@@ -88,7 +88,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiJ9...
 Content-Type: application/json
 
 {
-  "batch": [
+  "events": [
     {
       "event_type": "step",
       "event_name": "room_selected",

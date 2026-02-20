@@ -143,7 +143,7 @@ The SDK buffers events in memory and flushes them to the Yavio ingestion API in 
 | Max batch size | 100 events | Triggers early flush if buffer fills before interval |
 | Max buffer size | 10,000 events | Prevents memory exhaustion under extreme load. Oldest dropped with warning. |
 | Retry strategy | Exponential backoff: 1s, 2s, 4s, 8s, 16s (max 5 retries) | Handles transient network/ingestion failures |
-| Shutdown | Synchronous final flush on `process.exit` / `SIGTERM` | Uses `fetch` with keepalive to ensure delivery |
+| Shutdown | Async final flush on `process.exit` / `SIGTERM` | Awaits all pending batches before resolving |
 | Authentication | `Authorization: Bearer <projectApiKey>` header | Stateless, validated by ingestion API against PostgreSQL. Server SDK always uses the project API key directly (JWTs are only for widget-side auth). |
 
 ### 3.3.2 Request Format
@@ -155,7 +155,7 @@ Authorization: Bearer yav_proj_abc123...
 Content-Type: application/json
 
 {
-  "batch": [
+  "events": [
     {
       "event_type": "tool_call",
       "event_name": "search_rooms",
@@ -183,7 +183,7 @@ Content-Type: application/json
 | Status | SDK Behavior |
 |--------|-------------|
 | `200 OK` | Batch accepted. Clear from buffer. |
-| `207 Multi-Status` | Partial accept. Response body contains a `results` array with per-event status (`accepted` or `rejected` + error reason). Rejected events are re-inserted at the front of the buffer and retried on the next flush cycle. Rejected events follow the same retry strategy as transient failures (max 5 retries with exponential backoff). Events that fail after max retries are dropped with a warning log. |
+| `207 Multi-Status` | Partial accept. Response body contains per-event errors with index and reason. Rejected events are logged and discarded — rejections are caused by schema validation or field limit violations, which are deterministic and cannot be fixed by retrying. |
 | `401 Unauthorized` | Invalid API key. Log error. Stop retrying (permanent failure). |
 | `429 Too Many Requests` | Rate limited. Retry with backoff using `Retry-After` header. |
 | `5xx` | Server error. Retry with exponential backoff. |
