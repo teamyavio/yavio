@@ -1,0 +1,100 @@
+---
+title: Configuration
+description: Precedence chain, environment variables, and config file format
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+The SDK resolves configuration from multiple sources with a clear precedence order. The first source that provides a value wins.
+
+## Precedence chain
+
+```
+Code options → Environment variables → .yaviorc.json → Defaults → No-op
+```
+
+1. **Code options** — passed directly to `withYavio(server, { apiKey, endpoint, capture })`
+2. **Environment variables** — `YAVIO_API_KEY` and `YAVIO_ENDPOINT`
+3. **Config file** — `.yaviorc.json` found by walking up from `process.cwd()`
+4. **Defaults** — built-in defaults for `endpoint` and `capture`
+5. **No-op** — if no API key is found from any source, the SDK is disabled
+
+## Environment variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `YAVIO_API_KEY` | Project API key | `yav_abc123...` |
+| `YAVIO_ENDPOINT` | Ingestion API URL | `http://localhost:3001/v1/events` |
+
+```bash title=".env"
+YAVIO_API_KEY=yav_abc123...
+YAVIO_ENDPOINT=http://localhost:3001/v1/events
+```
+
+## Config file
+
+The SDK walks up the directory tree from `process.cwd()` looking for a `.yaviorc.json` file. This is useful for local development and monorepo setups.
+
+```json title=".yaviorc.json"
+{
+  "apiKey": "yav_abc123...",
+  "endpoint": "http://localhost:3001/v1/events"
+}
+```
+
+Place it in your project root or any parent directory. The nearest file wins.
+
+<Callout type="warn">
+  Add `.yaviorc.json` to your `.gitignore` to avoid committing API keys.
+</Callout>
+
+## Defaults
+
+| Setting | Default |
+|---------|---------|
+| `endpoint` | `https://ingest.yavio.ai/v1/events` |
+| `capture.inputValues` | `true` |
+
+## Capture options
+
+The `capture` object controls which data is collected.
+
+```ts
+withYavio(server, {
+  capture: {
+    inputValues: false, // Don't capture tool input key names/types
+  },
+});
+```
+
+## Example configurations
+
+### Production (Yavio Cloud)
+
+```ts
+// Code — just the API key, everything else uses defaults
+withYavio(server, {
+  apiKey: process.env.YAVIO_API_KEY,
+});
+```
+
+### Local development
+
+```json title=".yaviorc.json"
+{
+  "apiKey": "yav_dev_key",
+  "endpoint": "http://localhost:3001/v1/events"
+}
+```
+
+```ts
+// No options needed — config file is auto-discovered
+withYavio(server);
+```
+
+### Disabled (CI / testing)
+
+```ts
+// No API key anywhere → no-op mode, zero overhead
+withYavio(server);
+```

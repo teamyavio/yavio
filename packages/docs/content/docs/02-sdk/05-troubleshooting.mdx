@@ -1,0 +1,111 @@
+---
+title: Troubleshooting
+description: Common issues, SDK error codes, and debugging tips
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+## Common issues
+
+### Events not appearing in the dashboard
+
+1. **Check your API key** — verify `YAVIO_API_KEY` is set and starts with `yav_`
+2. **Check the endpoint** — if self-hosting, ensure `YAVIO_ENDPOINT` points to your ingest service (default: `http://localhost:3001/v1/events`)
+3. **Check the ingest service** — hit `GET /health` to confirm it's running
+4. **Wait for flush** — events are batched and flushed every 10 seconds (or at 100 events). Give it a moment.
+5. **Check logs** — the SDK logs warnings with `YAVIO-` error codes to stderr
+
+### No-op mode is active
+
+If you see `YAVIO-1000` in your logs, the SDK couldn't find an API key. Check:
+- `withYavio(server, { apiKey })` option
+- `YAVIO_API_KEY` environment variable
+- `.yaviorc.json` in your project directory (or any parent)
+
+### Rate limited (429 responses)
+
+The ingestion API enforces rate limits:
+- **Per API key:** 1,000 events/second
+- **Per IP:** 10 requests/second
+
+If you're hitting limits, the SDK retries automatically with exponential backoff (up to 5 attempts). Sustained rate limiting may indicate an event loop or misconfiguration.
+
+### Buffer overflow
+
+If events are generated faster than they can be flushed, the SDK caps its buffer at 10,000 events. Oldest events are dropped. A `YAVIO-1206` warning is logged when this happens.
+
+## SDK error codes
+
+All SDK error codes are prefixed with `YAVIO-1` and logged to stderr.
+
+### Configuration (1000-1099)
+
+| Code | Description |
+|------|-------------|
+| `YAVIO-1000` | No API key found — SDK is in no-op mode |
+| `YAVIO-1001` | API key format is invalid (must start with `yav_`) |
+| `YAVIO-1002` | Endpoint URL is malformed |
+| `YAVIO-1003` | Config loaded successfully (debug) |
+| `YAVIO-1004` | `.yaviorc.json` is malformed JSON |
+| `YAVIO-1005` | Config file version is not supported |
+
+### Proxy and instrumentation (1100-1199)
+
+| Code | Description |
+|------|-------------|
+| `YAVIO-1100` | Proxy interception failed — tool call not captured |
+| `YAVIO-1101` | Platform detection failed — defaulting to `"unknown"` |
+| `YAVIO-1102` | Session ID could not be derived from transport |
+| `YAVIO-1103` | Widget token minting failed |
+| `YAVIO-1104` | Widget config injection skipped |
+| `YAVIO-1105` | Context injection unavailable (AsyncLocalStorage issue) |
+| `YAVIO-1106` | Tool response inspection failed |
+
+### Transport and delivery (1200-1299)
+
+| Code | Description |
+|------|-------------|
+| `YAVIO-1200` | Flush failed, retrying (transient) |
+| `YAVIO-1201` | Flush failed after max retries — events dropped |
+| `YAVIO-1202` | Flush rate limited (429 from ingest API) |
+| `YAVIO-1203` | Auth rejected permanently (401 — check API key) |
+| `YAVIO-1204` | Partial batch rejection (207 — some events invalid) |
+| `YAVIO-1205` | Shutdown flush failed — some events may be lost |
+| `YAVIO-1206` | Buffer overflow — oldest events dropped |
+| `YAVIO-1207` | Beacon delivery failed (widget teardown) |
+
+### Validation and PII (1300-1399)
+
+| Code | Description |
+|------|-------------|
+| `YAVIO-1300` | Event validation failed |
+| `YAVIO-1301` | PII stripping encountered an error |
+| `YAVIO-1302` | `.identify()` called with conflicting user ID — second ID ignored |
+| `YAVIO-1303` | `.conversion()` missing required `value` or `currency` |
+| `YAVIO-1304` | Event payload exceeds size limit |
+
+## FAQ
+
+### Does the SDK add latency to tool calls?
+
+No measurable latency. Events are captured synchronously via `performance.now()` timestamps, but the actual HTTP delivery is fully asynchronous and batched. Your tool handler returns immediately.
+
+### What happens if the ingest service is down?
+
+The SDK retries failed flushes up to 5 times with exponential backoff (starting at 1 second). Events are buffered in memory (up to 10,000) until delivery succeeds. If the service stays down past all retries, events for that batch are dropped and a `YAVIO-1201` warning is logged.
+
+### Can I use the SDK without the dashboard?
+
+Yes. The SDK only needs the ingestion API (`@yavio/ingest`). You can run `docker compose up ingest clickhouse postgres` and query ClickHouse directly.
+
+### Is the SDK safe to include in production?
+
+Yes. The SDK is designed for production use:
+- No-op mode when unconfigured (zero overhead)
+- PII stripping before any network request
+- Graceful degradation on errors (never throws, never blocks)
+- Shutdown handlers for clean exit
+
+<Callout type="info">
+  For the full list of ingestion API error codes (`YAVIO-2xxx`), see the [API Reference](/docs/06-api-reference).
+</Callout>

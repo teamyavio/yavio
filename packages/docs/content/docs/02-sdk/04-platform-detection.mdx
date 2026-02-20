@@ -1,0 +1,49 @@
+---
+title: Platform Detection
+description: How Yavio identifies which AI platform is calling your MCP server
+---
+
+Yavio automatically detects which AI platform is connecting to your MCP server. This powers per-platform analytics, allowing you to compare tool usage and conversion rates across ChatGPT, Claude, Cursor, and other MCP clients.
+
+## How it works
+
+Platform detection runs a layered heuristic against signals from the MCP transport connection. The first match wins:
+
+| Priority | Signal | Description |
+|----------|--------|-------------|
+| 1 | `clientName` | Client name from the MCP `initialize` handshake |
+| 2 | `userAgent` | HTTP User-Agent header (for HTTP/SSE transports) |
+| 3 | `origin` | HTTP Origin header |
+| 4 | — | Falls back to `"unknown"` |
+
+All matching is case-insensitive substring matching.
+
+## Supported platforms
+
+| Platform | Detected from `clientName` | Detected from `userAgent` | Detected from `origin` |
+|----------|---------------------------|--------------------------|----------------------|
+| `chatgpt` | `chatgpt`, `openai` | `chatgpt`, `openai` | `openai.com`, `chatgpt.com` |
+| `claude` | `claude`, `anthropic` | `claude`, `anthropic` | `claude.ai`, `anthropic.com` |
+| `cursor` | `cursor` | `cursor` | — |
+| `vscode` | `vscode` | `vscode` | — |
+| `windsurf` | `windsurf`, `codeium` | `windsurf`, `codeium` | — |
+| `unknown` | — | — | — |
+
+## When detection runs
+
+- **On connection:** platform is detected when a client connects and stored for the session
+- **On tool call:** if not yet detected (e.g., `clientName` wasn't available at connect time), the SDK retries detection lazily using the latest available signals
+
+The detected platform is attached to every event as the `platform` field.
+
+## Using platform data
+
+Platform detection is fully automatic. The `platform` field appears on all events and can be used in the dashboard for:
+
+- **Filtering** — view events from a specific platform
+- **Segmentation** — compare metrics across platforms
+- **Funnel analysis** — see where users drop off on each platform
+
+## Custom platforms
+
+If your MCP client isn't in the supported list, it will appear as `"unknown"`. The raw `clientName` and `userAgent` are available in the event metadata for custom segmentation.

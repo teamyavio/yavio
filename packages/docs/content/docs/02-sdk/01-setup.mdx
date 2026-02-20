@@ -1,0 +1,101 @@
+---
+title: Server Setup
+description: Install the SDK, configure withYavio(), and understand auto-captured events
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+## Installation
+
+```bash
+npm install @yavio/sdk
+```
+
+The SDK requires `@modelcontextprotocol/sdk` >= 1.0.0 as a peer dependency.
+
+## Wrapping your server
+
+The `withYavio()` function takes your `McpServer` instance and returns an instrumented version. All tool registrations and connections are intercepted transparently.
+
+```ts
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { withYavio } from "@yavio/sdk";
+
+const server = new McpServer({
+  name: "my-server",
+  version: "1.0.0",
+});
+
+const instrumented = withYavio(server, {
+  apiKey: "yav_...",
+  endpoint: "https://ingest.yavio.ai/v1/events",
+  capture: {
+    inputValues: true,
+  },
+});
+```
+
+### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `apiKey` | `string` | — | Project API key. Falls back to `YAVIO_API_KEY` env var, then `.yaviorc.json`. |
+| `endpoint` | `string` | `https://ingest.yavio.ai/v1/events` | Ingestion API URL. Falls back to `YAVIO_ENDPOINT` env var. |
+| `capture.inputValues` | `boolean` | `true` | Capture tool input key names and types |
+
+See [Configuration](/docs/02-sdk/03-configuration) for the full precedence chain.
+
+## Auto-captured events
+
+Once wrapped, the SDK automatically captures these events without any additional code:
+
+### Tool calls
+
+Every `server.tool()` invocation is tracked with:
+
+- **Event type:** `tool_call`
+- **Tool name** and input key metadata
+- **Latency** (milliseconds, via `performance.now()`)
+- **Status:** `success` or `error`
+- **Error message** (if the handler throws)
+- **Platform** (auto-detected from the connecting client)
+
+### Connections
+
+When a client connects to your MCP server:
+
+- **Event type:** `connection`
+- **Session ID** derived from the transport
+- **Platform** detected from client signals
+
+## No-op mode
+
+If no API key is found through any configuration source, `withYavio()` returns the original `McpServer` unchanged. No proxy is created, no HTTP requests are made, and there is zero runtime overhead.
+
+This makes it safe to include `withYavio()` in your codebase unconditionally — it only activates when configured.
+
+<Callout type="info">
+  No-op mode emits a `YAVIO-1000` debug log so you can confirm it's active during development.
+</Callout>
+
+## Transport behavior
+
+The SDK batches events and flushes them to the ingestion API efficiently:
+
+- **Flush interval:** every 10 seconds
+- **Early flush:** triggers at 100 buffered events
+- **Buffer cap:** 10,000 events (oldest events are dropped when full)
+- **Retry:** up to 5 attempts with exponential backoff (starting at 1 second)
+- **Request timeout:** 30 seconds per HTTP request
+- **Shutdown:** SIGTERM/SIGINT handlers flush remaining events before exit (10-second timeout)
+
+## PII stripping
+
+The SDK strips personally identifiable information (PII) from event payloads before sending:
+
+- Email addresses
+- Credit card numbers
+- Social Security numbers
+- Phone numbers
+
+This runs client-side as a first line of defense. The ingestion API applies the same stripping server-side for defense in depth.

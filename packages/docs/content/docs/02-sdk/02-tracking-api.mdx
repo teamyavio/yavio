@@ -1,0 +1,159 @@
+---
+title: Tracking API
+description: Use .identify(), .step(), .track(), and .conversion() to capture user behavior
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+The tracking API is available inside tool handlers via `ctx.yavio`, and outside handlers via the `yavio` module singleton.
+
+## Accessing the context
+
+### Inside tool handlers
+
+The `ctx.yavio` object is injected into every tool handler callback:
+
+```ts
+instrumented.tool("search", { query: { type: "string" } }, async ({ query }, ctx) => {
+  ctx.yavio.identify("user_123");
+  ctx.yavio.track("search_executed", { query });
+
+  return { content: [{ type: "text", text: "Results..." }] };
+});
+```
+
+### Outside tool handlers
+
+For code that runs outside of a tool handler (e.g., middleware or background tasks within the same async context), import the `yavio` singleton:
+
+```ts
+import { yavio } from "@yavio/sdk";
+
+// Works within the same async context as a tool handler
+yavio.track("background_task_completed");
+```
+
+<Callout type="warn">
+  The `yavio` singleton relies on `AsyncLocalStorage`. It only works within the async context of a tool handler invocation. Calls outside that context are silently ignored.
+</Callout>
+
+## .identify()
+
+Ties the current session to a known user ID. Call this as early as possible in your tool handler.
+
+```ts
+ctx.yavio.identify(userId: string, traits?: Record<string, unknown>): void
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `userId` | `string` | Unique user identifier. Immutable per session — subsequent calls with a different ID are ignored. |
+| `traits` | `Record<string, unknown>` | Optional user properties (e.g., `plan`, `company`). Additive across calls. |
+
+### Behavior
+
+- The `userId` is set once per session. If you call `.identify()` again with a different ID, the second call is ignored and a `YAVIO-1302` warning is logged.
+- Traits are merged additively — calling `.identify("u1", { plan: "pro" })` then `.identify("u1", { company: "Acme" })` results in both traits being attached.
+- All subsequent events in the session include the `user_id` and traits.
+
+```ts
+ctx.yavio.identify("user_42", {
+  plan: "enterprise",
+  company: "Acme Corp",
+});
+```
+
+See [User Identification](/docs/07-concepts/05-user-identification) for a deeper look at identity rules and session semantics.
+
+## .step()
+
+Records a named step in a multi-step workflow. Steps are auto-numbered within a trace for funnel analysis.
+
+```ts
+ctx.yavio.step(name: string, meta?: Record<string, unknown>): void
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `name` | `string` | Step name (e.g., `"search"`, `"filter"`, `"select"`) |
+| `meta` | `Record<string, unknown>` | Optional metadata attached to the step event |
+
+### Example
+
+```ts
+instrumented.tool("wizard", { step: { type: "string" } }, async ({ step }, ctx) => {
+  ctx.yavio.step(step, { page: 1 });
+
+  // ... handle the step
+
+  return { content: [{ type: "text", text: "Step complete" }] };
+});
+```
+
+Steps generate events with `event_type: "step"` and an auto-incrementing `step_sequence` within the trace. This enables funnel visualization in the dashboard.
+
+## .track()
+
+Records a custom event with arbitrary properties.
+
+```ts
+ctx.yavio.track(event: string, properties?: Record<string, unknown>): void
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `event` | `string` | Event name (e.g., `"feature_used"`, `"export_requested"`) |
+| `properties` | `Record<string, unknown>` | Optional event properties |
+
+### Example
+
+```ts
+ctx.yavio.track("document_generated", {
+  format: "pdf",
+  pages: 12,
+});
+```
+
+Custom events use `event_type: "track"` with the event name in the `event_name` field.
+
+## .conversion()
+
+Records a conversion event with monetary value. Used for revenue attribution and ROI analysis.
+
+```ts
+ctx.yavio.conversion(
+  name: string,
+  data: {
+    value: number;
+    currency: string;
+    meta?: Record<string, unknown>;
+  }
+): void
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `name` | `string` | Conversion name (e.g., `"purchase"`, `"upgrade"`, `"signup"`) |
+| `data.value` | `number` | Monetary value of the conversion |
+| `data.currency` | `string` | ISO 4217 currency code (e.g., `"USD"`, `"EUR"`) |
+| `data.meta` | `Record<string, unknown>` | Optional metadata |
+
+### Example
+
+```ts
+ctx.yavio.conversion("subscription_upgrade", {
+  value: 99,
+  currency: "USD",
+  meta: { plan: "enterprise", annual: true },
+});
+```
+
+Conversions generate events with `event_type: "conversion"`, `conversion_value`, and `conversion_currency` fields.

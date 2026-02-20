@@ -1,0 +1,148 @@
+---
+title: Quickstart
+description: Install the SDK, wrap your MCP server, and see your first event
+---
+
+import { Step, Steps } from "fumadocs-ui/components/steps";
+import { Callout } from "fumadocs-ui/components/callout";
+
+This guide walks you through adding Yavio analytics to an existing MCP server. By the end, every tool invocation will be tracked automatically.
+
+## Prerequisites
+
+- **Node.js 20+**
+- An existing MCP server built with `@modelcontextprotocol/sdk`
+
+<Steps>
+
+<Step>
+
+## Get an API key
+
+Create a project in the [Yavio dashboard](https://app.yavio.ai) and copy the API key.
+
+For local development, you can skip the dashboard and create a `.yaviorc.json` file in your project root:
+
+```json title=".yaviorc.json"
+{
+  "apiKey": "yav_your_key_here",
+  "endpoint": "http://localhost:3001/v1/events"
+}
+```
+
+<Callout type="info">
+  Without an API key, the SDK operates in **no-op mode** — your server runs normally with zero overhead.
+</Callout>
+
+</Step>
+
+<Step>
+
+## Install the SDK
+
+```bash
+npm install @yavio/sdk
+```
+
+The SDK has a peer dependency on `@modelcontextprotocol/sdk` (>= 1.0.0), which you likely already have installed.
+
+</Step>
+
+<Step>
+
+## Wrap your MCP server
+
+Import `withYavio` and wrap your `McpServer` instance. Everything else stays the same.
+
+```ts title="server.ts"
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { withYavio } from "@yavio/sdk";
+
+const server = new McpServer({
+  name: "my-server",
+  version: "1.0.0",
+});
+
+const instrumented = withYavio(server, {
+  apiKey: process.env.YAVIO_API_KEY,
+});
+
+// Register tools on the instrumented server
+instrumented.tool("greet", { name: { type: "string" } }, async ({ name }) => {
+  return { content: [{ type: "text", text: `Hello, ${name}!` }] };
+});
+```
+
+That's it. Every tool call is now automatically captured with latency, status, platform detection, and input metadata.
+
+</Step>
+
+<Step>
+
+## Track users and conversions
+
+Inside any tool handler, use `ctx.yavio` to identify users and track custom events:
+
+```ts title="server.ts"
+instrumented.tool(
+  "checkout",
+  { userId: { type: "string" }, plan: { type: "string" } },
+  async ({ userId, plan }, ctx) => {
+    // Tie this session to a known user
+    ctx.yavio.identify(userId, { plan });
+
+    // Track a custom event
+    ctx.yavio.track("plan_selected", { plan });
+
+    // Record a conversion with monetary value
+    ctx.yavio.conversion("upgrade", {
+      value: 49,
+      currency: "USD",
+    });
+
+    return {
+      content: [{ type: "text", text: `Upgraded to ${plan}!` }],
+    };
+  },
+);
+```
+
+</Step>
+
+<Step>
+
+## Verify events
+
+Start your MCP server and invoke a tool. You should see events flowing in the Yavio dashboard within a few seconds.
+
+If you're running locally with the self-hosted stack:
+
+```bash
+# Start Yavio infrastructure
+docker compose up -d
+
+# Start your MCP server
+node server.ts
+
+# Invoke a tool (e.g., via the MCP inspector)
+# Events appear at http://localhost:3000
+```
+
+<Callout type="warn">
+  If events aren't appearing, check the [Troubleshooting](/docs/02-sdk/05-troubleshooting) guide for common issues.
+</Callout>
+
+</Step>
+
+</Steps>
+
+## What's next?
+
+import { Card, Cards } from "fumadocs-ui/components/card";
+
+<Cards>
+  <Card title="Server Setup" href="/docs/02-sdk/01-setup" description="Explore all withYavio() options and auto-captured events" />
+  <Card title="Tracking API" href="/docs/02-sdk/02-tracking-api" description="Learn about .identify(), .step(), .track(), and .conversion()" />
+  <Card title="Configuration" href="/docs/02-sdk/03-configuration" description="Environment variables, config files, and precedence rules" />
+  <Card title="API Reference" href="/docs/06-api-reference" description="Full HTTP API documentation for the Ingestion API" />
+</Cards>

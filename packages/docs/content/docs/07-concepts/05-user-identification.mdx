@@ -1,0 +1,105 @@
+---
+title: User Identification
+description: How Yavio ties events to known users with .identify(), anonymous sessions, and identity rules
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+Yavio tracks user journeys through a combination of anonymous sessions and explicit identification. This page explains how identity works and when to call `.identify()`.
+
+## Anonymous sessions
+
+Every MCP connection creates a new session with a unique `session_id` (format: `ses_<nanoid>`). Events are tracked against this session immediately, even before you know who the user is.
+
+Anonymous sessions are useful for:
+- Measuring overall tool usage and latency
+- Tracking conversion funnels before login
+- Counting unique sessions per platform
+
+## Calling .identify()
+
+When you learn who the user is (e.g., from an auth token or user input), call `.identify()` to attach a user ID to the session:
+
+```ts
+ctx.yavio.identify("user_42", {
+  plan: "enterprise",
+  company: "Acme Corp",
+});
+```
+
+From this point on, every event in the session includes `user_id: "user_42"` and the provided traits.
+
+### When to call it
+
+Call `.identify()` as early as possible — ideally in the first tool handler that has access to user identity. Common patterns:
+
+- **Auth tool:** if your MCP server has a login or auth tool, call `.identify()` there
+- **First tool with user context:** if the AI platform passes a user ID in the tool arguments
+- **Every tool (idempotent):** calling `.identify()` with the same user ID is a no-op, so it's safe to call in every handler
+
+## Identity rules
+
+### Immutable user ID per session
+
+The `userId` is set once per session. If you call `.identify()` a second time with a **different** user ID, the call is ignored and a `YAVIO-1302` warning is logged.
+
+```ts
+ctx.yavio.identify("user_42");     // Sets user ID
+ctx.yavio.identify("user_42");     // No-op (same ID)
+ctx.yavio.identify("user_99");     // Ignored — YAVIO-1302 warning
+```
+
+This prevents accidental identity conflicts in multi-tool sessions.
+
+### Additive traits
+
+User traits are merged across calls. Each `.identify()` call adds to (but doesn't replace) existing traits:
+
+```ts
+ctx.yavio.identify("user_42", { plan: "pro" });
+ctx.yavio.identify("user_42", { company: "Acme" });
+
+// Session now has: { plan: "pro", company: "Acme" }
+```
+
+If the same trait key is set twice, the later value wins:
+
+```ts
+ctx.yavio.identify("user_42", { plan: "free" });
+ctx.yavio.identify("user_42", { plan: "pro" });
+
+// Session now has: { plan: "pro" }
+```
+
+## User traits
+
+Traits are arbitrary key-value pairs attached to the user for segmentation and filtering. Common examples:
+
+| Trait | Description |
+|-------|-------------|
+| `plan` | Subscription tier (`free`, `pro`, `enterprise`) |
+| `company` | Organization name |
+| `role` | User role within their org |
+| `signupDate` | When the user first registered |
+
+Traits are included in `identify` events and used for cohort analysis in the dashboard.
+
+<Callout type="warn">
+  Avoid storing PII in traits. While the SDK strips known PII patterns (emails, phone numbers, etc.), it's best to use opaque identifiers.
+</Callout>
+
+## Retroactive stitching
+
+<Callout type="info">
+  Retroactive identity stitching is planned for a future release. Currently, events emitted before `.identify()` is called in a session remain anonymous.
+</Callout>
+
+In a future version, Yavio will support retroactive stitching — when `.identify()` is called, all prior events in the same session will be retroactively associated with the user ID. This enables accurate funnel analysis even when identity is established mid-session.
+
+## Session lifecycle
+
+1. **Client connects** → new session created (`ses_...`)
+2. **Tool calls** → events tracked against the anonymous session
+3. **`.identify()` called** → user ID and traits attached to the session
+4. **Subsequent events** → include `user_id` and traits automatically
+5. **Client disconnects** → session ends, remaining events flushed
