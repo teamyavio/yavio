@@ -154,6 +154,47 @@ jobs:
           CLICKHOUSE_URL: http://localhost:8123
           CLICKHOUSE_PASSWORD: test
 
+  # ── Tests: dashboard (requires PostgreSQL + ClickHouse) ────────────
+  test-dashboard:
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.dashboard == 'true'
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: yavio_test
+          POSTGRES_USER: yavio_service
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U yavio_service"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.3
+        env:
+          CLICKHOUSE_PASSWORD: test
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "clickhouse-client --password test --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup
+      - run: pnpm turbo build --filter=@yavio/dashboard...
+      - run: pnpm --filter @yavio/dashboard test
+        env:
+          DATABASE_URL: postgres://yavio_service:test@localhost:5432/yavio_test
+          CLICKHOUSE_URL: http://localhost:8123
+          CLICKHOUSE_PASSWORD: test
+
   # ── Tests: sdk ─────────────────────────────────────────────────────
   test-sdk:
     runs-on: ubuntu-latest
