@@ -11,9 +11,21 @@ The tracking API is available inside tool handlers via `ctx.yavio`, and outside 
 
 ### Inside tool handlers
 
-The `ctx.yavio` object is injected into every tool handler callback:
+The `ctx.yavio` object is injected into every tool handler callback. Both the deprecated `tool()` and the modern `registerTool()` APIs are supported:
 
 ```ts
+// Using registerTool (recommended, MCP SDK v1.26+)
+instrumented.registerTool("search", {
+  description: "Search for items",
+  inputSchema: { query: { type: "string" } },
+}, async ({ query }, ctx) => {
+  ctx.yavio.identify("user_123");
+  ctx.yavio.track("search_executed", { query });
+
+  return { content: [{ type: "text", text: "Results..." }] };
+});
+
+// Using tool (deprecated but still supported)
 instrumented.tool("search", { query: { type: "string" } }, async ({ query }, ctx) => {
   ctx.yavio.identify("user_123");
   ctx.yavio.track("search_executed", { query });

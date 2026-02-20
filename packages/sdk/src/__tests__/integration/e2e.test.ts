@@ -201,6 +201,87 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     expect(errorEvent?.error_message).toBe("Something went wrong");
   });
 
+  it("sends tool_call events via registerTool", async () => {
+    const batchCountBefore = receivedBatches.length;
+
+    const transport = new HttpTransport({
+      endpoint: mockUrl,
+      apiKey: "yav_test_key",
+      sdkVersion: "0.0.1",
+    });
+
+    const server = new McpServer({ name: "test-app", version: "1.0" });
+    const config: YavioConfig = {
+      apiKey: "yav_test_key",
+      endpoint: mockUrl,
+      capture: { inputValues: true, geo: true, tokens: true, retries: true },
+    };
+    const proxy = createProxy(server, config, transport, "0.0.1");
+
+    let handlerExecuted = false;
+    proxy.registerTool(
+      "search_hotels",
+      {
+        description: "Search for hotels",
+        inputSchema: { query: { type: "string" } as never },
+      },
+      (args, extra) => {
+        handlerExecuted = true;
+
+        const yavioCtx = (extra as Record<string, unknown>).yavio as {
+          identify: (id: string, traits?: Record<string, unknown>) => void;
+          step: (name: string, meta?: Record<string, unknown>) => void;
+          track: (event: string, props?: Record<string, unknown>) => void;
+        };
+        expect(yavioCtx).toBeDefined();
+        expect(typeof yavioCtx.identify).toBe("function");
+
+        yavioCtx.identify("user-99", { tier: "gold" });
+        yavioCtx.step("hotels_found", { count: 5 });
+        yavioCtx.track("filter_applied", { type: "location" });
+
+        return { content: [{ type: "text" as const, text: "Found 5 hotels" }] };
+      },
+    );
+
+    const tool = getRegisteredTool(server, "search_hotels");
+    expect(tool).toBeDefined();
+
+    const mockExtra = {
+      signal: new AbortController().signal,
+      sessionId: "test-session",
+      requestId: "req-rt-1",
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+    };
+    await tool?.handler({ query: "downtown" }, mockExtra);
+
+    await transport.shutdown();
+
+    expect(handlerExecuted).toBe(true);
+
+    const newBatches = receivedBatches.slice(batchCountBefore);
+    expect(newBatches.length).toBeGreaterThan(0);
+
+    const allEvents = newBatches.flatMap((b) => b.events);
+    const eventTypes = allEvents.map((e) => e.event_type);
+    expect(eventTypes).toContain("identify");
+    expect(eventTypes).toContain("step");
+    expect(eventTypes).toContain("track");
+    expect(eventTypes).toContain("tool_call");
+
+    const toolCall = allEvents.find((e) => e.event_type === "tool_call");
+    expect(toolCall).toBeDefined();
+    expect(toolCall?.event_name).toBe("search_hotels");
+    expect(toolCall?.status).toBe("success");
+    expect(toolCall?.latency_ms).toBeTypeOf("number");
+    expect(toolCall?.input_keys).toEqual({ query: true });
+    expect(toolCall?.input_types).toEqual({ query: "string" });
+
+    const identifyEvent = allEvents.find((e) => e.event_type === "identify");
+    expect(identifyEvent?.user_id).toBe("user-99");
+  });
+
   it("strips PII from event metadata before sending", async () => {
     const batchCountBefore = receivedBatches.length;
 

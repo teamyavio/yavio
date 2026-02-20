@@ -99,3 +99,54 @@ describe("createProxy", () => {
     }));
   });
 });
+
+describe("createProxy — registerTool", () => {
+  it("registers tools via registerTool without throwing", () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+
+    proxy.registerTool("test_tool", {}, () => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+  });
+
+  it("exposes registerTool as a function on the proxy", () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+
+    expect(typeof proxy.registerTool).toBe("function");
+  });
+
+  it("handles registerTool with description and inputSchema", () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+
+    proxy.registerTool(
+      "tool_with_config",
+      {
+        description: "A tool with config",
+        inputSchema: { query: { type: "string" } as never },
+      },
+      (args, extra) => ({
+        content: [{ type: "text", text: "ok" }],
+      }),
+    );
+  });
+
+  it("returns RegisteredTool with enable/disable/remove methods", () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+
+    const registered = proxy.registerTool("my_tool", {}, () => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+
+    expect(typeof registered.enable).toBe("function");
+    expect(typeof registered.disable).toBe("function");
+    expect(typeof registered.remove).toBe("function");
+  });
+});

@@ -43,7 +43,7 @@ If no API key is found through any source, `withYavio()` logs a warning and retu
 
 The proxy uses JavaScript `Proxy` to intercept method calls on the `McpServer` instance. The key interception points are:
 
-- **`server.tool()` registration:** Intercepts tool registration to capture tool names, descriptions, and schemas. Wraps the handler function with instrumentation.
+- **`server.tool()` and `server.registerTool()` registration:** Intercepts both the deprecated `tool()` method and the modern `registerTool()` method (MCP SDK v1.26+) to capture tool names, descriptions, and schemas. Wraps the handler function with identical instrumentation via a shared `wrapToolCallback()` helper. For `tool()`, the callback is located by scanning for the first function argument (handles all overloads). For `registerTool()`, the callback is always the 3rd positional argument.
 - **Tool handler execution:** Before/after hooks capture invocation timestamp, measure latency, catch errors, detect platform, and capture full input values and derive input patterns.
 - **`server.connect()` / transport:** Intercepts transport connection to detect platform from headers, user-agent, or protocol-specific signals. Intercepts the MCP `initialize` request to derive the `session_id` (see [Section 3.7](#37-session-lifecycle)).
 - **`tools/list` requests:** Intercepts tool discovery calls to track how often and when clients request the tool catalog. Records tool discovery events including which tools were listed and the client's initial capabilities.
@@ -66,7 +66,11 @@ For business-level telemetry that the proxy cannot infer automatically, develope
 `withYavio()` enriches the context object that MCP tool handlers receive. The `yavio` instance on context is automatically scoped to the current request, inheriting traceId, platform, tool name, and session.
 
 ```typescript
-server.tool("book_room", async (params, ctx) => {
+// Using registerTool (recommended, MCP SDK v1.26+)
+server.registerTool("book_room", {
+  description: "Book a hotel room",
+  inputSchema: { userId: z.string(), roomType: z.string() },
+}, async (params, ctx) => {
   // User identification: tie this session to a known user
   ctx.yavio.identify(params.userId, { plan: "premium", country: "DE" });
 
@@ -87,6 +91,12 @@ server.tool("book_room", async (params, ctx) => {
   });
 
   return booking;
+});
+
+// The deprecated tool() API is also supported
+server.tool("book_room", async (params, ctx) => {
+  ctx.yavio.identify(params.userId);
+  // ...
 });
 ```
 
@@ -151,7 +161,7 @@ The SDK buffers events in memory and flushes them to the Yavio ingestion API in 
 ```http
 POST /v1/events HTTP/1.1
 Host: ingest.yavio.ai
-Authorization: Bearer yav_proj_abc123...
+Authorization: Bearer yav_abc123...
 Content-Type: application/json
 
 {
@@ -200,7 +210,7 @@ Before injecting the config, the proxy requests a short-lived JWT from the inges
 ```http
 POST /v1/widget-tokens HTTP/1.1
 Host: ingest.yavio.ai
-Authorization: Bearer yav_proj_abc123...
+Authorization: Bearer yav_abc123...
 Content-Type: application/json
 
 { "traceId": "tr_8f2a...", "sessionId": "ses_abc..." }

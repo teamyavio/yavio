@@ -7,7 +7,112 @@ import type { Transport } from "../transport/types.js";
 import { type RequestStore, createYavioContext, runInContext } from "./context.js";
 
 /**
- * Create a Proxy around McpServer that intercepts tool() and connect()
+ * Wrap a tool callback with Yavio instrumentation.
+ *
+ * Handles lazy platform detection, trace/session context, ctx.yavio injection,
+ * latency measurement, and tool_call event emission.
+ */
+function wrapToolCallback(
+  originalCb: (...cbArgs: unknown[]) => unknown,
+  toolName: string,
+  getSession: () => SessionState,
+  server: McpServer,
+  config: YavioConfig,
+  transport: Transport,
+  sdkVersion: string,
+): (...cbArgs: unknown[]) => Promise<unknown> {
+  return async (...cbArgs: unknown[]) => {
+    const session = getSession();
+
+    // Lazy platform detection — clientInfo is available after initialize
+    if (session.platform === "unknown") {
+      try {
+        const clientVersion = (
+          server.server as unknown as {
+            getClientVersion?: () => { name: string } | undefined;
+          }
+        ).getClientVersion?.();
+        if (clientVersion?.name) {
+          session.platform = detectPlatform({ clientName: clientVersion.name });
+        }
+      } catch {
+        // Keep "unknown"
+      }
+    }
+
+    const traceId = generateTraceId();
+    const store: RequestStore = {
+      traceId,
+      session,
+      transport,
+      sdkVersion,
+    };
+
+    // Find the "extra" parameter — it's the last argument to the callback
+    // For zero-arg tools it's the only arg, for schema tools it's the second
+    const extra = cbArgs[cbArgs.length - 1];
+    if (extra && typeof extra === "object") {
+      (extra as Record<string, unknown>).yavio = createYavioContext(store);
+    }
+
+    const startTime = performance.now();
+    try {
+      const result = await runInContext(store, () => originalCb(...cbArgs));
+      const latencyMs = Math.round(performance.now() - startTime);
+
+      const toolCallEvent = buildToolCallEvent(
+        {
+          traceId,
+          sessionId: session.sessionId,
+          userId: session.userId ?? undefined,
+          platform: session.platform,
+          sdkVersion,
+        },
+        {
+          toolName,
+          latencyMs,
+          status: "success",
+          inputKeys:
+            config.capture.inputValues && cbArgs[0] !== extra
+              ? extractInputKeys(cbArgs[0])
+              : undefined,
+          inputTypes:
+            config.capture.inputValues && cbArgs[0] !== extra
+              ? extractInputTypes(cbArgs[0])
+              : undefined,
+        },
+      );
+      transport.send([toolCallEvent]);
+
+      return result;
+    } catch (error) {
+      const latencyMs = Math.round(performance.now() - startTime);
+
+      const toolCallEvent = buildToolCallEvent(
+        {
+          traceId,
+          sessionId: session.sessionId,
+          userId: session.userId ?? undefined,
+          platform: session.platform,
+          sdkVersion,
+        },
+        {
+          toolName,
+          latencyMs,
+          status: "error",
+          errorCategory: "unknown",
+          errorMessage: error instanceof Error ? error.message : String(error),
+        },
+      );
+      transport.send([toolCallEvent]);
+
+      throw error;
+    }
+  };
+}
+
+/**
+ * Create a Proxy around McpServer that intercepts tool()/registerTool() and connect()
  * to inject Yavio instrumentation transparently.
  */
 export function createProxy(
@@ -25,14 +130,15 @@ export function createProxy(
     stepSequence: 0,
   };
 
+  const getSession = () => session;
   const originalTool = server.tool.bind(server);
+  const originalRegisterTool = server.registerTool.bind(server);
   const originalConnect = server.connect.bind(server);
 
   return new Proxy(server, {
     get(target, prop, receiver) {
       if (prop === "tool") {
         return (...args: unknown[]) => {
-          // The callback is always the last argument
           const cbIndex = args.findIndex((a) => typeof a === "function");
           if (cbIndex === -1) {
             return (originalTool as (...a: unknown[]) => unknown)(...args);
@@ -40,96 +146,39 @@ export function createProxy(
 
           const originalCb = args[cbIndex] as (...cbArgs: unknown[]) => unknown;
           const toolName = typeof args[0] === "string" ? args[0] : "unknown";
-
-          // Replace callback with instrumented version
-          args[cbIndex] = async (...cbArgs: unknown[]) => {
-            // Lazy platform detection — clientInfo is available after initialize
-            if (session.platform === "unknown") {
-              try {
-                const clientVersion = (
-                  server.server as unknown as {
-                    getClientVersion?: () => { name: string } | undefined;
-                  }
-                ).getClientVersion?.();
-                if (clientVersion?.name) {
-                  session.platform = detectPlatform({ clientName: clientVersion.name });
-                }
-              } catch {
-                // Keep "unknown"
-              }
-            }
-
-            const traceId = generateTraceId();
-            const store: RequestStore = {
-              traceId,
-              session,
-              transport,
-              sdkVersion,
-            };
-
-            // Find the "extra" parameter — it's the last argument to the callback
-            // For zero-arg tools it's the only arg, for schema tools it's the second
-            const extra = cbArgs[cbArgs.length - 1];
-            if (extra && typeof extra === "object") {
-              (extra as Record<string, unknown>).yavio = createYavioContext(store);
-            }
-
-            const startTime = performance.now();
-            try {
-              const result = await runInContext(store, () => originalCb(...cbArgs));
-              const latencyMs = Math.round(performance.now() - startTime);
-
-              const toolCallEvent = buildToolCallEvent(
-                {
-                  traceId,
-                  sessionId: session.sessionId,
-                  userId: session.userId ?? undefined,
-                  platform: session.platform,
-                  sdkVersion,
-                },
-                {
-                  toolName,
-                  latencyMs,
-                  status: "success",
-                  inputKeys:
-                    config.capture.inputValues && cbArgs[0] !== extra
-                      ? extractInputKeys(cbArgs[0])
-                      : undefined,
-                  inputTypes:
-                    config.capture.inputValues && cbArgs[0] !== extra
-                      ? extractInputTypes(cbArgs[0])
-                      : undefined,
-                },
-              );
-              transport.send([toolCallEvent]);
-
-              return result;
-            } catch (error) {
-              const latencyMs = Math.round(performance.now() - startTime);
-
-              const toolCallEvent = buildToolCallEvent(
-                {
-                  traceId,
-                  sessionId: session.sessionId,
-                  userId: session.userId ?? undefined,
-                  platform: session.platform,
-                  sdkVersion,
-                },
-                {
-                  toolName,
-                  latencyMs,
-                  status: "error",
-                  errorCategory: "unknown",
-                  errorMessage: error instanceof Error ? error.message : String(error),
-                },
-              );
-              transport.send([toolCallEvent]);
-
-              throw error;
-            }
-          };
+          args[cbIndex] = wrapToolCallback(
+            originalCb,
+            toolName,
+            getSession,
+            server,
+            config,
+            transport,
+            sdkVersion,
+          );
 
           return (originalTool as (...a: unknown[]) => unknown)(...args);
+        };
+      }
+
+      if (prop === "registerTool") {
+        return (...args: unknown[]) => {
+          // registerTool(name: string, config: object, cb: Function)
+          // Callback is always the 3rd argument (index 2)
+          if (args.length >= 3 && typeof args[2] === "function") {
+            const originalCb = args[2] as (...cbArgs: unknown[]) => unknown;
+            const toolName = typeof args[0] === "string" ? args[0] : "unknown";
+            args[2] = wrapToolCallback(
+              originalCb,
+              toolName,
+              getSession,
+              server,
+              config,
+              transport,
+              sdkVersion,
+            );
+          }
+
+          return (originalRegisterTool as (...a: unknown[]) => unknown)(...args);
         };
       }
 
