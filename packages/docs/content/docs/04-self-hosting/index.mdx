@@ -1,0 +1,21 @@
+---
+title: Self-Hosting
+description: Run the Yavio platform on your own infrastructure
+---
+
+import { Card, Cards } from "fumadocs-ui/components/card";
+import { Callout } from "fumadocs-ui/components/callout";
+
+Yavio is fully open-source and designed to run on your own infrastructure. The entire platform — dashboard, ingestion API, ClickHouse, and PostgreSQL — ships as a single Docker Compose stack.
+
+<Callout type="info">
+  **Yavio Cloud is coming soon.** Until then, self-hosting is the only way to run Yavio. The good news: you get full control over your data and zero vendor lock-in.
+</Callout>
+
+<Cards>
+  <Card title="Quickstart" href="/docs/04-self-hosting/01-quickstart" description="Get the full platform running in under 5 minutes with Docker Compose" />
+  <Card title="Configuration" href="/docs/04-self-hosting/02-configuration" description="Environment variables, secrets, ports, and optional providers" />
+  <Card title="CLI Reference" href="/docs/04-self-hosting/03-cli" description="Manage your self-hosted deployment with the Yavio CLI" />
+  <Card title="Upgrading" href="/docs/04-self-hosting/04-upgrading" description="Pull latest images and keep your deployment up to date" />
+  <Card title="Troubleshooting" href="/docs/04-self-hosting/05-troubleshooting" description="Diagnose common self-hosting issues" />
+</Cards>

@@ -1,0 +1,173 @@
+---
+title: CLI Reference
+description: Manage your self-hosted Yavio deployment from the command line
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+The Yavio CLI (`@yavio/cli`) provides a convenient wrapper around Docker Compose for managing your self-hosted deployment. It handles health checks, environment validation, and common operations.
+
+## Installation
+
+```bash
+# Run directly with npx (no install needed)
+npx @yavio/cli <command>
+
+# Or install globally
+npm install -g @yavio/cli
+yavio <command>
+```
+
+## Commands
+
+### `yavio init`
+
+Initialize SDK configuration in the current project. Creates a `.yaviorc.json` file and adds it to `.gitignore`.
+
+```bash
+yavio init
+```
+
+Options:
+- `--api-key <key>` — API key (skips interactive prompt)
+- `--endpoint <url>` — Ingestion endpoint (skips interactive prompt)
+
+The command also verifies connectivity to the ingestion API if an endpoint is provided.
+
+### `yavio up`
+
+Start the self-hosted Yavio platform. Starts all Docker Compose services in detached mode and polls health endpoints until they respond.
+
+```bash
+yavio up
+```
+
+Options:
+- `-f, --file <path>` — Path to a custom `docker-compose.yml`
+- `--build` — Rebuild images before starting
+- `--prod` — Apply production compose overrides (resource limits, log rotation)
+
+After startup, the command prints the dashboard and ingestion URLs:
+
+```
+Dashboard:  http://localhost:3000
+Ingestion:  http://localhost:3001/v1/events
+```
+
+### `yavio down`
+
+Stop the self-hosted platform. Data volumes are preserved.
+
+```bash
+yavio down
+```
+
+Options:
+- `-f, --file <path>` — Path to a custom `docker-compose.yml`
+
+### `yavio status`
+
+Show the health status of all platform services.
+
+```bash
+yavio status
+```
+
+Output example:
+
+```
+Yavio Platform
+────────────────────────
+Dashboard:      ✓ healthy (Up 2 hours)
+Ingestion API:  ✓ healthy (Up 2 hours)
+ClickHouse:     ✓ healthy (Up 2 hours)
+PostgreSQL:     ✓ healthy (Up 2 hours)
+```
+
+Options:
+- `-f, --file <path>` — Path to a custom `docker-compose.yml`
+
+### `yavio logs [service]`
+
+Tail logs for one or all platform services.
+
+```bash
+# All services
+yavio logs
+
+# Single service
+yavio logs ingest
+yavio logs dashboard
+yavio logs clickhouse
+yavio logs postgres
+yavio logs docs
+```
+
+Options:
+- `-f, --file <path>` — Path to a custom `docker-compose.yml`
+- `-n, --lines <count>` — Number of historical lines (default: `100`)
+- `--no-follow` — Print logs and exit instead of following
+
+### `yavio update`
+
+Pull the latest Docker images and restart services. Data volumes are preserved.
+
+```bash
+yavio update
+```
+
+Options:
+- `-f, --file <path>` — Path to a custom `docker-compose.yml`
+- `--all` — Also pull third-party images (ClickHouse, PostgreSQL)
+- `--dry-run` — Show what would be updated without pulling
+
+### `yavio reset`
+
+Wipe data volumes and reinitialize the platform. This is a destructive operation that requires confirmation.
+
+```bash
+yavio reset
+```
+
+Options:
+- `-f, --file <path>` — Path to a custom `docker-compose.yml`
+- `--keep-config` — Preserve PostgreSQL data (users, projects, API keys), only wipe ClickHouse events
+- `--yes --confirm-destructive` — Skip interactive confirmation (both flags required)
+
+<Callout type="warn">
+  This permanently deletes all data. Use `--keep-config` to preserve your workspace and user data while clearing analytics events.
+</Callout>
+
+### `yavio doctor`
+
+Diagnose common setup issues. Checks Node.js version, Docker availability, config files, service connectivity, TLS, and port conflicts.
+
+```bash
+yavio doctor
+```
+
+Output example:
+
+```
+Yavio Doctor
+────────────
+✓ Node.js v22.0.0 (>= 20 required)
+✓ Docker v27.0.0 available
+✓ docker compose v2.29.0 available
+✓ .yaviorc.json found (API key: yav_abc12345...)
+✓ Ingestion API reachable at http://localhost:3001/health
+✓ Dashboard reachable at http://localhost:3000/api/health
+✓ No port conflicts detected (3000, 3001, 5432, 8123)
+
+All critical checks passed.
+```
+
+### `yavio telemetry`
+
+Manage anonymous usage telemetry. Telemetry is stored in `~/.yavio/config.json`.
+
+```bash
+yavio telemetry status    # Show current setting
+yavio telemetry enable    # Enable telemetry
+yavio telemetry disable   # Disable telemetry
+```

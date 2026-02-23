@@ -1,0 +1,137 @@
+---
+title: Configuration
+description: Environment variables, secrets, ports, and optional providers
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+All configuration for the self-hosted platform lives in a single `.env` file at the repository root. Docker Compose reads this file automatically.
+
+## Generating Secrets
+
+Run the setup script to auto-generate all required secrets:
+
+```bash
+./scripts/setup-env.sh
+```
+
+Or generate them manually:
+
+```bash
+openssl rand -base64 32
+```
+
+## Required Secrets
+
+These must be set before starting the platform. Each should be a unique random string.
+
+| Variable | Used By | Purpose |
+| --- | --- | --- |
+| `NEXTAUTH_SECRET` | Dashboard | Encrypts session cookies |
+| `JWT_SECRET` | Ingestion API | Signs widget JWTs |
+| `API_KEY_HASH_SECRET` | Dashboard + Ingestion | HMAC key for API key hashing (must match between services) |
+| `ENCRYPTION_KEY` | Dashboard | AES-256-GCM encryption for OAuth tokens |
+
+<Callout type="warn">
+  `API_KEY_HASH_SECRET` must be identical across the dashboard and ingestion API. If they differ, API keys generated in the dashboard will not authenticate against the ingestion API.
+</Callout>
+
+## Database Passwords
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `POSTGRES_SERVICE_PASSWORD` | `yavio_dev` | PostgreSQL `yavio_service` role (table owner, bypasses RLS) |
+| `POSTGRES_APP_PASSWORD` | `yavio_dev` | PostgreSQL `yavio_app` role (RLS enforced) |
+| `CLICKHOUSE_PASSWORD` | `yavio_dev` | ClickHouse `default` user (runs migrations) |
+| `CLICKHOUSE_INGEST_PASSWORD` | `yavio_dev` | ClickHouse `yavio_ingest` user (INSERT only) |
+| `CLICKHOUSE_DASHBOARD_PASSWORD` | `yavio_dev` | ClickHouse `yavio_dashboard` user (SELECT only, row policies) |
+
+<Callout type="warn">
+  Change all default passwords before exposing the platform to a network. The defaults are only safe for local development.
+</Callout>
+
+## Database Connection URLs
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DATABASE_URL` | `postgres://yavio_service:yavio_dev@localhost:5432/yavio` | PostgreSQL connection string |
+| `CLICKHOUSE_URL` | `http://default:yavio_dev@localhost:8123` | ClickHouse HTTP endpoint |
+
+In Docker Compose, these are overridden with container hostnames (`postgres`, `clickhouse`).
+
+## Port Configuration
+
+Override default ports via environment variables:
+
+| Variable | Default | Service |
+| --- | --- | --- |
+| `DASHBOARD_PORT` | `3000` | Dashboard web UI |
+| `INGEST_PORT` | `3001` | Ingestion API |
+| `DOCS_PORT` | `3002` | Documentation site |
+| `POSTGRES_PORT` | `5432` | PostgreSQL |
+| `CLICKHOUSE_HTTP_PORT` | `8123` | ClickHouse HTTP |
+| `CLICKHOUSE_NATIVE_PORT` | `9000` | ClickHouse native protocol |
+
+Example — run the dashboard on port 8080:
+
+```bash
+DASHBOARD_PORT=8080 docker compose up -d
+```
+
+## Dashboard Settings
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `NEXTAUTH_URL` | `http://localhost:3000` | Auth callback URL (set to your public domain in production) |
+| `APP_URL` | `http://localhost:3000` | Public-facing URL used in emails and links |
+| `CORS_ORIGINS` | `http://localhost:3000` | Allowed CORS origins for the ingestion API (comma-separated) |
+
+## OAuth Providers (Optional)
+
+Enable social login by setting provider credentials. Omit to disable.
+
+```bash
+# GitHub
+GITHUB_CLIENT_ID=...
+GITHUB_CLIENT_SECRET=...
+
+# Google
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+```
+
+## Email / SMTP (Optional)
+
+Enable email features (verification, password reset, invitations) by configuring SMTP. If unset, email features are disabled.
+
+```bash
+SMTP_HOST=smtp.resend.com
+SMTP_PORT=587
+SMTP_USER=resend
+SMTP_PASSWORD=re_...
+SMTP_FROM=noreply@yourdomain.com
+```
+
+## Production Overrides
+
+For production deployments, use the production compose overlay which adds resource limits and log rotation:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+Or via the CLI:
+
+```bash
+npx @yavio/cli up --prod
+```
+
+### Resource Limits (Production)
+
+| Service | CPU | Memory |
+| --- | --- | --- |
+| PostgreSQL | 2 | 2 GB |
+| ClickHouse | 2 | 4 GB |
+| Ingestion API | 1 | 1 GB |
+| Dashboard | 1 | 1 GB |
+| Docs | 0.5 | 512 MB |

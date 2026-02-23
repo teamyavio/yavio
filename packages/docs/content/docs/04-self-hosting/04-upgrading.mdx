@@ -1,0 +1,70 @@
+---
+title: Upgrading
+description: Keep your self-hosted Yavio deployment up to date
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+## Pulling Latest Images
+
+The simplest way to upgrade is via the Yavio CLI:
+
+```bash
+npx @yavio/cli update
+```
+
+This pulls the latest Yavio images (dashboard, ingest, docs) and restarts the services. Data volumes are preserved.
+
+To also update third-party images (PostgreSQL, ClickHouse):
+
+```bash
+npx @yavio/cli update --all
+```
+
+### Manual Upgrade
+
+If you prefer using Docker Compose directly:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+## Checking for Updates
+
+Preview what would be pulled without making changes:
+
+```bash
+npx @yavio/cli update --dry-run
+```
+
+## Database Migrations
+
+Database migrations run automatically when services start. Both PostgreSQL (via Drizzle) and ClickHouse migrations are applied on boot.
+
+<Callout type="info">
+  There is no manual migration step required. Just pull the latest images and restart.
+</Callout>
+
+## Rollback
+
+If an update causes issues, you can roll back to a specific image version by pinning the version in your `docker-compose.yml` or using a tagged image:
+
+```bash
+docker compose pull dashboard:v1.2.3
+docker compose up -d dashboard
+```
+
+## Backup Before Upgrading
+
+For production deployments, take a backup before upgrading:
+
+```bash
+# PostgreSQL
+docker compose exec postgres pg_dump -U yavio_service yavio > backup.sql
+
+# ClickHouse
+docker compose exec clickhouse clickhouse-client \
+  --password "$CLICKHOUSE_PASSWORD" \
+  --query "SELECT * FROM yavio.events FORMAT Native" > events.native
+```

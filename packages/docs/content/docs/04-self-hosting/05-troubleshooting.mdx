@@ -1,0 +1,123 @@
+---
+title: Troubleshooting
+description: Diagnose and fix common self-hosting issues
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+## Run the Doctor
+
+The fastest way to diagnose issues is the built-in doctor command:
+
+```bash
+npx @yavio/cli doctor
+```
+
+This checks Node.js version, Docker availability, config files, service connectivity, TLS warnings, and port conflicts.
+
+## Common Issues
+
+### Services fail to start
+
+**Symptoms:** `docker compose up -d` exits with errors, or containers restart in a loop.
+
+**Check logs:**
+
+```bash
+npx @yavio/cli logs          # All services
+npx @yavio/cli logs ingest   # Single service
+```
+
+**Common causes:**
+
+- **Missing `.env` file** — Run `./scripts/setup-env.sh` to generate one
+- **Empty secrets** — Ensure `NEXTAUTH_SECRET`, `JWT_SECRET`, `API_KEY_HASH_SECRET`, and `ENCRYPTION_KEY` are all set
+- **Port conflicts** — Another process is using port 3000, 3001, 5432, or 8123. Check with `lsof -i :3000` (macOS/Linux) or change ports via environment variables (see [Configuration](/docs/04-self-hosting/02-configuration))
+
+### Dashboard shows "unhealthy"
+
+**Check the dashboard logs:**
+
+```bash
+npx @yavio/cli logs dashboard
+```
+
+**Common causes:**
+
+- **`NEXTAUTH_URL` mismatch** — Must match the URL you access the dashboard at. If you use a custom domain, update `NEXTAUTH_URL` and `APP_URL` in `.env`
+- **Database not ready** — The dashboard depends on PostgreSQL. Ensure the postgres container is healthy: `docker compose ps`
+
+### Events not appearing in dashboard
+
+**Symptoms:** SDK reports no errors, but the dashboard shows no data.
+
+1. **Check the ingestion API is reachable:**
+
+```bash
+curl http://localhost:3001/health
+```
+
+Should return `{"status":"ok"}`.
+
+2. **Check `API_KEY_HASH_SECRET` matches** — The dashboard and ingestion API must share the same `API_KEY_HASH_SECRET`. If they differ, API keys generated in the dashboard won't authenticate against the ingestion API.
+
+3. **Check your SDK endpoint** — Ensure your `.yaviorc.json` or `withYavio()` config points to `http://localhost:3001/v1/events` (not just `http://localhost:3001`).
+
+4. **Check the SDK is not in no-op mode** — Without a valid API key, the SDK silently discards events. See [SDK Troubleshooting](/docs/02-sdk/05-troubleshooting).
+
+### ClickHouse out of memory
+
+ClickHouse defaults to using available system memory. In the production compose overlay, it's capped at 4 GB. If you hit memory issues:
+
+1. Use the production overlay:
+
+```bash
+npx @yavio/cli up --prod
+```
+
+2. Or set a custom limit in your compose file:
+
+```yaml
+services:
+  clickhouse:
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+```
+
+### Port already in use
+
+Check which process is using the port:
+
+```bash
+# macOS / Linux
+lsof -i :3000
+
+# Or change the port
+DASHBOARD_PORT=8080 docker compose up -d
+```
+
+See [Configuration](/docs/04-self-hosting/02-configuration) for all port variables.
+
+### Resetting everything
+
+If you want to start fresh, wipe all data and reinitialize:
+
+```bash
+npx @yavio/cli reset
+```
+
+To preserve your workspace and user data while only clearing analytics events:
+
+```bash
+npx @yavio/cli reset --keep-config
+```
+
+<Callout type="warn">
+  `reset` permanently deletes data. There is no undo.
+</Callout>
+
+## Getting Help
+
+If you're stuck, open an issue at [github.com/yavio-ai/yavio/issues](https://github.com/yavio-ai/yavio/issues) with the output of `npx @yavio/cli doctor` and relevant logs.

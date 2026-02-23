@@ -1,0 +1,156 @@
+---
+title: Quickstart
+description: Get the full Yavio platform running in under 5 minutes
+---
+
+import { Step, Steps } from "fumadocs-ui/components/steps";
+import { Callout } from "fumadocs-ui/components/callout";
+
+This guide walks you through deploying the complete Yavio platform on your machine using Docker Compose.
+
+## Prerequisites
+
+- **Docker** with Docker Compose v2+ installed
+- **Git** to clone the repository
+- Ports **3000**, **3001**, **5432**, and **8123** available
+
+<Steps>
+
+<Step>
+
+## Clone the repository
+
+```bash
+git clone https://github.com/yavio-ai/yavio.git
+cd yavio
+```
+
+</Step>
+
+<Step>
+
+## Generate environment secrets
+
+Run the setup script to create a `.env` file with random secrets:
+
+```bash
+./scripts/setup-env.sh
+```
+
+This generates cryptographically random values for `NEXTAUTH_SECRET`, `JWT_SECRET`, `API_KEY_HASH_SECRET`, and `ENCRYPTION_KEY`.
+
+<Callout type="info">
+  You can also copy `.env.example` manually and fill in the secrets yourself. Generate each with `openssl rand -base64 32`.
+</Callout>
+
+</Step>
+
+<Step>
+
+## Start the platform
+
+```bash
+docker compose up -d
+```
+
+This starts five services:
+
+| Service | Port | Description |
+| --- | --- | --- |
+| **Dashboard** | `3000` | Web UI for analytics and project management |
+| **Ingestion API** | `3001` | Receives events from the SDK |
+| **PostgreSQL** | `5432` | Stores workspaces, projects, users, API keys |
+| **ClickHouse** | `8123` | Stores analytics events |
+| **Docs** | `3002` | Documentation site |
+
+Wait for all health checks to pass:
+
+```bash
+docker compose ps
+```
+
+All services should show `healthy` status within about 30 seconds.
+
+</Step>
+
+<Step>
+
+## Create your account
+
+Open [http://localhost:3000](http://localhost:3000) in your browser and register your first account. The first user automatically becomes the workspace owner.
+
+</Step>
+
+<Step>
+
+## Create a project and API key
+
+1. Create a workspace and project in the dashboard
+2. Navigate to the project settings and generate an API key
+3. Copy the key — it starts with `yav_`
+
+</Step>
+
+<Step>
+
+## Connect the SDK
+
+Point your MCP server's SDK at your local instance:
+
+```ts title="server.ts"
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { withYavio } from "@yavio/sdk";
+
+const server = new McpServer({ name: "my-server", version: "1.0.0" });
+
+const instrumented = withYavio(server, {
+  apiKey: "yav_your_key_here",
+  endpoint: "http://localhost:3001/v1/events",
+});
+```
+
+Or use a `.yaviorc.json` config file so your code stays clean:
+
+```json title=".yaviorc.json"
+{
+  "apiKey": "yav_your_key_here",
+  "endpoint": "http://localhost:3001/v1/events"
+}
+```
+
+```ts title="server.ts"
+// withYavio() auto-reads .yaviorc.json — no config needed in code
+const instrumented = withYavio(server);
+```
+
+</Step>
+
+<Step>
+
+## Verify events
+
+Invoke a tool on your MCP server and check the dashboard at [http://localhost:3000](http://localhost:3000). Events should appear within a few seconds.
+
+</Step>
+
+</Steps>
+
+## Using the Yavio CLI
+
+Instead of running `docker compose` commands directly, you can use the [Yavio CLI](/docs/04-self-hosting/03-cli) for a streamlined experience:
+
+```bash
+npx @yavio/cli up       # Start the platform
+npx @yavio/cli status   # Check service health
+npx @yavio/cli down     # Stop the platform
+```
+
+## What's next?
+
+import { Card, Cards } from "fumadocs-ui/components/card";
+
+<Cards>
+  <Card title="Configuration" href="/docs/04-self-hosting/02-configuration" description="Customize ports, passwords, email, and OAuth providers" />
+  <Card title="CLI Reference" href="/docs/04-self-hosting/03-cli" description="All CLI commands for managing your deployment" />
+  <Card title="SDK Setup" href="/docs/02-sdk/01-setup" description="Explore all withYavio() options and auto-captured events" />
+</Cards>

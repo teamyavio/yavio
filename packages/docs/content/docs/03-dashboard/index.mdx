@@ -1,0 +1,30 @@
+---
+title: Dashboard
+description: Navigate the Yavio analytics dashboard
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+The Yavio Dashboard is your central hub for understanding how users interact with your MCP tools and widgets. It provides real-time analytics, funnel visualization, error tracking, and user-level insights.
+
+<Callout type="info">
+  **Yavio Cloud is coming soon.** Currently, the dashboard is available as a self-hosted deployment only. You can run the full platform on your own infrastructure using Docker Compose or the Yavio CLI. See [Self-Hosting](/docs/04-self-hosting) to get started.
+</Callout>
+
+## Features
+
+- **Overview** — KPIs at a glance: total invocations, unique sessions, error rate, average latency, conversions, and revenue
+- **Tool Explorer** — per-tool metrics, latency distribution, error rates, and parameter analysis
+- **Error Tracking** — error trends, top error messages, and affected tools
+- **User Analytics** — active users, session durations, retention, and user-level event timelines
+- **Funnels** — step-by-step conversion analysis across server and widget events
+- **Path Analysis** — Sankey diagrams showing how users flow between tools
+- **Live Feed** — real-time event stream with filtering and search
+
+## Default Ports
+
+| Service | URL |
+| --- | --- |
+| Dashboard | `http://localhost:3000` |
+| Ingestion API | `http://localhost:3001` |
+| Docs | `http://localhost:3002` |
