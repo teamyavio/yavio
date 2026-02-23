@@ -5,11 +5,11 @@
 <p align="center">
   <strong>Yavio</strong><br>
   Product analytics for MCP Apps and ChatGPT Apps.<br>
-  Open-source. Self-hosted or Cloud.
+  Open-source. Self-hosted or Cloud (coming soon).
 </p>
 
 <p align="center">
-  <a href="https://github.com/yavio-ai/yavio-analytics/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
+  <a href="https://github.com/teamyavio/yavio/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/status-v0.1_alpha-orange" alt="v0.1 Alpha">
   <a href="https://discord.gg/BprRh2fr"><img src="https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
@@ -70,8 +70,8 @@ Developer's MCP Server          Yavio Platform
 
 ```bash
 # Clone the repo
-git clone https://github.com/yavio-ai/yavio-analytics.git
-cd yavio-analytics
+git clone https://github.com/teamyavio/yavio.git
+cd yavio
 
 # Configure environment
 cp .env.example .env
@@ -110,7 +110,7 @@ server.tool("checkout", { items: z.array(z.string()) }, async (params, ctx) => {
 | Docker | v24+ | Latest stable |
 | docker-compose | v2.20+ | Latest stable |
 
-For production deployments, see the [self-hosting guide](https://docs.yavio.ai/self-hosting/production) — you'll need a TLS-terminating reverse proxy in front of the dashboard and ingestion API.
+For production deployments, you'll need a TLS-terminating reverse proxy in front of the dashboard and ingestion API.
 
 ## Contributing
 
