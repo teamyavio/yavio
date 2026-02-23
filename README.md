@@ -40,7 +40,7 @@ cd yavio
 # Generate .env with random secrets
 ./scripts/setup-env.sh
 
-# Start all services
+# Start all services (migrations run automatically on first start)
 docker compose up -d
 ```
 

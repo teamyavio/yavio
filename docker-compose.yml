@@ -46,6 +46,21 @@ services:
       timeout: 5s
       retries: 5
 
+  migrate:
+    build:
+      context: .
+      dockerfile: packages/db/Dockerfile
+    environment:
+      DATABASE_URL: postgres://yavio_service:${POSTGRES_SERVICE_PASSWORD:-yavio_dev}@postgres:5432/yavio
+      CLICKHOUSE_URL: http://default:${CLICKHOUSE_PASSWORD:-yavio_dev}@clickhouse:8123
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
   ingest:
     build:
       context: .
@@ -64,10 +79,8 @@ services:
       - frontend
       - backend
     depends_on:
-      postgres:
-        condition: service_healthy
-      clickhouse:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3001/health').then(r=>{process.exit(r.ok?0:1)}).catch(()=>process.exit(1))\""]
       interval: 5s
@@ -93,10 +106,8 @@ services:
       - frontend
       - backend
     depends_on:
-      postgres:
-        condition: service_healthy
-      clickhouse:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/api/health').then(r=>{process.exit(r.ok?0:1)}).catch(()=>process.exit(1))\""]
       interval: 10s

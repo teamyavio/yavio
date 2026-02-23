@@ -4,6 +4,20 @@
 # Adds resource limits, log rotation, and tighter health check intervals.
 
 services:
+  migrate:
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   postgres:
     deploy:
       resources:
