@@ -1,5 +1,5 @@
 import { getDb } from "@/lib/db";
-import { users, workspaceMembers, workspaces } from "@yavio/db/schema";
+import { projects, users, workspaceMembers, workspaces } from "@yavio/db/schema";
 import { eq } from "drizzle-orm";
 import type { NextAuthConfig } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
@@ -22,6 +22,7 @@ function getLazyAdapter() {
 }
 
 export const authConfig: NextAuthConfig = {
+  trustHost: true,
   secret: process.env.NEXTAUTH_SECRET,
   adapter: getLazyAdapter(),
   session: { strategy: "jwt" },
@@ -126,6 +127,12 @@ export const authConfig: NextAuthConfig = {
             workspaceId: ws.id,
             userId: user.id,
             role: "owner",
+          });
+
+          await db.insert(projects).values({
+            workspaceId: ws.id,
+            name: "Default Project",
+            slug: "default",
           });
         } catch {
           console.error("Failed to create default workspace for OAuth user");

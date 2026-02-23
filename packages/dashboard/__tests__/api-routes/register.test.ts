@@ -59,6 +59,7 @@ vi.mock("@yavio/db/schema", () => ({
   users: { id: "id", email: "email" },
   workspaces: { id: "id" },
   workspaceMembers: {},
+  projects: {},
 }));
 
 vi.mock("@yavio/shared/error-codes", () => ({

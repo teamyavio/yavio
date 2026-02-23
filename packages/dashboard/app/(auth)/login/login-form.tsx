@@ -16,7 +16,9 @@ import { useForm } from "react-hook-form";
 export function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const callbackUrl = searchParams.get("callbackUrl") ?? "/overview";
+  const rawCallback = searchParams.get("callbackUrl") ?? "/";
+  const callbackUrl =
+    rawCallback.startsWith("/") && !rawCallback.startsWith("//") ? rawCallback : "/";
   const [error, setError] = useState<string | null>(null);
 
   const {

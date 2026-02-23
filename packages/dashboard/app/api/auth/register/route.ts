@@ -1,7 +1,7 @@
 import { hashPassword } from "@/lib/auth/password";
 import { registerSchema } from "@/lib/auth/validation";
 import { getDb } from "@/lib/db";
-import { users, workspaceMembers, workspaces } from "@yavio/db/schema";
+import { projects, users, workspaceMembers, workspaces } from "@yavio/db/schema";
 import { ErrorCode } from "@yavio/shared/error-codes";
 import { eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
@@ -62,6 +62,12 @@ export async function POST(request: Request) {
       workspaceId: workspace.id,
       userId: user.id,
       role: "owner",
+    });
+
+    await tx.insert(projects).values({
+      workspaceId: workspace.id,
+      name: "Default Project",
+      slug: "default",
     });
   });
 
