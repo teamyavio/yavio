@@ -1,0 +1,95 @@
+# Yavio Platform — Docker Compose Production Overrides
+# Layer on top of docker-compose.yml: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Adds resource limits, log rotation, and tighter health check intervals.
+
+services:
+  postgres:
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    healthcheck:
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  clickhouse:
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4G
+        reservations:
+          memory: 1G
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    healthcheck:
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  ingest:
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "25m"
+        max-file: "5"
+    healthcheck:
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  dashboard:
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "25m"
+        max-file: "5"
+    healthcheck:
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  docs:
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      interval: 30s
+      timeout: 5s
+      retries: 3

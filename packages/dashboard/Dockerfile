@@ -3,7 +3,7 @@ RUN corepack enable
 
 FROM base AS deps
 WORKDIR /app
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/db/package.json packages/db/
 COPY packages/dashboard/package.json packages/dashboard/
@@ -26,7 +26,6 @@ RUN adduser --system --uid 1001 nextjs
 
 COPY --from=build --chown=nextjs:nodejs /app/packages/dashboard/.next/standalone ./
 COPY --from=build --chown=nextjs:nodejs /app/packages/dashboard/.next/static ./packages/dashboard/.next/static
-COPY --from=build --chown=nextjs:nodejs /app/packages/dashboard/public ./packages/dashboard/public
 
 USER nextjs
 

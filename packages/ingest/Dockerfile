@@ -3,7 +3,7 @@ RUN corepack enable
 
 FROM base AS deps
 WORKDIR /app
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/db/package.json packages/db/
 COPY packages/ingest/package.json packages/ingest/
@@ -19,6 +19,13 @@ RUN pnpm deploy --filter @yavio/ingest --prod /app/deploy
 FROM base AS runner
 WORKDIR /app
 ENV NODE_ENV=production
-COPY --from=build /app/deploy .
+
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 ingest
+
+COPY --from=build --chown=ingest:nodejs /app/deploy .
+
+USER ingest
+
 EXPOSE 3001
 CMD ["node", "dist/server.js"]
