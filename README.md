@@ -6,6 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/yavio-ai/yavio-analytics/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/status-v0.1_alpha-orange" alt="v0.1 Alpha">
 </p>
 
 ---
