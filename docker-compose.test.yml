@@ -1,11 +1,14 @@
 # Minimal Compose file for running integration tests locally and in CI.
 # Uses tmpfs for RAM-backed databases (fast, data discarded on stop).
+# Uses a separate project name and ports so dev containers are never affected.
 # See: .specs/infrastructure/ci-cd.md §11.3
 #
 # Usage:
 #   docker compose -f docker-compose.test.yml up -d
 #   npm run test:integration
 #   docker compose -f docker-compose.test.yml down
+
+name: yavio-test
 
 services:
   postgres:
@@ -15,7 +18,7 @@ services:
       POSTGRES_USER: yavio_service
       POSTGRES_PASSWORD: test
     ports:
-      - "5432:5432"
+      - "${TEST_POSTGRES_PORT:-5433}:5432"
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:
@@ -30,7 +33,7 @@ services:
       CLICKHOUSE_PASSWORD: test
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     ports:
-      - "8123:8123"
+      - "${TEST_CLICKHOUSE_PORT:-8124}:8123"
     tmpfs:
       - /var/lib/clickhouse
     healthcheck:
