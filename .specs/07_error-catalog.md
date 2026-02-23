@@ -107,7 +107,7 @@ Errors originating in the `@yavio/sdk` SDK (both server and widget entry points)
 | Code | Severity | Message | Description | Recovery |
 |------|----------|---------|-------------|----------|
 | `YAVIO-1000` | warn | No API key found | `withYavio()` found no API key in code options, `YAVIO_API_KEY` env var, or `.yaviorc.json`. SDK operates as a transparent pass-through proxy. | Provide API key via any of the three config sources. |
-| `YAVIO-1001` | warn | Invalid API key format | API key does not match `yav_proj_` prefix pattern. | Use a valid key from the dashboard. |
+| `YAVIO-1001` | warn | Invalid API key format | API key does not match `yav_` prefix pattern. | Use a valid key from the dashboard. |
 | `YAVIO-1002` | warn | Invalid endpoint URL | `endpoint` option or `YAVIO_ENDPOINT` is not a valid URL. | Fix the endpoint URL. |
 | `YAVIO-1003` | info | Configuration loaded from .yaviorc.json | Config file discovered and parsed. Informational log, not an error. | N/A |
 | `YAVIO-1004` | warn | Malformed .yaviorc.json | Config file exists but cannot be parsed as JSON or is missing required fields. | Re-run `yavio init` or fix the file manually. |
@@ -172,7 +172,7 @@ Errors from the `yavio-ingest` service. These appear in HTTP responses, Pino log
 | `YAVIO-2003` | 401 | API key revoked | API key has a `revoked_at` timestamp set. | Generate a new key or use an active key. |
 | `YAVIO-2004` | 401 | Invalid widget JWT | JWT signature verification failed. | Token was tampered with or signed with wrong secret. |
 | `YAVIO-2005` | 401 | Widget JWT expired | JWT `exp` claim is in the past. | Mint a new token via `POST /v1/widget-tokens`. |
-| `YAVIO-2006` | 401 | Malformed bearer token | Token is neither a valid `yav_proj_` key nor a parseable JWT. | Check the Authorization header format. |
+| `YAVIO-2006` | 401 | Malformed bearer token | Token is neither a valid `yav_` key nor a parseable JWT. | Check the Authorization header format. |
 
 ### Rate Limiting (2050&ndash;2099)
 

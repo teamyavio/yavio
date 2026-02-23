@@ -38,10 +38,10 @@ The ingestion API accepts two types of credentials:
 
 | Source | Credential | Header | Validation |
 |--------|-----------|--------|------------|
-| Server SDK | Project API key (`yav_proj_...`) | `Authorization: Bearer yav_proj_...` | Hash-based lookup in PostgreSQL (cached) |
+| Server SDK | Project API key (`yav_...`) | `Authorization: Bearer yav_...` | Hash-based lookup in PostgreSQL (cached) |
 | Widget SDK | Widget JWT (`eyJ...`) | `Authorization: Bearer eyJ...` | Signature verification + expiry check using internal `JWT_SECRET` |
 
-The API distinguishes between the two by inspecting the Bearer token format: tokens starting with `yav_proj_` are API keys; all others are parsed as JWTs.
+The API distinguishes between the two by inspecting the Bearer token format: tokens starting with `yav_` are API keys; all others are parsed as JWTs.
 
 ### 6.2.2 Widget Token Endpoint
 
@@ -51,7 +51,7 @@ The API distinguishes between the two by inspecting the Bearer token format: tok
 ```http
 POST /v1/widget-tokens HTTP/1.1
 Host: ingest.yavio.ai
-Authorization: Bearer yav_proj_abc123...
+Authorization: Bearer yav_abc123...
 Content-Type: application/json
 
 { "traceId": "tr_8f2a...", "sessionId": "ses_abc..." }

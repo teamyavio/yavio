@@ -78,7 +78,7 @@
 
 | Test Case | Expected Status |
 |-----------|-----------------|
-| Valid API key (`yav_proj_...`) | 200 |
+| Valid API key (`yav_...`) | 200 |
 | Valid widget JWT | 200 |
 | Missing `Authorization` header | 401 |
 | Malformed Bearer token | 401 |

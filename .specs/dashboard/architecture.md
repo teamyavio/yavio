@@ -148,7 +148,7 @@ A project represents a single MCP server or application being instrumented.
 
 Dashboard pages for API key lifecycle:
 
-- **Create:** Generate new key for a project. Full key shown once, then only the prefix (`yav_proj_abc1...`) is visible.
+- **Create:** Generate new key for a project. Full key shown once, then only the prefix (`yav_abc1...`) is visible.
 - **List:** Show all keys for a project with name, prefix, creation date, last used.
 - **Revoke:** Soft-delete (sets `revoked_at`). Immediately stops accepting events from that key.
 - **Rotate:** Create new key + revoke old key in one action. Grace period option (old key remains valid for N minutes).
@@ -253,7 +253,7 @@ When a user creates a new workspace and project, the dashboard guides them throu
 import { withYavio } from "@yavio/sdk";
 
 const instrumented = withYavio(server, {
-  apiKey: "yav_proj_abc123...",
+  apiKey: "yav_abc123...",
   endpoint: "https://your-instance:3001/v1/events", // or omit for Yavio Cloud
 });
 ```
@@ -336,7 +336,7 @@ All workspace routes require an authenticated session. Authorization is enforced
 
 | Method | Path | Auth | Role | Description |
 |--------|------|------|------|-------------|
-| POST | `/api/workspaces/[workspaceId]/projects/[projectId]/keys` | Session | Admin | Create API key. Returns full key once (`yav_proj_...`). Body: `{ name }`. |
+| POST | `/api/workspaces/[workspaceId]/projects/[projectId]/keys` | Session | Admin | Create API key. Returns full key once (`yav_...`). Body: `{ name }`. |
 | GET | `/api/workspaces/[workspaceId]/projects/[projectId]/keys` | Session | Any member | List API keys (name, prefix, created date, last used). Full key never returned. Viewers see masked keys. |
 | DELETE | `/api/workspaces/[workspaceId]/projects/[projectId]/keys/[keyId]` | Session | Admin | Revoke API key (soft-delete, sets `revoked_at`). Immediately stops accepting events. |
 | POST | `/api/workspaces/[workspaceId]/projects/[projectId]/keys/[keyId]/rotate` | Session | Admin | Rotate key: create new + revoke old. Body: `{ gracePeriodMinutes?: number }`. Returns new full key. |

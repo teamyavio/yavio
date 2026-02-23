@@ -100,7 +100,7 @@ $ yavio init
 
 Yavio Setup
 ──────────────────────
-? Enter your project API key: yav_proj_abc123...
+? Enter your project API key: yav_abc123...
 ? Ingestion endpoint (leave blank for Yavio Cloud): https://localhost:3001
 ✓ Created .yaviorc.json
 ✓ Added .yaviorc.json to .gitignore
@@ -120,7 +120,7 @@ Next steps:
 ```json
 {
   "version": 1,
-  "apiKey": "yav_proj_abc123...",
+  "apiKey": "yav_abc123...",
   "endpoint": "https://localhost:3001/v1/events"
 }
 ```
@@ -269,7 +269,7 @@ Yavio Doctor
 ✓ Node.js v20.11.0 (>= 20 required)
 ✓ Docker v27.0.1 available
 ✓ docker-compose v2.28.0 available
-✓ .yaviorc.json found (API key: yav_proj_abc1...)
+✓ .yaviorc.json found (API key: yav_abc1...)
 ✓ Ingestion API reachable at http://localhost:3001
 ✓ API key valid (project: "hotel-booking", workspace: "acme-corp")
 ✓ ClickHouse accepting writes

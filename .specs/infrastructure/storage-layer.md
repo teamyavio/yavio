@@ -408,7 +408,7 @@ CREATE TABLE api_keys (
   project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   workspace_id    UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, -- denormalized for fast lookup
   key_hash        TEXT NOT NULL,           -- HMAC-SHA256(API_KEY_HASH_SECRET, full_key). Server-side secret prevents precomputation attacks.
-  key_prefix      TEXT NOT NULL,           -- First 8 chars for identification (yav_proj_)
+  key_prefix      TEXT NOT NULL,           -- First 8 chars for identification (yav_)
   name            TEXT DEFAULT 'Default',  -- Human-readable label
   last_used_at    TIMESTAMPTZ,
   created_at      TIMESTAMPTZ DEFAULT now(),
@@ -482,7 +482,7 @@ CREATE INDEX idx_projects_workspace ON projects(workspace_id);
 CREATE INDEX idx_oauth_accounts_user ON oauth_accounts(user_id);
 ```
 
-> **API Key Format:** Keys follow the pattern `yav_proj_<32 random chars>`. Only the HMAC-SHA256 hash is stored (`HMAC(SHA256, API_KEY_HASH_SECRET, full_key)`). The `API_KEY_HASH_SECRET` is a server-side environment variable — it prevents precomputation and rainbow table attacks even if the database is compromised. The full key is shown once at creation time and never again. The `yav_proj_` prefix allows key scanning tools to identify leaked keys.
+> **API Key Format:** Keys follow the pattern `yav_<32 random chars>`. Only the HMAC-SHA256 hash is stored (`HMAC(SHA256, API_KEY_HASH_SECRET, full_key)`). The `API_KEY_HASH_SECRET` is a server-side environment variable — it prevents precomputation and rainbow table attacks even if the database is compromised. The full key is shown once at creation time and never again. The `yav_` prefix allows key scanning tools to identify leaked keys.
 
 ### 5.2.13 Row-Level Security (Tenant Isolation)
 

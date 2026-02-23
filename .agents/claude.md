@@ -134,7 +134,7 @@ These patterns are critical — follow them in all new code:
 - Never use the service role for user-facing queries
 
 ### API Key Security
-- Keys follow format `yav_proj_<32 random chars>`
+- Keys follow format `yav_<32 random chars>`
 - Only HMAC-SHA256 hash stored in DB (with server-side `API_KEY_HASH_SECRET`)
 - Full key shown once at creation, never again
 

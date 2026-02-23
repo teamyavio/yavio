@@ -41,7 +41,7 @@ Telemetry is designed to be **anonymous and non-reversible**. The following rule
 |------|---------------|
 | No PII | No names, emails, IP addresses, or user-identifiable data |
 | No project data | No project names, workspace names, tool names, or event content |
-| No API keys | Only the key prefix format is reported (e.g., `yav_proj_`), never the key itself |
+| No API keys | Only the key prefix format is reported (e.g., `yav_`), never the key itself |
 | Anonymous instance ID | Generated via `crypto.randomUUID()` on first run, stored locally. Not derived from hardware, IP, or user identity. |
 | No tracking across projects | Each `.yaviorc.json` gets its own instance ID. No cross-project correlation. |
 | Minimal payload | Only the fields listed in §1.3 and §1.4 — nothing else |

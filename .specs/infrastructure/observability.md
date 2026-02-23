@@ -70,7 +70,7 @@ This allows correlating logs across services for a single user action without a 
 
 Logs must never contain:
 
-- API keys or JWT tokens (log the `key_prefix` only, e.g., `yav_proj_a1b2...`)
+- API keys or JWT tokens (log the `key_prefix` only, e.g., `yav_a1b2...`)
 - User passwords or OAuth tokens
 - PII from event payloads (events are PII-stripped before logging)
 - Full request bodies (log `eventCount` and `batchSizeBytes` instead)

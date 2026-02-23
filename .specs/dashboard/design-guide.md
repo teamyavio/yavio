@@ -96,7 +96,7 @@ Uses the system font stack via Tailwind's `font-sans`. Monospace (`font-mono`) f
 | KPI label | `text-sm` (14px) | `font-normal` (400) | sans | "Total invocations" |
 | Body text | `text-sm` (14px) | `font-normal` (400) | sans | Descriptions, table cells |
 | Small text | `text-xs` (12px) | `font-normal` (400) | sans | Timestamps, badge labels |
-| Code / monospace | `text-sm` (14px) | `font-normal` (400) | mono | `yav_proj_abc1...`, `search_rooms` |
+| Code / monospace | `text-sm` (14px) | `font-normal` (400) | mono | `yav_abc1...`, `search_rooms` |
 
 ---
 
