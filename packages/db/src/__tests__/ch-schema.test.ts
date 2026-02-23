@@ -52,6 +52,37 @@ describe("ClickHouse schema validation", () => {
     });
   });
 
+  describe("input/output capture columns (migration 0008)", () => {
+    it("has input_values and output_content String columns with default '{}'", async () => {
+      const ch = getClient();
+      const result = await ch.query({
+        query: `
+          SELECT name, type, default_expression FROM system.columns
+          WHERE database = 'default' AND table = 'events'
+          AND name IN ('input_values', 'output_content')
+          ORDER BY name
+        `,
+        format: "JSONEachRow",
+      });
+      const cols = await result.json<{
+        name: string;
+        type: string;
+        default_expression: string;
+      }>();
+      expect(cols).toHaveLength(2);
+      expect(cols[0]).toMatchObject({
+        name: "input_values",
+        type: "String",
+        default_expression: "'{}'",
+      });
+      expect(cols[1]).toMatchObject({
+        name: "output_content",
+        type: "String",
+        default_expression: "'{}'",
+      });
+    });
+  });
+
   describe("ORDER BY correctness", () => {
     it("events table is ordered by (workspace_id, project_id, event_type, timestamp, event_id)", async () => {
       const ch = getClient();
