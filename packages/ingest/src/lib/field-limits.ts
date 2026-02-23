@@ -13,6 +13,8 @@ const LIMITS = {
   user_traits: 5_120, // 5 KB
   input_keys: 5_120, // 5 KB
   input_types: 5_120, // 5 KB
+  input_values: 10_240, // 10 KB
+  output_content: 10_240, // 10 KB
   intent_signals: 2_048, // 2 KB
 
   /** String fields — truncate if exceeded. */
@@ -94,7 +96,14 @@ export function enforceFieldLimits(events: BaseEvent[]): FieldLimitResult {
 
     const eventRecord = event as Record<string, unknown>;
 
-    for (const field of ["user_traits", "input_keys", "input_types", "intent_signals"] as const) {
+    for (const field of [
+      "user_traits",
+      "input_keys",
+      "input_types",
+      "input_values",
+      "output_content",
+      "intent_signals",
+    ] as const) {
       if (eventRecord[field]) {
         const json = JSON.stringify(eventRecord[field]);
         const limit = LIMITS[field];

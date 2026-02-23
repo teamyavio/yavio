@@ -81,7 +81,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     const config: YavioConfig = {
       apiKey: "yav_test_key",
       endpoint: mockUrl,
-      capture: { inputValues: true, geo: true, tokens: true, retries: true },
+      capture: { inputValues: true, outputValues: true, geo: true, tokens: true, retries: true },
     };
     const proxy = createProxy(server, config, transport, "0.0.1");
 
@@ -170,7 +170,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     const config: YavioConfig = {
       apiKey: "yav_test_key",
       endpoint: mockUrl,
-      capture: { inputValues: true, geo: true, tokens: true, retries: true },
+      capture: { inputValues: true, outputValues: true, geo: true, tokens: true, retries: true },
     };
     const proxy = createProxy(server, config, transport, "0.0.1");
 
@@ -218,7 +218,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     const config: YavioConfig = {
       apiKey: "yav_test_key",
       endpoint: mockUrl,
-      capture: { inputValues: true, geo: true, tokens: true, retries: true },
+      capture: { inputValues: true, outputValues: true, geo: true, tokens: true, retries: true },
     };
     const proxy = createProxy(server, config, transport, "0.0.1");
 
@@ -299,7 +299,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     const config: YavioConfig = {
       apiKey: "yav_test_key",
       endpoint: mockUrl,
-      capture: { inputValues: true, geo: true, tokens: true, retries: true },
+      capture: { inputValues: true, outputValues: true, geo: true, tokens: true, retries: true },
     };
     const proxy = createProxy(server, config, transport, "0.0.1");
 

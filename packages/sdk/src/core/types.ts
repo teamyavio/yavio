@@ -8,6 +8,7 @@ export interface YavioConfig {
 /** Controls which auto-captured data is included. */
 export interface CaptureConfig {
   inputValues: boolean;
+  outputValues: boolean;
   geo: boolean;
   tokens: boolean;
   retries: boolean;

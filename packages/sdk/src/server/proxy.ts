@@ -138,6 +138,7 @@ function wrapToolCallback(
       const result = await runInContext(store, () => originalCb(...cbArgs));
       const latencyMs = Math.round(performance.now() - startTime);
 
+      const captureInput = config.capture.inputValues && cbArgs[0] !== extra;
       const toolCallEvent = buildToolCallEvent(
         {
           traceId,
@@ -150,14 +151,10 @@ function wrapToolCallback(
           toolName,
           latencyMs,
           status: "success",
-          inputKeys:
-            config.capture.inputValues && cbArgs[0] !== extra
-              ? extractInputKeys(cbArgs[0])
-              : undefined,
-          inputTypes:
-            config.capture.inputValues && cbArgs[0] !== extra
-              ? extractInputTypes(cbArgs[0])
-              : undefined,
+          inputKeys: captureInput ? extractInputKeys(cbArgs[0]) : undefined,
+          inputTypes: captureInput ? extractInputTypes(cbArgs[0]) : undefined,
+          inputValues: captureInput ? extractInputValues(cbArgs[0], extra) : undefined,
+          outputContent: config.capture.outputValues ? extractOutputContent(result) : undefined,
         },
       );
       transport.send([toolCallEvent]);
@@ -191,6 +188,7 @@ function wrapToolCallback(
     } catch (error) {
       const latencyMs = Math.round(performance.now() - startTime);
 
+      const captureInputOnError = config.capture.inputValues && cbArgs[0] !== extra;
       const toolCallEvent = buildToolCallEvent(
         {
           traceId,
@@ -205,6 +203,7 @@ function wrapToolCallback(
           status: "error",
           errorCategory: "unknown",
           errorMessage: error instanceof Error ? error.message : String(error),
+          inputValues: captureInputOnError ? extractInputValues(cbArgs[0], extra) : undefined,
         },
       );
       transport.send([toolCallEvent]);
@@ -495,4 +494,90 @@ function extractInputTypes(args: unknown): Record<string, unknown> | undefined {
     return types;
   }
   return undefined;
+}
+
+/**
+ * Deep-clone tool arguments and merge serializable fields from RequestHandlerExtra.
+ * Extra fields are prefixed with `_` to avoid collisions with tool arguments.
+ */
+function extractInputValues(args: unknown, extra: unknown): Record<string, unknown> | undefined {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+  try {
+    const clone = JSON.parse(JSON.stringify(args)) as Record<string, unknown>;
+    if (extra && typeof extra === "object") {
+      const ex = extra as Record<string, unknown>;
+      // Serializable extra fields (skip signal, functions, taskStore)
+      if (ex._meta != null) clone._meta = JSON.parse(JSON.stringify(ex._meta));
+      if (typeof ex.sessionId === "string") clone._sessionId = ex.sessionId;
+      if (ex.requestId != null) clone._requestId = ex.requestId;
+      if (typeof ex.taskId === "string") clone._taskId = ex.taskId;
+      if (ex.taskRequestedTtl !== undefined) clone._taskRequestedTtl = ex.taskRequestedTtl;
+      if (ex.requestInfo != null) clone._requestInfo = JSON.parse(JSON.stringify(ex.requestInfo));
+    }
+    return clone;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Replace binary data (base64 image, audio, resource blob) with size placeholders.
+ */
+function sanitizeContentItem(item: unknown): unknown {
+  if (!item || typeof item !== "object") return item;
+  const entry = item as Record<string, unknown>;
+  if ((entry.type === "image" || entry.type === "audio") && typeof entry.data === "string") {
+    return {
+      ...entry,
+      data: `[binary:${String(entry.mimeType ?? "unknown")}:${(entry.data as string).length}]`,
+    };
+  }
+  if (entry.type === "resource" && entry.resource && typeof entry.resource === "object") {
+    const resource = entry.resource as Record<string, unknown>;
+    if (typeof resource.blob === "string") {
+      return {
+        ...entry,
+        resource: {
+          ...resource,
+          blob: `[binary:${String(resource.mimeType ?? "unknown")}:${(resource.blob as string).length}]`,
+        },
+      };
+    }
+  }
+  return item;
+}
+
+/**
+ * Extract the full MCP CallToolResult for output capture.
+ * Includes content (with binary sanitization), structuredContent, isError, _meta.
+ * Sizing is handled by ingest field limits.
+ */
+function extractOutputContent(result: unknown): Record<string, unknown> | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const res = result as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+
+  if (Array.isArray(res.content)) {
+    output.content = res.content.map(sanitizeContentItem);
+  }
+
+  if (res.structuredContent !== undefined) {
+    output.structuredContent = JSON.parse(JSON.stringify(res.structuredContent));
+  }
+
+  if (res.isError !== undefined) {
+    output.isError = res.isError;
+  }
+
+  // Captured BEFORE widget token injection (line ~175)
+  if (res._meta && typeof res._meta === "object") {
+    output._meta = JSON.parse(JSON.stringify(res._meta));
+  }
+
+  if (Object.keys(output).length === 0) return undefined;
+  try {
+    return JSON.parse(JSON.stringify(output)) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
 }

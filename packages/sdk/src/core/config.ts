@@ -6,6 +6,7 @@ const DEFAULT_ENDPOINT = "https://ingest.yavio.ai/v1/events";
 
 const DEFAULT_CAPTURE: CaptureConfig = {
   inputValues: true,
+  outputValues: true,
   geo: true,
   tokens: true,
   retries: true,

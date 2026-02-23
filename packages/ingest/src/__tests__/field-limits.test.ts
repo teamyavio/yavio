@@ -107,6 +107,26 @@ describe("enforceFieldLimits", () => {
     expect(result.warnings[0].field).toBe("input_types");
   });
 
+  it("truncates input_values exceeding 10KB", () => {
+    const event = makeEvent({ input_values: { data: "x".repeat(11_000) } });
+    const result = enforceFieldLimits([event]);
+    expect(result.accepted).toHaveLength(1);
+    expect((result.accepted[0] as Record<string, unknown>).input_values).toEqual({
+      _truncated: true,
+    });
+    expect(result.warnings[0].field).toBe("input_values");
+  });
+
+  it("truncates output_content exceeding 10KB", () => {
+    const event = makeEvent({ output_content: { content: [{ text: "x".repeat(11_000) }] } });
+    const result = enforceFieldLimits([event]);
+    expect(result.accepted).toHaveLength(1);
+    expect((result.accepted[0] as Record<string, unknown>).output_content).toEqual({
+      _truncated: true,
+    });
+    expect(result.warnings[0].field).toBe("output_content");
+  });
+
   it("truncates intent_signals exceeding 2KB", () => {
     const event = makeEvent({ intent_signals: { data: "x".repeat(3_000) } });
     const result = enforceFieldLimits([event]);

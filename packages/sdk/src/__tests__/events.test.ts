@@ -119,6 +119,38 @@ describe("Event factories", () => {
       expect(event.input_keys).toEqual({ checkin: true, guests: true });
       expect(event.input_types).toEqual({ checkin: "string", guests: "number" });
     });
+
+    it("strips PII from input_values", () => {
+      const event = buildToolCallEvent(ctx, {
+        toolName: "search",
+        inputValues: { query: "contact test@example.com" },
+      });
+      expect(event.input_values?.query).toBe("contact [EMAIL_REDACTED]");
+    });
+
+    it("strips PII from output_content text content", () => {
+      const event = buildToolCallEvent(ctx, {
+        toolName: "search",
+        outputContent: {
+          content: [{ type: "text", text: "email is test@example.com" }],
+        },
+      });
+      const content = event.output_content?.content as Array<Record<string, unknown>>;
+      expect(content[0].text).toBe("email is [EMAIL_REDACTED]");
+    });
+
+    it("strips PII from output_content structuredContent", () => {
+      const event = buildToolCallEvent(ctx, {
+        toolName: "search",
+        outputContent: {
+          content: [{ type: "text", text: "ok" }],
+          structuredContent: { email: "test@example.com", name: "Alice" },
+        },
+      });
+      const structured = event.output_content?.structuredContent as Record<string, unknown>;
+      expect(structured.email).toBe("[EMAIL_REDACTED]");
+      expect(structured.name).toBe("Alice");
+    });
   });
 
   describe("common fields", () => {

@@ -99,6 +99,8 @@ export interface ToolCallData {
   isRetry?: boolean;
   inputKeys?: Record<string, unknown>;
   inputTypes?: Record<string, unknown>;
+  inputValues?: Record<string, unknown>;
+  outputContent?: Record<string, unknown>;
 }
 
 export function buildToolCallEvent(ctx: EventContext, data: ToolCallData): ToolCallEvent {
@@ -113,6 +115,8 @@ export function buildToolCallEvent(ctx: EventContext, data: ToolCallData): ToolC
     is_retry: data.isRetry ? 1 : 0,
     input_keys: data.inputKeys ? stripPii(data.inputKeys) : undefined,
     input_types: data.inputTypes,
+    input_values: data.inputValues ? stripPii(data.inputValues) : undefined,
+    output_content: data.outputContent ? stripPii(data.outputContent) : undefined,
   };
 }
 

@@ -30,6 +30,7 @@ const testConfig: YavioConfig = {
   endpoint: "http://localhost:3001/v1/events",
   capture: {
     inputValues: true,
+    outputValues: true,
     geo: true,
     tokens: true,
     retries: true,

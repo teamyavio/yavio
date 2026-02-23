@@ -56,6 +56,7 @@ describe("resolveConfig", () => {
     const config = resolveConfig({ apiKey: "test" });
     expect(config?.capture).toEqual({
       inputValues: true,
+      outputValues: true,
       geo: true,
       tokens: true,
       retries: true,
@@ -69,6 +70,7 @@ describe("resolveConfig", () => {
     });
     expect(config?.capture).toEqual({
       inputValues: false,
+      outputValues: true,
       geo: true,
       tokens: true,
       retries: true,

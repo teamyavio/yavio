@@ -81,6 +81,8 @@ export const ToolCallEvent = BaseEvent.extend({
   is_retry: z.number().int().min(0).max(1).optional(),
   input_keys: z.record(z.unknown()).optional(),
   input_types: z.record(z.unknown()).optional(),
+  input_values: z.record(z.unknown()).optional(),
+  output_content: z.record(z.unknown()).optional(),
   intent_signals: z.record(z.unknown()).optional(),
   tokens_in: z.number().int().optional(),
   tokens_out: z.number().int().optional(),

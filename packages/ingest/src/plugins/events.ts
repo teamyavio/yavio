@@ -76,6 +76,12 @@ const eventsRoute: FastifyPluginAsync = async (app) => {
       // 4. Field size limits → per-event warnings/rejections
       const fieldResult = enforceFieldLimits(validation.valid);
 
+      if (fieldResult.warnings.length > 0) {
+        for (const w of fieldResult.warnings) {
+          request.log.warn({ eventIndex: w.index, field: w.field }, w.warning);
+        }
+      }
+
       // 5. PII stripping
       const { result: strippedEvents } = stripPii(fieldResult.accepted);
 
