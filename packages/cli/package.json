@@ -1,6 +1,6 @@
 {
   "name": "@yavio/cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "CLI for setting up the Yavio SDK and managing self-hosted Yavio deployments",
   "type": "module",
   "license": "MIT",
@@ -30,7 +30,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@yavio/shared": "workspace:*",
     "commander": "^13.1.0",
     "execa": "^9.5.2",
     "ora": "^8.2.0",

@@ -8,5 +8,6 @@ export default defineConfig({
   format: ["esm", "cjs"],
   dts: true,
   clean: true,
+  noExternal: ["@yavio/shared"],
   external: ["@modelcontextprotocol/sdk", "react", "react-dom"],
 });
