@@ -21,14 +21,14 @@ Ordered by dependency chain and risk. Each phase produces a testable, deployable
 
 | Phase | Service | Details | status |
 |-------|---------|---------| ------ |
-| 1. Database Schemas & Docker Foundation | [infrastructure/roadmap.md](./infrastructure/roadmap.md) | PostgreSQL + ClickHouse schemas, Docker Compose, migrations | |
-| 1a. Monorepo Foundation | [infrastructure/monorepo-foundation.md](./infrastructure/monorepo-foundation.md) | Turborepo, Biome, Vitest, tsup, `packages/shared` scaffold, per-package tsconfigs & scripts | |
-| 1b. CI/CD Pipeline | [infrastructure/ci-cd.md](./infrastructure/ci-cd.md) | GitHub Actions: lint, build, test gates; publish & deploy jobs added as services ship | |
-| 1c. Docs Scaffolding | [docs/roadmap.md](./docs/roadmap.md) | Fumadocs site setup, concepts section, contributing guide, OpenAPI stubs | |
-| 2. Ingestion API | [ingest/roadmap.md](./ingest/roadmap.md) | Fastify/Hono server, event endpoint, auth, PII stripping, ClickHouse writer; add CI jobs for ingest | |
-| 3. Server SDK HTTP Transport | [sdk/roadmap.md](./sdk/roadmap.md) | withYavio() proxy, batch queue, HTTP transport, explicit API; add CI jobs for sdk | |
+| 1. Database Schemas & Docker Foundation | [infrastructure/roadmap.md](./infrastructure/roadmap.md) | PostgreSQL + ClickHouse schemas, Docker Compose, migrations | done |
+| 1a. Monorepo Foundation | [infrastructure/monorepo-foundation.md](./infrastructure/monorepo-foundation.md) | Turborepo, Biome, Vitest, tsup, `packages/shared` scaffold, per-package tsconfigs & scripts | done |
+| 1b. CI | [infrastructure/ci-cd.md](./infrastructure/ci-cd.md) | GitHub Actions: lint, build, test gates; publish & deploy jobs added as services ship | done |
+| 1c. Docs Scaffolding | [docs/roadmap.md](./docs/roadmap.md) | Fumadocs site setup, concepts section, contributing guide, OpenAPI stubs | done |
+| 2. Ingestion API | [ingest/roadmap.md](./ingest/roadmap.md) | Fastify/Hono server, event endpoint, auth, PII stripping, ClickHouse writer; add CI jobs for ingest | done |
+| 3. Server SDK HTTP Transport | [sdk/roadmap.md](./sdk/roadmap.md) | withYavio() proxy, batch queue, HTTP transport, explicit API; add CI jobs for sdk | done |
 | 3b. Docs: SDK & Ingestion | [docs/roadmap.md](./docs/roadmap.md) | Quickstart guide, SDK reference, ingestion API reference, user identification concepts | |
-| 4. Auth & Workspace Management | [dashboard/roadmap.md](./dashboard/roadmap.md) | Next.js 16, NextAuth.js v5, workspace CRUD, roles, invitations; add CI jobs for dashboard | |
+| 4. Auth & Workspace Management | [dashboard/roadmap.md](./dashboard/roadmap.md) | Next.js 16, NextAuth.js v5, workspace CRUD, roles, invitations; add CI jobs for dashboard | done |
 | 5. Dashboard Analytics Views | [dashboard/roadmap.md](./dashboard/roadmap.md) | Overview, tools, funnels, users, paths, live feed, errors views | |
 | 5b. Docs: Dashboard | [docs/roadmap.md](./docs/roadmap.md) | Workspace, project, and analytics view docs; dashboard API reference | |
 | 6. React Widget SDK | [sdk/roadmap.md](./sdk/roadmap.md) | useYavio() hook, auto-config, widget JWT auth, beacon teardown; add CI jobs for widget | |
