@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="https://i.imgur.com/EIwgLHP.png" alt="Yavio Logo" width="200">
+</p>
+
+<p align="center">
   <strong>Yavio</strong><br>
   Product analytics for MCP Apps and ChatGPT Apps.<br>
   Open-source. Self-hosted or Cloud.
@@ -7,13 +11,14 @@
 <p align="center">
   <a href="https://github.com/yavio-ai/yavio-analytics/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/status-v0.1_alpha-orange" alt="v0.1 Alpha">
+  <a href="https://discord.gg/BprRh2fr"><img src="https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 ---
 
 Yavio is the first Analytics and Visibility layer for ChatGPT Apps and MCP Apps. It captures how users interact with your MCP tools and ChatGPT App widgets: tool calls, conversions, funnels, retention, errors — with a 3-line SDK integration and a full analytics dashboard.
 
-The entire platform is **open source (MIT)**. Self-host with Docker or use [Yavio Cloud](https://yavio.ai) (1M events/month free).
+The entire platform is **open source (MIT)**. Self-host with Docker or use [Yavio Cloud](https://yavio.ai) (coming soon).
 
 ## Features
 
@@ -57,26 +62,9 @@ Developer's MCP Server          Yavio Platform
 
 ## Quick Start
 
-### Option A: Yavio Cloud (no Docker required)
+### Option A: Yavio Cloud
 
-```bash
-# Install the SDK
-npm install @yavio/sdk
-
-# Set up your project
-npx @yavio/cli init
-```
-
-Then wrap your MCP server:
-
-```typescript
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { withYavio } from "@yavio/sdk";
-
-const server = withYavio(new McpServer({ name: "my-app", version: "1.0.0" }));
-```
-
-That's it. View your analytics at [app.yavio.ai](https://app.yavio.ai).
+> **Coming soon** — Yavio Cloud is not yet available. For now, use the self-hosted option below.
 
 ### Option B: Self-Hosted (Docker)
 
