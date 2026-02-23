@@ -4,9 +4,10 @@ import { projects, workspaceMembers, workspaces } from "@yavio/db/schema";
 import { asc, eq } from "drizzle-orm";
 import { redirect } from "next/navigation";
 
-export default async function HomePage() {
+export default async function DashboardRootPage() {
   const session = await getServerSession();
   if (!session) redirect("/login");
+
   const db = getDb();
 
   const userWorkspaces = await db
@@ -21,7 +22,7 @@ export default async function HomePage() {
     .limit(1);
 
   if (userWorkspaces.length === 0) {
-    redirect("/setup");
+    redirect("/login");
   }
 
   const ws = userWorkspaces[0];
@@ -33,7 +34,7 @@ export default async function HomePage() {
     .limit(1);
 
   if (userProjects.length === 0) {
-    redirect("/setup");
+    redirect("/login");
   }
 
   redirect(`/${ws.slug}/${userProjects[0].slug}/overview`);
