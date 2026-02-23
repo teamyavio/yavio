@@ -18,8 +18,8 @@ By participating, you agree to uphold our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ```bash
 # Clone the repo
-git clone https://github.com/yavio-ai/yavio-analytics.git
-cd yavio-analytics
+git clone https://github.com/teamyavio/yavio.git
+cd yavio
 
 # Install dependencies
 pnpm install
@@ -243,7 +243,6 @@ docker compose logs -f dashboard
 
 ## Questions?
 
-- Open a [discussion](https://github.com/yavio-ai/yavio-analytics/discussions)
-- Join our [Discord](https://discord.gg/yavio)
+- Join our [Discord](https://discord.gg/BprRh2fr)
 
 Thank you for contributing!
