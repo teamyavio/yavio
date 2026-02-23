@@ -1,5 +1,5 @@
-import { getMDXComponents } from "@/mdx-components";
 import { source } from "@/lib/source";
+import { getMDXComponents } from "@/mdx-components";
 import type { DocData } from "fumadocs-mdx/runtime/types";
 import { DocsBody, DocsDescription, DocsPage, DocsTitle } from "fumadocs-ui/page";
 import { notFound } from "next/navigation";
