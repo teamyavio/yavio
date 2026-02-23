@@ -1,8 +1,25 @@
 {
   "name": "@yavio/cli",
   "version": "0.1.0",
-  "private": true,
+  "description": "CLI for setting up the Yavio SDK and managing self-hosted Yavio deployments",
   "type": "module",
+  "license": "MIT",
+  "author": "Yavio GmbH",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/teamyavio/yavio.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://yavio.ai",
+  "bugs": "https://github.com/teamyavio/yavio/issues",
+  "keywords": ["yavio", "mcp", "model-context-protocol", "analytics", "cli", "devtools"],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "files": ["dist", "LICENSE", "README.md"],
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "yavio": "./dist/cli.mjs"
   },

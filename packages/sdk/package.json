@@ -1,8 +1,34 @@
 {
   "name": "@yavio/sdk",
   "version": "0.1.0",
-  "private": true,
+  "description": "Yavio SDK for instrumenting MCP servers with analytics, session tracking, and a React widget",
   "type": "module",
+  "license": "MIT",
+  "author": "Yavio GmbH",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/teamyavio/yavio.git",
+    "directory": "packages/sdk"
+  },
+  "homepage": "https://yavio.ai",
+  "bugs": "https://github.com/teamyavio/yavio/issues",
+  "keywords": [
+    "yavio",
+    "mcp",
+    "model-context-protocol",
+    "analytics",
+    "instrumentation",
+    "observability",
+    "ai",
+    "llm"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "files": ["dist", "LICENSE", "README.md"],
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
