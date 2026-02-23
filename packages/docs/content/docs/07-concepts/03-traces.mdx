@@ -57,11 +57,13 @@ When you call `ctx.yavio.step()` or `useYavio().step()`, each step receives an a
 
 This enables deterministic ordering even when multiple steps share the same millisecond timestamp, and ensures the combined funnel view displays steps in the correct order across server and widget boundaries.
 
-## Funnel Analytics
+## Funnel Analytics (Coming Soon)
 
-The dashboard's funnel view uses trace IDs to:
+The dashboard's funnel view will use trace IDs to:
 
 - **Visualize step progression** — see how users move through your defined funnel steps
 - **Calculate drop-off rates** — identify where users abandon the journey
 - **Inspect individual traces** — drill into a specific trace to see every event that occurred
 - **Compare funnels across platforms** — see if ChatGPT users convert differently than Claude users
+
+> The Funnels and Paths dashboard views are coming soon. Event data is already being collected — once the views launch, you'll have full historical visibility.
