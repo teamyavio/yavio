@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://docs.yavio.ai/docs"><img src="https://img.shields.io/badge/docs-docs.yavio.ai-blue" alt="Documentation"></a>
   <a href="https://github.com/teamyavio/yavio/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/status-v0.1_alpha-orange" alt="v0.1 Alpha">
   <a href="https://discord.gg/BprRh2fr"><img src="https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
@@ -150,9 +151,11 @@ yavio doctor      # Diagnose setup issues
 Tie events to known users for retention and per-user analytics:
 
 ```typescript
-server.tool("checkout", { items: z.array(z.string()) }, async (params, ctx) => {
-  ctx.yavio.identify("user_123", { plan: "pro", company: "Acme" });
-  ctx.yavio.conversion("purchase", { value: 99 });
+import { yavio } from "@yavio/sdk";
+
+server.registerTool("checkout", { inputSchema: { items: z.array(z.string()) } }, async (params) => {
+  yavio.identify("user_123", { plan: "pro", company: "Acme" });
+  yavio.conversion("purchase", { value: 99 });
 
   return { content: [{ type: "text", text: "Order placed." }] };
 });
@@ -163,10 +166,10 @@ server.tool("checkout", { items: z.array(z.string()) }, async (params, ctx) => {
 Track progression through multi-step flows:
 
 ```typescript
-server.tool("search", { query: z.string() }, async ({ query }, ctx) => {
-  ctx.yavio.step("search_initiated", { queryLength: query.length });
+server.registerTool("search", { inputSchema: { query: z.string() } }, async ({ query }) => {
+  yavio.step("search_initiated", { queryLength: query.length });
   const results = await performSearch(query);
-  ctx.yavio.step("results_found", { count: results.length });
+  yavio.step("results_found", { count: results.length });
 
   return { content: [{ type: "text", text: `Found ${results.length} results` }] };
 });
@@ -175,8 +178,8 @@ server.tool("search", { query: z.string() }, async ({ query }, ctx) => {
 ### Custom Events and Conversions
 
 ```typescript
-ctx.yavio.track("feature_used", { feature: "export", format: "pdf" });
-ctx.yavio.conversion("subscription_upgrade", { value: 99, currency: "USD" });
+yavio.track("feature_used", { feature: "export", format: "pdf" });
+yavio.conversion("subscription_upgrade", { value: 99, currency: "USD" });
 ```
 
 ### Widget SDK (React)
