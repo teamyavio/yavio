@@ -12,6 +12,10 @@ export interface BatchWriterLogger {
 
 export interface BatchWriterOptions {
   clickhouse: ClickHouseClient;
+  /** Target ClickHouse table. Defaults to `"events"`. */
+  table?: string;
+  /** Optional row mapper applied before insert. */
+  mapRow?: (event: EnrichedEvent) => Record<string, unknown>;
   flushIntervalMs?: number;
   flushSize?: number;
   maxBufferSize?: number;
@@ -22,6 +26,8 @@ export class BatchWriter {
   private buffer: EnrichedEvent[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly clickhouse: ClickHouseClient;
+  private readonly table: string;
+  private readonly mapRow?: (event: EnrichedEvent) => Record<string, unknown>;
   private readonly flushIntervalMs: number;
   private readonly flushSize: number;
   private readonly maxBufferSize: number;
@@ -30,6 +36,8 @@ export class BatchWriter {
 
   constructor(options: BatchWriterOptions) {
     this.clickhouse = options.clickhouse;
+    this.table = options.table ?? "events";
+    this.mapRow = options.mapRow;
     this.flushIntervalMs = options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
     this.flushSize = options.flushSize ?? DEFAULT_FLUSH_SIZE;
     this.maxBufferSize = options.maxBufferSize ?? DEFAULT_MAX_BUFFER_SIZE;
@@ -87,13 +95,14 @@ export class BatchWriter {
   }
 
   private async insertWithRetry(batch: EnrichedEvent[]): Promise<void> {
+    const values = this.mapRow ? batch.map(this.mapRow) : batch;
     let lastError: unknown;
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
         await this.clickhouse.insert({
-          table: "events",
-          values: batch,
+          table: this.table,
+          values,
           format: "JSONEachRow",
         });
         return;

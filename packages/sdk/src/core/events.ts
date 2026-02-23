@@ -4,6 +4,7 @@ import type {
   IdentifyEvent,
   StepEvent,
   ToolCallEvent,
+  ToolDiscoveryEvent,
   TrackEvent,
 } from "@yavio/shared/events";
 import { generateEventId } from "./ids.js";
@@ -128,5 +129,24 @@ export function buildConnectionEvent(ctx: EventContext, data: ConnectionData): C
     protocol_version: data.protocolVersion,
     client_name: data.clientName,
     client_version: data.clientVersion,
+  };
+}
+
+export interface ToolDiscoveryData {
+  toolName: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+}
+
+export function buildToolDiscoveryEvent(
+  ctx: EventContext,
+  data: ToolDiscoveryData,
+): ToolDiscoveryEvent {
+  return {
+    ...baseFields(ctx, "tool_discovery"),
+    event_type: "tool_discovery",
+    tool_name: data.toolName,
+    description: data.description,
+    input_schema: data.inputSchema,
   };
 }

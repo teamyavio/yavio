@@ -82,9 +82,13 @@ const eventsRoute: FastifyPluginAsync = async (app) => {
       // 6. Event enrichment
       const enriched = enrichEvents(strippedEvents, ctx);
 
-      // 7. Queue to batch writer (if available)
-      if (app.batchWriter) {
-        const backpressure = app.batchWriter.enqueue(enriched);
+      // 7. Partition tool_discovery events for tool_registry
+      const toolDiscoveryEvents = enriched.filter((e) => e.event_type === "tool_discovery");
+      const regularEvents = enriched.filter((e) => e.event_type !== "tool_discovery");
+
+      // 7a. Queue regular events to batch writer
+      if (app.batchWriter && regularEvents.length > 0) {
+        const backpressure = app.batchWriter.enqueue(regularEvents);
         if (backpressure) {
           const err = new YavioError(
             ErrorCode.INGEST.BACKPRESSURE_ACTIVE,
@@ -92,6 +96,14 @@ const eventsRoute: FastifyPluginAsync = async (app) => {
             503,
           );
           throw Object.assign(err, { retryAfterMs: 1000 });
+        }
+      }
+
+      // 7b. Queue tool_discovery events to tool registry writer
+      if (app.toolRegistryWriter && toolDiscoveryEvents.length > 0) {
+        const registryBackpressure = app.toolRegistryWriter.enqueue(toolDiscoveryEvents);
+        if (registryBackpressure) {
+          request.log.warn("Tool registry writer backpressure active, events may be dropped");
         }
       }
 

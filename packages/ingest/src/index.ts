@@ -33,6 +33,8 @@ export interface CreateAppOptions {
   jwtSecret?: string;
   /** Pre-built batch writer (for testing). */
   batchWriter?: BatchWriter;
+  /** Pre-built tool registry writer (for testing). */
+  toolRegistryWriter?: BatchWriter;
   /** Pre-built rate limiter (for testing). */
   rateLimiter?: RateLimiter;
   /** Allowed CORS origins. Defaults to `["*"]` (all origins). */
@@ -66,6 +68,10 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
 
   if (options.batchWriter) {
     app.decorate("batchWriter", options.batchWriter);
+  }
+
+  if (options.toolRegistryWriter) {
+    app.decorate("toolRegistryWriter", options.toolRegistryWriter);
   }
 
   if (options.rateLimiter) {

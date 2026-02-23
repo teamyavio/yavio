@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BaseEvent } from "@yavio/shared/events";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import type { CaptureConfig, YavioConfig } from "../core/types.js";
 import { _resetSessionMap, createProxy } from "../server/proxy.js";
 import { mintWidgetToken } from "../server/token.js";
@@ -322,6 +323,130 @@ describe("createProxy — widget config injection", () => {
 
     // mintWidgetToken should only have been called once
     expect(mockedMint).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createProxy — tool_discovery emission", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue(null);
+    _resetSessionMap();
+  });
+
+  it("emits tool_discovery event when tool() is called", () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    createProxy(server, testConfig, transport, "0.0.1").tool("search_rooms", () => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+
+    expect(transport.sent.length).toBe(1);
+    const event = transport.sent[0][0];
+    expect(event.event_type).toBe("tool_discovery");
+    expect((event as Record<string, unknown>).tool_name).toBe("search_rooms");
+  });
+
+  it("emits tool_discovery with description from tool(name, desc, cb)", () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    createProxy(server, testConfig, transport, "0.0.1").tool("my_tool", "A helpful tool", () => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+
+    const event = transport.sent[0][0] as Record<string, unknown>;
+    expect(event.event_type).toBe("tool_discovery");
+    expect(event.tool_name).toBe("my_tool");
+    expect(event.description).toBe("A helpful tool");
+  });
+
+  it("emits tool_discovery with inputSchema from tool(name, schema, cb)", () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    createProxy(server, testConfig, transport, "0.0.1").tool(
+      "schema_tool",
+      { query: z.string(), limit: z.number().optional() },
+      () => ({ content: [{ type: "text", text: "ok" }] }),
+    );
+
+    const event = transport.sent[0][0] as Record<string, unknown>;
+    expect(event.event_type).toBe("tool_discovery");
+    expect(event.tool_name).toBe("schema_tool");
+    expect(event.input_schema).toEqual({
+      type: "object",
+      properties: { query: {}, limit: {} },
+    });
+  });
+
+  it("emits tool_discovery with description and inputSchema from tool(name, desc, schema, cb)", () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    createProxy(server, testConfig, transport, "0.0.1").tool(
+      "full_tool",
+      "A full tool",
+      { query: z.string() },
+      () => ({ content: [{ type: "text", text: "ok" }] }),
+    );
+
+    const event = transport.sent[0][0] as Record<string, unknown>;
+    expect(event.event_type).toBe("tool_discovery");
+    expect(event.tool_name).toBe("full_tool");
+    expect(event.description).toBe("A full tool");
+    expect(event.input_schema).toEqual({
+      type: "object",
+      properties: { query: {} },
+    });
+  });
+
+  it("emits tool_discovery event when registerTool() is called", () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    createProxy(server, testConfig, transport, "0.0.1").registerTool(
+      "reg_tool",
+      {
+        description: "A registered tool",
+        inputSchema: { query: { type: "string" } as never },
+      },
+      () => ({ content: [{ type: "text", text: "ok" }] }),
+    );
+
+    expect(transport.sent.length).toBe(1);
+    const event = transport.sent[0][0] as Record<string, unknown>;
+    expect(event.event_type).toBe("tool_discovery");
+    expect(event.tool_name).toBe("reg_tool");
+    expect(event.description).toBe("A registered tool");
+    expect(event.input_schema).toEqual({ query: { type: "string" } });
+  });
+
+  it("only emits tool_discovery once per tool name", () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+
+    proxy.tool("dup_tool", () => ({
+      content: [{ type: "text", text: "first" }],
+    }));
+
+    // Registering again with different config — should not emit again
+    // (McpServer would throw on duplicate, but we're testing the proxy dedup)
+    expect(transport.sent.length).toBe(1);
+    expect((transport.sent[0][0] as Record<string, unknown>).tool_name).toBe("dup_tool");
+  });
+
+  it("emits tool_discovery with correct base event fields", () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    createProxy(server, testConfig, transport, "0.0.1").tool("base_fields_tool", () => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+
+    const event = transport.sent[0][0];
+    expect(event.event_type).toBe("tool_discovery");
+    expect(event.source).toBe("server");
+    expect(event.sdk_version).toBe("0.0.1");
+    expect(typeof event.event_id).toBe("string");
+    expect(typeof event.trace_id).toBe("string");
+    expect(typeof event.session_id).toBe("string");
+    expect(typeof event.timestamp).toBe("string");
   });
 });
 

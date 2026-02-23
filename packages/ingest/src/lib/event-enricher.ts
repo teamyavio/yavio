@@ -18,6 +18,7 @@ const JSON_FIELDS = new Set([
   "input_keys",
   "input_types",
   "intent_signals",
+  "input_schema",
 ]);
 
 /**

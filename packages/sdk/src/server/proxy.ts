@@ -1,5 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { buildConnectionEvent, buildToolCallEvent } from "../core/events.js";
+import {
+  buildConnectionEvent,
+  buildToolCallEvent,
+  buildToolDiscoveryEvent,
+} from "../core/events.js";
 import { generateSessionId, generateTraceId } from "../core/ids.js";
 import { detectPlatform } from "../core/platform.js";
 import type { SessionState, YavioConfig } from "../core/types.js";
@@ -229,10 +233,14 @@ const globalSessionMap = new Map<string, SessionState>();
 /** Tracks session IDs that have already emitted a connection event. */
 const emittedConnections = new Set<string>();
 
+/** Tracks tool names that have already emitted a tool_discovery event (global dedup). */
+const emittedToolDiscoveries = new Set<string>();
+
 /** @internal Reset the global session map — exposed for testing only. */
 export function _resetSessionMap(): void {
   globalSessionMap.clear();
   emittedConnections.clear();
+  emittedToolDiscoveries.clear();
 }
 
 /**
@@ -292,6 +300,25 @@ export function createProxy<T extends McpServer>(
   const originalRegisterTool = server.registerTool.bind(server);
   const originalConnect = server.connect.bind(server);
 
+  /** Emit a tool_discovery event via the transport. */
+  const emitDiscovery = (
+    toolName: string,
+    description: string | undefined,
+    inputSchema: Record<string, unknown> | undefined,
+  ) => {
+    transport.send([
+      buildToolDiscoveryEvent(
+        {
+          traceId: generateTraceId(),
+          sessionId: session.sessionId,
+          sdkVersion,
+          platform: session.platform,
+        },
+        { toolName, description, inputSchema },
+      ),
+    ]);
+  };
+
   return new Proxy<T>(server, {
     get(target, prop, receiver) {
       if (prop === "tool") {
@@ -314,7 +341,34 @@ export function createProxy<T extends McpServer>(
             tokenCache,
           );
 
-          return (originalTool as (...a: unknown[]) => unknown)(...args);
+          const result = (originalTool as (...a: unknown[]) => unknown)(...args);
+
+          // Emit tool_discovery event (once per tool name)
+          if (!emittedToolDiscoveries.has(toolName)) {
+            emittedToolDiscoveries.add(toolName);
+            let description: string | undefined;
+            let inputSchema: Record<string, unknown> | undefined;
+            // Scan args between name and callback for description + schema
+            for (let i = 1; i < cbIndex; i++) {
+              const arg = args[i];
+              if (typeof arg === "string" && !description) {
+                description = arg;
+              } else if (typeof arg === "object" && arg !== null) {
+                const schema = extractParamKeys(arg);
+                if (schema) {
+                  inputSchema = schema;
+                } else if (!description) {
+                  const obj = arg as Record<string, unknown>;
+                  if (typeof obj.description === "string") {
+                    description = obj.description;
+                  }
+                }
+              }
+            }
+            emitDiscovery(toolName, description, inputSchema);
+          }
+
+          return result;
         };
       }
 
@@ -322,9 +376,9 @@ export function createProxy<T extends McpServer>(
         return (...args: unknown[]) => {
           // registerTool(name: string, config: object, cb: Function)
           // Callback is always the 3rd argument (index 2)
+          const toolName = typeof args[0] === "string" ? args[0] : "unknown";
           if (args.length >= 3 && typeof args[2] === "function") {
             const originalCb = args[2] as (...cbArgs: unknown[]) => unknown;
-            const toolName = typeof args[0] === "string" ? args[0] : "unknown";
             args[2] = wrapToolCallback(
               originalCb,
               toolName,
@@ -337,7 +391,27 @@ export function createProxy<T extends McpServer>(
             );
           }
 
-          return (originalRegisterTool as (...a: unknown[]) => unknown)(...args);
+          const result = (originalRegisterTool as (...a: unknown[]) => unknown)(...args);
+
+          // Emit tool_discovery event (once per tool name)
+          if (!emittedToolDiscoveries.has(toolName)) {
+            emittedToolDiscoveries.add(toolName);
+            let description: string | undefined;
+            let inputSchema: Record<string, unknown> | undefined;
+            const configArg = args[1];
+            if (configArg && typeof configArg === "object") {
+              const obj = configArg as Record<string, unknown>;
+              if (typeof obj.description === "string") {
+                description = obj.description;
+              }
+              if (obj.inputSchema && typeof obj.inputSchema === "object") {
+                inputSchema = obj.inputSchema as Record<string, unknown>;
+              }
+            }
+            emitDiscovery(toolName, description, inputSchema);
+          }
+
+          return result;
         };
       }
 
@@ -375,6 +449,28 @@ export function createProxy<T extends McpServer>(
       return Reflect.get(target, prop, receiver);
     },
   });
+}
+
+/**
+ * Extract parameter keys from a ZodRawShape (used in tool() overloads).
+ * Returns a minimal JSON Schema-like representation with property names,
+ * or undefined if the arg is not a ZodRawShape.
+ */
+function extractParamKeys(obj: unknown): Record<string, unknown> | undefined {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return undefined;
+  const record = obj as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length === 0) return undefined;
+  // Heuristic: ZodRawShape values have a _def property (Zod internal marker)
+  const isZodShape = keys.some(
+    (k) => record[k] && typeof record[k] === "object" && "_def" in (record[k] as object),
+  );
+  if (!isZodShape) return undefined;
+  const properties: Record<string, unknown> = {};
+  for (const key of keys) {
+    properties[key] = {};
+  }
+  return { type: "object", properties };
 }
 
 /** Extract top-level key names from tool args (values set to `true`). */

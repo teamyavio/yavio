@@ -22,6 +22,7 @@ declare module "fastify" {
     jwtSecret: string;
     corsOrigins: string[];
     batchWriter?: BatchWriter;
+    toolRegistryWriter?: BatchWriter;
     rateLimiter?: RateLimiter;
   }
 

@@ -132,9 +132,12 @@ export const WidgetResponseEvent = BaseEvent.extend({
 });
 export type WidgetResponseEvent = z.infer<typeof WidgetResponseEvent>;
 
-/** tool_discovery — fires on tools/list request interception. */
+/** tool_discovery — fires when a tool is registered on the server. */
 export const ToolDiscoveryEvent = BaseEvent.extend({
   event_type: z.literal("tool_discovery"),
+  tool_name: z.string().min(1).max(256),
+  description: z.string().max(2048).optional(),
+  input_schema: z.record(z.unknown()).optional(),
 });
 export type ToolDiscoveryEvent = z.infer<typeof ToolDiscoveryEvent>;
 

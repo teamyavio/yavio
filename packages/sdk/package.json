@@ -1,6 +1,6 @@
 {
   "name": "@yavio/sdk",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "exports": {
@@ -50,6 +50,7 @@
     "jsdom": "^28.1.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "zod": "^4.3.6"
   }
 }
