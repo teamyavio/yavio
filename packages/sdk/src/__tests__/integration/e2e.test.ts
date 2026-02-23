@@ -1,9 +1,9 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { YavioConfig } from "../../core/types.js";
-import { createProxy } from "../../server/proxy.js";
+import { _resetSessionMap, createProxy } from "../../server/proxy.js";
 import { HttpTransport } from "../../transport/http.js";
 
 interface ReceivedBatch {
@@ -64,6 +64,10 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     await new Promise<void>((resolve) => {
       mockServer.close(() => resolve());
     });
+  });
+
+  beforeEach(() => {
+    _resetSessionMap();
   });
 
   it("sends tool_call events to the ingest API on tool invocation", async () => {

@@ -52,7 +52,7 @@ async function getWidgetToken(
 function wrapToolCallback(
   originalCb: (...cbArgs: unknown[]) => unknown,
   toolName: string,
-  getSession: () => SessionState,
+  getSession: (mcpSessionId?: string) => SessionState,
   server: McpServer,
   config: YavioConfig,
   transport: Transport,
@@ -60,7 +60,45 @@ function wrapToolCallback(
   tokenCache: { current: CachedWidgetToken | null },
 ): (...cbArgs: unknown[]) => Promise<unknown> {
   return async (...cbArgs: unknown[]) => {
-    const session = getSession();
+    // Extract MCP session ID from the extra parameter (RequestHandlerExtra.sessionId)
+    // This is the most reliable correlation signal — set from the Mcp-Session-Id header
+    const extra = cbArgs[cbArgs.length - 1];
+    const mcpSessionId =
+      extra && typeof extra === "object" ? (extra as Record<string, unknown>).sessionId : undefined;
+
+    // Fall back to OpenAI's conversation-scoped session from _meta
+    // OpenAI re-initializes MCP per tool call but sends a stable "openai/session" in _meta
+    const extraMeta =
+      extra && typeof extra === "object" ? (extra as Record<string, unknown>)._meta : undefined;
+    const openaiSessionId =
+      extraMeta && typeof extraMeta === "object"
+        ? (extraMeta as Record<string, unknown>)["openai/session"]
+        : undefined;
+
+    const sessionKey =
+      typeof mcpSessionId === "string"
+        ? mcpSessionId
+        : typeof openaiSessionId === "string"
+          ? openaiSessionId
+          : undefined;
+    const session = getSession(sessionKey);
+
+    // Emit deferred connection event on the first tool call for this session.
+    // Deferred from connect() so that OpenAI's per-tool-call reconnects don't
+    // spam a connection event for every tool call in the same conversation.
+    if (!emittedConnections.has(session.sessionId)) {
+      emittedConnections.add(session.sessionId);
+      const connectionEvent = buildConnectionEvent(
+        {
+          traceId: generateTraceId(),
+          sessionId: session.sessionId,
+          platform: session.platform,
+          sdkVersion,
+        },
+        {},
+      );
+      transport.send([connectionEvent]);
+    }
 
     // Lazy platform detection — clientInfo is available after initialize
     if (session.platform === "unknown") {
@@ -86,9 +124,7 @@ function wrapToolCallback(
       sdkVersion,
     };
 
-    // Find the "extra" parameter — it's the last argument to the callback
-    // For zero-arg tools it's the only arg, for schema tools it's the second
-    const extra = cbArgs[cbArgs.length - 1];
+    // Inject ctx.yavio into the extra parameter (already extracted above)
     if (extra && typeof extra === "object") {
       (extra as Record<string, unknown>).yavio = createYavioContext(store);
     }
@@ -174,6 +210,31 @@ function wrapToolCallback(
   };
 }
 
+/** Maximum number of MCP sessions to cache for session reuse. */
+const MAX_SESSION_MAP_SIZE = 1000;
+
+/**
+ * Module-level session map: MCP session ID → Yavio SessionState.
+ *
+ * Shared across all proxy instances so that the common pattern of creating a
+ * new McpServer + withYavio() per HTTP connection still correlates tool calls
+ * belonging to the same MCP session.
+ *
+ * Correlation uses extra.sessionId (from RequestHandlerExtra, set via the
+ * Mcp-Session-Id header) as the primary key, with transport.sessionId as
+ * fallback. Both are checked lazily at tool-call time via getSession().
+ */
+const globalSessionMap = new Map<string, SessionState>();
+
+/** Tracks session IDs that have already emitted a connection event. */
+const emittedConnections = new Set<string>();
+
+/** @internal Reset the global session map — exposed for testing only. */
+export function _resetSessionMap(): void {
+  globalSessionMap.clear();
+  emittedConnections.clear();
+}
+
 /**
  * Create a Proxy around McpServer that intercepts tool()/registerTool() and connect()
  * to inject Yavio instrumentation transparently.
@@ -196,7 +257,37 @@ export function createProxy<T extends McpServer>(
   // Widget token cache — shared across tool calls, reset on reconnect
   const tokenCache: { current: CachedWidgetToken | null } = { current: null };
 
-  const getSession = () => session;
+  // Reference to the current MCP transport for lazy sessionId lookup
+  let currentMcpTransport: Record<string, unknown> | null = null;
+
+  const getSession = (extraSessionId?: string) => {
+    // Prefer extra.sessionId (from MCP request context), fall back to transport.sessionId
+    const mcpSessionId =
+      extraSessionId ??
+      (currentMcpTransport && typeof currentMcpTransport.sessionId === "string"
+        ? (currentMcpTransport.sessionId as string)
+        : undefined);
+
+    if (mcpSessionId) {
+      const existing = globalSessionMap.get(mcpSessionId);
+      if (existing && existing !== session) {
+        // Reuse the existing session — preserves userId, userTraits, stepSequence
+        session = existing;
+      } else if (!existing) {
+        // First time seeing this MCP session — register current session
+        if (globalSessionMap.size >= MAX_SESSION_MAP_SIZE) {
+          // Evict oldest entry (first key in insertion order)
+          const firstKey = globalSessionMap.keys().next().value as string;
+          const evicted = globalSessionMap.get(firstKey);
+          if (evicted) emittedConnections.delete(evicted.sessionId);
+          globalSessionMap.delete(firstKey);
+        }
+        globalSessionMap.set(mcpSessionId, session);
+      }
+    }
+    return session;
+  };
+
   const originalTool = server.tool.bind(server);
   const originalRegisterTool = server.registerTool.bind(server);
   const originalConnect = server.connect.bind(server);
@@ -252,10 +343,12 @@ export function createProxy<T extends McpServer>(
 
       if (prop === "connect") {
         return async (mcpTransport: unknown) => {
-          // Extract platform signals from the transport
-          const transportObj = mcpTransport as Record<string, unknown>;
+          // Store transport reference for lazy sessionId lookup in getSession()
+          currentMcpTransport = mcpTransport as Record<string, unknown>;
           const sessionIdFromTransport =
-            typeof transportObj.sessionId === "string" ? transportObj.sessionId : undefined;
+            typeof currentMcpTransport.sessionId === "string"
+              ? currentMcpTransport.sessionId
+              : undefined;
 
           session = {
             sessionId: sessionIdFromTransport ?? generateSessionId(),
@@ -272,17 +365,8 @@ export function createProxy<T extends McpServer>(
             mcpTransport as Parameters<typeof originalConnect>[0],
           );
 
-          // Emit connection event
-          const connectionEvent = buildConnectionEvent(
-            {
-              traceId: generateTraceId(),
-              sessionId: session.sessionId,
-              platform: session.platform,
-              sdkVersion,
-            },
-            {},
-          );
-          transport.send([connectionEvent]);
+          // Connection event is deferred to the first tool call (see wrapToolCallback)
+          // so that OpenAI's per-tool-call reconnects don't produce duplicate events.
 
           return result;
         };

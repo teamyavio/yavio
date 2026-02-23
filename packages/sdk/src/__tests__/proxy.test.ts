@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BaseEvent } from "@yavio/shared/events";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CaptureConfig, YavioConfig } from "../core/types.js";
-import { createProxy } from "../server/proxy.js";
+import { _resetSessionMap, createProxy } from "../server/proxy.js";
 import { mintWidgetToken } from "../server/token.js";
 import type { Transport } from "../transport/types.js";
 
@@ -322,5 +322,287 @@ describe("createProxy — widget config injection", () => {
 
     // mintWidgetToken should only have been called once
     expect(mockedMint).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createProxy — session reuse", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue(null);
+    _resetSessionMap();
+  });
+
+  function makeExtra(overrides?: Record<string, unknown>) {
+    return {
+      signal: new AbortController().signal,
+      requestId: "req-sess",
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+      ...overrides,
+    };
+  }
+
+  /** Create a new McpServer + proxy pair (simulates the getServer() pattern). */
+  function createServerAndProxy(yavioTransport: Transport) {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const proxy = createProxy(server, testConfig, yavioTransport, "0.0.1");
+    proxy.tool("tool_a", (extra) => ({
+      content: [{ type: "text", text: "a" }],
+    }));
+    return { server, proxy };
+  }
+
+  it("reuses session via extra.sessionId across reconnections", async () => {
+    const yavioTransport = createMockTransport();
+
+    // First connection — new server + proxy (per-request HTTP pattern)
+    const { server: server1, proxy: proxy1 } = createServerAndProxy(yavioTransport);
+    const mcpTransport1 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
+    await proxy1.connect(mcpTransport1 as never);
+
+    // Tool call with MCP session ID in extra (from Mcp-Session-Id header)
+    const tool1 = getRegisteredTool(server1, "tool_a");
+    await tool1?.handler(makeExtra({ sessionId: "mcp-session-abc" }));
+
+    const firstSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+
+    // Second connection — new server + proxy, same MCP session
+    const { server: server2, proxy: proxy2 } = createServerAndProxy(yavioTransport);
+    const mcpTransport2 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
+    await proxy2.connect(mcpTransport2 as never);
+
+    const tool2 = getRegisteredTool(server2, "tool_a");
+    await tool2?.handler(makeExtra({ sessionId: "mcp-session-abc", requestId: "req-2" }));
+
+    const secondSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+
+    expect(firstSessionId).toBe(secondSessionId);
+  });
+
+  it("falls back to transport.sessionId when extra has no sessionId", async () => {
+    const yavioTransport = createMockTransport();
+
+    // First connection with transport-level sessionId
+    const { server: server1, proxy: proxy1 } = createServerAndProxy(yavioTransport);
+    const mcpTransport1 = { start: vi.fn(), close: vi.fn(), send: vi.fn() } as Record<
+      string,
+      unknown
+    >;
+    await proxy1.connect(mcpTransport1 as never);
+    mcpTransport1.sessionId = "mcp-transport-abc";
+
+    const tool1 = getRegisteredTool(server1, "tool_a");
+    await tool1?.handler(makeExtra());
+
+    const firstSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+
+    // Second connection with same transport sessionId
+    const { server: server2, proxy: proxy2 } = createServerAndProxy(yavioTransport);
+    const mcpTransport2 = { start: vi.fn(), close: vi.fn(), send: vi.fn() } as Record<
+      string,
+      unknown
+    >;
+    await proxy2.connect(mcpTransport2 as never);
+    mcpTransport2.sessionId = "mcp-transport-abc";
+
+    const tool2 = getRegisteredTool(server2, "tool_a");
+    await tool2?.handler(makeExtra({ requestId: "req-2" }));
+
+    const secondSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+
+    expect(firstSessionId).toBe(secondSessionId);
+  });
+
+  it("creates separate sessions for different extra.sessionIds", async () => {
+    const yavioTransport = createMockTransport();
+
+    // First connection — MCP session "alpha"
+    const { server: server1, proxy: proxy1 } = createServerAndProxy(yavioTransport);
+    const mcpTransport1 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
+    await proxy1.connect(mcpTransport1 as never);
+
+    const tool1 = getRegisteredTool(server1, "tool_a");
+    await tool1?.handler(makeExtra({ sessionId: "mcp-session-alpha" }));
+
+    const firstSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+
+    // Second connection — different MCP session "beta"
+    const { server: server2, proxy: proxy2 } = createServerAndProxy(yavioTransport);
+    const mcpTransport2 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
+    await proxy2.connect(mcpTransport2 as never);
+
+    const tool2 = getRegisteredTool(server2, "tool_a");
+    await tool2?.handler(makeExtra({ sessionId: "mcp-session-beta", requestId: "req-3" }));
+
+    const secondSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+
+    expect(firstSessionId).not.toBe(secondSessionId);
+  });
+
+  it("works without any sessionId (stateless mode)", async () => {
+    const yavioTransport = createMockTransport();
+
+    // First connection — no sessionId anywhere
+    const { server: server1, proxy: proxy1 } = createServerAndProxy(yavioTransport);
+    const mcpTransport1 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
+    await proxy1.connect(mcpTransport1 as never);
+
+    const tool1 = getRegisteredTool(server1, "tool_a");
+    await tool1?.handler(makeExtra());
+
+    const firstSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+
+    // Second connection — also no sessionId
+    const { server: server2, proxy: proxy2 } = createServerAndProxy(yavioTransport);
+    const mcpTransport2 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
+    await proxy2.connect(mcpTransport2 as never);
+
+    const tool2 = getRegisteredTool(server2, "tool_a");
+    await tool2?.handler(makeExtra({ requestId: "req-4" }));
+
+    const secondSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+
+    // Different sessions since there's no MCP session ID to correlate
+    expect(firstSessionId).not.toBe(secondSessionId);
+  });
+
+  it("reuses session via _meta['openai/session'] across reconnections", async () => {
+    const yavioTransport = createMockTransport();
+
+    // First connection — OpenAI re-initializes per tool call, no Mcp-Session-Id
+    const { server: server1, proxy: proxy1 } = createServerAndProxy(yavioTransport);
+    const mcpTransport1 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
+    await proxy1.connect(mcpTransport1 as never);
+
+    const tool1 = getRegisteredTool(server1, "tool_a");
+    await tool1?.handler(
+      makeExtra({
+        _meta: {
+          "openai/session": "v1/conversation-abc",
+          "openai/subject": "v1/user-xyz",
+        },
+      }),
+    );
+
+    const firstSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+
+    // Second connection — new server + proxy, same OpenAI session
+    const { server: server2, proxy: proxy2 } = createServerAndProxy(yavioTransport);
+    const mcpTransport2 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
+    await proxy2.connect(mcpTransport2 as never);
+
+    const tool2 = getRegisteredTool(server2, "tool_a");
+    await tool2?.handler(
+      makeExtra({
+        requestId: "req-2",
+        _meta: {
+          "openai/session": "v1/conversation-abc",
+          "openai/subject": "v1/user-xyz",
+        },
+      }),
+    );
+
+    const secondSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+
+    expect(firstSessionId).toBe(secondSessionId);
+  });
+
+  it("prefers extra.sessionId over _meta['openai/session']", async () => {
+    const yavioTransport = createMockTransport();
+
+    // Connection with both MCP session ID and OpenAI session
+    const { server: server1, proxy: proxy1 } = createServerAndProxy(yavioTransport);
+    const mcpTransport1 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
+    await proxy1.connect(mcpTransport1 as never);
+
+    const tool1 = getRegisteredTool(server1, "tool_a");
+    await tool1?.handler(
+      makeExtra({
+        sessionId: "mcp-session-real",
+        _meta: { "openai/session": "v1/conversation-xyz" },
+      }),
+    );
+
+    const firstSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+
+    // Second connection — same MCP session, different OpenAI session
+    const { server: server2, proxy: proxy2 } = createServerAndProxy(yavioTransport);
+    const mcpTransport2 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
+    await proxy2.connect(mcpTransport2 as never);
+
+    const tool2 = getRegisteredTool(server2, "tool_a");
+    await tool2?.handler(
+      makeExtra({
+        sessionId: "mcp-session-real",
+        requestId: "req-2",
+        _meta: { "openai/session": "v1/different-conversation" },
+      }),
+    );
+
+    const secondSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+
+    // Should correlate on MCP session ID, not OpenAI session
+    expect(firstSessionId).toBe(secondSessionId);
+  });
+
+  it("creates separate sessions for different _meta['openai/session'] values", async () => {
+    const yavioTransport = createMockTransport();
+
+    // First connection — conversation alpha
+    const { server: server1, proxy: proxy1 } = createServerAndProxy(yavioTransport);
+    const mcpTransport1 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
+    await proxy1.connect(mcpTransport1 as never);
+
+    const tool1 = getRegisteredTool(server1, "tool_a");
+    await tool1?.handler(makeExtra({ _meta: { "openai/session": "v1/conversation-alpha" } }));
+
+    const firstSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+
+    // Second connection — conversation beta (different conversation, same user)
+    const { server: server2, proxy: proxy2 } = createServerAndProxy(yavioTransport);
+    const mcpTransport2 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
+    await proxy2.connect(mcpTransport2 as never);
+
+    const tool2 = getRegisteredTool(server2, "tool_a");
+    await tool2?.handler(
+      makeExtra({
+        requestId: "req-2",
+        _meta: { "openai/session": "v1/conversation-beta" },
+      }),
+    );
+
+    const secondSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+
+    expect(firstSessionId).not.toBe(secondSessionId);
+  });
+
+  it("caps session map size at MAX_SESSION_MAP_SIZE", async () => {
+    const yavioTransport = createMockTransport();
+
+    // Create 1001 connections with unique MCP session IDs via extra.sessionId
+    for (let i = 0; i < 1001; i++) {
+      const { server, proxy } = createServerAndProxy(yavioTransport);
+      const mcpTransport = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
+      await proxy.connect(mcpTransport as never);
+      const tool = getRegisteredTool(server, "tool_a");
+      await tool?.handler(makeExtra({ sessionId: `mcp-session-${i}`, requestId: `req-cap-${i}` }));
+    }
+
+    // Capture the original Yavio session ID for mcp-session-0
+    // Events: [connection_0, tool_call_0, connection_1, tool_call_1, ...]
+    // tool_call_0 is at index 1
+    const originalSessionId = (yavioTransport.sent[1] as unknown as BaseEvent[])[0].session_id;
+
+    // Reconnect with the very first MCP session ID — it should have been evicted
+    const { server, proxy } = createServerAndProxy(yavioTransport);
+    const mcpTransport = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
+    await proxy.connect(mcpTransport as never);
+    const tool = getRegisteredTool(server, "tool_a");
+    await tool?.handler(makeExtra({ sessionId: "mcp-session-0", requestId: "req-cap-final" }));
+
+    const finalSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+
+    // mcp-session-0 was evicted, so a new Yavio session was created
+    expect(finalSessionId).not.toBe(originalSessionId);
   });
 });
