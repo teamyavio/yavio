@@ -1,6 +1,6 @@
 {
   "name": "@yavio/db",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "exports": {
@@ -35,10 +35,10 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "test": "vitest run",
-    "migrate:postgres": "tsx src/migrate.ts",
-    "migrate:clickhouse": "tsx src/migrate-clickhouse.ts",
-    "db:generate": "drizzle-kit generate",
-    "db:studio": "drizzle-kit studio"
+    "migrate:postgres": "tsx --env-file=../../.env src/migrate.ts",
+    "migrate:clickhouse": "tsx --env-file=../../.env src/migrate-clickhouse.ts",
+    "db:generate": "dotenv -e ../../.env -- drizzle-kit generate",
+    "db:studio": "dotenv -e ../../.env -- drizzle-kit studio"
   },
   "dependencies": {
     "@clickhouse/client": "^1.8.1",

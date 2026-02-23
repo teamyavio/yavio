@@ -1,11 +1,11 @@
 {
   "name": "@yavio/docs",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "next build",
-    "dev": "next dev -p 3002",
+    "dev": "dotenv -e ../../.env -- next dev -p 3002",
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "generate:openapi": "tsx scripts/generate-openapi.ts",

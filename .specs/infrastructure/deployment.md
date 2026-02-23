@@ -190,64 +190,22 @@ A `docker-compose.prod.yml` provides production-ready overrides:
 | `STRIPE_WEBHOOK_SECRET` | No (Cloud) | - | Stripe webhook signing secret. Required when `YAVIO_CLOUD=true`. |
 | `STRIPE_PRO_PRICE_ID` | No (Cloud) | - | Stripe Price ID for the Cloud Pro usage-based plan. |
 
-### 9.1.5 `.env.example`
+### 9.1.5 `.env.example` File
 
-A `.env.example` file is included in the repository root to document all available environment variables and reduce onboarding friction. Copy it to `.env` and fill in the required values before running `docker-compose up`.
+All environment variables are defined in a single root `.env.example`. There are no per-package env files — all packages load from the root `.env` via `dotenv-cli` or `tsx --env-file` in their dev/migrate scripts. Docker Compose also reads from root `.env` automatically.
 
 ```bash
-# .env.example — Copy to .env and fill in required values
+# Generate .env with random secrets
+./scripts/setup-env.sh
 
-# === Required ===
-NEXTAUTH_SECRET=           # Session encryption secret (generate with: openssl rand -base64 32)
-JWT_SECRET=                # Widget JWT signing secret (generate with: openssl rand -base64 32). NEVER use the API key.
-API_KEY_HASH_SECRET=       # HMAC secret for API key hashing (generate with: openssl rand -base64 32)
-ENCRYPTION_KEY=            # AES-256-GCM key for OAuth token encryption (generate with: openssl rand -base64 32)
-
-# === Database Roles (see storage-layer.md §5.1.8 and §5.2.10) ===
-POSTGRES_SERVICE_PASSWORD=yavio_dev    # yavio_service: table owner, bypasses RLS
-POSTGRES_APP_PASSWORD=yavio_dev        # yavio_app: RLS enforced for user-facing queries
-CLICKHOUSE_ADMIN_PASSWORD=yavio_dev      # default: admin user, runs migrations
-CLICKHOUSE_INGEST_PASSWORD=yavio_dev     # yavio_ingest: INSERT only, no row policies
-CLICKHOUSE_DASHBOARD_PASSWORD=yavio_dev  # yavio_dashboard: SELECT only, row policies enforced
-
-# === Application ===
-NEXTAUTH_URL=http://localhost:3000
-
-# === Email / SMTP (optional — if unset, email features are disabled) ===
-# SMTP_HOST=                   # e.g., smtp.resend.com, email-smtp.us-east-1.amazonaws.com, smtp.gmail.com
-# SMTP_PORT=587                # 587 for STARTTLS, 465 for TLS
-# SMTP_USER=
-# SMTP_PASSWORD=
-# SMTP_FROM=noreply@example.com
-
-# === OAuth (optional) ===
-# GITHUB_CLIENT_ID=
-# GITHUB_CLIENT_SECRET=
-# GOOGLE_CLIENT_ID=
-# GOOGLE_CLIENT_SECRET=
-
-# === Data Retention ===
-# YAVIO_RETENTION_DAYS=90
-
-# === Enterprise / Cloud Pro (optional) ===
-# YAVIO_LICENSE_KEY=
-# LLM_API_KEY=
-# LLM_PROVIDER=openai
-
-# === Observability (optional) ===
-# LOG_LEVEL=info
-# SENTRY_DSN=
-# OTEL_EXPORTER_OTLP_ENDPOINT=
-
-# === Telemetry ===
-# YAVIO_TELEMETRY=true          # Set to false to disable anonymous usage telemetry
-
-# === Yavio Cloud only (never set by self-hosters) ===
-# YAVIO_CLOUD=true
-# STRIPE_SECRET_KEY=
-# STRIPE_WEBHOOK_SECRET=
-# STRIPE_PRO_PRICE_ID=
+# Or manually
+cp .env.example .env
+# Fill in the 4 required secrets (see comments in .env.example)
 ```
+
+The `setup-env.sh` script copies `.env.example` to `.env` and auto-generates `NEXTAUTH_SECRET`, `JWT_SECRET`, `API_KEY_HASH_SECRET`, and `ENCRYPTION_KEY` using `openssl rand -base64 32`.
+
+**Important:** `API_KEY_HASH_SECRET` is shared between the dashboard and ingest service for API key validation. The single `.env` file ensures they always match.
 
 ### 9.1.6 System Requirements (Self-Hosted)
 
@@ -275,7 +233,7 @@ Developer workstation                      Yavio Cloud
 Developer's MCP Server                      │
   │                                         │
   │ @yavio/sdk                              │
-  │   apiKey: "yav_proj_..."                │
+  │   apiKey: "yav_..."                │
   │   endpoint: (default: ingest.yavio.ai) │
   │   (auto-reads .yaviorc.json)            │
   │                                         │

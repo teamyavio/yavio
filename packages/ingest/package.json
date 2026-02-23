@@ -15,7 +15,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "test": "vitest run",
-    "dev": "tsx watch src/server.ts",
+    "dev": "dotenv -e ../../.env -- tsx watch src/server.ts",
     "start": "node dist/server.js"
   },
   "dependencies": {

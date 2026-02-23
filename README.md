@@ -9,6 +9,8 @@
   <img src="https://img.shields.io/badge/status-v0.1_alpha-orange" alt="v0.1 Alpha">
 </p>
 
+> **Alpha (v0.1)** — Yavio is under active development. APIs, configuration, and database schemas may change between releases without notice or migration paths. Do not use in production without pinning exact versions.
+
 ---
 
 Yavio is the first Analytics and Visibility layer for ChatGPT Apps and MCP Apps. It captures how users interact with your MCP tools and ChatGPT App widgets: tool calls, conversions, funnels, retention, errors — with a 3-line SDK integration and a full analytics dashboard.
@@ -85,9 +87,8 @@ That's it. View your analytics at [app.yavio.ai](https://app.yavio.ai).
 git clone https://github.com/yavio-ai/yavio-analytics.git
 cd yavio-analytics
 
-# Configure environment
-cp .env.example .env
-# Edit .env — fill in the required secrets (see comments in the file)
+# Generate .env with random secrets (or: cp .env.example .env && edit manually)
+./scripts/setup-env.sh
 
 # Start all services
 docker compose up -d
