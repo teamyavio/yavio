@@ -5,7 +5,7 @@ import { registerInit } from "./commands/init.js";
 import { registerLogs } from "./commands/logs.js";
 import { registerReset } from "./commands/reset.js";
 import { registerStatus } from "./commands/status.js";
-import { registerTelemetry } from "./commands/telemetry.js";
+
 import { registerUp } from "./commands/up.js";
 import { registerUpdate } from "./commands/update.js";
 
@@ -25,6 +25,5 @@ registerLogs(program);
 registerUpdate(program);
 registerReset(program);
 registerDoctor(program);
-registerTelemetry(program);
 
 program.parse();

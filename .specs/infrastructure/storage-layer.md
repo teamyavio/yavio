@@ -713,7 +713,7 @@ Fields are never removed within a MAJOR version. Instead, they go through a depr
 | **Removed** | Next MAJOR version | SDK stops sending the field. Ingestion API silently ignores it from older SDKs. ClickHouse column retained for historical queries but no longer written to. |
 | **Dropped** | After data retention window expires | Column dropped from ClickHouse via `ALTER TABLE DROP COLUMN` once all partitions containing the field have aged out. |
 
-**Telemetry-informed timing:** The anonymous telemetry system (see [telemetry.md](../telemetry.md)) reports `sdk_version` distribution across all deployments. A deprecated field is not moved to "Removed" until telemetry confirms <5% of active SDKs still send it, or the minimum deprecation window has elapsed — whichever comes later.
+**Version-informed timing:** A deprecated field is not moved to "Removed" until the minimum deprecation window has elapsed.
 
 ### 5.4.6 Renaming a Field
 
