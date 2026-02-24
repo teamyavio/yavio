@@ -1,26 +1,12 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const CONFIG_FILENAME = ".yaviorc.json";
-
-function globalDir(): string {
-  return join(homedir(), ".yavio");
-}
-
-function globalConfigPath(): string {
-  return join(globalDir(), "config.json");
-}
 
 export interface ProjectConfig {
   version: number;
   apiKey?: string;
   endpoint?: string;
-}
-
-export interface GlobalConfig {
-  telemetry?: boolean;
-  instanceId?: string;
 }
 
 /**
@@ -69,24 +55,4 @@ export function ensureGitignore(dir: string): void {
   } catch {
     writeFileSync(gitignorePath, `${CONFIG_FILENAME}\n`, "utf-8");
   }
-}
-
-/**
- * Read global config from `~/.yavio/config.json`.
- */
-export function readGlobalConfig(): GlobalConfig {
-  try {
-    const content = readFileSync(globalConfigPath(), "utf-8");
-    return JSON.parse(content) as GlobalConfig;
-  } catch {
-    return {};
-  }
-}
-
-/**
- * Write global config to `~/.yavio/config.json`.
- */
-export function writeGlobalConfig(data: GlobalConfig): void {
-  mkdirSync(globalDir(), { recursive: true });
-  writeFileSync(globalConfigPath(), `${JSON.stringify(data, null, 2)}\n`, "utf-8");
 }

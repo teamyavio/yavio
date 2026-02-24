@@ -2,13 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  ensureGitignore,
-  readConfig,
-  readGlobalConfig,
-  writeConfig,
-  writeGlobalConfig,
-} from "../util/config.js";
+import { ensureGitignore, readConfig, writeConfig } from "../util/config.js";
 
 describe("config utilities", () => {
   let tempDir: string;
@@ -91,34 +85,6 @@ describe("config utilities", () => {
       const content = readFileSync(join(tempDir, ".gitignore"), "utf-8");
       const count = content.split(".yaviorc.json").length - 1;
       expect(count).toBe(1);
-    });
-  });
-
-  describe("globalConfig", () => {
-    const originalHome = process.env.HOME;
-    let globalDir: string;
-
-    beforeEach(() => {
-      globalDir = mkdtempSync(join(tmpdir(), "yavio-global-test-"));
-      // Override HOME so readGlobalConfig/writeGlobalConfig use temp dir
-      // Note: These functions use homedir() which reads HOME env
-      process.env.HOME = globalDir;
-    });
-
-    afterEach(() => {
-      process.env.HOME = originalHome;
-      rmSync(globalDir, { recursive: true, force: true });
-    });
-
-    it("returns empty object when no global config exists", () => {
-      const config = readGlobalConfig();
-      expect(config).toEqual({});
-    });
-
-    it("writes and reads global config", () => {
-      writeGlobalConfig({ telemetry: false });
-      const config = readGlobalConfig();
-      expect(config.telemetry).toBe(false);
     });
   });
 });

@@ -99,16 +99,7 @@
 - Each check: pass/fail/warn with clear description
 - Unit tests: individual check logic (mocked), output formatting
 
-### Step 10 — `yavio telemetry`
-
-- `yavio telemetry status`: show enabled/disabled state and anonymous instance ID
-- `yavio telemetry disable`: set `telemetry: false` in config
-- `yavio telemetry enable`: set `telemetry: true` in config
-- Telemetry config stored in `~/.yavio/config.json` (global, not per-project)
-- Respects `YAVIO_TELEMETRY=false` env var (env takes precedence)
-- Unit tests: config read/write, env var override
-
-### Step 11 — Docker Compose Production Overrides
+### Step 10 — Docker Compose Production Overrides
 
 - Create `docker-compose.prod.yml` with production-ready overrides:
   - Resource limits: CPU and memory per service (sensible defaults)
@@ -120,7 +111,7 @@
 - Usage: `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d`
 - `yavio up --prod` flag: auto-includes production override file
 
-### Step 12 — CI Integration
+### Step 11 — CI Integration
 
 - Add `test-cli` job to `.github/workflows/ci.yml`:
   - Runs on `needs.detect.outputs.cli == 'true'`
@@ -129,9 +120,9 @@
 - Verify `@yavio/cli` builds in the monorepo `build` job
 - Add `@yavio/cli` to `typecheck` step sequence (after shared/db, before dashboard)
 
-### Step 13 — Tests
+### Step 12 — Tests
 
-- Unit tests per command: init, up, down, status, logs, update, reset, doctor, telemetry
+- Unit tests per command: init, up, down, status, logs, update, reset, doctor
 - Unit tests per utility: config, docker, http, output
 - All external calls (Docker, HTTP, filesystem) mocked in unit tests
 - Target: full coverage of command logic and edge cases

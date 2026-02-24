@@ -184,7 +184,6 @@ A `docker-compose.prod.yml` provides production-ready overrides:
 | `LOG_LEVEL` | No | `info` | Pino log level: `trace`, `debug`, `info`, `warn`, `error`, `fatal`. See [observability.md](./observability.md). |
 | `SENTRY_DSN` | No | - | Sentry DSN for error tracking. If unset, Sentry is disabled. See [observability.md §4](./observability.md#4-error-tracking). |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | No | - | OTLP endpoint for distributed tracing. If unset, tracing is disabled. See [observability.md §5](./observability.md#5-distributed-tracing). |
-| `YAVIO_TELEMETRY` | No | `true` | Anonymous usage telemetry. Set to `false` to disable. See [telemetry.md](../telemetry.md). |
 | `YAVIO_CLOUD` | No | - | Set to `true` on Yavio Cloud deployments. Enables billing UI and Stripe integration. Never set by self-hosters. |
 | `STRIPE_SECRET_KEY` | No (Cloud) | - | Stripe API secret key. Required when `YAVIO_CLOUD=true`. |
 | `STRIPE_WEBHOOK_SECRET` | No (Cloud) | - | Stripe webhook signing secret. Required when `YAVIO_CLOUD=true`. |

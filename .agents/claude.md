@@ -31,7 +31,7 @@ Developer's MCP Server              Yavio Platform
 | Component | Technology |
 |-----------|------------|
 | SDK (`@yavio/sdk`) | TypeScript, npm package. Server: `withYavio()` proxy. Widget: `useYavio()` React hook |
-| CLI (`@yavio/cli`) | TypeScript, npm package. Commands: `init`, `up`, `down`, `status`, `doctor` |
+| CLI (`@yavio/cli`) | TypeScript, npm package. Commands: `init`, `up`, `down`, `status`, `logs`, `update`, `reset`, `doctor` |
 | Ingestion API (`packages/ingest`) | Fastify (or Hono), TypeScript |
 | Dashboard (`packages/dashboard`) | Next.js 16 (App Router), React, TypeScript |
 | Analytics DB | ClickHouse (ReplacingMergeTree engine) |
@@ -88,7 +88,6 @@ Detailed technical specs live in `specs/`. Always consult the relevant spec befo
 | Metrics definitions | `specs/metrics/metrics.md` |
 | Event types | `specs/metrics/events.md` |
 | Error catalog | `specs/07_error-catalog.md` |
-| Telemetry | `specs/06_telemetry.md` |
 | Testing (overview) | `specs/03_testing.md` |
 | Design guide | `specs/dashboard/design-guide.md` |
 
@@ -102,6 +101,7 @@ Detailed technical specs live in `specs/`. Always consult the relevant spec befo
   - Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`, `ci`
   - Scopes: `sdk`, `ingest`, `dashboard`, `cli`, `docs`
 - **Branches:** `feat/`, `fix/`, `docs/`, `refactor/`, `test/`, `chore/`
+- **Git workflow:** Never commit directly to `main`. Always create a feature branch, push, and open a PR via `gh pr create`.
 
 ## Key Development Commands
 

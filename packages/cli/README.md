@@ -92,16 +92,6 @@ Diagnose common setup issues — checks Node.js version, Docker availability, co
 yavio doctor
 ```
 
-### `yavio telemetry`
-
-Manage anonymous usage telemetry.
-
-```bash
-yavio telemetry status
-yavio telemetry enable
-yavio telemetry disable
-```
-
 ## Global Options
 
 ```

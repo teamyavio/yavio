@@ -23,7 +23,6 @@ It consists of an open-source SDK (`@yavio/sdk`), a high-throughput event ingest
 | [03_testing.md](./03_testing.md) | Testing strategy overview with links to per-service details |
 | [04_roadmap.md](./04_roadmap.md) | Implementation roadmap overview with links to per-service details |
 | [05_appendix.md](./05_appendix.md) | Dependencies, performance targets, open questions |
-| [telemetry.md](./06_telemetry.md) | Anonymous usage telemetry (opt-out) from SDK and self-hosted instances |
 | [metrics/events.md](./metrics/events.md) | All captured event types and their fields |
 | [metrics/metrics.md](./metrics/metrics.md) | Derived metrics computed from events |
 | [error-catalog.md](./07_error-catalog.md) | Comprehensive error code catalog across all services (YAVIO-1000 through YAVIO-7999) |

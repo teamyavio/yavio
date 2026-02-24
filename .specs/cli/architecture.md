@@ -33,8 +33,7 @@ packages/cli/
 │   │   ├── logs.ts             # yavio logs [service] — docker-compose logs wrapper
 │   │   ├── update.ts           # yavio update — pull latest Docker images and restart
 │   │   ├── reset.ts            # yavio reset — wipe data volumes and reinitialize
-│   │   ├── doctor.ts           # yavio doctor — environment diagnostics
-│   │   └── telemetry.ts       # yavio telemetry status/enable/disable
+│   │   └── doctor.ts           # yavio doctor — environment diagnostics
 │   └── util/
 │       ├── docker.ts           # Docker/docker-compose detection and invocation
 │       ├── config.ts           # .yaviorc.json read/write, config file discovery
@@ -87,9 +86,6 @@ The CLI does not depend on the SDK at runtime — it only creates the `.yaviorc.
 | `yavio update` | Pull latest Docker images and restart services | Self-hosted |
 | `yavio reset` | Wipe data volumes (ClickHouse events, PostgreSQL app data) and reinitialize | Self-hosted |
 | `yavio doctor` | Diagnose common issues: Docker availability, port conflicts, connectivity, SDK version | Troubleshooting |
-| `yavio telemetry status` | Show telemetry status (enabled/disabled) and instance ID | Telemetry |
-| `yavio telemetry disable` | Disable anonymous usage telemetry | Telemetry |
-| `yavio telemetry enable` | Re-enable anonymous usage telemetry | Telemetry |
 
 ## 8.2 yavio init
 
