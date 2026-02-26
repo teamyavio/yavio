@@ -51,6 +51,7 @@ describe("CORS", () => {
     });
     expect(r.statusCode).toBe(204);
     expect(r.headers["access-control-allow-origin"]).toBe("https://example.com");
+    expect(r.headers["access-control-allow-credentials"]).toBe("true");
     expect(r.headers["access-control-allow-methods"]).toContain("POST");
     expect(r.headers["access-control-allow-headers"]).toContain("Authorization");
   });

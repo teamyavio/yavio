@@ -6,7 +6,6 @@ export interface AppConfig {
   clickhouseUrl: string;
   apiKeyHashSecret: string;
   jwtSecret: string;
-  corsOrigins: string[];
 }
 
 export function loadConfig(): AppConfig {
@@ -49,9 +48,5 @@ export function loadConfig(): AppConfig {
     });
   }
 
-  const corsOrigins = process.env.CORS_ORIGINS
-    ? process.env.CORS_ORIGINS.split(",").map((o) => o.trim())
-    : ["*"];
-
-  return { port, databaseUrl, clickhouseUrl, apiKeyHashSecret, jwtSecret, corsOrigins };
+  return { port, databaseUrl, clickhouseUrl, apiKeyHashSecret, jwtSecret };
 }

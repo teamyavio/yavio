@@ -37,8 +37,6 @@ export interface CreateAppOptions {
   toolRegistryWriter?: BatchWriter;
   /** Pre-built rate limiter (for testing). */
   rateLimiter?: RateLimiter;
-  /** Allowed CORS origins. Defaults to `["*"]` (all origins). */
-  corsOrigins?: string[];
   /** Enable Fastify request logging. Defaults to true. */
   logger?: boolean;
 }
@@ -58,13 +56,10 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     throw new Error("jwtSecret is required");
   }
 
-  const corsOrigins = options.corsOrigins ?? ["*"];
-
   app.decorate("db", db);
   app.decorate("clickhouse", clickhouse);
   app.decorate("apiKeyResolver", apiKeyResolver);
   app.decorate("jwtSecret", jwtSecret);
-  app.decorate("corsOrigins", corsOrigins);
 
   if (options.batchWriter) {
     app.decorate("batchWriter", options.batchWriter);

@@ -48,7 +48,6 @@ async function main() {
     clickhouseUrl: config.clickhouseUrl,
     apiKeyHashSecret: config.apiKeyHashSecret,
     jwtSecret: config.jwtSecret,
-    corsOrigins: config.corsOrigins,
     clickhouse,
     batchWriter,
     toolRegistryWriter,

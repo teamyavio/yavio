@@ -572,7 +572,6 @@ Errors related to platform infrastructure, deployment, health checks, and cross-
 
 | Code | HTTP | Message | Description | Recovery |
 |------|------|---------|-------------|----------|
-| `YAVIO-7400` | 403 | CORS origin not allowed | Widget request `Origin` header is not in the allowed origins list. | Add the origin to `YAVIO_CORS_ORIGINS` or project settings in the dashboard. |
 | `YAVIO-7401` | 405 | CORS method not allowed | Request method is not in `Access-Control-Allow-Methods`. | Only `POST` and `OPTIONS` are allowed on ingestion endpoints. |
 
 ### Catch-All (7999)
