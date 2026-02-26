@@ -152,7 +152,7 @@ The ingestion API must accept cross-origin requests from widget iframes. CORS he
 | `https://claude.ai` | Claude |
 | `https://cursor.sh` | Cursor |
 
-Additional origins can be configured per project via the dashboard settings or the `YAVIO_CORS_ORIGINS` environment variable (comma-separated list). This allows developers to add custom domains for self-hosted or development environments while keeping the default restrictive.
+The ingestion API reflects all origins (`origin: true`) with credentials support, so no additional CORS configuration is needed. Auth is enforced via API keys and JWTs, not origin restrictions.
 
 ## 4.5 Security Model
 

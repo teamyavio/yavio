@@ -72,7 +72,6 @@ services:
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET}
       JWT_SECRET: ${JWT_SECRET}
       PORT: "3001"
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
     ports:
       - "${INGEST_PORT:-3001}:3001"
     networks:

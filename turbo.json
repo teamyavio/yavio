@@ -19,7 +19,6 @@
     "SMTP_PASSWORD",
     "SMTP_FROM",
     "PORT",
-    "CORS_ORIGINS",
     "NODE_ENV"
   ],
   "tasks": {

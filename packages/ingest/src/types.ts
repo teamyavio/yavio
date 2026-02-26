@@ -20,7 +20,6 @@ declare module "fastify" {
     clickhouse: ClickHouseClient;
     apiKeyResolver: ApiKeyResolver;
     jwtSecret: string;
-    corsOrigins: string[];
     batchWriter?: BatchWriter;
     toolRegistryWriter?: BatchWriter;
     rateLimiter?: RateLimiter;
