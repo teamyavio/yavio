@@ -3,6 +3,13 @@ import type { BaseEvent } from "@yavio/shared/events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { _resetWidgetInstance, useYavio } from "../../react/hook.js";
 
+const FULL_CONFIG = {
+  token: "jwt_integration",
+  endpoint: "http://ingest.test/v1/events",
+  traceId: "tr_int",
+  sessionId: "ses_int",
+};
+
 describe("React Widget SDK Integration", () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
   let sentBatches: Array<{ events: BaseEvent[]; sdk_version: string; sent_at: string }>;
@@ -29,18 +36,10 @@ describe("React Widget SDK Integration", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
-    window.__YAVIO__ = undefined;
   });
 
   it("full flow: config → init → identify → step → track → conversion → flush", async () => {
-    window.__YAVIO__ = {
-      token: "jwt_integration",
-      endpoint: "http://ingest.test/v1/events",
-      traceId: "tr_int",
-      sessionId: "ses_int",
-    };
-
-    const { result } = renderHook(() => useYavio());
+    const { result } = renderHook(() => useYavio(FULL_CONFIG));
 
     result.current.identify("user42", { plan: "pro" });
     result.current.step("onboarding_start");
@@ -85,27 +84,8 @@ describe("React Widget SDK Integration", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("window.__YAVIO__ is deleted after initialization", () => {
-    window.__YAVIO__ = {
-      token: "jwt_test",
-      endpoint: "http://test/v1/events",
-      traceId: "tr_test",
-      sessionId: "ses_test",
-    };
-
-    renderHook(() => useYavio());
-    expect(window.__YAVIO__).toBeUndefined();
-  });
-
   it("events contain valid UUIDs as event_id", async () => {
-    window.__YAVIO__ = {
-      token: "jwt_test",
-      endpoint: "http://test/v1/events",
-      traceId: "tr_test",
-      sessionId: "ses_test",
-    };
-
-    const { result } = renderHook(() => useYavio());
+    const { result } = renderHook(() => useYavio(FULL_CONFIG));
     result.current.track("test");
 
     await vi.advanceTimersByTimeAsync(5_000);
@@ -118,14 +98,7 @@ describe("React Widget SDK Integration", () => {
   });
 
   it("step_sequence starts at 1 and increments", async () => {
-    window.__YAVIO__ = {
-      token: "jwt_test",
-      endpoint: "http://test/v1/events",
-      traceId: "tr_test",
-      sessionId: "ses_test",
-    };
-
-    const { result } = renderHook(() => useYavio());
+    const { result } = renderHook(() => useYavio(FULL_CONFIG));
     result.current.step("a");
     result.current.step("b");
 
@@ -141,14 +114,7 @@ describe("React Widget SDK Integration", () => {
   });
 
   it("sdk_version is included in events", async () => {
-    window.__YAVIO__ = {
-      token: "jwt_test",
-      endpoint: "http://test/v1/events",
-      traceId: "tr_test",
-      sessionId: "ses_test",
-    };
-
-    const { result } = renderHook(() => useYavio());
+    const { result } = renderHook(() => useYavio(FULL_CONFIG));
     result.current.track("test");
 
     await vi.advanceTimersByTimeAsync(5_000);

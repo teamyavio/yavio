@@ -111,9 +111,9 @@ function createState(config: WidgetConfig): WidgetState {
 /**
  * React hook for Yavio widget tracking.
  *
- * Auto-detects configuration injected by the server-side `withYavio()` proxy
- * via `window.__YAVIO__`. Returns a singleton instance shared across all
- * consumers. Cleans up transport and auto-capture listeners on unmount.
+ * Resolves configuration from tool result metadata (`_meta.yavio`) or explicit
+ * fields. Returns a singleton instance shared across all consumers. Cleans up
+ * transport and auto-capture listeners on unmount.
  *
  * If no configuration is found, returns a no-op instance that silently
  * discards all events (prevents widget crashes in dev/test).
