@@ -75,8 +75,8 @@ Run against real Docker services using Testcontainers or a shared `docker-compos
 | Server SDK → ClickHouse | `withYavio()` wraps tool → tool called → SDK flushes → query ClickHouse | Event row exists with correct `project_id`, `event_type=tool_call`, `trace_id` |
 | Widget → ClickHouse | Mint widget JWT → POST widget event to ingest → query ClickHouse | Widget event exists, `source=widget`, `trace_id` matches JWT |
 | Trace correlation | Server tool call + widget events share `trace_id` → query by trace | Both server and widget events returned, ordered by timestamp |
-| Identify propagation | `ctx.yavio.identify(userId, traits)` → subsequent events | All events after identify carry `user_id`, `user_traits` populated |
-| Conversion tracking | `ctx.yavio.conversion("purchase", { value: 29.99, currency: "USD" })` | Event has `conversion_value=29.99`, `conversion_currency=USD` |
+| Identify propagation | `yavio.identify(userId, traits)` → subsequent events | All events after identify carry `user_id`, `user_traits` populated |
+| Conversion tracking | `yavio.conversion("purchase", { value: 29.99, currency: "USD" })` | Event has `conversion_value=29.99`, `conversion_currency=USD` |
 | Materialized views | Insert events → wait for MV refresh → query `sessions_mv` and `users_mv` | Aggregated rows match expected counts and sums |
 
 ### Dashboard Query Accuracy

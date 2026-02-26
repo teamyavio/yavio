@@ -12,7 +12,7 @@ Here's what happens when a user interacts with your MCP app:
 1. User sends a prompt to the AI platform (ChatGPT, Claude, Cursor, etc.)
 2. The AI platform invokes an MCP tool — `withYavio()` intercepts the call
 3. The proxy generates a `trace_id` (e.g., `tr_` + a random ID) and inherits the `session_id` from the current MCP connection
-4. The tool handler executes — any `ctx.yavio.step()` calls inherit the trace ID
+4. The tool handler executes — any `yavio.step()` calls inherit the trace ID
 5. If the tool returns a widget response, the proxy mints a short-lived widget JWT
 6. The proxy injects `window.__YAVIO__` with the trace ID, session ID, widget JWT, and endpoint
 7. The widget renders and initializes `useYavio()`, which reads the injected config
@@ -53,7 +53,7 @@ Both server and widget events share the same `session_id`. The `trace_id` provid
 
 ## Step Sequencing
 
-When you call `ctx.yavio.step()` or `useYavio().step()`, each step receives an auto-incrementing `step_sequence` number. On the server, the sequence starts at 0 and increments with each step call within the trace. On the widget, the sequence continues from where the server left off (the starting value is passed via the trace ID context).
+When you call `yavio.step()` or `useYavio().step()`, each step receives an auto-incrementing `step_sequence` number. On the server, the sequence starts at 0 and increments with each step call within the trace. On the widget, the sequence continues from where the server left off (the starting value is passed via the trace ID context).
 
 This enables deterministic ordering even when multiple steps share the same millisecond timestamp, and ensures the combined funnel view displays steps in the correct order across server and widget boundaries.
 

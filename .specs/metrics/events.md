@@ -99,7 +99,7 @@ Fires on `tools/list` request interception. Tracks how often and when clients re
 
 ### step
 
-Funnel progression point. Called via `ctx.yavio.step()`.
+Funnel progression point. Called via `yavio.step()`.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -109,7 +109,7 @@ Funnel progression point. Called via `ctx.yavio.step()`.
 
 ### track
 
-Generic custom event. Called via `ctx.yavio.track()`.
+Generic custom event. Called via `yavio.track()`.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -118,7 +118,7 @@ Generic custom event. Called via `ctx.yavio.track()`.
 
 ### conversion
 
-Revenue attribution event. Called via `ctx.yavio.conversion()`.
+Revenue attribution event. Called via `yavio.conversion()`.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -129,7 +129,7 @@ Revenue attribution event. Called via `ctx.yavio.conversion()`.
 
 ### identify
 
-User identification event. Called via `ctx.yavio.identify()`.
+User identification event. Called via `yavio.identify()`.
 
 | Field | Type | Description |
 |-------|------|-------------|

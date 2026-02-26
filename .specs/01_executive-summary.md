@@ -54,7 +54,7 @@ Self-hosted and Cloud run the same codebase. Cloud monetizes through usage-based
 |----------|--------|-----------|
 | Instrumentation | Proxy pattern (`withYavio` wraps `McpServer`) | Best DX: 3 lines, zero config. Abstraction layer allows transport-level interception later. |
 | User identification | `.identify(userId, traits)` on server + widget | Ties events to known users. Enables retention, cohorts, per-user analytics. Stored as `user_id` on events + `users_mv` materialized view. |
-| Instance access (server) | Context injection + AsyncLocalStorage singleton | `ctx.yavio` for scoped handler use; singleton for deep utility functions. |
+| Instance access (server) | AsyncLocalStorage singleton (`yavio`) | Import `yavio` from `@yavio/sdk` and call methods inside tool handlers. |
 | Instance access (widget) | `useYavio()` React hook with auto-config | Zero-config: API key and endpoint auto-injected by server via `window.__YAVIO__`. |
 | Event transport (server) | HTTP batch POST to ingestion API | SDK buffers events in memory, flushes to ingestion endpoint. Stateless, retryable. |
 | Event transport (widget) | Direct HTTP to ingestion API | Widget sends events directly to ingestion endpoint using short-lived JWT (minted by server-side proxy). Project API key never reaches the browser. |

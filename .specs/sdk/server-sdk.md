@@ -70,22 +70,22 @@ For business-level telemetry that the proxy cannot infer automatically, develope
 server.registerTool("book_room", {
   description: "Book a hotel room",
   inputSchema: { userId: z.string(), roomType: z.string() },
-}, async (params, ctx) => {
+}, async (params) => {
   // User identification: tie this session to a known user
-  ctx.yavio.identify(params.userId, { plan: "premium", country: "DE" });
+  yavio.identify(params.userId, { plan: "premium", country: "DE" });
 
   const rooms = await searchRooms(params);
 
   // Funnel step: mark progress through a user journey
-  ctx.yavio.step("rooms_found", { count: rooms.length });
+  yavio.step("rooms_found", { count: rooms.length });
 
   // Custom event: track anything not auto-captured
-  ctx.yavio.track("cache_hit", { provider: "memory" });
+  yavio.track("cache_hit", { provider: "memory" });
 
   const booking = await confirmBooking(rooms[0]);
 
   // Conversion: revenue attribution
-  ctx.yavio.conversion("booking_completed", {
+  yavio.conversion("booking_completed", {
     value: booking.price,
     currency: "EUR",
   });
@@ -94,8 +94,8 @@ server.registerTool("book_room", {
 });
 
 // The deprecated tool() API is also supported
-server.tool("book_room", async (params, ctx) => {
-  ctx.yavio.identify(params.userId);
+server.tool("book_room", async (params) => {
+  yavio.identify(params.userId);
   // ...
 });
 ```
@@ -284,7 +284,7 @@ The `traceId` is the correlation key that stitches server-side and widget-side e
 2. AI platform invokes MCP tool → `withYavio()` proxy intercepts
 3. Proxy generates traceId (e.g., `"tr_" + nanoid(21)`) and inherits `session_id` from the current MCP connection (see [Section 3.7](#37-session-lifecycle))
 4. Proxy starts AsyncLocalStorage context with traceId and sessionId
-5. Tool handler executes (`ctx.yavio.step()` calls inherit traceId)
+5. Tool handler executes (`yavio.step()` calls inherit traceId via AsyncLocalStorage)
 6. If tool returns widget: proxy calls `POST /v1/widget-tokens` with traceId and sessionId to mint a short-lived JWT
 7. Proxy injects `window.__YAVIO__` with traceId + sessionId + widget JWT + endpoint (API key stays on server)
 8. Widget renders in iframe, initializes `useYavio()` which reads `window.__YAVIO__`

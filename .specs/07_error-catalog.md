@@ -122,7 +122,7 @@ Errors originating in the `@yavio/sdk` SDK (both server and widget entry points)
 | `YAVIO-1102` | warn | Session ID derivation failed | Could not derive `session_id` from MCP `initialize` handshake. A random session ID is generated as fallback. | Ensure the MCP client sends a valid `initialize` request. |
 | `YAVIO-1103` | warn | Widget token minting failed | `POST /v1/widget-tokens` returned an error or was unreachable. Widget falls back to no-op mode. | Check ingestion API availability and API key validity. |
 | `YAVIO-1104` | warn | Widget config injection skipped | Response interception could not detect `_meta.ui.resourceUri` or injection failed. Widget operates without analytics. | Ensure tool response follows MCP widget response format. |
-| `YAVIO-1105` | warn | Context injection unavailable | `AsyncLocalStorage` context lost. Explicit tracking calls (`yavio.track()`, etc.) outside a request context will lack `traceId` and `sessionId`. | Call explicit methods from within a tool handler or use `ctx.yavio` instead of the module singleton. |
+| `YAVIO-1105` | warn | Context unavailable | `AsyncLocalStorage` context lost. Tracking calls (`yavio.track()`, etc.) outside a request context will lack `traceId` and `sessionId`. | Ensure calls are made from within a tool handler wrapped by `withYavio()`. |
 | `YAVIO-1106` | warn | Tool response inspection failed | Error inspecting tool handler response for size, content type, or zero-result detection. Event captured without response metadata. | Report the bug. |
 
 ### Transport & Delivery (1200&ndash;1299)

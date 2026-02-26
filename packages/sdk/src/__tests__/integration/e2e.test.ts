@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { YavioConfig } from "../../core/types.js";
+import { createYavioContext } from "../../server/context.js";
 import { _resetSessionMap, createProxy } from "../../server/proxy.js";
 import { HttpTransport } from "../../transport/http.js";
 
@@ -85,17 +86,10 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     };
     const proxy = createProxy(server, config, transport, "0.0.1");
 
+    const yavioCtx = createYavioContext();
     let handlerExecuted = false;
-    proxy.tool("search_rooms", { query: { type: "string" } as never }, (args, extra) => {
+    proxy.tool("search_rooms", { query: { type: "string" } as never }, (args) => {
       handlerExecuted = true;
-
-      const yavioCtx = (extra as Record<string, unknown>).yavio as {
-        identify: (id: string, traits?: Record<string, unknown>) => void;
-        step: (name: string, meta?: Record<string, unknown>) => void;
-        track: (event: string, props?: Record<string, unknown>) => void;
-      };
-      expect(yavioCtx).toBeDefined();
-      expect(typeof yavioCtx.identify).toBe("function");
 
       yavioCtx.identify("user-42", { plan: "premium" });
       yavioCtx.step("rooms_found", { count: 3 });
@@ -222,6 +216,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     };
     const proxy = createProxy(server, config, transport, "0.0.1");
 
+    const yavioCtx = createYavioContext();
     let handlerExecuted = false;
     proxy.registerTool(
       "search_hotels",
@@ -229,16 +224,8 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
         description: "Search for hotels",
         inputSchema: { query: { type: "string" } as never },
       },
-      (args, extra) => {
+      (args) => {
         handlerExecuted = true;
-
-        const yavioCtx = (extra as Record<string, unknown>).yavio as {
-          identify: (id: string, traits?: Record<string, unknown>) => void;
-          step: (name: string, meta?: Record<string, unknown>) => void;
-          track: (event: string, props?: Record<string, unknown>) => void;
-        };
-        expect(yavioCtx).toBeDefined();
-        expect(typeof yavioCtx.identify).toBe("function");
 
         yavioCtx.identify("user-99", { tier: "gold" });
         yavioCtx.step("hotels_found", { count: 5 });
@@ -303,11 +290,9 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     };
     const proxy = createProxy(server, config, transport, "0.0.1");
 
-    proxy.tool("contact_tool", (extra) => {
-      const ctx = (extra as Record<string, unknown>).yavio as {
-        track: (event: string, props?: Record<string, unknown>) => void;
-      };
-      ctx.track("contact_submitted", { email: "test@example.com", phone: "555-123-4567" });
+    const yavioCtx = createYavioContext();
+    proxy.tool("contact_tool", () => {
+      yavioCtx.track("contact_submitted", { email: "test@example.com", phone: "555-123-4567" });
       return { content: [{ type: "text" as const, text: "ok" }] };
     });
 
