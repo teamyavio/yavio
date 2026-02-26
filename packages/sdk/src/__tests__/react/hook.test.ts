@@ -11,6 +11,13 @@ function mockFetch(status = 200) {
   });
 }
 
+const FULL_CONFIG = {
+  token: "jwt_test",
+  endpoint: "http://test/v1/events",
+  traceId: "tr_test",
+  sessionId: "ses_test",
+};
+
 describe("useYavio", () => {
   let fetchSpy: ReturnType<typeof mockFetch>;
 
@@ -24,17 +31,7 @@ describe("useYavio", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
-    window.__YAVIO__ = undefined;
   });
-
-  function setupConfig() {
-    window.__YAVIO__ = {
-      token: "jwt_test",
-      endpoint: "http://test/v1/events",
-      traceId: "tr_test",
-      sessionId: "ses_test",
-    };
-  }
 
   it("returns no-op widget when no config found", () => {
     const { result } = renderHook(() => useYavio());
@@ -49,15 +46,13 @@ describe("useYavio", () => {
   });
 
   it("returns singleton on multiple calls", () => {
-    setupConfig();
-    const { result: first } = renderHook(() => useYavio());
-    const { result: second } = renderHook(() => useYavio());
+    const { result: first } = renderHook(() => useYavio(FULL_CONFIG));
+    const { result: second } = renderHook(() => useYavio(FULL_CONFIG));
     expect(first.current).toBe(second.current);
   });
 
   it("creates events with source: widget", async () => {
-    setupConfig();
-    const { result } = renderHook(() => useYavio());
+    const { result } = renderHook(() => useYavio(FULL_CONFIG));
     result.current.track("test_event", { key: "value" });
 
     // Flush to capture the call
@@ -76,8 +71,7 @@ describe("useYavio", () => {
   });
 
   it("identify() sets user_id on subsequent events", async () => {
-    setupConfig();
-    const { result } = renderHook(() => useYavio());
+    const { result } = renderHook(() => useYavio(FULL_CONFIG));
     result.current.identify("user123", { plan: "pro" });
     result.current.track("after_identify");
 
@@ -95,8 +89,7 @@ describe("useYavio", () => {
   });
 
   it("step() auto-increments step_sequence", async () => {
-    setupConfig();
-    const { result } = renderHook(() => useYavio());
+    const { result } = renderHook(() => useYavio(FULL_CONFIG));
     result.current.step("step_a");
     result.current.step("step_b");
     result.current.step("step_c");
@@ -117,8 +110,7 @@ describe("useYavio", () => {
   });
 
   it("conversion() includes value and currency", async () => {
-    setupConfig();
-    const { result } = renderHook(() => useYavio());
+    const { result } = renderHook(() => useYavio(FULL_CONFIG));
     result.current.conversion("purchase", { value: 49.99, currency: "EUR" });
 
     await vi.advanceTimersByTimeAsync(5_000);
@@ -135,8 +127,7 @@ describe("useYavio", () => {
   });
 
   it("strips PII from metadata", async () => {
-    setupConfig();
-    const { result } = renderHook(() => useYavio());
+    const { result } = renderHook(() => useYavio(FULL_CONFIG));
     result.current.track("contact", { email: "user@example.com", name: "John" });
 
     await vi.advanceTimersByTimeAsync(5_000);
@@ -151,8 +142,7 @@ describe("useYavio", () => {
   });
 
   it("strips PII from identify traits", async () => {
-    setupConfig();
-    const { result } = renderHook(() => useYavio());
+    const { result } = renderHook(() => useYavio(FULL_CONFIG));
     result.current.identify("user1", { email: "test@test.com", role: "admin" });
 
     await vi.advanceTimersByTimeAsync(5_000);
@@ -169,8 +159,7 @@ describe("useYavio", () => {
   });
 
   it("emits widget_render on initialization", async () => {
-    setupConfig();
-    renderHook(() => useYavio());
+    renderHook(() => useYavio(FULL_CONFIG));
 
     await vi.advanceTimersByTimeAsync(5_000);
 
@@ -184,8 +173,7 @@ describe("useYavio", () => {
   });
 
   it("cleans up transport and listeners on unmount", async () => {
-    setupConfig();
-    const { unmount } = renderHook(() => useYavio());
+    const { unmount } = renderHook(() => useYavio(FULL_CONFIG));
 
     unmount();
 
@@ -198,7 +186,7 @@ describe("useYavio", () => {
 
   it("upgrades from noop to active when config transitions from undefined to valid", async () => {
     // Start with no config — noop mode
-    const { result, rerender } = renderHook(({ config }) => useYavio(config), {
+    const { result } = renderHook(({ config }) => useYavio(config), {
       initialProps: {
         config: undefined as Partial<import("../../react/types.js").WidgetConfig> | undefined,
       },
@@ -211,14 +199,7 @@ describe("useYavio", () => {
 
     // Now provide full config
     _resetWidgetInstance();
-    const { result: result2 } = renderHook(() =>
-      useYavio({
-        token: "jwt_upgrade",
-        endpoint: "http://test/v1/events",
-        traceId: "tr_upgrade",
-        sessionId: "ses_upgrade",
-      }),
-    );
+    const { result: result2 } = renderHook(() => useYavio(FULL_CONFIG));
 
     result2.current.track("active_event");
     await vi.advanceTimersByTimeAsync(5_000);
@@ -233,13 +214,7 @@ describe("useYavio", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
 
     // Re-render with full config — should upgrade
-    const fullConfig = {
-      token: "jwt_lazy",
-      endpoint: "http://test/v1/events",
-      traceId: "tr_lazy",
-      sessionId: "ses_lazy",
-    };
-    const { result: activeResult } = renderHook(() => useYavio(fullConfig));
+    const { result: activeResult } = renderHook(() => useYavio(FULL_CONFIG));
     activeResult.current.track("should_be_sent");
     await vi.advanceTimersByTimeAsync(5_000);
     expect(fetchSpy).toHaveBeenCalled();

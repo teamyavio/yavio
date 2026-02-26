@@ -102,7 +102,7 @@ function App() {
 }
 ```
 
-The widget auto-captures clicks, scrolls, form interactions, navigation, errors, performance metrics, and rage clicks. Configuration is injected automatically via `window.__YAVIO__` or a `<meta name="yavio-config">` tag.
+The widget auto-captures clicks, scrolls, form interactions, navigation, errors, performance metrics, and rage clicks. Configuration is resolved from tool result metadata (`_meta.yavio`) or passed explicitly to the hook.
 
 ## PII Protection
 
