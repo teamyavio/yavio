@@ -5,7 +5,7 @@
 The React entry point (`@yavio/sdk/react`) provides a hook-based API for tracking user interactions inside ChatGPT App widgets. It shares the same method names as the server-side API (including `.identify()`) but sends events directly to the Yavio ingestion API over HTTP.
 
 > **Same API, Different Transport**
-> Server-side: `ctx.yavio.step()` buffers events and flushes to the ingestion API in batches. Widget-side: `useYavio().step()` does the same — buffers events in memory and sends them via HTTP POST directly to the ingestion API. Configuration (API key, endpoint, traceId) is auto-injected by the server via `window.__YAVIO__`. The developer calls `useYavio()` with no arguments.
+> Server-side: `yavio.step()` buffers events and flushes to the ingestion API in batches. Widget-side: `useYavio().step()` does the same — buffers events in memory and sends them via HTTP POST directly to the ingestion API. Configuration (API key, endpoint, traceId) is auto-injected by the server via `window.__YAVIO__`. The developer calls `useYavio()` with no arguments.
 
 ## 4.2 Developer-Facing API
 

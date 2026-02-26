@@ -21,7 +21,7 @@ export interface WithYavioOptions {
   capture?: Partial<CaptureConfig>;
 }
 
-/** The tracking context injected as `ctx.yavio` in tool handlers. */
+/** The tracking context available via the `yavio` singleton. */
 export interface YavioContext {
   identify(userId: string, traits?: Record<string, unknown>): void;
   step(name: string, meta?: Record<string, unknown>): void;

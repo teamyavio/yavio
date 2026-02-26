@@ -68,26 +68,6 @@ describe("createProxy", () => {
     // The tool was registered — we can verify via the server's internal state
   });
 
-  it("injects ctx.yavio into tool handler extra parameter", async () => {
-    const server = new McpServer({ name: "test", version: "1.0" });
-    const transport = createMockTransport();
-    const proxy = createProxy(server, testConfig, transport, "0.0.1");
-
-    let capturedYavio: unknown = null;
-
-    // Register with the proxy — the callback gets wrapped
-    proxy.tool("my_tool", (extra) => {
-      capturedYavio = (extra as Record<string, unknown>).yavio;
-      return { content: [{ type: "text", text: "ok" }] };
-    });
-
-    // The actual wrapping happens — we need to verify the handler was replaced
-    // Since McpServer stores the handler internally, we verify through integration
-    // tests (Step 7). Here we verify the proxy returns a valid McpServer-like object.
-    expect(typeof proxy.tool).toBe("function");
-    expect(typeof proxy.connect).toBe("function");
-  });
-
   it("preserves non-intercepted properties", () => {
     const server = new McpServer({ name: "test", version: "1.0" });
     const transport = createMockTransport();

@@ -81,21 +81,23 @@ That's it. Every tool call is now automatically captured with latency, status, p
 
 ## Track users and conversions
 
-Inside any tool handler, use `ctx.yavio` to identify users and track custom events:
+Inside any tool handler, import the `yavio` singleton to identify users and track custom events:
 
 ```ts title="server.ts"
+import { withYavio, yavio } from "@yavio/sdk";
+
 instrumented.tool(
   "checkout",
   { userId: { type: "string" }, plan: { type: "string" } },
-  async ({ userId, plan }, ctx) => {
+  async ({ userId, plan }) => {
     // Tie this session to a known user
-    ctx.yavio.identify(userId, { plan });
+    yavio.identify(userId, { plan });
 
     // Track a custom event
-    ctx.yavio.track("plan_selected", { plan });
+    yavio.track("plan_selected", { plan });
 
     // Record a conversion with monetary value
-    ctx.yavio.conversion("upgrade", {
+    yavio.conversion("upgrade", {
       value: 49,
       currency: "USD",
     });

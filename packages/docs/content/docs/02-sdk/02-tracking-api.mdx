@@ -5,30 +5,32 @@ description: Use .identify(), .step(), .track(), and .conversion() to capture us
 
 import { Callout } from "fumadocs-ui/components/callout";
 
-The tracking API is available inside tool handlers via `ctx.yavio`, and outside handlers via the `yavio` module singleton.
+The tracking API is available via the `yavio` singleton, which you import from `@yavio/sdk`.
 
 ## Accessing the context
 
 ### Inside tool handlers
 
-The `ctx.yavio` object is injected into every tool handler callback. Both the deprecated `tool()` and the modern `registerTool()` APIs are supported:
+Import the `yavio` singleton and call its methods from within any tool handler wrapped by `withYavio()`:
 
 ```ts
+import { withYavio, yavio } from "@yavio/sdk";
+
 // Using registerTool (recommended, MCP SDK v1.26+)
 instrumented.registerTool("search", {
   description: "Search for items",
   inputSchema: { query: { type: "string" } },
-}, async ({ query }, ctx) => {
-  ctx.yavio.identify("user_123");
-  ctx.yavio.track("search_executed", { query });
+}, async ({ query }) => {
+  yavio.identify("user_123");
+  yavio.track("search_executed", { query });
 
   return { content: [{ type: "text", text: "Results..." }] };
 });
 
 // Using tool (deprecated but still supported)
-instrumented.tool("search", { query: { type: "string" } }, async ({ query }, ctx) => {
-  ctx.yavio.identify("user_123");
-  ctx.yavio.track("search_executed", { query });
+instrumented.tool("search", { query: { type: "string" } }, async ({ query }) => {
+  yavio.identify("user_123");
+  yavio.track("search_executed", { query });
 
   return { content: [{ type: "text", text: "Results..." }] };
 });
@@ -36,13 +38,14 @@ instrumented.tool("search", { query: { type: "string" } }, async ({ query }, ctx
 
 ### Outside tool handlers
 
-For code that runs outside of a tool handler (e.g., middleware or background tasks within the same async context), import the `yavio` singleton:
+The `yavio` singleton also works in any code that runs within the same async context as a tool handler (e.g., helper functions called from a tool handler):
 
 ```ts
 import { yavio } from "@yavio/sdk";
 
-// Works within the same async context as a tool handler
-yavio.track("background_task_completed");
+function processResults(results: Result[]) {
+  yavio.track("results_processed", { count: results.length });
+}
 ```
 
 <Callout type="warn">
@@ -54,7 +57,7 @@ yavio.track("background_task_completed");
 Ties the current session to a known user ID. Call this as early as possible in your tool handler.
 
 ```ts
-ctx.yavio.identify(userId: string, traits?: Record<string, unknown>): void
+yavio.identify(userId: string, traits?: Record<string, unknown>): void
 ```
 
 ### Parameters
@@ -71,7 +74,7 @@ ctx.yavio.identify(userId: string, traits?: Record<string, unknown>): void
 - All subsequent events in the session include the `user_id` and traits.
 
 ```ts
-ctx.yavio.identify("user_42", {
+yavio.identify("user_42", {
   plan: "enterprise",
   company: "Acme Corp",
 });
@@ -84,7 +87,7 @@ See [User Identification](/docs/07-concepts/05-user-identification) for a deeper
 Records a named step in a multi-step workflow. Steps are auto-numbered within a trace for funnel analysis.
 
 ```ts
-ctx.yavio.step(name: string, meta?: Record<string, unknown>): void
+yavio.step(name: string, meta?: Record<string, unknown>): void
 ```
 
 ### Parameters
@@ -97,8 +100,8 @@ ctx.yavio.step(name: string, meta?: Record<string, unknown>): void
 ### Example
 
 ```ts
-instrumented.tool("wizard", { step: { type: "string" } }, async ({ step }, ctx) => {
-  ctx.yavio.step(step, { page: 1 });
+instrumented.tool("wizard", { step: { type: "string" } }, async ({ step }) => {
+  yavio.step(step, { page: 1 });
 
   // ... handle the step
 
@@ -113,7 +116,7 @@ Steps generate events with `event_type: "step"` and an auto-incrementing `step_s
 Records a custom event with arbitrary properties.
 
 ```ts
-ctx.yavio.track(event: string, properties?: Record<string, unknown>): void
+yavio.track(event: string, properties?: Record<string, unknown>): void
 ```
 
 ### Parameters
@@ -126,7 +129,7 @@ ctx.yavio.track(event: string, properties?: Record<string, unknown>): void
 ### Example
 
 ```ts
-ctx.yavio.track("document_generated", {
+yavio.track("document_generated", {
   format: "pdf",
   pages: 12,
 });
@@ -139,7 +142,7 @@ Custom events use `event_type: "track"` with the event name in the `event_name` 
 Records a conversion event with monetary value. Used for revenue attribution and ROI analysis.
 
 ```ts
-ctx.yavio.conversion(
+yavio.conversion(
   name: string,
   data: {
     value: number;
@@ -161,7 +164,7 @@ ctx.yavio.conversion(
 ### Example
 
 ```ts
-ctx.yavio.conversion("subscription_upgrade", {
+yavio.conversion("subscription_upgrade", {
   value: 99,
   currency: "USD",
   meta: { plan: "enterprise", annual: true },

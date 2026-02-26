@@ -11,8 +11,8 @@ export const SDK_VERSION = "0.0.1";
 /**
  * Wrap an MCP server with Yavio instrumentation.
  *
- * Auto-captures tool calls and injects `ctx.yavio` into tool handlers
- * for explicit tracking (`.identify()`, `.step()`, `.track()`, `.conversion()`).
+ * Auto-captures tool calls and provides explicit tracking via the `yavio` singleton
+ * (`.identify()`, `.step()`, `.track()`, `.conversion()`).
  *
  * If no API key is found, returns the original server unchanged (transparent no-op).
  */
@@ -44,11 +44,13 @@ export function withYavio<T extends McpServer>(server: T, options?: WithYavioOpt
 }
 
 /**
- * Module singleton for tracking outside of tool handler context.
+ * Module singleton for explicit tracking inside tool handlers.
  *
- * When used inside a `runInContext()` scope (e.g., within a tool handler),
- * events are associated with the current trace and session.
- * When used outside context, calls are no-ops.
+ * Import this and call `yavio.identify()`, `yavio.track()`, etc. from within
+ * any tool handler wrapped by `withYavio()`. Uses `AsyncLocalStorage` to
+ * associate events with the current trace and session automatically.
+ *
+ * Calls outside a tool handler context are silently ignored (no-ops).
  */
 export const yavio: YavioContext = createYavioContext();
 

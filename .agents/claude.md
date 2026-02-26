@@ -251,7 +251,7 @@ All HTTP services return errors in this shape:
 
 ## Important Implementation Notes
 
-- The SDK uses `AsyncLocalStorage` for context propagation — `ctx.yavio` in handlers, singleton for deep utilities
+- The SDK uses `AsyncLocalStorage` for context propagation — import the `yavio` singleton from `@yavio/sdk` and call methods inside tool handlers
 - Event transport: SDK buffers in memory, flushes HTTP batch to ingestion endpoint
 - Widget auto-config: API key and endpoint injected via `window.__YAVIO__` by server-side proxy
 - Dashboard uses Next.js Server Components for ClickHouse queries

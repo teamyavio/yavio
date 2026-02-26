@@ -8,7 +8,7 @@ import { generateSessionId, generateTraceId } from "../core/ids.js";
 import { detectPlatform } from "../core/platform.js";
 import type { SessionState, YavioConfig } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
-import { type RequestStore, createYavioContext, runInContext } from "./context.js";
+import { type RequestStore, runInContext } from "./context.js";
 import { type MintResult, mintWidgetToken } from "./token.js";
 
 /** Cached widget token with parsed expiry for reuse across tool calls. */
@@ -50,7 +50,7 @@ async function getWidgetToken(
 /**
  * Wrap a tool callback with Yavio instrumentation.
  *
- * Handles lazy platform detection, trace/session context, ctx.yavio injection,
+ * Handles lazy platform detection, trace/session context,
  * latency measurement, and tool_call event emission.
  */
 function wrapToolCallback(
@@ -127,11 +127,6 @@ function wrapToolCallback(
       transport,
       sdkVersion,
     };
-
-    // Inject ctx.yavio into the extra parameter (already extracted above)
-    if (extra && typeof extra === "object") {
-      (extra as Record<string, unknown>).yavio = createYavioContext(store);
-    }
 
     const startTime = performance.now();
     try {

@@ -73,23 +73,23 @@ Fires on `tools/list` requests. Tracks how often clients request the tool catalo
 
 ## Server-Side Explicit Events
 
-These events require developer code using `ctx.yavio` within a tool handler:
+These events require developer code using `yavio` within a tool handler:
 
 ### step
 
-Funnel progression point. Called via `ctx.yavio.step("step_name")`. Each step receives an auto-incrementing `step_sequence` for deterministic ordering.
+Funnel progression point. Called via `yavio.step("step_name")`. Each step receives an auto-incrementing `step_sequence` for deterministic ordering.
 
 ### track
 
-Generic custom event. Called via `ctx.yavio.track("event_name", properties)`. An escape hatch for anything not auto-captured.
+Generic custom event. Called via `yavio.track("event_name", properties)`. An escape hatch for anything not auto-captured.
 
 ### conversion
 
-Revenue attribution event. Called via `ctx.yavio.conversion("name", { value, currency })`. Powers ROI analytics.
+Revenue attribution event. Called via `yavio.conversion("name", { value, currency })`. Powers ROI analytics.
 
 ### identify
 
-User identification event. Called via `ctx.yavio.identify(userId, traits)`. Ties the session to a known user.
+User identification event. Called via `yavio.identify(userId, traits)`. Ties the session to a known user.
 
 ## Widget Auto-Captured Events
 

@@ -21,7 +21,7 @@ Anonymous sessions are useful for:
 When you learn who the user is (e.g., from an auth token or user input), call `.identify()` to attach a user ID to the session:
 
 ```ts
-ctx.yavio.identify("user_42", {
+yavio.identify("user_42", {
   plan: "enterprise",
   company: "Acme Corp",
 });
@@ -44,9 +44,9 @@ Call `.identify()` as early as possible — ideally in the first tool handler th
 The `userId` is set once per session. If you call `.identify()` a second time with a **different** user ID, the call is ignored and a `YAVIO-1302` warning is logged.
 
 ```ts
-ctx.yavio.identify("user_42");     // Sets user ID
-ctx.yavio.identify("user_42");     // No-op (same ID)
-ctx.yavio.identify("user_99");     // Ignored — YAVIO-1302 warning
+yavio.identify("user_42");     // Sets user ID
+yavio.identify("user_42");     // No-op (same ID)
+yavio.identify("user_99");     // Ignored — YAVIO-1302 warning
 ```
 
 This prevents accidental identity conflicts in multi-tool sessions.
@@ -56,8 +56,8 @@ This prevents accidental identity conflicts in multi-tool sessions.
 User traits are merged across calls. Each `.identify()` call adds to (but doesn't replace) existing traits:
 
 ```ts
-ctx.yavio.identify("user_42", { plan: "pro" });
-ctx.yavio.identify("user_42", { company: "Acme" });
+yavio.identify("user_42", { plan: "pro" });
+yavio.identify("user_42", { company: "Acme" });
 
 // Session now has: { plan: "pro", company: "Acme" }
 ```
@@ -65,8 +65,8 @@ ctx.yavio.identify("user_42", { company: "Acme" });
 If the same trait key is set twice, the later value wins:
 
 ```ts
-ctx.yavio.identify("user_42", { plan: "free" });
-ctx.yavio.identify("user_42", { plan: "pro" });
+yavio.identify("user_42", { plan: "free" });
+yavio.identify("user_42", { plan: "pro" });
 
 // Session now has: { plan: "pro" }
 ```
