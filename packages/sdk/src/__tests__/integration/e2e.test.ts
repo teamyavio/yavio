@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { YavioConfig } from "../../core/types.js";
 import { createYavioContext } from "../../server/context.js";
-import { _resetSessionMap, createProxy } from "../../server/proxy.js";
+import { _resetGlobalState, createProxy } from "../../server/proxy.js";
 import { HttpTransport } from "../../transport/http.js";
 
 interface ReceivedBatch {
@@ -68,7 +68,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
   });
 
   beforeEach(() => {
-    _resetSessionMap();
+    _resetGlobalState();
   });
 
   it("sends tool_call events to the ingest API on tool invocation", async () => {

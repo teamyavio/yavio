@@ -4,7 +4,7 @@ import {
   buildToolCallEvent,
   buildToolDiscoveryEvent,
 } from "../core/events.js";
-import { generateSessionId, generateTraceId } from "../core/ids.js";
+import { deriveSessionId, generateSessionId, generateTraceId } from "../core/ids.js";
 import { detectPlatform } from "../core/platform.js";
 import type { SessionState, YavioConfig } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
@@ -56,7 +56,7 @@ async function getWidgetToken(
 function wrapToolCallback(
   originalCb: (...cbArgs: unknown[]) => unknown,
   toolName: string,
-  getSession: (mcpSessionId?: string) => SessionState,
+  resolveSession: (sessionKey?: string) => SessionState,
   server: McpServer,
   config: YavioConfig,
   transport: Transport,
@@ -85,7 +85,7 @@ function wrapToolCallback(
         : typeof openaiSessionId === "string"
           ? openaiSessionId
           : undefined;
-    const session = getSession(sessionKey);
+    const session = resolveSession(sessionKey);
 
     // Emit deferred connection event on the first tool call for this session.
     // Deferred from connect() so that OpenAI's per-tool-call reconnects don't
@@ -208,31 +208,14 @@ function wrapToolCallback(
   };
 }
 
-/** Maximum number of MCP sessions to cache for session reuse. */
-const MAX_SESSION_MAP_SIZE = 1000;
-
-/**
- * Module-level session map: MCP session ID → Yavio SessionState.
- *
- * Shared across all proxy instances so that the common pattern of creating a
- * new McpServer + withYavio() per HTTP connection still correlates tool calls
- * belonging to the same MCP session.
- *
- * Correlation uses extra.sessionId (from RequestHandlerExtra, set via the
- * Mcp-Session-Id header) as the primary key, with transport.sessionId as
- * fallback. Both are checked lazily at tool-call time via getSession().
- */
-const globalSessionMap = new Map<string, SessionState>();
-
 /** Tracks session IDs that have already emitted a connection event. */
 const emittedConnections = new Set<string>();
 
 /** Tracks tool names that have already emitted a tool_discovery event (global dedup). */
 const emittedToolDiscoveries = new Set<string>();
 
-/** @internal Reset the global session map — exposed for testing only. */
-export function _resetSessionMap(): void {
-  globalSessionMap.clear();
+/** @internal Reset global dedup state — exposed for testing only. */
+export function _resetGlobalState(): void {
   emittedConnections.clear();
   emittedToolDiscoveries.clear();
 }
@@ -262,30 +245,22 @@ export function createProxy<T extends McpServer>(
   // Reference to the current MCP transport for lazy sessionId lookup
   let currentMcpTransport: Record<string, unknown> | null = null;
 
-  const getSession = (extraSessionId?: string) => {
-    // Prefer extra.sessionId (from MCP request context), fall back to transport.sessionId
-    const mcpSessionId =
-      extraSessionId ??
+  /**
+   * Resolve the session for the current tool call.
+   *
+   * If a session key is available (MCP session ID, OpenAI session, or transport
+   * session ID), derives a deterministic Yavio session ID from it so that any
+   * server instance processing the same key produces the same ID.
+   */
+  const resolveSession = (sessionKey?: string) => {
+    const key =
+      sessionKey ??
       (currentMcpTransport && typeof currentMcpTransport.sessionId === "string"
         ? (currentMcpTransport.sessionId as string)
         : undefined);
 
-    if (mcpSessionId) {
-      const existing = globalSessionMap.get(mcpSessionId);
-      if (existing && existing !== session) {
-        // Reuse the existing session — preserves userId, userTraits, stepSequence
-        session = existing;
-      } else if (!existing) {
-        // First time seeing this MCP session — register current session
-        if (globalSessionMap.size >= MAX_SESSION_MAP_SIZE) {
-          // Evict oldest entry (first key in insertion order)
-          const firstKey = globalSessionMap.keys().next().value as string;
-          const evicted = globalSessionMap.get(firstKey);
-          if (evicted) emittedConnections.delete(evicted.sessionId);
-          globalSessionMap.delete(firstKey);
-        }
-        globalSessionMap.set(mcpSessionId, session);
-      }
+    if (key) {
+      session.sessionId = deriveSessionId(key);
     }
     return session;
   };
@@ -327,7 +302,7 @@ export function createProxy<T extends McpServer>(
           args[cbIndex] = wrapToolCallback(
             originalCb,
             toolName,
-            getSession,
+            resolveSession,
             server,
             config,
             transport,
@@ -376,7 +351,7 @@ export function createProxy<T extends McpServer>(
             args[2] = wrapToolCallback(
               originalCb,
               toolName,
-              getSession,
+              resolveSession,
               server,
               config,
               transport,
@@ -419,7 +394,9 @@ export function createProxy<T extends McpServer>(
               : undefined;
 
           session = {
-            sessionId: sessionIdFromTransport ?? generateSessionId(),
+            sessionId: sessionIdFromTransport
+              ? deriveSessionId(sessionIdFromTransport)
+              : generateSessionId(),
             userId: null,
             userTraits: {},
             platform: detectPlatform({
