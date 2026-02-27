@@ -185,13 +185,7 @@ describe("docker utilities", () => {
       const { removeVolumes } = await import("../util/docker.js");
       await removeVolumes(["vol1", "vol2"]);
 
-      expect(execa).toHaveBeenCalledWith("docker", [
-        "volume",
-        "rm",
-        "--force",
-        "vol1",
-        "vol2",
-      ]);
+      expect(execa).toHaveBeenCalledWith("docker", ["volume", "rm", "--force", "vol1", "vol2"]);
     });
 
     it("does nothing for empty array", async () => {
@@ -210,8 +204,7 @@ describe("docker utilities", () => {
       const composePath = join(tempDir, "docker-compose.yml");
       writeFileSync(composePath, "services: {}");
       vi.mocked(execa).mockResolvedValueOnce({
-        stdout:
-          '{"Name":"c1","Service":"web","State":"running","Status":"Up","Health":"healthy"}',
+        stdout: '{"Name":"c1","Service":"web","State":"running","Status":"Up","Health":"healthy"}',
       } as never);
 
       const { getContainerStatus } = await import("../util/docker.js");
@@ -248,11 +241,9 @@ describe("docker utilities", () => {
       const { execCompose } = await import("../util/docker.js");
       await execCompose(["up", "-d"], { files: [composePath] });
 
-      expect(execa).toHaveBeenCalledWith(
-        "docker",
-        ["compose", "-f", composePath, "up", "-d"],
-        { stdio: "pipe" },
-      );
+      expect(execa).toHaveBeenCalledWith("docker", ["compose", "-f", composePath, "up", "-d"], {
+        stdio: "pipe",
+      });
     });
 
     it("passes stdio option through", async () => {
@@ -264,11 +255,9 @@ describe("docker utilities", () => {
       const { execCompose } = await import("../util/docker.js");
       await execCompose(["logs"], { files: [composePath], stdio: "inherit" });
 
-      expect(execa).toHaveBeenCalledWith(
-        "docker",
-        ["compose", "-f", composePath, "logs"],
-        { stdio: "inherit" },
-      );
+      expect(execa).toHaveBeenCalledWith("docker", ["compose", "-f", composePath, "logs"], {
+        stdio: "inherit",
+      });
     });
   });
 

@@ -120,9 +120,7 @@ describe("BaseEvent", () => {
   });
 
   it("rejects invalid timestamp", () => {
-    expect(() =>
-      BaseEvent.parse(base({ event_type: "track", timestamp: "not-a-date" })),
-    ).toThrow();
+    expect(() => BaseEvent.parse(base({ event_type: "track", timestamp: "not-a-date" }))).toThrow();
   });
 });
 
@@ -292,9 +290,7 @@ describe("ConversionEvent", () => {
 
   it("rejects invalid currency length", () => {
     expect(() =>
-      ConversionEvent.parse(
-        base({ event_type: "conversion", conversion_currency: "US" }),
-      ),
+      ConversionEvent.parse(base({ event_type: "conversion", conversion_currency: "US" })),
     ).toThrow();
   });
 });
@@ -394,9 +390,7 @@ describe("Widget events", () => {
   });
 
   it("WidgetFocusEvent validates", () => {
-    const result = WidgetFocusEvent.parse(
-      base({ event_type: "widget_focus", source: "widget" }),
-    );
+    const result = WidgetFocusEvent.parse(base({ event_type: "widget_focus", source: "widget" }));
     expect(result.event_type).toBe("widget_focus");
   });
 

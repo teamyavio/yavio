@@ -7,15 +7,7 @@ describe("ErrorCode", () => {
 
   it("has expected top-level groups", () => {
     expect(groups).toEqual(
-      expect.arrayContaining([
-        "SDK",
-        "INGEST",
-        "DASHBOARD",
-        "INTELLIGENCE",
-        "DB",
-        "CLI",
-        "INFRA",
-      ]),
+      expect.arrayContaining(["SDK", "INGEST", "DASHBOARD", "INTELLIGENCE", "DB", "CLI", "INFRA"]),
     );
   });
 

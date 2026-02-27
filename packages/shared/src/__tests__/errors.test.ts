@@ -15,11 +15,7 @@ describe("YavioError", () => {
   });
 
   it("stores code, message, and status", () => {
-    const err = new YavioError(
-      ErrorCode.INGEST.MISSING_AUTH_HEADER,
-      "Auth header required",
-      401,
-    );
+    const err = new YavioError(ErrorCode.INGEST.MISSING_AUTH_HEADER, "Auth header required", 401);
     expect(err.code).toBe("YAVIO-2000");
     expect(err.message).toBe("Auth header required");
     expect(err.status).toBe(401);
@@ -27,12 +23,7 @@ describe("YavioError", () => {
 
   it("stores optional metadata", () => {
     const meta = { slug: "my-workspace" };
-    const err = new YavioError(
-      ErrorCode.DASHBOARD.WORKSPACE_SLUG_EXISTS,
-      "exists",
-      409,
-      meta,
-    );
+    const err = new YavioError(ErrorCode.DASHBOARD.WORKSPACE_SLUG_EXISTS, "exists", 409, meta);
     expect(err.metadata).toEqual(meta);
   });
 
@@ -63,12 +54,9 @@ describe("YavioError", () => {
     });
 
     it("includes metadata when present", () => {
-      const err = new YavioError(
-        ErrorCode.DASHBOARD.WORKSPACE_SLUG_EXISTS,
-        "exists",
-        409,
-        { slug: "test" },
-      );
+      const err = new YavioError(ErrorCode.DASHBOARD.WORKSPACE_SLUG_EXISTS, "exists", 409, {
+        slug: "test",
+      });
       expect(err.toJSON()).toEqual({
         code: "YAVIO-3150",
         message: "exists",
@@ -78,12 +66,7 @@ describe("YavioError", () => {
     });
 
     it("includes both requestId and metadata", () => {
-      const err = new YavioError(
-        ErrorCode.INGEST.INTERNAL_ERROR,
-        "boom",
-        500,
-        { detail: "oops" },
-      );
+      const err = new YavioError(ErrorCode.INGEST.INTERNAL_ERROR, "boom", 500, { detail: "oops" });
       const json = err.toJSON("req-456");
       expect(json).toEqual({
         code: "YAVIO-2999",
