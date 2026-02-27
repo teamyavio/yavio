@@ -106,4 +106,36 @@ describe("status command", () => {
     await program.parseAsync(["node", "yavio", "status"]);
     expect(process.exitCode).toBe(1);
   });
+
+  it("shows PostgreSQL not running when container is missing", async () => {
+    mockGetContainerStatus.mockResolvedValue(
+      defaultContainers.filter((c) => c.Service !== "postgres"),
+    );
+
+    const program = new Command();
+    registerStatus(program);
+
+    await program.parseAsync(["node", "yavio", "status", "--file", "/some/compose.yml"]);
+
+    const output = consoleLogs.join("\n");
+    expect(output).toContain("not running");
+  });
+
+  it("shows PostgreSQL unhealthy when state is bad", async () => {
+    mockGetContainerStatus.mockResolvedValue(
+      defaultContainers.map((c) =>
+        c.Service === "postgres"
+          ? { ...c, Health: "unhealthy", State: "exited", Status: "Exited (1)" }
+          : c,
+      ),
+    );
+
+    const program = new Command();
+    registerStatus(program);
+
+    await program.parseAsync(["node", "yavio", "status", "--file", "/some/compose.yml"]);
+
+    const output = consoleLogs.join("\n");
+    expect(output).toContain("unhealthy");
+  });
 });

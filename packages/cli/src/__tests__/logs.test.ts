@@ -89,4 +89,24 @@ describe("logs command", () => {
     await program.parseAsync(["node", "yavio", "logs", "unknown-service"]);
     expect(process.exitCode).toBe(1);
   });
+
+  it("fails when Docker is not available", async () => {
+    mockHasDocker.mockResolvedValueOnce(false);
+
+    const program = new Command();
+    registerLogs(program);
+
+    await program.parseAsync(["node", "yavio", "logs"]);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("handles compose failure gracefully", async () => {
+    mockExecCompose.mockRejectedValueOnce(new Error("compose failed"));
+
+    const program = new Command();
+    registerLogs(program);
+
+    await program.parseAsync(["node", "yavio", "logs", "--file", "/some/compose.yml"]);
+    expect(process.exitCode).toBe(1);
+  });
 });
