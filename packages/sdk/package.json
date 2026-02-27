@@ -1,6 +1,6 @@
 {
   "name": "@yavio/sdk",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Yavio SDK for instrumenting MCP servers with analytics, session tracking, and a React widget",
   "type": "module",
   "license": "MIT",
