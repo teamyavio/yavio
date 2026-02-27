@@ -3,7 +3,7 @@ import type { BaseEvent } from "@yavio/shared/events";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { CaptureConfig, YavioConfig } from "../core/types.js";
-import { _resetSessionMap, createProxy } from "../server/proxy.js";
+import { _resetGlobalState, createProxy } from "../server/proxy.js";
 import { mintWidgetToken } from "../server/token.js";
 import type { Transport } from "../transport/types.js";
 
@@ -311,7 +311,7 @@ describe("createProxy — tool_discovery emission", () => {
   beforeEach(() => {
     mockedMint.mockReset();
     mockedMint.mockResolvedValue(null);
-    _resetSessionMap();
+    _resetGlobalState();
   });
 
   it("emits tool_discovery event when tool() is called", () => {
@@ -435,7 +435,7 @@ describe("createProxy — session reuse", () => {
   beforeEach(() => {
     mockedMint.mockReset();
     mockedMint.mockResolvedValue(null);
-    _resetSessionMap();
+    _resetGlobalState();
   });
 
   function makeExtra(overrides?: Record<string, unknown>) {
@@ -682,33 +682,32 @@ describe("createProxy — session reuse", () => {
     expect(firstSessionId).not.toBe(secondSessionId);
   });
 
-  it("caps session map size at MAX_SESSION_MAP_SIZE", async () => {
+  it("produces stable session IDs across independent proxy instances", async () => {
     const yavioTransport = createMockTransport();
 
-    // Create 1001 connections with unique MCP session IDs via extra.sessionId
-    for (let i = 0; i < 1001; i++) {
-      const { server, proxy } = createServerAndProxy(yavioTransport);
-      const mcpTransport = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
-      await proxy.connect(mcpTransport as never);
-      const tool = getRegisteredTool(server, "tool_a");
-      await tool?.handler(makeExtra({ sessionId: `mcp-session-${i}`, requestId: `req-cap-${i}` }));
-    }
+    // Two completely independent proxy instances (simulating different server instances)
+    // with the same MCP session key should produce the same Yavio session ID.
+    const { server: server1, proxy: proxy1 } = createServerAndProxy(yavioTransport);
+    const mcpTransport1 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
+    await proxy1.connect(mcpTransport1 as never);
+    const tool1 = getRegisteredTool(server1, "tool_a");
+    await tool1?.handler(makeExtra({ sessionId: "mcp-session-stable" }));
 
-    // Capture the original Yavio session ID for mcp-session-0
-    // Events: [connection_0, tool_call_0, connection_1, tool_call_1, ...]
-    // tool_call_0 is at index 1
-    const originalSessionId = (yavioTransport.sent[1] as unknown as BaseEvent[])[0].session_id;
+    const firstSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
 
-    // Reconnect with the very first MCP session ID — it should have been evicted
-    const { server, proxy } = createServerAndProxy(yavioTransport);
-    const mcpTransport = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
-    await proxy.connect(mcpTransport as never);
-    const tool = getRegisteredTool(server, "tool_a");
-    await tool?.handler(makeExtra({ sessionId: "mcp-session-0", requestId: "req-cap-final" }));
+    // Reset global state to simulate a completely separate process
+    _resetGlobalState();
 
-    const finalSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+    const { server: server2, proxy: proxy2 } = createServerAndProxy(yavioTransport);
+    const mcpTransport2 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
+    await proxy2.connect(mcpTransport2 as never);
+    const tool2 = getRegisteredTool(server2, "tool_a");
+    await tool2?.handler(makeExtra({ sessionId: "mcp-session-stable", requestId: "req-2" }));
 
-    // mcp-session-0 was evicted, so a new Yavio session was created
-    expect(finalSessionId).not.toBe(originalSessionId);
+    const secondSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
+
+    // Deterministic derivation — no shared state needed
+    expect(firstSessionId).toBe(secondSessionId);
+    expect(firstSessionId).toMatch(/^ses_/);
   });
 });
