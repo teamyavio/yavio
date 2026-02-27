@@ -126,4 +126,97 @@ describe("doctor command", () => {
     const output = consoleLogs.join("\n");
     expect(output).toContain("Docker not found");
   });
+
+  it("warns when Docker version cannot be parsed", async () => {
+    mockGetDockerVersion.mockResolvedValue(null);
+    mockHasDocker.mockResolvedValue(true);
+
+    const program = new Command();
+    registerDoctor(program);
+
+    await program.parseAsync(["node", "yavio", "doctor"]);
+
+    const output = consoleLogs.join("\n");
+    expect(output).toContain("could not parse version");
+  });
+
+  it("warns when compose version cannot be parsed", async () => {
+    mockGetComposeVersion.mockResolvedValue(null);
+    mockHasDockerCompose.mockResolvedValue(true);
+
+    const program = new Command();
+    registerDoctor(program);
+
+    await program.parseAsync(["node", "yavio", "doctor"]);
+
+    const output = consoleLogs.join("\n");
+    expect(output).toContain("could not parse version");
+  });
+
+  it("reports missing docker compose", async () => {
+    mockGetComposeVersion.mockResolvedValue(null);
+    mockHasDockerCompose.mockResolvedValue(false);
+
+    const program = new Command();
+    registerDoctor(program);
+
+    await program.parseAsync(["node", "yavio", "doctor"]);
+
+    const output = consoleLogs.join("\n");
+    expect(output).toContain("docker compose not found");
+  });
+
+  it("warns about HTTP endpoint on non-localhost", async () => {
+    writeFileSync(
+      join(tempDir, ".yaviorc.json"),
+      JSON.stringify({
+        version: 1,
+        apiKey: "yav_test_key_12345",
+        endpoint: "http://example.com/v1/events",
+      }),
+    );
+
+    const program = new Command();
+    registerDoctor(program);
+
+    await program.parseAsync(["node", "yavio", "doctor"]);
+
+    const output = consoleLogs.join("\n");
+    expect(output).toContain("HTTP on non-localhost");
+  });
+
+  it("reports all checks passed when everything is healthy", async () => {
+    const program = new Command();
+    registerDoctor(program);
+
+    await program.parseAsync(["node", "yavio", "doctor"]);
+
+    const output = consoleLogs.join("\n");
+    expect(output).toContain("All critical checks passed");
+  });
+
+  it("warns about unreachable endpoints", async () => {
+    mockCheckHealth.mockResolvedValue({ ok: false, status: 0, latency: 0 });
+
+    const program = new Command();
+    registerDoctor(program);
+
+    await program.parseAsync(["node", "yavio", "doctor"]);
+
+    const output = consoleLogs.join("\n");
+    expect(output).toContain("not reachable");
+  });
+
+  it("reports some checks failed when critical issues found", async () => {
+    mockGetDockerVersion.mockResolvedValue(null);
+    mockHasDocker.mockResolvedValue(false);
+
+    const program = new Command();
+    registerDoctor(program);
+
+    await program.parseAsync(["node", "yavio", "doctor"]);
+
+    const output = consoleLogs.join("\n");
+    expect(output).toContain("Some critical checks failed");
+  });
 });

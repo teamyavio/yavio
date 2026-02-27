@@ -108,4 +108,40 @@ describe("init command", () => {
 
     expect(process.exitCode).toBe(1);
   });
+
+  it("warns when ingestion API is not reachable", async () => {
+    mockCheckHealth.mockResolvedValue({ ok: false, status: 0, latency: 0 });
+
+    const program = new Command();
+    registerInit(program);
+
+    await program.parseAsync([
+      "node",
+      "yavio",
+      "init",
+      "--api-key",
+      "yav_test_key_12345",
+      "--endpoint",
+      "http://localhost:3001/v1/events",
+    ]);
+
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("skips health check when no endpoint is provided", async () => {
+    const program = new Command();
+    registerInit(program);
+
+    await program.parseAsync([
+      "node",
+      "yavio",
+      "init",
+      "--api-key",
+      "yav_test_key_12345",
+      "--endpoint",
+      "http://localhost:3001",
+    ]);
+
+    expect(mockCheckHealth).toHaveBeenCalled();
+  });
 });

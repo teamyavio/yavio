@@ -66,4 +66,14 @@ describe("down command", () => {
     await program.parseAsync(["node", "yavio", "down", "--file", "/some/compose.yml"]);
     expect(process.exitCode).toBe(1);
   });
+
+  it("fails when docker compose is not available", async () => {
+    mockHasDockerCompose.mockResolvedValueOnce(false);
+
+    const program = new Command();
+    registerDown(program);
+
+    await program.parseAsync(["node", "yavio", "down"]);
+    expect(process.exitCode).toBe(1);
+  });
 });
