@@ -12,6 +12,7 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   # ── Change Detection ───────────────────────────────────────────────
@@ -84,7 +85,12 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: ./.github/actions/setup
-      - run: pnpm --filter @yavio/shared test
+      - run: pnpm --filter @yavio/shared exec vitest run --coverage
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: coverage-shared
+          path: packages/shared/coverage/
 
   # ── Tests: db (requires PostgreSQL + ClickHouse) ───────────────────
   test-db:
@@ -121,11 +127,16 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: ./.github/actions/setup
       - run: pnpm --filter @yavio/shared build
-      - run: pnpm --filter @yavio/db test
+      - run: pnpm --filter @yavio/db exec vitest run --coverage
         env:
           DATABASE_URL: postgres://yavio_service:test@localhost:5432/yavio_test
           CLICKHOUSE_URL: http://localhost:8123
           CLICKHOUSE_PASSWORD: test
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: coverage-db
+          path: packages/db/coverage/
 
   # ── Tests: ingest (requires ClickHouse for e2e) ────────────────────
   test-ingest:
@@ -149,10 +160,15 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: ./.github/actions/setup
       - run: pnpm turbo build --filter=@yavio/ingest...
-      - run: pnpm --filter @yavio/ingest test
+      - run: pnpm --filter @yavio/ingest exec vitest run --coverage
         env:
           CLICKHOUSE_URL: http://localhost:8123
           CLICKHOUSE_PASSWORD: test
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: coverage-ingest
+          path: packages/ingest/coverage/
 
   # ── Tests: dashboard (requires PostgreSQL + ClickHouse) ────────────
   test-dashboard:
@@ -189,11 +205,16 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: ./.github/actions/setup
       - run: pnpm turbo build --filter=@yavio/dashboard...
-      - run: pnpm --filter @yavio/dashboard test
+      - run: pnpm --filter @yavio/dashboard exec vitest run --coverage
         env:
           DATABASE_URL: postgres://yavio_service:test@localhost:5432/yavio_test
           CLICKHOUSE_URL: http://localhost:8123
           CLICKHOUSE_PASSWORD: test
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: coverage-dashboard
+          path: packages/dashboard/coverage/
 
   # ── Tests: cli ─────────────────────────────────────────────────────
   test-cli:
@@ -204,7 +225,12 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: ./.github/actions/setup
       - run: pnpm turbo build --filter=@yavio/cli...
-      - run: pnpm --filter @yavio/cli test
+      - run: pnpm --filter @yavio/cli exec vitest run --coverage
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: coverage-cli
+          path: packages/cli/coverage/
 
   # ── Tests: sdk ─────────────────────────────────────────────────────
   test-sdk:
@@ -215,7 +241,71 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: ./.github/actions/setup
       - run: pnpm turbo build --filter=@yavio/sdk...
-      - run: pnpm --filter @yavio/sdk test
+      - run: pnpm --filter @yavio/sdk exec vitest run --coverage
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: coverage-sdk
+          path: packages/sdk/coverage/
+
+  # ── Coverage Report (PR comment) ──────────────────────────────────
+  coverage-report:
+    if: github.event_name == 'pull_request' && always()
+    needs: [test-shared, test-db, test-ingest, test-dashboard, test-cli, test-sdk]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          pattern: coverage-*
+          merge-multiple: false
+
+      - name: Coverage report — shared
+        if: needs.test-shared.result == 'success'
+        uses: davelosert/vitest-coverage-report-action@2500dafcee7dd64f85ab689c0b83798a8359770e # v2.9.3
+        with:
+          name: shared
+          json-summary-path: coverage-shared/coverage-summary.json
+          json-final-path: coverage-shared/coverage-final.json
+
+      - name: Coverage report — db
+        if: needs.test-db.result == 'success'
+        uses: davelosert/vitest-coverage-report-action@2500dafcee7dd64f85ab689c0b83798a8359770e # v2.9.3
+        with:
+          name: db
+          json-summary-path: coverage-db/coverage-summary.json
+          json-final-path: coverage-db/coverage-final.json
+
+      - name: Coverage report — ingest
+        if: needs.test-ingest.result == 'success'
+        uses: davelosert/vitest-coverage-report-action@2500dafcee7dd64f85ab689c0b83798a8359770e # v2.9.3
+        with:
+          name: ingest
+          json-summary-path: coverage-ingest/coverage-summary.json
+          json-final-path: coverage-ingest/coverage-final.json
+
+      - name: Coverage report — dashboard
+        if: needs.test-dashboard.result == 'success'
+        uses: davelosert/vitest-coverage-report-action@2500dafcee7dd64f85ab689c0b83798a8359770e # v2.9.3
+        with:
+          name: dashboard
+          json-summary-path: coverage-dashboard/coverage-summary.json
+          json-final-path: coverage-dashboard/coverage-final.json
+
+      - name: Coverage report — cli
+        if: needs.test-cli.result == 'success'
+        uses: davelosert/vitest-coverage-report-action@2500dafcee7dd64f85ab689c0b83798a8359770e # v2.9.3
+        with:
+          name: cli
+          json-summary-path: coverage-cli/coverage-summary.json
+          json-final-path: coverage-cli/coverage-final.json
+
+      - name: Coverage report — sdk
+        if: needs.test-sdk.result == 'success'
+        uses: davelosert/vitest-coverage-report-action@2500dafcee7dd64f85ab689c0b83798a8359770e # v2.9.3
+        with:
+          name: sdk
+          json-summary-path: coverage-sdk/coverage-summary.json
+          json-final-path: coverage-sdk/coverage-final.json
 
   # ── Build ──────────────────────────────────────────────────────────
   build:

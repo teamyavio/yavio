@@ -133,4 +133,74 @@ describe("up command", () => {
       files: [composePath, prodPath],
     });
   });
+
+  it("handles compose file resolution failure", async () => {
+    mockHasDocker.mockResolvedValue(true);
+    mockHasDockerCompose.mockResolvedValue(true);
+    mockResolveComposeFile.mockImplementation(() => {
+      throw new Error("Compose file not found");
+    });
+
+    const program = new Command();
+    registerUp(program);
+
+    await program.parseAsync(["node", "yavio", "up"]);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("handles compose start failure", async () => {
+    const composePath = join(tempDir, "docker-compose.yml");
+    writeFileSync(composePath, "services: {}");
+    mockHasDocker.mockResolvedValue(true);
+    mockHasDockerCompose.mockResolvedValue(true);
+    mockResolveComposeFile.mockReturnValue(composePath);
+    mockExecCompose.mockRejectedValueOnce(new Error("start failed"));
+
+    const program = new Command();
+    registerUp(program);
+
+    await program.parseAsync(["node", "yavio", "up", "--file", composePath]);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("warns when services are not healthy within deadline", async () => {
+    const composePath = join(tempDir, "docker-compose.yml");
+    writeFileSync(composePath, "services: {}");
+    mockHasDocker.mockResolvedValue(true);
+    mockHasDockerCompose.mockResolvedValue(true);
+    mockResolveComposeFile.mockReturnValue(composePath);
+    mockExecCompose.mockResolvedValue({ stdout: "", stderr: "" });
+    mockCheckHealth.mockResolvedValue({ ok: false, status: 0, latency: 0 });
+
+    let dateCallCount = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => {
+      dateCallCount++;
+      return dateCallCount === 1 ? 0 : 100_000;
+    });
+
+    const program = new Command();
+    registerUp(program);
+
+    await program.parseAsync(["node", "yavio", "up", "--file", composePath]);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("warns when --prod file does not exist", async () => {
+    const composePath = join(tempDir, "docker-compose.yml");
+    writeFileSync(composePath, "services: {}");
+    mockHasDocker.mockResolvedValue(true);
+    mockHasDockerCompose.mockResolvedValue(true);
+    mockResolveComposeFile.mockReturnValue(composePath);
+    mockExecCompose.mockResolvedValue({ stdout: "", stderr: "" });
+    mockCheckHealth.mockResolvedValue({ ok: true, status: 200, latency: 5 });
+
+    const program = new Command();
+    registerUp(program);
+
+    await program.parseAsync(["node", "yavio", "up", "--file", composePath, "--prod"]);
+
+    expect(mockExecCompose).toHaveBeenCalledWith(["up", "-d"], {
+      files: [composePath],
+    });
+  });
 });

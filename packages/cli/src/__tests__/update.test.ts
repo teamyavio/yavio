@@ -76,4 +76,36 @@ describe("update command", () => {
     expect(output).toContain("ingest");
     expect(output).toContain("dashboard");
   });
+
+  it("fails when Docker is not available", async () => {
+    mockHasDocker.mockResolvedValueOnce(false);
+
+    const program = new Command();
+    registerUpdate(program);
+
+    await program.parseAsync(["node", "yavio", "update", "--file", "/some/compose.yml"]);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("handles pull failure", async () => {
+    mockExecCompose.mockRejectedValueOnce(new Error("pull failed"));
+
+    const program = new Command();
+    registerUpdate(program);
+
+    await program.parseAsync(["node", "yavio", "update", "--file", "/some/compose.yml"]);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("handles restart failure after successful pull", async () => {
+    mockExecCompose
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockRejectedValueOnce(new Error("restart failed"));
+
+    const program = new Command();
+    registerUpdate(program);
+
+    await program.parseAsync(["node", "yavio", "update", "--file", "/some/compose.yml"]);
+    expect(process.exitCode).toBe(1);
+  });
 });

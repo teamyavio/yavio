@@ -9,5 +9,17 @@ export default defineConfig({
   },
   test: {
     passWithNoTests: true,
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "json-summary", "json"],
+      reportsDirectory: "./coverage",
+      include: ["lib/**/*.ts"],
+      thresholds: {
+        lines: 80,
+        branches: 70,
+        functions: 80,
+        statements: 80,
+      },
+    },
   },
 });

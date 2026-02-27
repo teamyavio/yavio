@@ -108,4 +108,87 @@ describe("reset command", () => {
     await program.parseAsync(["node", "yavio", "reset", "--yes", "--confirm-destructive"]);
     expect(process.exitCode).toBe(1);
   });
+
+  it("handles stop services failure", async () => {
+    mockExecCompose.mockRejectedValueOnce(new Error("stop failed"));
+
+    const program = new Command();
+    registerReset(program);
+
+    await program.parseAsync([
+      "node",
+      "yavio",
+      "reset",
+      "--yes",
+      "--confirm-destructive",
+      "--file",
+      "/some/compose.yml",
+    ]);
+
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("handles volume removal failure", async () => {
+    mockExecCompose
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockRejectedValueOnce(new Error("volume removal failed"));
+
+    const program = new Command();
+    registerReset(program);
+
+    await program.parseAsync([
+      "node",
+      "yavio",
+      "reset",
+      "--yes",
+      "--confirm-destructive",
+      "--file",
+      "/some/compose.yml",
+    ]);
+
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("handles restart failure", async () => {
+    mockExecCompose
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockRejectedValueOnce(new Error("restart failed"));
+
+    const program = new Command();
+    registerReset(program);
+
+    await program.parseAsync([
+      "node",
+      "yavio",
+      "reset",
+      "--yes",
+      "--confirm-destructive",
+      "--file",
+      "/some/compose.yml",
+    ]);
+
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("handles selective volume removal failure with --keep-config", async () => {
+    mockExecCompose.mockResolvedValueOnce({ stdout: "", stderr: "" });
+    mockRemoveVolumes.mockRejectedValueOnce(new Error("volume rm failed"));
+
+    const program = new Command();
+    registerReset(program);
+
+    await program.parseAsync([
+      "node",
+      "yavio",
+      "reset",
+      "--yes",
+      "--confirm-destructive",
+      "--keep-config",
+      "--file",
+      "/some/compose.yml",
+    ]);
+
+    expect(process.exitCode).toBe(1);
+  });
 });
