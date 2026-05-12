@@ -17,7 +17,7 @@
     "fumadocs-mdx": "^14.2.7",
     "fumadocs-openapi": "^10.3.6",
     "fumadocs-ui": "^16.6.3",
-    "next": "^16.0.0",
+    "next": "^16.2.6",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "shiki": "^3.22.0"
