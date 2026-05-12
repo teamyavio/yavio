@@ -77,6 +77,42 @@ describe("resolveConfig", () => {
     });
   });
 
+  describe("serverOnly", () => {
+    it("defaults to false when nothing is configured", () => {
+      const config = resolveConfig({ apiKey: "test" });
+      expect(config?.serverOnly).toBe(false);
+    });
+
+    it("reads serverOnly from code options", () => {
+      const config = resolveConfig({ apiKey: "test", serverOnly: true });
+      expect(config?.serverOnly).toBe(true);
+    });
+
+    it("reads serverOnly from YAVIO_SERVER_ONLY=1", () => {
+      process.env.YAVIO_SERVER_ONLY = "1";
+      const config = resolveConfig({ apiKey: "test" });
+      expect(config?.serverOnly).toBe(true);
+    });
+
+    it("reads serverOnly from YAVIO_SERVER_ONLY=true", () => {
+      process.env.YAVIO_SERVER_ONLY = "true";
+      const config = resolveConfig({ apiKey: "test" });
+      expect(config?.serverOnly).toBe(true);
+    });
+
+    it("code option overrides env var", () => {
+      process.env.YAVIO_SERVER_ONLY = "true";
+      const config = resolveConfig({ apiKey: "test", serverOnly: false });
+      expect(config?.serverOnly).toBe(false);
+    });
+
+    it("treats unknown env values as undefined (falls through to default)", () => {
+      process.env.YAVIO_SERVER_ONLY = "maybe";
+      const config = resolveConfig({ apiKey: "test" });
+      expect(config?.serverOnly).toBe(false);
+    });
+  });
+
   describe(".yaviorc.json file discovery", () => {
     let tempDir: string;
 
