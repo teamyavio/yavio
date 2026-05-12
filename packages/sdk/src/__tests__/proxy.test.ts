@@ -35,6 +35,7 @@ const testConfig: YavioConfig = {
     tokens: true,
     retries: true,
   } satisfies CaptureConfig,
+  serverOnly: false,
 };
 
 describe("createProxy", () => {
@@ -304,6 +305,108 @@ describe("createProxy — widget config injection", () => {
 
     // mintWidgetToken should only have been called once
     expect(mockedMint).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createProxy — serverOnly mode", () => {
+  const serverOnlyConfig: YavioConfig = { ...testConfig, serverOnly: true };
+
+  beforeEach(() => {
+    mockedMint.mockReset();
+    _resetGlobalState();
+  });
+
+  it("does not inject _meta.yavio when serverOnly is true", async () => {
+    mockedMint.mockResolvedValue({
+      token: "jwt_should_not_be_used",
+      expiresAt: "2026-01-01T00:00:00Z",
+    });
+
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, serverOnlyConfig, transport, "0.0.1");
+
+    proxy.tool("server_only_tool", (extra) => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+
+    const tool = getRegisteredTool(server, "server_only_tool");
+    const mockExtra = {
+      signal: new AbortController().signal,
+      requestId: "req-so-1",
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+    };
+
+    const result = (await tool?.handler(mockExtra)) as Record<string, unknown>;
+    expect(result._meta).toBeUndefined();
+  });
+
+  it("does not call mintWidgetToken when serverOnly is true", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, serverOnlyConfig, transport, "0.0.1");
+
+    proxy.tool("no_mint_tool", (extra) => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+
+    const tool = getRegisteredTool(server, "no_mint_tool");
+    await tool?.handler({
+      signal: new AbortController().signal,
+      requestId: "req-so-2",
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+    });
+
+    expect(mockedMint).not.toHaveBeenCalled();
+  });
+
+  it("preserves existing _meta from the handler verbatim", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, serverOnlyConfig, transport, "0.0.1");
+
+    proxy.tool("preserve_meta_tool", (extra) => ({
+      content: [{ type: "text", text: "ok" }],
+      _meta: { custom: "value" },
+    }));
+
+    const tool = getRegisteredTool(server, "preserve_meta_tool");
+    const result = (await tool?.handler({
+      signal: new AbortController().signal,
+      requestId: "req-so-3",
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+    })) as Record<string, unknown>;
+
+    expect(result._meta).toEqual({ custom: "value" });
+  });
+
+  it("still emits tool_discovery and tool_call events in serverOnly mode", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, serverOnlyConfig, transport, "0.0.1");
+
+    proxy.tool("events_still_fire", (extra) => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+
+    // tool_discovery fires synchronously on registration
+    const discoveryBatch = transport.sent[0];
+    expect(discoveryBatch?.[0].event_type).toBe("tool_discovery");
+
+    const tool = getRegisteredTool(server, "events_still_fire");
+    await tool?.handler({
+      signal: new AbortController().signal,
+      requestId: "req-so-4",
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+    });
+
+    const eventTypes = transport.sent.flat().map((e) => e.event_type);
+    expect(eventTypes).toContain("connection");
+    expect(eventTypes).toContain("tool_call");
   });
 });
 

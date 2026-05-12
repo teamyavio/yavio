@@ -154,7 +154,9 @@ function wrapToolCallback(
       );
       transport.send([toolCallEvent]);
 
-      if (result && typeof result === "object") {
+      // Server-only mode skips widget token minting and _meta.yavio injection
+      // so the tool result is forwarded to the MCP client byte-for-byte.
+      if (!config.serverOnly && result && typeof result === "object") {
         try {
           const token = await getWidgetToken(
             tokenCache,

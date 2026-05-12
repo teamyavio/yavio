@@ -18,6 +18,16 @@ interface ConfigFile {
   apiKey?: string;
   endpoint?: string;
   capture?: Partial<CaptureConfig>;
+  serverOnly?: boolean;
+}
+
+/** Parse an env var as a boolean. Accepts "1"/"true"/"yes" (case-insensitive). */
+function parseBoolEnv(value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  const v = value.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "yes") return true;
+  if (v === "0" || v === "false" || v === "no" || v === "") return false;
+  return undefined;
 }
 
 /**
@@ -43,7 +53,7 @@ function findConfigFile(startDir: string): ConfigFile | null {
 /**
  * Resolve SDK configuration with priority:
  * 1. Code options passed to `withYavio()`
- * 2. Environment variables (`YAVIO_API_KEY`, `YAVIO_ENDPOINT`)
+ * 2. Environment variables (`YAVIO_API_KEY`, `YAVIO_ENDPOINT`, `YAVIO_SERVER_ONLY`)
  * 3. `.yaviorc.json` config file (walked up from cwd)
  *
  * Returns null if no API key is found (triggers no-op mode).
@@ -64,5 +74,11 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
     ...options?.capture,
   };
 
-  return { apiKey, endpoint, capture };
+  const serverOnly =
+    options?.serverOnly ??
+    parseBoolEnv(process.env.YAVIO_SERVER_ONLY) ??
+    fileConfig?.serverOnly ??
+    false;
+
+  return { apiKey, endpoint, capture, serverOnly };
 }

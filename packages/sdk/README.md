@@ -48,6 +48,7 @@ If no API key is found, `withYavio()` returns the original server unchanged — 
 withYavio(server, {
   apiKey: "yav_...",
   endpoint: "https://ingest.yavio.app",
+  serverOnly: false,     // skip _meta.yavio injection + widget token mint (default: false)
   capture: {
     inputValues: true,   // capture tool input values (default: true)
     outputValues: true,  // capture tool output values (default: true)
@@ -57,6 +58,23 @@ withYavio(server, {
   },
 });
 ```
+
+### Server-only mode
+
+Pass `serverOnly: true` (or set `YAVIO_SERVER_ONLY=1`) when you only want server-side event capture and your tool responses must remain byte-identical to what your handler returns:
+
+```typescript
+withYavio(server, { apiKey: "yav_...", serverOnly: true });
+```
+
+In this mode the SDK:
+
+- does **not** inject `_meta.yavio` into tool results,
+- does **not** mint a widget token (no extra HTTP round-trip on the first tool call),
+- still emits `tool_discovery`, `tool_call`, and `connection` events,
+- still supports the full `yavio.identify / step / track / conversion` API inside handlers.
+
+The React widget (`useYavio()`) auto-configures from `_meta.yavio`, so it will not connect on its own in server-only mode — pass config to the hook explicitly if you still want client-side tracking.
 
 ## Tracking API
 
