@@ -28,9 +28,7 @@
       "undici": "^7.24.0"
     },
     "auditConfig": {
-      "ignoreGhsas": [
-        "GHSA-r5fr-rjxr-66jc"
-      ]
+      "ignoreGhsas": ["GHSA-r5fr-rjxr-66jc"]
     }
   },
   "devDependencies": {
