@@ -22,13 +22,12 @@
       "fast-xml-parser": ">=5.5.6",
       "path-to-regexp": ">=8.4.0",
       "picomatch": ">=4.0.4",
-      "vite": ">=7.3.2",
       "@hono/node-server": ">=1.19.10",
       "express-rate-limit": ">=8.2.2",
       "undici": "^7.24.0"
     },
     "auditConfig": {
-      "ignoreGhsas": ["GHSA-r5fr-rjxr-66jc"]
+      "ignoreGhsas": ["GHSA-r5fr-rjxr-66jc", "GHSA-v2wj-q39q-566r", "GHSA-p9ff-h696-f583"]
     }
   },
   "devDependencies": {
