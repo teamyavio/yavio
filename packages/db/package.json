@@ -43,7 +43,7 @@
   "dependencies": {
     "@clickhouse/client": "^1.8.1",
     "@yavio/shared": "workspace:*",
-    "drizzle-orm": "^0.38.4",
+    "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.5"
   },
   "devDependencies": {
