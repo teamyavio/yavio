@@ -271,6 +271,21 @@ export function createProxy<T extends McpServer>(
   const originalRegisterTool = server.registerTool.bind(server);
   const originalConnect = server.connect.bind(server);
 
+  /**
+   * Keep fluent chains on the proxy.
+   *
+   * Skybridge's fluent methods (`registerTool`/`registerWidget`) return `this`
+   * (the underlying server) so calls can be chained. Because the intercepting
+   * functions below call methods bound to the underlying server, they would
+   * return that server directly — dropping the rest of the chain off the proxy,
+   * so only the first chained `registerTool` would be instrumented. When the
+   * underlying call returns the server itself, return the proxy instead so every
+   * chained registration stays intercepted. Plain MCP SDK `registerTool`/`tool`
+   * return a `RegisteredTool` (not the server), which passes through unchanged.
+   */
+  const chainable = (result: unknown, receiver: unknown): unknown =>
+    result === server ? receiver : result;
+
   /** Emit a tool_discovery event via the transport. */
   const emitDiscovery = (
     toolName: string,
@@ -339,7 +354,7 @@ export function createProxy<T extends McpServer>(
             emitDiscovery(toolName, description, inputSchema);
           }
 
-          return result;
+          return chainable(result, receiver);
         };
       }
 
@@ -382,7 +397,7 @@ export function createProxy<T extends McpServer>(
             emitDiscovery(toolName, description, inputSchema);
           }
 
-          return result;
+          return chainable(result, receiver);
         };
       }
 

@@ -410,6 +410,84 @@ describe("createProxy — serverOnly mode", () => {
   });
 });
 
+describe("createProxy — fluent chaining (Skybridge-style)", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue(null);
+    _resetGlobalState();
+  });
+
+  /** A minimal Skybridge-style server whose registerTool returns `this` for chaining. */
+  function makeFluentServer() {
+    const registered: string[] = [];
+    const server = {
+      server: {},
+      connect: async () => {},
+      tool() {
+        return this;
+      },
+      registerTool(name: string, _config: unknown, _cb: unknown) {
+        registered.push(name);
+        return this; // fluent: returns the server for chaining
+      },
+    };
+    return { server, registered };
+  }
+
+  it("keeps the chain on the proxy so every chained registerTool is instrumented", () => {
+    const { server, registered } = makeFluentServer();
+    const transport = createMockTransport();
+    const proxy = createProxy(server as unknown as McpServer, testConfig, transport, "0.0.1");
+
+    // The base McpServer type returns RegisteredTool from registerTool; Skybridge's
+    // McpServer<TTools> returns the accumulated server for chaining. Model the
+    // fluent shape locally so the chained calls type-check.
+    type Chainable = {
+      registerTool(name: string, config: unknown, cb: () => { content: unknown[] }): Chainable;
+    };
+    const chain = proxy as unknown as Chainable;
+
+    const ret = chain
+      .registerTool("a", {}, () => ({ content: [{ type: "text", text: "" }] }))
+      .registerTool("b", {}, () => ({ content: [{ type: "text", text: "" }] }))
+      .registerTool("c", {}, () => ({ content: [{ type: "text", text: "" }] }));
+
+    // All three reached the underlying server
+    expect(registered).toEqual(["a", "b", "c"]);
+
+    // tool_discovery emitted for ALL three — proves each registerTool was intercepted,
+    // not just the first (the bug this fix addresses)
+    const discovered = transport.sent
+      .flat()
+      .filter((e) => e.event_type === "tool_discovery")
+      .map((e) => (e as Record<string, unknown>).tool_name);
+    expect(discovered).toEqual(["a", "b", "c"]);
+
+    // The chain stayed on the proxy
+    expect(ret).toBe(proxy);
+  });
+
+  it("passes a RegisteredTool handle (plain MCP SDK) through unchanged", () => {
+    const handle = { enable() {}, disable() {}, remove() {} };
+    const server = {
+      server: {},
+      connect: async () => {},
+      tool() {
+        return this;
+      },
+      registerTool() {
+        return handle; // plain MCP SDK returns a handle, not the server
+      },
+    };
+    const transport = createMockTransport();
+    const proxy = createProxy(server as unknown as McpServer, testConfig, transport, "0.0.1");
+
+    const ret = proxy.registerTool("x", {}, () => ({ content: [{ type: "text", text: "" }] }));
+    expect(ret).toBe(handle);
+    expect(ret).not.toBe(proxy);
+  });
+});
+
 describe("createProxy — tool_discovery emission", () => {
   beforeEach(() => {
     mockedMint.mockReset();
