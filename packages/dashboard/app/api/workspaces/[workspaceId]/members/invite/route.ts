@@ -1,8 +1,11 @@
 import { type AuthContext, withRole } from "@/lib/auth/require-role";
 import { getDb } from "@/lib/db";
+import { sendEmail } from "@/lib/email/send";
+import { renderInvitationEmail } from "@/lib/email/templates/invitation";
+import { getEnv } from "@/lib/env";
 import { generateInviteToken } from "@/lib/invitation/token";
 import { inviteSchema } from "@/lib/invitation/validation";
-import { invitations, users, workspaceMembers } from "@yavio/db/schema";
+import { invitations, users, workspaceMembers, workspaces } from "@yavio/db/schema";
 import { ErrorCode } from "@yavio/shared/error-codes";
 import { and, eq, gt, isNull } from "drizzle-orm";
 import { NextResponse } from "next/server";
@@ -91,8 +94,37 @@ export const POST = withRole("admin")(async (request: Request, ctx: AuthContext)
     })
     .returning();
 
+  // Look up the names needed to personalize the email.
+  const [workspace] = await db
+    .select({ name: workspaces.name })
+    .from(workspaces)
+    .where(eq(workspaces.id, ctx.workspaceId))
+    .limit(1);
+
+  const [inviter] = await db
+    .select({ name: users.name, email: users.email })
+    .from(users)
+    .where(eq(users.id, ctx.userId))
+    .limit(1);
+
+  const workspaceName = workspace?.name ?? "your workspace";
+  const inviterName = inviter?.name ?? inviter?.email ?? "A teammate";
+  const inviteUrl = `${getEnv().APP_URL}/invite/${raw}`;
+
+  const emailSent = await sendEmail(
+    email,
+    `You've been invited to join ${workspaceName} on Yavio`,
+    renderInvitationEmail({ workspaceName, inviterName, inviteUrl, role }),
+  );
+
   return NextResponse.json(
-    { invitation: { id: invitation.id, email, role, expiresAt }, token: raw },
+    {
+      invitation: { id: invitation.id, email, role, expiresAt },
+      emailSent,
+      // Fall back to returning the link when email delivery isn't configured,
+      // so an admin can still share it manually. Omitted once email works.
+      ...(emailSent ? {} : { inviteUrl }),
+    },
     { status: 201 },
   );
 });

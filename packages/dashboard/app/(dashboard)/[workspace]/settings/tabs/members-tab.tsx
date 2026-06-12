@@ -110,14 +110,28 @@ export function MembersTab({ workspaceId, userRole, userId }: MembersTabProps) {
       body: JSON.stringify({ email: inviteEmail, role: inviteRole }),
     });
 
+    const body = await res.json();
+
     if (!res.ok) {
-      const body = await res.json();
       setInviteError(body.error ?? "Failed to send invitation");
       setInviteLoading(false);
       return;
     }
 
-    toast.success(`Invitation sent to ${inviteEmail}`);
+    if (body.emailSent) {
+      toast.success(`Invitation sent to ${inviteEmail}`);
+    } else if (body.inviteUrl) {
+      toast.warning("Email isn't configured — copy the invite link to share it", {
+        description: body.inviteUrl,
+        action: {
+          label: "Copy link",
+          onClick: () => navigator.clipboard.writeText(body.inviteUrl),
+        },
+        duration: 30000,
+      });
+    } else {
+      toast.success(`Invitation created for ${inviteEmail}`);
+    }
     setInviteEmail("");
     setInviteRole("member");
     setInviteOpen(false);
