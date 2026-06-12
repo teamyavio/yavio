@@ -26,6 +26,12 @@ export function withYavio<T extends McpServer>(server: T, options?: WithYavioOpt
     return server;
   }
 
+  if (config.serverOnly) {
+    console.info(
+      "[yavio] Server-only mode: skipping _meta.yavio injection and widget token minting. The React widget will not auto-connect.",
+    );
+  }
+
   const transport = new HttpTransport({
     endpoint: config.endpoint,
     apiKey: config.apiKey,
