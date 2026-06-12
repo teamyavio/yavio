@@ -99,6 +99,11 @@ services:
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET}
       APP_URL: ${APP_URL:-http://localhost:3000}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@yavio.dev}
     ports:
       - "${DASHBOARD_PORT:-3000}:3000"
     networks:
