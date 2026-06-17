@@ -892,3 +892,83 @@ describe("createProxy — session reuse", () => {
     expect(firstSessionId).toMatch(/^ses_/);
   });
 });
+
+describe("createProxy — Skybridge registerTool(config, cb)", () => {
+  beforeEach(() => {
+    _resetGlobalState();
+    mockedMint.mockResolvedValue(null as never);
+  });
+
+  // Skybridge's McpServer uses `registerTool(config, cb)` (the name lives on
+  // `config.name`) and returns `this` for chaining — unlike the MCP SDK's
+  // `registerTool(name, config, cb)`. The proxy must instrument both.
+  function createSkybridgeMock() {
+    const mock: Record<string, unknown> = {
+      stored: null,
+      tool() {
+        return mock;
+      },
+      registerTool(...args: unknown[]) {
+        mock.stored = args.find((a) => typeof a === "function");
+        return mock; // fluent — returns the server itself
+      },
+      connect: async () => {},
+      server: { getClientVersion: () => ({ name: "test-client" }) },
+    };
+    return mock;
+  }
+
+  it("derives the tool name from config.name (not 'unknown')", () => {
+    const mock = createSkybridgeMock();
+    const transport = createMockTransport();
+    const proxy = createProxy(mock as never, testConfig, transport, "0.0.1");
+
+    proxy.registerTool(
+      { name: "compare_prices", description: "Compare prices", inputSchema: { q: {} } } as never,
+      (() => ({ content: [{ type: "text", text: "ok" }] })) as never,
+    );
+
+    const discovery = transport.sent
+      .flat()
+      .find((e) => (e as Record<string, unknown>).event_type === "tool_discovery") as
+      | Record<string, unknown>
+      | undefined;
+    expect(discovery?.tool_name).toBe("compare_prices");
+  });
+
+  it("wraps the handler so invoking it emits a tool_call event", async () => {
+    const mock = createSkybridgeMock();
+    const transport = createMockTransport();
+    const proxy = createProxy(mock as never, testConfig, transport, "0.0.1");
+
+    proxy.registerTool(
+      { name: "compare_prices", description: "d" } as never,
+      (async () => ({ content: [{ type: "text", text: "ok" }] })) as never,
+    );
+
+    const handler = mock.stored as (...a: unknown[]) => Promise<unknown>;
+    expect(typeof handler).toBe("function");
+    await handler({ q: "x" }, { sessionId: "s1", _meta: {} });
+
+    const call = transport.sent
+      .flat()
+      .find((e) => (e as Record<string, unknown>).event_type === "tool_call") as
+      | Record<string, unknown>
+      | undefined;
+    expect(call?.event_name).toBe("compare_prices");
+  });
+
+  it("keeps the fluent chain intercepted across registrations", () => {
+    const mock = createSkybridgeMock();
+    const transport = createMockTransport();
+    const proxy = createProxy(mock as never, testConfig, transport, "0.0.1");
+
+    const ret = proxy.registerTool(
+      { name: "a" } as never,
+      (() => ({ content: [] })) as never,
+    );
+    // Skybridge returns `this`; the proxy must hand back the proxy so the next
+    // chained registration stays instrumented.
+    expect(ret).toBe(proxy);
+  });
+});
