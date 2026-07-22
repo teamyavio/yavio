@@ -22,7 +22,9 @@ function Calendar({ className, classNames, ...props }: ComponentProps<typeof Day
         ),
         month_caption: "flex justify-center pt-1 relative items-center w-full",
         caption_label: "text-sm font-medium",
-        nav: "flex items-center gap-1",
+        // the nav only hosts the absolutely-positioned prev/next buttons;
+        // "contents" removes its box so it doesn't consume flex gap in the months row
+        nav: "contents",
         button_previous: cn(
           buttonVariants({ variant: "outline" }),
           "absolute left-3 top-3 h-7 w-7 bg-transparent p-0 opacity-50 hover:opacity-100",
