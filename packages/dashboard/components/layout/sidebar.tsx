@@ -73,7 +73,7 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
       : "";
 
   return (
-    <aside className="flex h-screen w-56 flex-shrink-0 flex-col border-r bg-muted/40">
+    <aside className="flex h-full w-56 flex-shrink-0 flex-col border-r bg-muted/40">
       <div className="flex h-14 items-center border-b px-4">
         <Link href="/" className="text-lg font-bold">
           Yavio
@@ -143,7 +143,7 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
 
       <Separator />
 
-      <nav className="flex-1 space-y-1 p-2">
+      <nav className="flex-1 space-y-1 overflow-y-auto p-2">
         {analyticsNavItems.map((item) => {
           const Icon = item.icon;
           const href = `${basePath}/${item.path}`;
