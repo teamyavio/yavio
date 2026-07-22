@@ -488,6 +488,184 @@ describe("createProxy — fluent chaining (Skybridge-style)", () => {
   });
 });
 
+describe("createProxy — Skybridge registerTool(config, cb)", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue(null);
+    _resetGlobalState();
+  });
+
+  /**
+   * A minimal Skybridge-style server: registerTool takes (config, cb) with the
+   * tool name on config.name, stores the callback it receives, and returns
+   * `this` for chaining — mirroring skybridge's McpServer.
+   */
+  function makeSkybridgeServer() {
+    const handlers = new Map<string, (...cbArgs: unknown[]) => unknown>();
+    const server = {
+      server: {},
+      connect: async () => {},
+      tool() {
+        return this;
+      },
+      registerTool(config: { name: string }, cb: (...cbArgs: unknown[]) => unknown) {
+        handlers.set(config.name, cb);
+        return this;
+      },
+    };
+    return { server, handlers };
+  }
+
+  /** The 2-arg fluent shape so chained calls type-check against the proxy. */
+  type SkybridgeChainable = {
+    registerTool(
+      config: Record<string, unknown>,
+      cb: (...cbArgs: unknown[]) => unknown,
+    ): SkybridgeChainable;
+  };
+
+  function makeExtra(overrides?: Record<string, unknown>) {
+    return {
+      signal: new AbortController().signal,
+      requestId: "req-sb-1",
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+      ...overrides,
+    };
+  }
+
+  it("derives the tool name from config.name for tool_discovery", () => {
+    const { server } = makeSkybridgeServer();
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server as unknown as McpServer,
+      testConfig,
+      transport,
+      "0.0.1",
+    ) as unknown as SkybridgeChainable;
+
+    proxy.registerTool(
+      {
+        name: "search_rooms",
+        description: "Search available rooms",
+        inputSchema: { query: { type: "string" } },
+      },
+      () => ({ content: [{ type: "text", text: "ok" }] }),
+    );
+
+    expect(transport.sent.length).toBe(1);
+    const event = transport.sent[0][0] as Record<string, unknown>;
+    expect(event.event_type).toBe("tool_discovery");
+    expect(event.tool_name).toBe("search_rooms");
+    expect(event.description).toBe("Search available rooms");
+    expect(event.input_schema).toEqual({ query: { type: "string" } });
+  });
+
+  it("wraps the handler so invoking it emits connection and tool_call events", async () => {
+    const { server, handlers } = makeSkybridgeServer();
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server as unknown as McpServer,
+      testConfig,
+      transport,
+      "0.0.1",
+    ) as unknown as SkybridgeChainable;
+
+    let handlerCalled = false;
+    proxy.registerTool({ name: "book_room" }, () => {
+      handlerCalled = true;
+      return { content: [{ type: "text", text: "booked" }] };
+    });
+
+    // The underlying server must have received the WRAPPED callback
+    const wrapped = handlers.get("book_room");
+    expect(wrapped).toBeDefined();
+
+    const result = (await wrapped?.({ roomId: "r1" }, makeExtra())) as Record<string, unknown>;
+    expect(handlerCalled).toBe(true);
+    expect(result.content).toEqual([{ type: "text", text: "booked" }]);
+
+    const eventTypes = transport.sent.flat().map((e) => e.event_type);
+    expect(eventTypes).toContain("connection");
+    expect(eventTypes).toContain("tool_call");
+
+    const toolCall = transport.sent
+      .flat()
+      .find((e) => e.event_type === "tool_call") as unknown as Record<string, unknown>;
+    expect(toolCall.event_name).toBe("book_room");
+    expect(toolCall.status).toBe("success");
+  });
+
+  it("emits an error tool_call and rethrows when the handler throws", async () => {
+    const { server, handlers } = makeSkybridgeServer();
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server as unknown as McpServer,
+      testConfig,
+      transport,
+      "0.0.1",
+    ) as unknown as SkybridgeChainable;
+
+    proxy.registerTool({ name: "failing_tool" }, () => {
+      throw new Error("boom");
+    });
+
+    const wrapped = handlers.get("failing_tool");
+    await expect(wrapped?.({}, makeExtra())).rejects.toThrow("boom");
+
+    const toolCall = transport.sent
+      .flat()
+      .find((e) => e.event_type === "tool_call") as unknown as Record<string, unknown>;
+    expect(toolCall.event_name).toBe("failing_tool");
+    expect(toolCall.status).toBe("error");
+    expect(toolCall.error_message).toBe("boom");
+  });
+
+  it("instruments every registration in a fluent chain", () => {
+    const { server, handlers } = makeSkybridgeServer();
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server as unknown as McpServer,
+      testConfig,
+      transport,
+      "0.0.1",
+    ) as unknown as SkybridgeChainable;
+
+    const ret = proxy
+      .registerTool({ name: "a" }, () => ({ content: [{ type: "text", text: "" }] }))
+      .registerTool({ name: "b" }, () => ({ content: [{ type: "text", text: "" }] }))
+      .registerTool({ name: "c" }, () => ({ content: [{ type: "text", text: "" }] }));
+
+    expect([...handlers.keys()]).toEqual(["a", "b", "c"]);
+
+    const discovered = transport.sent
+      .flat()
+      .filter((e) => e.event_type === "tool_discovery")
+      .map((e) => (e as unknown as Record<string, unknown>).tool_name);
+    expect(discovered).toEqual(["a", "b", "c"]);
+
+    // The chain stayed on the proxy so later registrations remain intercepted
+    expect(ret).toBe(proxy);
+  });
+
+  it("falls back to 'unknown' when no name is derivable", () => {
+    const { server } = makeSkybridgeServer();
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server as unknown as McpServer,
+      testConfig,
+      transport,
+      "0.0.1",
+    ) as unknown as SkybridgeChainable;
+
+    proxy.registerTool({}, () => ({ content: [{ type: "text", text: "" }] }));
+
+    const event = transport.sent[0][0] as Record<string, unknown>;
+    expect(event.event_type).toBe("tool_discovery");
+    expect(event.tool_name).toBe("unknown");
+  });
+});
+
 describe("createProxy — tool_discovery emission", () => {
   beforeEach(() => {
     mockedMint.mockReset();
