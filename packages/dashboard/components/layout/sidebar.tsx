@@ -98,7 +98,7 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
       <div
         className={cn(
           "flex items-center border-b",
-          collapsed ? "flex-col gap-1 py-2" : "h-14 justify-between px-4",
+          collapsed ? "flex-col gap-1 pt-3 pb-2" : "h-14 justify-between px-4",
         )}
       >
         <Link
