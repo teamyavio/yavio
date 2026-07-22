@@ -2,7 +2,9 @@
   "$schema": "https://turbo.build/schema.json",
   "globalPassThroughEnv": [
     "DATABASE_URL",
+    "DATABASE_APP_URL",
     "CLICKHOUSE_URL",
+    "CLICKHOUSE_PASSWORD",
     "API_KEY_HASH_SECRET",
     "JWT_SECRET",
     "ENCRYPTION_KEY",
