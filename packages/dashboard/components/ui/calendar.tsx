@@ -14,10 +14,11 @@ function Calendar({ className, classNames, ...props }: ComponentProps<typeof Day
         months: "flex flex-col sm:flex-row gap-4",
         month: cn(
           "flex flex-col gap-4",
-          // divider between adjacent months: horizontal when stacked, vertical side by side
-          "[&:not(:first-child)]:border-t [&:not(:first-child)]:pt-4",
-          "sm:[&:not(:first-child)]:border-t-0 sm:[&:not(:first-child)]:pt-0",
-          "sm:[&:not(:first-child)]:border-l sm:[&:not(:first-child)]:pl-4",
+          // divider between adjacent months ([&+&] = a month directly following
+          // another month, so the nav rendered as first sibling never matches):
+          // horizontal when stacked, vertical when side by side
+          "[&+&]:border-t [&+&]:pt-4",
+          "sm:[&+&]:border-t-0 sm:[&+&]:pt-0 sm:[&+&]:border-l sm:[&+&]:pl-4",
         ),
         month_caption: "flex justify-center pt-1 relative items-center w-full",
         caption_label: "text-sm font-medium",
