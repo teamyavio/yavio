@@ -97,44 +97,32 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
     >
       <div
         className={cn(
-          "flex h-14 items-center border-b",
-          collapsed ? "justify-center" : "justify-between px-4",
+          "flex items-center border-b",
+          collapsed ? "flex-col gap-1 py-2" : "h-14 justify-between px-4",
         )}
       >
         <Link
           href="/"
           title={collapsed ? "Yavio" : undefined}
-          className="flex items-center gap-2 text-lg font-bold"
+          className={cn("flex items-center gap-2 text-lg font-bold", collapsed && "p-1.5")}
         >
           <YavioLogo className="h-5 w-5" />
           {!collapsed && "Yavio"}
         </Link>
-        {!collapsed && (
-          <button
-            type="button"
-            onClick={toggleCollapsed}
-            aria-label="Collapse sidebar"
-            title="Collapse sidebar"
-            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-          >
-            <PanelLeftClose className="h-4 w-4" />
-          </button>
-        )}
-      </div>
-
-      {collapsed && (
-        <div className="flex justify-center border-b p-2">
-          <button
-            type="button"
-            onClick={toggleCollapsed}
-            aria-label="Expand sidebar"
-            title="Expand sidebar"
-            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-          >
+        <button
+          type="button"
+          onClick={toggleCollapsed}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+        >
+          {collapsed ? (
             <PanelLeftOpen className="h-4 w-4" />
-          </button>
-        </div>
-      )}
+          ) : (
+            <PanelLeftClose className="h-4 w-4" />
+          )}
+        </button>
+      </div>
 
       {!collapsed && (
         <div className="space-y-2 p-3">
@@ -199,7 +187,7 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
         </div>
       )}
 
-      <Separator />
+      {!collapsed && <Separator />}
 
       <nav className="flex-1 space-y-1 overflow-y-auto p-2">
         {analyticsNavItems.map((item) => {
