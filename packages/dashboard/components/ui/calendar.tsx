@@ -11,18 +11,27 @@ function Calendar({ className, classNames, ...props }: ComponentProps<typeof Day
     <DayPicker
       className={cn("p-3", className)}
       classNames={{
-        months: "flex flex-col sm:flex-row gap-2",
-        month: "flex flex-col gap-4",
+        months: "flex flex-col sm:flex-row gap-4",
+        month: cn(
+          "flex flex-col gap-4",
+          // divider between adjacent months ([&+&] = a month directly following
+          // another month, so the nav rendered as first sibling never matches):
+          // horizontal when stacked, vertical when side by side
+          "[&+&]:border-t [&+&]:pt-4",
+          "sm:[&+&]:border-t-0 sm:[&+&]:pt-0 sm:[&+&]:border-l sm:[&+&]:pl-4",
+        ),
         month_caption: "flex justify-center pt-1 relative items-center w-full",
         caption_label: "text-sm font-medium",
-        nav: "flex items-center gap-1",
+        // the nav only hosts the absolutely-positioned prev/next buttons;
+        // "contents" removes its box so it doesn't consume flex gap in the months row
+        nav: "contents",
         button_previous: cn(
           buttonVariants({ variant: "outline" }),
-          "absolute left-1 top-0 h-7 w-7 bg-transparent p-0 opacity-50 hover:opacity-100",
+          "absolute left-3 top-3 h-7 w-7 bg-transparent p-0 opacity-50 hover:opacity-100",
         ),
         button_next: cn(
           buttonVariants({ variant: "outline" }),
-          "absolute right-1 top-0 h-7 w-7 bg-transparent p-0 opacity-50 hover:opacity-100",
+          "absolute right-3 top-3 h-7 w-7 bg-transparent p-0 opacity-50 hover:opacity-100",
         ),
         month_grid: "w-full border-collapse space-x-1",
         weekdays: "flex",
