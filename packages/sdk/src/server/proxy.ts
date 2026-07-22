@@ -360,12 +360,24 @@ export function createProxy<T extends McpServer>(
 
       if (prop === "registerTool") {
         return (...args: unknown[]) => {
-          // registerTool(name: string, config: object, cb: Function)
-          // Callback is always the 3rd argument (index 2)
-          const toolName = typeof args[0] === "string" ? args[0] : "unknown";
-          if (args.length >= 3 && typeof args[2] === "function") {
-            const originalCb = args[2] as (...cbArgs: unknown[]) => unknown;
-            args[2] = wrapToolCallback(
+          // Two calling conventions reach this interceptor:
+          //   MCP SDK:   registerTool(name, config, cb) — name at args[0], cb at args[2]
+          //   Skybridge: registerTool(config, cb) — name on config.name, cb at args[1]
+          // Locate the callback by type and the config by shape so both forms
+          // (and mixes of them) are instrumented.
+          const cbIndex = args.findIndex((a) => typeof a === "function");
+          const configArg = args.find(
+            (a, i) => (cbIndex === -1 || i < cbIndex) && typeof a === "object" && a !== null,
+          ) as Record<string, unknown> | undefined;
+          const toolName =
+            typeof args[0] === "string"
+              ? args[0]
+              : typeof configArg?.name === "string"
+                ? configArg.name
+                : "unknown";
+          if (cbIndex !== -1) {
+            const originalCb = args[cbIndex] as (...cbArgs: unknown[]) => unknown;
+            args[cbIndex] = wrapToolCallback(
               originalCb,
               toolName,
               resolveSession,
@@ -384,14 +396,12 @@ export function createProxy<T extends McpServer>(
             emittedToolDiscoveries.add(toolName);
             let description: string | undefined;
             let inputSchema: Record<string, unknown> | undefined;
-            const configArg = args[1];
-            if (configArg && typeof configArg === "object") {
-              const obj = configArg as Record<string, unknown>;
-              if (typeof obj.description === "string") {
-                description = obj.description;
+            if (configArg) {
+              if (typeof configArg.description === "string") {
+                description = configArg.description;
               }
-              if (obj.inputSchema && typeof obj.inputSchema === "object") {
-                inputSchema = obj.inputSchema as Record<string, unknown>;
+              if (configArg.inputSchema && typeof configArg.inputSchema === "object") {
+                inputSchema = configArg.inputSchema as Record<string, unknown>;
               }
             }
             emitDiscovery(toolName, description, inputSchema);
