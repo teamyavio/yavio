@@ -200,7 +200,7 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
               href={href}
               title={collapsed ? item.label : undefined}
               className={cn(
-                "flex items-center gap-3 rounded-md py-2 text-sm font-medium transition-colors",
+                "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
                 collapsed ? "justify-center px-2" : "px-3",
                 active
                   ? "bg-accent text-accent-foreground"
@@ -227,7 +227,7 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
             href={`/${currentWorkspaceSlug}/settings`}
             title={collapsed ? "Settings" : undefined}
             className={cn(
-              "flex items-center gap-3 rounded-md py-2 text-sm font-medium transition-colors",
+              "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
               collapsed ? "justify-center px-2" : "px-3",
               pathname.includes("/settings") && !pathname.includes("/settings/account")
                 ? "bg-accent text-accent-foreground"
@@ -242,7 +242,7 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
           href="/settings/account"
           title={collapsed ? "Account" : undefined}
           className={cn(
-            "flex items-center gap-3 rounded-md py-2 text-sm font-medium transition-colors",
+            "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
             collapsed ? "justify-center px-2" : "px-3",
             pathname === "/settings/account"
               ? "bg-accent text-accent-foreground"
