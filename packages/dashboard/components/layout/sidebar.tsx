@@ -17,6 +17,7 @@ import {
   Filter,
   GitBranch,
   LayoutDashboard,
+  LogOut,
   PanelLeftClose,
   PanelLeftOpen,
   Settings,
@@ -24,6 +25,7 @@ import {
   Users,
   Wrench,
 } from "lucide-react";
+import { signOut } from "next-auth/react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -339,6 +341,18 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
           <User className="h-4 w-4 flex-shrink-0" />
           {!collapsed && "Account"}
         </Link>
+        <button
+          type="button"
+          onClick={() => signOut({ callbackUrl: "/login" })}
+          title={collapsed ? "Log out" : undefined}
+          className={cn(
+            "flex h-9 w-full items-center gap-3 rounded-md text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
+            collapsed ? "justify-center px-2" : "px-3",
+          )}
+        >
+          <LogOut className="h-4 w-4 flex-shrink-0" />
+          {!collapsed && "Log out"}
+        </button>
       </div>
     </aside>
   );
