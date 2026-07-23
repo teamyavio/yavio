@@ -22,6 +22,7 @@ import {
   GitBranch,
   KeyRound,
   LayoutDashboard,
+  LockKeyhole,
   LogOut,
   PanelLeftClose,
   PanelLeftOpen,
@@ -71,6 +72,11 @@ const ROLE_LEVEL: Record<string, number> = {
   member: 2,
   viewer: 1,
 };
+
+const accountSettingsItems = [
+  { tab: "profile", label: "Profile", icon: User },
+  { tab: "security", label: "Security", icon: LockKeyhole },
+];
 
 const workspaceSettingsItems = [
   { tab: "general", label: "General", icon: Settings, minRole: ROLE_LEVEL.admin },
@@ -244,12 +250,14 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
                   </p>
                 </div>
               )}
-              {(() => {
-                const active = true;
+              {accountSettingsItems.map((item) => {
+                const Icon = item.icon;
+                const active = (searchParams.get("tab") ?? "profile") === item.tab;
                 return (
                   <Link
-                    href="/settings/account"
-                    title={collapsed ? "Account settings" : undefined}
+                    key={item.tab}
+                    href={`/settings/account?tab=${item.tab}`}
+                    title={collapsed ? item.label : undefined}
                     className={cn(
                       "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
                       collapsed ? "justify-center px-2" : "px-3",
@@ -258,11 +266,11 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
                         : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
                     )}
                   >
-                    <User className="h-4 w-4 flex-shrink-0" />
-                    {!collapsed && "Account settings"}
+                    <Icon className="h-4 w-4 flex-shrink-0" />
+                    {!collapsed && item.label}
                   </Link>
                 );
-              })()}
+              })}
             </>
           ) : (
             currentWorkspace &&
@@ -350,18 +358,14 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
         <div className="p-2">
           <Link
             href={`${basePath}/overview`}
-            title={
-              collapsed
-                ? `Back to ${currentProjectName ?? "project"}`
-                : (currentProjectName ?? undefined)
-            }
+            title={collapsed ? "Back to dashboard" : (currentProjectName ?? undefined)}
             className={cn(
               "flex h-9 items-center gap-3 rounded-md border text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
               collapsed ? "justify-center px-2" : "px-3",
             )}
           >
             <ArrowLeft className="h-4 w-4 flex-shrink-0" />
-            {!collapsed && <span className="truncate">Back to project</span>}
+            {!collapsed && <span className="truncate">Back to dashboard</span>}
           </Link>
         </div>
       )}
