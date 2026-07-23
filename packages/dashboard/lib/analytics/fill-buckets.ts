@@ -46,6 +46,18 @@ function canonical(bucket: string): string {
 
 const MAX_BUCKETS = 1000;
 
+/**
+ * Range bounds arrive in ClickHouse form ("2026-07-16 15:30:56.202") —
+ * a UTC instant with no timezone marker, which new Date() would parse
+ * as SERVER-LOCAL time. Force UTC so the fill window never shifts on a
+ * non-UTC host.
+ */
+function parseUtc(value: string | Date): Date {
+  if (value instanceof Date) return value;
+  if (value.includes("Z") || value.includes("+")) return new Date(value);
+  return new Date(`${value.replace(" ", "T")}Z`);
+}
+
 export function fillTimeBuckets<T extends { bucket: string }>(
   rows: T[],
   from: string | Date,
@@ -53,8 +65,8 @@ export function fillTimeBuckets<T extends { bucket: string }>(
   granularity: Granularity,
   empty: (bucket: string) => T,
 ): T[] {
-  const start = floorBucket(new Date(from), granularity);
-  const end = new Date(to);
+  const start = floorBucket(parseUtc(from), granularity);
+  const end = parseUtc(to);
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return rows;
 
   const byKey = new Map(rows.map((r) => [canonical(r.bucket), r]));
