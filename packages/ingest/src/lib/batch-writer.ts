@@ -32,7 +32,7 @@ export class BatchWriter {
   private readonly flushSize: number;
   private readonly maxBufferSize: number;
   private readonly logger?: BatchWriterLogger;
-  private flushing = false;
+  private inFlight: Promise<void> | null = null;
 
   constructor(options: BatchWriterOptions) {
     this.clickhouse = options.clickhouse;
@@ -77,20 +77,32 @@ export class BatchWriter {
 
   /**
    * Flush buffered events to ClickHouse.
+   *
+   * Resolves only once currently-buffered events have actually been
+   * written (or re-buffered after a failed insert) — callers like the
+   * shutdown path rely on this as a completion guarantee, so a flush
+   * that is already in flight is awaited instead of skipped.
    */
   async flush(): Promise<void> {
-    if (this.flushing || this.buffer.length === 0) return;
+    while (this.inFlight) {
+      await this.inFlight;
+    }
+    if (this.buffer.length === 0) return;
 
-    this.flushing = true;
     const batch = this.buffer.splice(0, this.flushSize);
+    this.inFlight = (async () => {
+      try {
+        await this.insertWithRetry(batch);
+      } catch {
+        // Re-add failed events to front of buffer for next attempt
+        this.buffer.unshift(...batch);
+      }
+    })();
 
     try {
-      await this.insertWithRetry(batch);
-    } catch {
-      // Re-add failed events to front of buffer for next attempt
-      this.buffer.unshift(...batch);
+      await this.inFlight;
     } finally {
-      this.flushing = false;
+      this.inFlight = null;
     }
   }
 
