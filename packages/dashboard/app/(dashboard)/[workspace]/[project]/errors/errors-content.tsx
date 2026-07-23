@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  CHART_COLORS,
   COMMON_AXIS_PROPS,
   COMMON_CHART_PROPS,
   COMMON_GRID_PROPS,
@@ -10,23 +9,26 @@ import {
 import { ChartPanel } from "@/components/analytics/chart-panel";
 import { type Column, DataTable } from "@/components/analytics/data-table";
 import { DateRangePicker } from "@/components/analytics/date-range-picker";
+import { DonutWithLegend } from "@/components/analytics/donut-with-legend";
 import { EmptyState } from "@/components/analytics/empty-state";
 import { ErrorAlert } from "@/components/analytics/error-alert";
-import { EventBadge } from "@/components/analytics/event-badge";
 import { PageHeader } from "@/components/analytics/page-header";
 import { PlatformFilter } from "@/components/analytics/platform-filter";
+import { platformLabel } from "@/components/analytics/platform-meta";
 import { useAnalyticsFilters } from "@/hooks/use-analytics-filters";
 import { useAnalyticsQuery } from "@/hooks/use-analytics-query";
-import { formatRelativeTime } from "@/lib/analytics/format";
+import {
+  formatBucketLabel,
+  formatBucketTooltip,
+  formatPercent,
+  formatRelativeTime,
+} from "@/lib/analytics/format";
 import type { ErrorCategoryCount, ErrorListItem, TimeSeriesPoint } from "@/lib/queries/types";
 import { useState } from "react";
 import {
   Area,
   AreaChart,
   CartesianGrid,
-  Cell,
-  Pie,
-  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -48,8 +50,20 @@ const columns: Column<ErrorListItem>[] = [
   },
   { key: "toolName", label: "Tool" },
   { key: "errorCategory", label: "Category" },
-  { key: "errorMessage", label: "Message" },
-  { key: "platform", label: "Platform" },
+  {
+    key: "errorMessage",
+    label: "Message",
+    render: (row: ErrorListItem) => (
+      <span className="block max-w-xl truncate" title={row.errorMessage ?? undefined}>
+        {row.errorMessage}
+      </span>
+    ),
+  },
+  {
+    key: "platform",
+    label: "Platform",
+    render: (row: ErrorListItem) => platformLabel(row.platform ?? "unknown"),
+  },
 ];
 
 export function ErrorsContent({ projectId }: { projectId: string }) {
@@ -83,7 +97,7 @@ export function ErrorsContent({ projectId }: { projectId: string }) {
         />
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <ChartPanel
               title="Error Rate"
               granularity={filters.granularity}
@@ -92,9 +106,20 @@ export function ErrorsContent({ projectId }: { projectId: string }) {
               <ResponsiveContainer width="100%" height={256}>
                 <AreaChart data={data?.timeSeries ?? []}>
                   <CartesianGrid {...COMMON_GRID_PROPS} />
-                  <XAxis dataKey="bucket" {...COMMON_AXIS_PROPS} />
-                  <YAxis {...COMMON_AXIS_PROPS} />
-                  <Tooltip />
+                  <XAxis
+                    dataKey="bucket"
+                    minTickGap={32}
+                    tickFormatter={(v: string) => formatBucketLabel(v, filters.granularity)}
+                    {...COMMON_AXIS_PROPS}
+                  />
+                  <YAxis
+                    tickFormatter={(v: number) => formatPercent(v, 0)}
+                    {...COMMON_AXIS_PROPS}
+                  />
+                  <Tooltip
+                    labelFormatter={(v) => formatBucketTooltip(String(v), filters.granularity)}
+                    formatter={(value?: number) => [formatPercent(value ?? 0), "Error rate"]}
+                  />
                   <Area
                     type="monotone"
                     dataKey="value"
@@ -107,25 +132,13 @@ export function ErrorsContent({ projectId }: { projectId: string }) {
             </ChartPanel>
 
             <ChartPanel title="Error Categories">
-              <ResponsiveContainer width="100%" height={256}>
-                <PieChart>
-                  <Pie
-                    data={data?.categories ?? []}
-                    dataKey="count"
-                    nameKey="category"
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={60}
-                    outerRadius={100}
-                    animationDuration={0}
-                  >
-                    {(data?.categories ?? []).map((entry, idx) => (
-                      <Cell key={entry.category} fill={CHART_COLORS[idx % CHART_COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip />
-                </PieChart>
-              </ResponsiveContainer>
+              <DonutWithLegend
+                data={(data?.categories ?? []).map((c) => ({
+                  key: c.category,
+                  label: c.category,
+                  count: Number(c.count),
+                }))}
+              />
             </ChartPanel>
           </div>
 

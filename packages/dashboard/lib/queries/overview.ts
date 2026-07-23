@@ -65,33 +65,50 @@ export async function queryOverviewKPIs(ctx: QueryContext): Promise<KPIResult[]>
   });
 
   const r = rows[0] ?? {};
+  // ClickHouse serialises UInt64 aggregates as JSON strings; coerce so
+  // consumers never do string arithmetic ("819" / "0" -> Infinity).
+  const num = (v: unknown): number | undefined => {
+    if (v === null || v === undefined) return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  };
   return [
     {
       label: "Invocations",
-      value: r.invocations ?? 0,
-      previousValue: r.prev_invocations,
+      value: num(r.invocations) ?? 0,
+      previousValue: num(r.prev_invocations),
       format: "number",
     },
-    { label: "Sessions", value: r.sessions ?? 0, previousValue: r.prev_sessions, format: "number" },
+    {
+      label: "Sessions",
+      value: num(r.sessions) ?? 0,
+      previousValue: num(r.prev_sessions),
+      format: "number",
+    },
     {
       label: "Error Rate",
-      value: r.error_rate ?? 0,
-      previousValue: r.prev_error_rate,
+      value: num(r.error_rate) ?? 0,
+      previousValue: num(r.prev_error_rate),
       format: "percent",
     },
     {
       label: "Avg Latency",
-      value: r.avg_latency ?? 0,
-      previousValue: r.prev_avg_latency,
+      value: num(r.avg_latency) ?? 0,
+      previousValue: num(r.prev_avg_latency),
       format: "latency",
     },
     {
       label: "Conversions",
-      value: r.conversions ?? 0,
-      previousValue: r.prev_conversions,
+      value: num(r.conversions) ?? 0,
+      previousValue: num(r.prev_conversions),
       format: "number",
     },
-    { label: "Revenue", value: r.revenue ?? 0, previousValue: r.prev_revenue, format: "currency" },
+    {
+      label: "Revenue",
+      value: num(r.revenue) ?? 0,
+      previousValue: num(r.prev_revenue),
+      format: "currency",
+    },
   ];
 }
 

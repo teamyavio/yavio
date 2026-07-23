@@ -10,12 +10,13 @@ import {
 import { ChartPanel } from "@/components/analytics/chart-panel";
 import { type Column, DataTable } from "@/components/analytics/data-table";
 import { DateRangePicker } from "@/components/analytics/date-range-picker";
+import { DonutWithLegend } from "@/components/analytics/donut-with-legend";
 import { EmptyState } from "@/components/analytics/empty-state";
 import { ErrorAlert } from "@/components/analytics/error-alert";
 import { KPICard } from "@/components/analytics/kpi-card";
 import { PageHeader } from "@/components/analytics/page-header";
 import { PlatformFilter } from "@/components/analytics/platform-filter";
-import { platformLabel } from "@/components/analytics/platform-meta";
+import { PLATFORM_META, platformLabel } from "@/components/analytics/platform-meta";
 import { Badge } from "@/components/ui/badge";
 import {
   Breadcrumb,
@@ -36,7 +37,14 @@ import {
 } from "@/components/ui/dialog";
 import { useAnalyticsFilters } from "@/hooks/use-analytics-filters";
 import { useAnalyticsQuery } from "@/hooks/use-analytics-query";
-import { formatLatency, formatRelativeTime } from "@/lib/analytics/format";
+import {
+  formatBucketLabel,
+  formatBucketTooltip,
+  formatLatency,
+  formatNumber,
+  formatPercent,
+  formatRelativeTime,
+} from "@/lib/analytics/format";
 import type {
   ErrorCategoryCount,
   KPIResult,
@@ -47,6 +55,7 @@ import type {
   ToolInvocation,
   ToolRegistryEntry,
 } from "@/lib/queries/types";
+import type { Platform } from "@yavio/shared/platform";
 import { Code } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useState } from "react";
@@ -109,7 +118,11 @@ const invocationColumns: Column<ToolInvocation>[] = [
     align: "right",
     render: (row: ToolInvocation) => (row.latencyMs !== null ? formatLatency(row.latencyMs) : "-"),
   },
-  { key: "platform", label: "Platform" },
+  {
+    key: "platform",
+    label: "Platform",
+    render: (row: ToolInvocation) => platformLabel(row.platform ?? "unknown"),
+  },
   {
     key: "userId",
     label: "User",
@@ -227,7 +240,7 @@ export function ToolDetailContent({
             ))}
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <ChartPanel
               title="Call Volume"
               granularity={filters.granularity}
@@ -236,9 +249,17 @@ export function ToolDetailContent({
               <ResponsiveContainer width="100%" height={256}>
                 <AreaChart data={data?.callVolume ?? []}>
                   <CartesianGrid {...COMMON_GRID_PROPS} />
-                  <XAxis dataKey="bucket" {...COMMON_AXIS_PROPS} />
-                  <YAxis {...COMMON_AXIS_PROPS} />
-                  <Tooltip />
+                  <XAxis
+                    dataKey="bucket"
+                    minTickGap={32}
+                    tickFormatter={(v: string) => formatBucketLabel(v, filters.granularity)}
+                    {...COMMON_AXIS_PROPS}
+                  />
+                  <YAxis tickFormatter={(v: number) => formatNumber(v)} {...COMMON_AXIS_PROPS} />
+                  <Tooltip
+                    labelFormatter={(v) => formatBucketTooltip(String(v), filters.granularity)}
+                    formatter={(value?: number) => [(value ?? 0).toLocaleString(), "Calls"]}
+                  />
                   <Area
                     type="monotone"
                     dataKey="value"
@@ -255,22 +276,33 @@ export function ToolDetailContent({
                 <BarChart data={data?.histogram ?? []}>
                   <CartesianGrid {...COMMON_GRID_PROPS} />
                   <XAxis dataKey="rangeLabel" {...COMMON_AXIS_PROPS} />
-                  <YAxis {...COMMON_AXIS_PROPS} />
-                  <Tooltip />
+                  <YAxis tickFormatter={(v: number) => formatNumber(v)} {...COMMON_AXIS_PROPS} />
+                  <Tooltip
+                    cursor={false}
+                    formatter={(value?: number) => [(value ?? 0).toLocaleString(), "Calls"]}
+                  />
                   <Bar dataKey="count" fill={CHART_COLORS[0]} animationDuration={0} />
                 </BarChart>
               </ResponsiveContainer>
             </ChartPanel>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <ChartPanel title="Latency Percentiles">
               <ResponsiveContainer width="100%" height={256}>
                 <LineChart data={data?.latencyPercentiles ?? []}>
                   <CartesianGrid {...COMMON_GRID_PROPS} />
-                  <XAxis dataKey="bucket" {...COMMON_AXIS_PROPS} />
-                  <YAxis {...COMMON_AXIS_PROPS} />
-                  <Tooltip />
+                  <XAxis
+                    dataKey="bucket"
+                    minTickGap={32}
+                    tickFormatter={(v: string) => formatBucketLabel(v, filters.granularity)}
+                    {...COMMON_AXIS_PROPS}
+                  />
+                  <YAxis tickFormatter={(v: number) => formatLatency(v)} {...COMMON_AXIS_PROPS} />
+                  <Tooltip
+                    labelFormatter={(v) => formatBucketTooltip(String(v), filters.granularity)}
+                    formatter={(value?: number) => formatLatency(value ?? 0)}
+                  />
                   <Legend />
                   <Line
                     type="monotone"
@@ -311,9 +343,20 @@ export function ToolDetailContent({
               <ResponsiveContainer width="100%" height={256}>
                 <AreaChart data={data?.errorRateTimeSeries ?? []}>
                   <CartesianGrid {...COMMON_GRID_PROPS} />
-                  <XAxis dataKey="bucket" {...COMMON_AXIS_PROPS} />
-                  <YAxis {...COMMON_AXIS_PROPS} />
-                  <Tooltip />
+                  <XAxis
+                    dataKey="bucket"
+                    minTickGap={32}
+                    tickFormatter={(v: string) => formatBucketLabel(v, filters.granularity)}
+                    {...COMMON_AXIS_PROPS}
+                  />
+                  <YAxis
+                    tickFormatter={(v: number) => formatPercent(v, 0)}
+                    {...COMMON_AXIS_PROPS}
+                  />
+                  <Tooltip
+                    labelFormatter={(v) => formatBucketTooltip(String(v), filters.granularity)}
+                    formatter={(value?: number) => [formatPercent(value ?? 0), "Error rate"]}
+                  />
                   <Area
                     type="monotone"
                     dataKey="value"
@@ -326,52 +369,26 @@ export function ToolDetailContent({
             </ChartPanel>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <ChartPanel title="Error Categories">
-              <ResponsiveContainer width="100%" height={256}>
-                <PieChart>
-                  <Pie
-                    data={data?.errorCategories ?? []}
-                    dataKey="count"
-                    nameKey="category"
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={60}
-                    outerRadius={100}
-                    animationDuration={0}
-                  >
-                    {(data?.errorCategories ?? []).map((entry, idx) => (
-                      <Cell key={entry.category} fill={CHART_COLORS[idx % CHART_COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip />
-                </PieChart>
-              </ResponsiveContainer>
+              <DonutWithLegend
+                data={(data?.errorCategories ?? []).map((c) => ({
+                  key: c.category,
+                  label: c.category,
+                  count: Number(c.count),
+                }))}
+              />
             </ChartPanel>
 
             <ChartPanel title="Platform Breakdown">
-              <ResponsiveContainer width="100%" height={256}>
-                <PieChart>
-                  <Pie
-                    data={(data?.platforms ?? []).map((p) => ({
-                      ...p,
-                      platform: platformLabel(p.platform),
-                    }))}
-                    dataKey="count"
-                    nameKey="platform"
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={60}
-                    outerRadius={100}
-                    animationDuration={0}
-                  >
-                    {(data?.platforms ?? []).map((entry, idx) => (
-                      <Cell key={entry.platform} fill={CHART_COLORS[idx % CHART_COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip />
-                </PieChart>
-              </ResponsiveContainer>
+              <DonutWithLegend
+                data={(data?.platforms ?? []).map((p) => ({
+                  key: p.platform,
+                  label: platformLabel(p.platform),
+                  count: Number(p.count),
+                  icon: PLATFORM_META[p.platform as Platform]?.icon,
+                }))}
+              />
             </ChartPanel>
           </div>
 

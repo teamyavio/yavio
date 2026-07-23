@@ -34,15 +34,64 @@ export function formatLatency(ms: number): string {
 }
 
 /**
- * Format currency value.
+ * Format currency value. Cents are dropped from 1,000 upwards so large
+ * amounts stay short enough for KPI cards.
  */
 export function formatCurrency(value: number, currency = "USD"): string {
+  const digits = Math.abs(value) >= 1_000 ? 0 : 2;
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency,
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
   }).format(value);
+}
+
+const MONTH_NAMES = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+
+/**
+ * Format a ClickHouse time bucket ("2026-07-17 00:00:00") as a short
+ * axis label appropriate for the granularity, e.g. "Jul 17" or "14:00".
+ */
+export function formatBucketLabel(bucket: string, granularity: Granularity): string {
+  const match = bucket.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  if (!match) return bucket;
+  const [, year, month, day, hour, minute] = match;
+  const monthName = MONTH_NAMES[Number(month) - 1] ?? month;
+  switch (granularity) {
+    case "hour":
+      return `${hour}:${minute}`;
+    case "month":
+      return `${monthName} ${year}`;
+    default:
+      return `${monthName} ${Number(day)}`;
+  }
+}
+
+/**
+ * Verbose bucket label for chart tooltips ("Jul 17, 14:00" / "Jul 17, 2026").
+ */
+export function formatBucketTooltip(bucket: string, granularity: Granularity): string {
+  const match = bucket.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  if (!match) return bucket;
+  const [, year, month, day, hour, minute] = match;
+  const monthName = MONTH_NAMES[Number(month) - 1] ?? month;
+  if (granularity === "hour") return `${monthName} ${Number(day)}, ${hour}:${minute}`;
+  if (granularity === "month") return `${monthName} ${year}`;
+  return `${monthName} ${Number(day)}, ${year}`;
 }
 
 /**

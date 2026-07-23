@@ -1,4 +1,6 @@
 import {
+  formatBucketLabel,
+  formatBucketTooltip,
   formatCurrency,
   formatLatency,
   formatNumber,
@@ -54,13 +56,47 @@ describe("formatLatency", () => {
 });
 
 describe("formatCurrency", () => {
-  it("formats USD by default", () => {
-    expect(formatCurrency(1234.5)).toBe("$1,234.50");
+  it("keeps cents below 1,000", () => {
+    expect(formatCurrency(123.45)).toBe("$123.45");
+  });
+
+  it("drops cents from 1,000 upwards so KPI values stay short", () => {
+    expect(formatCurrency(1234.5)).toBe("$1,235");
+    expect(formatCurrency(16289.25)).toBe("$16,289");
   });
 
   it("formats with custom currency", () => {
     const result = formatCurrency(1000, "EUR");
     expect(result).toContain("1,000");
+  });
+});
+
+describe("formatBucketLabel", () => {
+  it("formats day buckets as short dates", () => {
+    expect(formatBucketLabel("2026-07-17 00:00:00", "day")).toBe("Jul 17");
+    expect(formatBucketLabel("2026-07-17 00:00:00", "week")).toBe("Jul 17");
+  });
+
+  it("formats hour buckets as times", () => {
+    expect(formatBucketLabel("2026-07-17 14:00:00", "hour")).toBe("14:00");
+  });
+
+  it("formats month buckets with the year", () => {
+    expect(formatBucketLabel("2026-07-01 00:00:00", "month")).toBe("Jul 2026");
+  });
+
+  it("passes through values it cannot parse", () => {
+    expect(formatBucketLabel("0-500ms", "day")).toBe("0-500ms");
+  });
+});
+
+describe("formatBucketTooltip", () => {
+  it("includes the year for day buckets", () => {
+    expect(formatBucketTooltip("2026-07-17 00:00:00", "day")).toBe("Jul 17, 2026");
+  });
+
+  it("includes the date for hour buckets", () => {
+    expect(formatBucketTooltip("2026-07-17 14:00:00", "hour")).toBe("Jul 17, 14:00");
   });
 });
 

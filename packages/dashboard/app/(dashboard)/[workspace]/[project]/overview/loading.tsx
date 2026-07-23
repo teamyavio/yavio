@@ -8,19 +8,16 @@ export default function OverviewLoading() {
         <div className="h-8 w-32 animate-pulse rounded bg-muted" />
         <div className="h-8 w-64 animate-pulse rounded bg-muted" />
       </div>
-      <div className="grid grid-cols-3 gap-4 xl:grid-cols-6">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
         {Array.from({ length: 6 }, (_, i) => (
           <SkeletonKPI key={`kpi-${String(i)}`} />
         ))}
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <SkeletonChart />
         <SkeletonChart />
       </div>
-      <div className="grid grid-cols-2 gap-4">
-        <SkeletonChart />
-        <SkeletonChart />
-      </div>
+      <SkeletonChart />
     </div>
   );
 }
