@@ -30,6 +30,9 @@ interface ScopeSwitcherProps {
   currentWorkspaceSlug?: string;
   currentProjectSlug?: string;
   collapsed: boolean;
+  /** In settings mode the switcher stays in the same spot but switches
+   *  which workspace's settings are shown instead of the project scope. */
+  mode?: "scope" | "workspace-settings";
 }
 
 /**
@@ -44,7 +47,9 @@ export function ScopeSwitcher({
   currentWorkspaceSlug,
   currentProjectSlug,
   collapsed,
+  mode = "scope",
 }: ScopeSwitcherProps) {
+  const inSettingsMode = mode === "workspace-settings";
   const [open, setOpen] = useState(false);
   const currentWorkspace = workspaces.find((ws) => ws.slug === currentWorkspaceSlug);
   const currentProject = projects.find(
@@ -73,10 +78,12 @@ export function ScopeSwitcher({
           >
             <span className="min-w-0 flex-1">
               <span className="block truncate text-[11px] leading-tight text-muted-foreground">
-                {currentWorkspace?.name ?? "Workspace"}
+                {inSettingsMode ? "Workspace" : (currentWorkspace?.name ?? "Workspace")}
               </span>
               <span className="block truncate text-sm font-medium leading-tight">
-                {currentProject?.name ?? "Select project"}
+                {inSettingsMode
+                  ? (currentWorkspace?.name ?? "Select workspace")
+                  : (currentProject?.name ?? "Select project")}
               </span>
             </span>
             <ChevronsUpDown className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
@@ -84,32 +91,42 @@ export function ScopeSwitcher({
         )}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="max-h-[70vh] w-64 overflow-y-auto">
-        {workspaces.map((ws) => {
-          const wsProjects = projects.filter((p) => p.workspaceId === ws.id);
-          return (
-            <div key={ws.id}>
-              <div className="px-2 pt-2 pb-1">
-                <span className="block truncate text-xs font-medium text-muted-foreground">
-                  {ws.name}
-                </span>
-              </div>
-              {wsProjects.map((proj) => {
-                const active = ws.slug === currentWorkspaceSlug && proj.slug === currentProjectSlug;
-                return (
-                  <DropdownMenuItem asChild key={proj.id}>
-                    <Link href={`/${ws.slug}/${proj.slug}/overview`}>
-                      <span className="truncate">{proj.name}</span>
-                      {active && <Check className="ml-auto h-4 w-4" />}
-                    </Link>
-                  </DropdownMenuItem>
-                );
-              })}
-              {wsProjects.length === 0 && (
-                <p className="px-2 pb-1.5 text-xs text-muted-foreground">No projects yet</p>
-              )}
-            </div>
-          );
-        })}
+        {inSettingsMode
+          ? workspaces.map((ws) => (
+              <DropdownMenuItem asChild key={ws.id}>
+                <Link href={`/${ws.slug}/settings`}>
+                  <span className="truncate">{ws.name}</span>
+                  {ws.slug === currentWorkspaceSlug && <Check className="ml-auto h-4 w-4" />}
+                </Link>
+              </DropdownMenuItem>
+            ))
+          : workspaces.map((ws) => {
+              const wsProjects = projects.filter((p) => p.workspaceId === ws.id);
+              return (
+                <div key={ws.id}>
+                  <div className="px-2 pt-2 pb-1">
+                    <span className="block truncate text-xs font-medium text-muted-foreground">
+                      {ws.name}
+                    </span>
+                  </div>
+                  {wsProjects.map((proj) => {
+                    const active =
+                      ws.slug === currentWorkspaceSlug && proj.slug === currentProjectSlug;
+                    return (
+                      <DropdownMenuItem asChild key={proj.id}>
+                        <Link href={`/${ws.slug}/${proj.slug}/overview`}>
+                          <span className="truncate">{proj.name}</span>
+                          {active && <Check className="ml-auto h-4 w-4" />}
+                        </Link>
+                      </DropdownMenuItem>
+                    );
+                  })}
+                  {wsProjects.length === 0 && (
+                    <p className="px-2 pb-1.5 text-xs text-muted-foreground">No projects yet</p>
+                  )}
+                </div>
+              );
+            })}
       </DropdownMenuContent>
     </DropdownMenu>
   );

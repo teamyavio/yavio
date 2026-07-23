@@ -225,7 +225,7 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
         </button>
       </div>
 
-      {!inSettings && (
+      {!(inSettings && onAccountSettings) && (
         <div className={collapsed ? "p-2" : "p-3"}>
           <ScopeSwitcher
             workspaces={workspaces}
@@ -233,11 +233,12 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
             currentWorkspaceSlug={currentWorkspaceSlug}
             currentProjectSlug={currentProjectSlug}
             collapsed={collapsed}
+            mode={inSettings ? "workspace-settings" : "scope"}
           />
         </div>
       )}
 
-      {!inSettings && <Separator />}
+      {!(inSettings && onAccountSettings) && <Separator />}
 
       <nav className="flex-1 space-y-1 overflow-y-auto p-2">
         {inSettings ? (
@@ -276,14 +277,6 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
             currentWorkspace &&
             visibleSettingsItems.length > 0 && (
               <>
-                {!collapsed && (
-                  <div className="px-3 pt-3 pb-1">
-                    <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                      Workspace
-                    </p>
-                    <p className="truncate text-sm font-medium">{currentWorkspace.name}</p>
-                  </div>
-                )}
                 {visibleSettingsItems.map((item) => {
                   const Icon = item.icon;
                   const active = activeSettingsTab === item.tab;
@@ -358,14 +351,14 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
         <div className="p-2">
           <Link
             href={`${basePath}/overview`}
-            title={collapsed ? "Back to dashboard" : (currentProjectName ?? undefined)}
+            title={collapsed ? "Back to Dashboard" : (currentProjectName ?? undefined)}
             className={cn(
               "flex h-9 items-center gap-3 rounded-md border text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
               collapsed ? "justify-center px-2" : "px-3",
             )}
           >
             <ArrowLeft className="h-4 w-4 flex-shrink-0" />
-            {!collapsed && <span className="truncate">Back to dashboard</span>}
+            {!collapsed && <span className="truncate">Back to Dashboard</span>}
           </Link>
         </div>
       )}
