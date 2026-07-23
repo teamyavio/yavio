@@ -1,5 +1,6 @@
 "use client";
 
+import { ScopeSwitcher } from "@/components/layout/scope-switcher";
 import { YavioLogo } from "@/components/layout/yavio-logo";
 import {
   DropdownMenu,
@@ -9,13 +10,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import {
@@ -188,15 +182,6 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
     ? (searchParams.get("tab") ?? defaultSettingsTab)
     : null;
 
-  function projectSlugFor(workspaceSlug: string): string | undefined {
-    const ws = workspaces.find((w) => w.slug === workspaceSlug);
-    const wsProjects = ws ? projects.filter((p) => p.workspaceId === ws.id) : [];
-    const remembered = mounted ? localStorage.getItem(lastProjectKey(workspaceSlug)) : null;
-    return remembered && wsProjects.some((p) => p.slug === remembered)
-      ? remembered
-      : wsProjects[0]?.slug;
-  }
-
   return (
     <aside
       className={cn(
@@ -233,74 +218,19 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
         </button>
       </div>
 
-      {!collapsed && !inSettings && (
-        <div className="space-y-2 p-3">
-          {mounted ? (
-            <>
-              <Select
-                value={currentWorkspaceSlug ?? ""}
-                onValueChange={(slug) => {
-                  // Switching workspace inside settings stays in settings;
-                  // everywhere else it opens that workspace's dashboard.
-                  if (inSettings && pathname !== "/settings/account") {
-                    router.push(`/${slug}/settings`);
-                    return;
-                  }
-                  const projectSlug = projectSlugFor(slug);
-                  if (projectSlug) {
-                    router.push(`/${slug}/${projectSlug}/overview`);
-                  }
-                }}
-              >
-                <SelectTrigger className="h-8 text-xs">
-                  <SelectValue placeholder="Select workspace" />
-                </SelectTrigger>
-                <SelectContent>
-                  {workspaces.map((ws) => (
-                    <SelectItem key={ws.id} value={ws.slug}>
-                      {ws.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-
-              {!inSettings && currentWorkspaceSlug && workspaceProjects.length > 0 && (
-                <Select
-                  value={currentProjectSlug ?? ""}
-                  onValueChange={(slug) => {
-                    router.push(`/${currentWorkspaceSlug}/${slug}/overview`);
-                  }}
-                >
-                  <SelectTrigger className="h-8 text-xs">
-                    <SelectValue placeholder="Select project" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {workspaceProjects.map((proj) => (
-                      <SelectItem key={proj.id} value={proj.slug}>
-                        {proj.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              )}
-            </>
-          ) : (
-            <>
-              <div className="flex h-8 items-center rounded-md border border-input px-3 text-xs">
-                {currentWorkspace?.name ?? "Select workspace"}
-              </div>
-              {!inSettings && currentWorkspaceSlug && workspaceProjects.length > 0 && (
-                <div className="flex h-8 items-center rounded-md border border-input px-3 text-xs">
-                  {workspaceProjects.find((p) => p.slug === currentProjectSlug)?.name ??
-                    "Select project"}
-                </div>
-              )}
-            </>
-          )}
+      {!inSettings && (
+        <div className={collapsed ? "p-2" : "p-3"}>
+          <ScopeSwitcher
+            workspaces={workspaces}
+            projects={projects}
+            currentWorkspaceSlug={currentWorkspaceSlug}
+            currentProjectSlug={currentProjectSlug}
+            collapsed={collapsed}
+          />
         </div>
       )}
 
-      {!collapsed && !inSettings && <Separator />}
+      {!inSettings && <Separator />}
 
       <nav className="flex-1 space-y-1 overflow-y-auto p-2">
         {inSettings ? (
@@ -369,7 +299,7 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
               return (
                 <Link
                   href="/settings/account"
-                  title={collapsed ? "Profile" : undefined}
+                  title={collapsed ? "Account settings" : undefined}
                   className={cn(
                     "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
                     collapsed ? "justify-center px-2" : "px-3",
@@ -379,7 +309,7 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
                   )}
                 >
                   <User className="h-4 w-4 flex-shrink-0" />
-                  {!collapsed && "Profile"}
+                  {!collapsed && "Account settings"}
                 </Link>
               );
             })()}
@@ -440,18 +370,10 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
               <span className="block truncate text-xs text-muted-foreground">{user.email}</span>
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
-            {currentWorkspaceSlug && (
-              <DropdownMenuItem asChild>
-                <Link href={`/${currentWorkspaceSlug}/settings`}>
-                  <Settings className="h-4 w-4" />
-                  Workspace settings
-                </Link>
-              </DropdownMenuItem>
-            )}
             <DropdownMenuItem asChild>
               <Link href="/settings/account">
                 <User className="h-4 w-4" />
-                Account
+                Account settings
               </Link>
             </DropdownMenuItem>
             <DropdownMenuSeparator />
