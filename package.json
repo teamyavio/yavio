@@ -34,11 +34,7 @@
       "postcss@<8.5.12": ">=8.5.12"
     },
     "auditConfig": {
-      "ignoreGhsas": [
-        "GHSA-r5fr-rjxr-66jc",
-        "GHSA-v2wj-q39q-566r",
-        "GHSA-p9ff-h696-f583"
-      ]
+      "ignoreGhsas": ["GHSA-r5fr-rjxr-66jc", "GHSA-v2wj-q39q-566r", "GHSA-p9ff-h696-f583"]
     }
   },
   "devDependencies": {
