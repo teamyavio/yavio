@@ -1,6 +1,6 @@
 {
   "name": "@yavio/sdk",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "description": "Yavio SDK for instrumenting MCP servers with analytics, session tracking, and a React widget",
   "type": "module",
   "license": "MIT",
@@ -51,7 +51,7 @@
     "nanoid": "^5.1.5"
   },
   "peerDependencies": {
-    "@modelcontextprotocol/sdk": ">=1.0.0",
+    "@modelcontextprotocol/sdk": ">=1.12.0",
     "react": ">=18.0.0",
     "react-dom": ">=18.0.0"
   },

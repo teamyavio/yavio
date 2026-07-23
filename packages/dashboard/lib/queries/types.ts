@@ -139,6 +139,27 @@ export interface LatencyPercentilePoint {
 }
 
 /** A single tool invocation row. */
+/** A captured user intent for one tool call. */
+export interface RecentIntent {
+  eventId: string;
+  timestamp: string;
+  intent: string;
+  source: string;
+  sessionId: string;
+  status: string;
+}
+
+/**
+ * Whether the project's SDK reports intent capture as active.
+ * - enabled/disabled: latest connection event carried an explicit flag
+ * - unsupported: connections exist but predate SDK 0.2.0 (no flag)
+ * - unknown: no connection events at all
+ */
+export interface IntentStatus {
+  status: "enabled" | "disabled" | "unsupported" | "unknown";
+  sdkVersion: string | null;
+}
+
 export interface ToolInvocation {
   eventId: string;
   timestamp: string;

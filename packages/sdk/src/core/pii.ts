@@ -7,7 +7,31 @@
  * (the ingestion API performs authoritative stripping).
  */
 
-const PII_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
+/**
+ * Luhn algorithm — validates that a digit string is a plausible credit card
+ * number. Mirrors the ingest-side stripper so this layer never redacts digit
+ * runs (years, order numbers) that the authoritative layer would preserve.
+ */
+function passesLuhn(digits: string): boolean {
+  let sum = 0;
+  let alternate = false;
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let n = Number.parseInt(digits[i] as string, 10);
+    if (alternate) {
+      n *= 2;
+      if (n > 9) n -= 9;
+    }
+    sum += n;
+    alternate = !alternate;
+  }
+  return sum % 10 === 0;
+}
+
+const PII_PATTERNS: Array<{
+  pattern: RegExp;
+  replacement: string;
+  validate?: (match: string) => boolean;
+}> = [
   {
     pattern: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
     replacement: "[EMAIL_REDACTED]",
@@ -15,6 +39,10 @@ const PII_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   {
     pattern: /\b(?:\d[ -]*?){13,19}\b/g,
     replacement: "[CC_REDACTED]",
+    validate: (match: string) => {
+      const digits = match.replace(/[\s-]/g, "");
+      return /^\d{13,19}$/.test(digits) && passesLuhn(digits);
+    },
   },
   {
     pattern: /\b\d{3}-\d{2}-\d{4}\b/g,
@@ -28,12 +56,11 @@ const PII_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
 
 function stripPiiFromString(value: string): string {
   let result = value;
-  for (const { pattern, replacement } of PII_PATTERNS) {
+  for (const { pattern, replacement, validate } of PII_PATTERNS) {
     pattern.lastIndex = 0;
-    if (pattern.test(result)) {
-      pattern.lastIndex = 0;
-      result = result.replace(pattern, replacement);
-    }
+    result = result.replace(pattern, (match) =>
+      validate && !validate(match) ? match : replacement,
+    );
   }
   return result;
 }

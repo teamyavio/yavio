@@ -10,6 +10,12 @@ describe("stripPii", () => {
     expect(stripPii("card 4111 1111 1111 1111")).toBe("card [CC_REDACTED]");
   });
 
+  it("keeps non-Luhn digit runs like year lists intact", () => {
+    // Mirrors the ingest stripper: only Luhn-valid runs are card numbers
+    const text = "Comparing revenue for 2022 2023 2024 2025 to build the yearly summary";
+    expect(stripPii(text)).toBe(text);
+  });
+
   it("redacts SSNs", () => {
     expect(stripPii("ssn 123-45-6789")).toBe("ssn [SSN_REDACTED]");
   });

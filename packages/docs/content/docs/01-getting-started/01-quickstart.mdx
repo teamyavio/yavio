@@ -57,6 +57,7 @@ Import `withYavio` and wrap your `McpServer` instance. Everything else stays the
 ```ts title="server.ts"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { withYavio } from "@yavio/sdk";
+import { z } from "zod";
 
 const server = new McpServer({
   name: "my-server",
@@ -68,7 +69,7 @@ const instrumented = withYavio(server, {
 });
 
 // Register tools on the instrumented server
-instrumented.tool("greet", { name: { type: "string" } }, async ({ name }) => {
+instrumented.tool("greet", { name: z.string() }, async ({ name }) => {
   return { content: [{ type: "text", text: `Hello, ${name}!` }] };
 });
 ```
@@ -85,10 +86,11 @@ Inside any tool handler, import the `yavio` singleton to identify users and trac
 
 ```ts title="server.ts"
 import { withYavio, yavio } from "@yavio/sdk";
+import { z } from "zod";
 
 instrumented.tool(
   "checkout",
-  { userId: { type: "string" }, plan: { type: "string" } },
+  { userId: z.string(), plan: z.string() },
   async ({ userId, plan }) => {
     // Tie this session to a known user
     yavio.identify(userId, { plan });

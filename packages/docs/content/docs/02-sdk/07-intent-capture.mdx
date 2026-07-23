@@ -1,0 +1,69 @@
+---
+title: Intent Capture
+description: Capture why the AI agent calls each tool — the user goal behind every invocation
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+Tool-call counts tell you *what* agents do with your MCP server. Intent capture tells you *why*: for every tool call, the calling model states in one sentence what the user is trying to achieve. Captured intents appear on the tool detail page in your dashboard.
+
+Intent capture is **off by default**. Enable it with one line:
+
+```ts
+withYavio(server, {
+  apiKey: "yav_...",
+  intent: true,
+});
+```
+
+## How it works
+
+When enabled, the SDK advertises an extra required string parameter named `context` on every tool. The calling model (ChatGPT, Claude, Cursor, …) sees its description and fills in a short third-person explanation with each call — for example:
+
+> "Searching available rental cars in Munich for the user's weekend trip to compare compact options."
+
+The SDK reads and removes the `context` value at the protocol layer **before** your tool's input validation runs. This means:
+
+- **Your handler never sees it.** Tool code and input schemas stay untouched — strict schemas included.
+- **A call without `context` never fails.** The parameter is required only in the advertised schema; the server tolerates its absence.
+- **Tools that define their own `context` parameter are left completely alone** — no injection, no capture, no stripping.
+
+Captured intents are stored on the `tool_call` event (`intent_signals`), PII-stripped, and capped at 500 characters.
+
+## Options
+
+```ts
+withYavio(server, {
+  apiKey: "yav_...",
+  intent: {
+    // Advertise context as optional instead of required (lower capture
+    // rate, but immune to clients that hard-validate required params)
+    required: false,
+    // Replace the model-facing parameter description
+    description: "Explain the user's goal for this call in one sentence.",
+    // Derive an intent for calls that arrive without context
+    // (captured with source "inferred" instead of "context_parameter").
+    // Runs before your handler on every context-less call — keep it fast
+    // and synchronous; never call an LLM or network service here.
+    fallback: (toolName, args) => `Called ${toolName}`,
+  },
+});
+```
+
+`YAVIO_INTENT=true` (environment) and `"intent": true` (`.yaviorc.json`) work as well; code options take precedence.
+
+## Dashboard status
+
+The SDK reports its intent setting with the first tool call of each session, so the dashboard's **User Intents** panel always shows an honest state: *enabled*, *disabled*, or *SDK too old* (intent capture requires `@yavio/sdk` 0.2.0+). If capture is enabled but no intents arrive, the panel says so — some MCP clients do not fill unknown parameters.
+
+## Privacy and app-store review
+
+<Callout type="warn">
+  Intent text is derived from your end user's conversation. Treat it as user
+  data: disclose the collection in your privacy policy, or leave intent
+  capture disabled.
+</Callout>
+
+If you plan to submit your server to the **ChatGPT App Store** or the **Claude Directory**, review their data-collection policies first. OpenAI's guidelines permit an intent field only when it meaningfully improves tool execution, and Anthropic's directory policy prohibits collecting extraneous conversation data. For a listed app, the safe default is `intent: false` — or explicit disclosure in your submission.
+
+Two token-related costs are worth knowing: the parameter description (~40 words) is added to every tool's schema in the model's context, and the model writes ~15–25 words per tool call.

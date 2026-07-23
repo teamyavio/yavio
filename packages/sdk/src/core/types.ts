@@ -10,6 +10,36 @@ export interface YavioConfig {
    * API still work unchanged.
    */
   serverOnly: boolean;
+  intent: IntentConfig;
+}
+
+/** Resolved user-intent capture configuration. */
+export interface IntentConfig {
+  enabled: boolean;
+  /** Advertise the `context` parameter as required in tools/list. */
+  required: boolean;
+  /** Description shown to the calling model for the `context` parameter. */
+  description: string;
+  /**
+   * Called for eligible tool calls that arrive without a `context` argument.
+   * Return a short intent string to capture it with source "inferred", or
+   * undefined to capture nothing. Errors are swallowed.
+   *
+   * Runs on the hot path BEFORE the tool handler, and its duration is not
+   * included in the call's latency_ms — keep it fast and synchronous; do not
+   * call out to an LLM or network service here.
+   */
+  fallback?: (
+    toolName: string,
+    args: Record<string, unknown> | undefined,
+  ) => string | undefined | Promise<string | undefined>;
+}
+
+/** User-facing intent options on `withYavio()`. */
+export interface IntentOptions {
+  required?: boolean;
+  description?: string;
+  fallback?: IntentConfig["fallback"];
 }
 
 /** Controls which auto-captured data is included. */
@@ -35,6 +65,19 @@ export interface WithYavioOptions {
    * self-configure, so it will not auto-connect when `serverOnly` is true.
    */
   serverOnly?: boolean;
+  /**
+   * User intent capture. Off by default. Pass `true` to advertise a required
+   * `context` parameter on every tool so the calling model states why it is
+   * invoking the tool; the value is captured as the call's intent and removed
+   * before your handler runs. Pass an object to tune requiredness, the
+   * model-facing description, or a fallback for clients that never send it.
+   *
+   * Privacy note: intent text is derived from the end user's conversation.
+   * If you submit your server to the ChatGPT App Store or Claude Directory,
+   * disclose this collection in your privacy policy or leave intent capture
+   * disabled.
+   */
+  intent?: boolean | IntentOptions;
 }
 
 /** The tracking context available via the `yavio` singleton. */

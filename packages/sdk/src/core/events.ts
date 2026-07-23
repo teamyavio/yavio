@@ -101,6 +101,7 @@ export interface ToolCallData {
   inputTypes?: Record<string, unknown>;
   inputValues?: Record<string, unknown>;
   outputContent?: Record<string, unknown>;
+  intentSignals?: { intent: string; source: "context_parameter" | "inferred" };
 }
 
 export function buildToolCallEvent(ctx: EventContext, data: ToolCallData): ToolCallEvent {
@@ -117,6 +118,7 @@ export function buildToolCallEvent(ctx: EventContext, data: ToolCallData): ToolC
     input_types: data.inputTypes,
     input_values: data.inputValues ? stripPii(data.inputValues) : undefined,
     output_content: data.outputContent ? stripPii(data.outputContent) : undefined,
+    intent_signals: data.intentSignals ? stripPii({ ...data.intentSignals }) : undefined,
   };
 }
 
@@ -124,6 +126,7 @@ export interface ConnectionData {
   protocolVersion?: string;
   clientName?: string;
   clientVersion?: string;
+  intentEnabled?: boolean;
 }
 
 export function buildConnectionEvent(ctx: EventContext, data: ConnectionData): ConnectionEvent {
@@ -133,6 +136,9 @@ export function buildConnectionEvent(ctx: EventContext, data: ConnectionData): C
     protocol_version: data.protocolVersion,
     client_name: data.clientName,
     client_version: data.clientVersion,
+    // Explicit capability beacon: lets the dashboard distinguish "intent
+    // capture off" from "SDK too old to support it" (metadata absent).
+    metadata: { intent_enabled: data.intentEnabled ?? false },
   };
 }
 
