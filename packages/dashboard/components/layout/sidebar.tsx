@@ -315,52 +315,54 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
             })()}
           </>
         ) : (
-          analyticsNavItems.map((item) => {
-            const Icon = item.icon;
-            const href = `${basePath}/${item.path}`;
-            const active = pathname === href || pathname.startsWith(`${href}/`);
-            return (
+          <>
+            {analyticsNavItems.map((item) => {
+              const Icon = item.icon;
+              const href = `${basePath}/${item.path}`;
+              const active = pathname === href || pathname.startsWith(`${href}/`);
+              return (
+                <Link
+                  key={item.path}
+                  href={href}
+                  title={collapsed ? item.label : undefined}
+                  className={cn(
+                    "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
+                    collapsed ? "justify-center px-2" : "px-3",
+                    active
+                      ? "bg-accent text-accent-foreground"
+                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                  )}
+                >
+                  <Icon className="h-4 w-4 flex-shrink-0" />
+                  {!collapsed && item.label}
+                  {!collapsed && item.comingSoon && (
+                    <span className="ml-auto rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                      Soon
+                    </span>
+                  )}
+                </Link>
+              );
+            })}
+            {currentWorkspaceSlug && (
               <Link
-                key={item.path}
-                href={href}
-                title={collapsed ? item.label : undefined}
+                href={`/${currentWorkspaceSlug}/settings`}
+                title={collapsed ? "Settings" : undefined}
                 className={cn(
-                  "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
+                  "flex h-9 items-center gap-3 rounded-md text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
                   collapsed ? "justify-center px-2" : "px-3",
-                  active
-                    ? "bg-accent text-accent-foreground"
-                    : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
                 )}
               >
-                <Icon className="h-4 w-4 flex-shrink-0" />
-                {!collapsed && item.label}
-                {!collapsed && item.comingSoon && (
-                  <span className="ml-auto rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
-                    Soon
-                  </span>
-                )}
+                <Settings className="h-4 w-4 flex-shrink-0" />
+                {!collapsed && "Settings"}
               </Link>
-            );
-          })
+            )}
+          </>
         )}
       </nav>
 
       <Separator />
 
-      <div className="space-y-1 p-2">
-        {!inSettings && currentWorkspaceSlug && (
-          <Link
-            href={`/${currentWorkspaceSlug}/settings`}
-            title={collapsed ? "Settings" : undefined}
-            className={cn(
-              "flex h-9 items-center gap-3 rounded-md text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
-              collapsed ? "justify-center px-2" : "px-3",
-            )}
-          >
-            <Settings className="h-4 w-4 flex-shrink-0" />
-            {!collapsed && "Settings"}
-          </Link>
-        )}
+      <div className="p-2">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
