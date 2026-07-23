@@ -7,6 +7,7 @@ export default defineConfig({
     "src/errors.ts",
     "src/events.ts",
     "src/validation.ts",
+    "src/platform.ts",
   ],
   format: ["esm", "cjs"],
   dts: true,

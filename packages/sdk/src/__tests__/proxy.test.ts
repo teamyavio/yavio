@@ -1070,3 +1070,134 @@ describe("createProxy — session reuse", () => {
     expect(firstSessionId).toMatch(/^ses_/);
   });
 });
+
+describe("createProxy — client identity on connection events", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue(null);
+    _resetGlobalState();
+  });
+
+  async function invokeTool(server: McpServer, name: string) {
+    const tool = getRegisteredTool(server, name);
+    await tool?.handler({
+      signal: new AbortController().signal,
+      requestId: "req-ci-1",
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+    });
+  }
+
+  it("persists client_name and client_version from the MCP handshake", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    (server.server as unknown as Record<string, unknown>).getClientVersion = () => ({
+      name: "claude-code",
+      version: "2.1.218",
+    });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+
+    proxy.tool("identity_tool", () => ({ content: [{ type: "text", text: "ok" }] }));
+    await invokeTool(server, "identity_tool");
+
+    const connection = transport.sent.flat().find((e) => e.event_type === "connection") as Record<
+      string,
+      unknown
+    >;
+    expect(connection).toBeDefined();
+    expect(connection.client_name).toBe("claude-code");
+    expect(connection.client_version).toBe("2.1.218");
+  });
+
+  it("resolves the platform before the connection event is emitted", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    (server.server as unknown as Record<string, unknown>).getClientVersion = () => ({
+      name: "codex-mcp-client",
+      version: "0.108.0",
+    });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+
+    proxy.tool("platform_tool", () => ({ content: [{ type: "text", text: "ok" }] }));
+    await invokeTool(server, "platform_tool");
+
+    const connection = transport.sent.flat().find((e) => e.event_type === "connection") as Record<
+      string,
+      unknown
+    >;
+    expect(connection.platform).toBe("codex");
+  });
+
+  it("omits client identity when the handshake exposes none", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+
+    proxy.tool("anonymous_tool", () => ({ content: [{ type: "text", text: "ok" }] }));
+    await invokeTool(server, "anonymous_tool");
+
+    const connection = transport.sent.flat().find((e) => e.event_type === "connection") as Record<
+      string,
+      unknown
+    >;
+    expect(connection).toBeDefined();
+    expect(connection.client_name).toBeUndefined();
+    expect(connection.platform).toBe("unknown");
+  });
+});
+
+describe("createProxy — platform detection from HTTP request headers", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue(null);
+    _resetGlobalState();
+  });
+
+  it("falls back to User-Agent when the handshake identity is unrecognised", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    (server.server as unknown as Record<string, unknown>).getClientVersion = () => ({
+      name: "SomeUnknownClient",
+      version: "1.0.0",
+    });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+
+    proxy.tool("ua_tool", () => ({ content: [{ type: "text", text: "ok" }] }));
+    const tool = getRegisteredTool(server, "ua_tool");
+    await tool?.handler({
+      signal: new AbortController().signal,
+      requestId: "req-ua-1",
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+      requestInfo: { headers: { "user-agent": "Cursor/1.0" } },
+    });
+
+    const toolCall = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+      string,
+      unknown
+    >;
+    expect(toolCall.platform).toBe("cursor");
+  });
+
+  it("detects the platform from the Origin header when nothing else matches", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+
+    proxy.tool("origin_tool", () => ({ content: [{ type: "text", text: "ok" }] }));
+    const tool = getRegisteredTool(server, "origin_tool");
+    await tool?.handler({
+      signal: new AbortController().signal,
+      requestId: "req-or-1",
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+      requestInfo: { headers: { origin: "https://gemini.google.com" } },
+    });
+
+    const toolCall = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+      string,
+      unknown
+    >;
+    expect(toolCall.platform).toBe("gemini");
+  });
+});

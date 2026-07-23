@@ -28,6 +28,11 @@
       "types": "./dist/validation.d.ts",
       "import": "./dist/validation.js",
       "require": "./dist/validation.cjs"
+    },
+    "./platform": {
+      "types": "./dist/platform.d.ts",
+      "import": "./dist/platform.js",
+      "require": "./dist/platform.cjs"
     }
   },
   "scripts": {
