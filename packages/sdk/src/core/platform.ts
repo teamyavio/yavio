@@ -29,6 +29,7 @@ function matchIdentity(raw: string): Platform | undefined {
   if (name.includes("chatgpt") || name.includes("openai")) return "chatgpt";
   if (name.includes("claude") || name.includes("anthropic")) return "claude";
   if (name.includes("cursor")) return "cursor";
+  if (name.includes("gemini-cli")) return "gemini-cli";
   if (name.includes("gemini")) return "gemini";
   if (name.includes("windsurf") || name.includes("codeium")) return "windsurf";
   if (name.includes("cline")) return "cline";

@@ -16,7 +16,7 @@ Platform detection runs a layered heuristic against signals from the MCP transpo
 | 3 | `origin` | HTTP Origin header |
 | 4 | — | Falls back to `"unknown"` |
 
-All matching is case-insensitive substring matching (except `zed`, which requires an exact name to avoid false positives). Specific product names are matched before the generic vendor patterns they contain — `claude-code` is checked before `claude`, and `cursor` before `vscode` (Cursor identifies as `cursor-vscode`).
+All matching is case-insensitive substring matching (except `zed`, which requires an exact name to avoid false positives). Specific product names are matched before the generic vendor patterns they contain — `claude-code` before `claude`, `gemini-cli` before `gemini`, and `cursor` before `vscode` (Cursor identifies as `cursor-vscode`).
 
 ## Supported platforms
 
@@ -27,7 +27,8 @@ All matching is case-insensitive substring matching (except `zed`, which require
 | `claude` | `claude`, `anthropic` | claude.ai and Claude Desktop both send `claude-ai`; also via `claude.ai` / `anthropic.com` origin |
 | `claude-code` | `claude-code` | Claude Code sends `claude-code` |
 | `cursor` | `cursor` | Cursor sends `cursor-vscode` |
-| `gemini` | `gemini` | Google Gemini surfaces (app, Enterprise, CLI); the CLI sends `gemini-cli-mcp-client`; also via `gemini.google.com` origin |
+| `gemini` | `gemini` | Google Gemini app and Enterprise connector; also via `gemini.google.com` origin |
+| `gemini-cli` | `gemini-cli` | Gemini CLI sends `gemini-cli-mcp-client` |
 | `opencode` | `opencode` | opencode sends `opencode` |
 | `vscode` | `vscode`, `visual studio code` | VS Code MCP clients (e.g. Copilot agent mode) |
 | `windsurf` | `windsurf`, `codeium` | Windsurf (formerly Codeium) |
