@@ -38,7 +38,9 @@ export function LiveContent({ projectId }: { projectId: string }) {
   const [paused, setPaused] = useState(false);
   const [eventTypeFilter, setEventTypeFilter] = useState<string>("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [connected, setConnected] = useState(false);
+  const [connectionState, setConnectionState] = useState<
+    "connecting" | "connected" | "reconnecting"
+  >("connecting");
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const seenIdsRef = useRef(new Set<string>());
@@ -73,17 +75,17 @@ export function LiveContent({ projectId }: { projectId: string }) {
     });
 
     es.addEventListener("heartbeat", () => {
-      setConnected(true);
+      setConnectionState("connected");
     });
 
     es.onerror = () => {
-      setConnected(false);
+      setConnectionState("reconnecting");
       es.close();
       reconnectRef.current = setTimeout(connect, 3000);
     };
 
     es.onopen = () => {
-      setConnected(true);
+      setConnectionState("connected");
     };
 
     eventSourceRef.current = es;
@@ -101,9 +103,20 @@ export function LiveContent({ projectId }: { projectId: string }) {
     <div className="space-y-6">
       <PageHeader title="Live Feed">
         <div className="flex items-center gap-2">
-          <div className={cn("h-2 w-2 rounded-full", connected ? "bg-green-500" : "bg-red-500")} />
+          <div
+            className={cn(
+              "h-2 w-2 rounded-full",
+              connectionState === "connected" && "bg-green-500",
+              connectionState === "connecting" && "bg-muted-foreground",
+              connectionState === "reconnecting" && "bg-amber-500",
+            )}
+          />
           <span className="text-xs text-muted-foreground">
-            {connected ? "Connected" : "Reconnecting..."}
+            {connectionState === "connected"
+              ? "Live"
+              : connectionState === "connecting"
+                ? "Connecting..."
+                : "Reconnecting..."}
           </span>
           <Select
             value={eventTypeFilter || "all"}

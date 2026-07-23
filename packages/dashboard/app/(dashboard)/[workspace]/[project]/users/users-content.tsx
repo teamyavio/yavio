@@ -12,11 +12,18 @@ import { DateRangePicker } from "@/components/analytics/date-range-picker";
 import { EmptyState } from "@/components/analytics/empty-state";
 import { ErrorAlert } from "@/components/analytics/error-alert";
 import { PageHeader } from "@/components/analytics/page-header";
+import { PLATFORM_META, platformLabel } from "@/components/analytics/platform-meta";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAnalyticsFilters } from "@/hooks/use-analytics-filters";
 import { useAnalyticsQuery } from "@/hooks/use-analytics-query";
-import { formatNumber, formatRelativeTime } from "@/lib/analytics/format";
+import {
+  formatBucketLabel,
+  formatBucketTooltip,
+  formatNumber,
+  formatRelativeTime,
+} from "@/lib/analytics/format";
 import type { ActiveUsersPoint, NewVsReturningPoint, UserListItem } from "@/lib/queries/types";
+import type { Platform } from "@yavio/shared/platform";
 import { useState } from "react";
 import {
   Area,
@@ -40,8 +47,23 @@ interface ActiveUsersResponse {
   newVsReturning: NewVsReturningPoint[];
 }
 
+function PlatformCell({ value }: { value: string }) {
+  const Icon = PLATFORM_META[value as Platform]?.icon;
+  return (
+    <span className="flex items-center gap-1.5">
+      {Icon && <Icon className="h-4 w-4 flex-shrink-0" />}
+      {platformLabel(value)}
+    </span>
+  );
+}
+
 const userColumns: Column<UserListItem>[] = [
   { key: "userId", label: "User ID", sortable: true },
+  {
+    key: "lastPlatform",
+    label: "Platform",
+    render: (row: UserListItem) => <PlatformCell value={row.lastPlatform || "unknown"} />,
+  },
   {
     key: "firstSeen",
     label: "First Seen",
@@ -167,9 +189,16 @@ export function UsersContent({ projectId }: { projectId: string }) {
                 <ResponsiveContainer width="100%" height={256}>
                   <LineChart data={activeData?.activeUsers ?? []}>
                     <CartesianGrid {...COMMON_GRID_PROPS} />
-                    <XAxis dataKey="bucket" {...COMMON_AXIS_PROPS} />
-                    <YAxis {...COMMON_AXIS_PROPS} />
-                    <Tooltip />
+                    <XAxis
+                      dataKey="bucket"
+                      minTickGap={32}
+                      tickFormatter={(v: string) => formatBucketLabel(v, filters.granularity)}
+                      {...COMMON_AXIS_PROPS}
+                    />
+                    <YAxis tickFormatter={(v: number) => formatNumber(v)} {...COMMON_AXIS_PROPS} />
+                    <Tooltip
+                      labelFormatter={(v) => formatBucketTooltip(String(v), filters.granularity)}
+                    />
                     <Line
                       type="monotone"
                       dataKey="dau"
@@ -199,9 +228,16 @@ export function UsersContent({ projectId }: { projectId: string }) {
                 <ResponsiveContainer width="100%" height={256}>
                   <AreaChart data={activeData?.newVsReturning ?? []}>
                     <CartesianGrid {...COMMON_GRID_PROPS} />
-                    <XAxis dataKey="bucket" {...COMMON_AXIS_PROPS} />
-                    <YAxis {...COMMON_AXIS_PROPS} />
-                    <Tooltip />
+                    <XAxis
+                      dataKey="bucket"
+                      minTickGap={32}
+                      tickFormatter={(v: string) => formatBucketLabel(v, filters.granularity)}
+                      {...COMMON_AXIS_PROPS}
+                    />
+                    <YAxis tickFormatter={(v: number) => formatNumber(v)} {...COMMON_AXIS_PROPS} />
+                    <Tooltip
+                      labelFormatter={(v) => formatBucketTooltip(String(v), filters.granularity)}
+                    />
                     <Area
                       type="monotone"
                       dataKey="newUsers"

@@ -8,29 +8,29 @@ import {
 } from "@/components/analytics/chart-config";
 import { ChartPanel } from "@/components/analytics/chart-panel";
 import { DateRangePicker } from "@/components/analytics/date-range-picker";
+import { DonutWithLegend } from "@/components/analytics/donut-with-legend";
 import { EmptyState } from "@/components/analytics/empty-state";
 import { ErrorAlert } from "@/components/analytics/error-alert";
 import { KPICard } from "@/components/analytics/kpi-card";
 import { PageHeader } from "@/components/analytics/page-header";
 import { PlatformFilter } from "@/components/analytics/platform-filter";
-import { platformLabel } from "@/components/analytics/platform-meta";
+import { PLATFORM_META, platformLabel } from "@/components/analytics/platform-meta";
 import { useAnalyticsFilters } from "@/hooks/use-analytics-filters";
 import { useAnalyticsQuery } from "@/hooks/use-analytics-query";
+import { formatBucketLabel, formatBucketTooltip, formatNumber } from "@/lib/analytics/format";
 import type {
   KPIResult,
   PlatformBreakdown,
   TimeSeriesPoint,
   ToolRanking,
 } from "@/lib/queries/types";
+import type { Platform } from "@yavio/shared/platform";
 import {
   Area,
   AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
-  Cell,
-  Pie,
-  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -74,7 +74,7 @@ export function OverviewContent({ projectId }: { projectId: string }) {
         />
       ) : (
         <>
-          <div className="grid grid-cols-3 gap-4 xl:grid-cols-6">
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
             {(data?.kpis ?? []).map((kpi) => (
               <KPICard
                 key={kpi.label}
@@ -87,7 +87,7 @@ export function OverviewContent({ projectId }: { projectId: string }) {
             ))}
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <ChartPanel
               title="Invocations"
               granularity={filters.granularity}
@@ -96,9 +96,17 @@ export function OverviewContent({ projectId }: { projectId: string }) {
               <ResponsiveContainer width="100%" height={256}>
                 <AreaChart data={data?.timeSeries ?? []}>
                   <CartesianGrid {...COMMON_GRID_PROPS} />
-                  <XAxis dataKey="bucket" {...COMMON_AXIS_PROPS} />
-                  <YAxis {...COMMON_AXIS_PROPS} />
-                  <Tooltip />
+                  <XAxis
+                    dataKey="bucket"
+                    minTickGap={32}
+                    tickFormatter={(v: string) => formatBucketLabel(v, filters.granularity)}
+                    {...COMMON_AXIS_PROPS}
+                  />
+                  <YAxis tickFormatter={(v: number) => formatNumber(v)} {...COMMON_AXIS_PROPS} />
+                  <Tooltip
+                    labelFormatter={(v) => formatBucketTooltip(String(v), filters.granularity)}
+                    formatter={(value?: number) => [(value ?? 0).toLocaleString(), "Invocations"]}
+                  />
                   <Area
                     type="monotone"
                     dataKey="value"
@@ -111,44 +119,41 @@ export function OverviewContent({ projectId }: { projectId: string }) {
             </ChartPanel>
 
             <ChartPanel title="Platform Breakdown">
-              <ResponsiveContainer width="100%" height={256}>
-                <PieChart>
-                  <Pie
-                    data={(data?.platforms ?? []).map((p) => ({
-                      ...p,
-                      platform: platformLabel(p.platform),
-                    }))}
-                    dataKey="count"
-                    nameKey="platform"
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={60}
-                    outerRadius={100}
-                    animationDuration={0}
-                  >
-                    {(data?.platforms ?? []).map((entry, idx) => (
-                      <Cell key={entry.platform} fill={CHART_COLORS[idx % CHART_COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip />
-                </PieChart>
-              </ResponsiveContainer>
+              <DonutWithLegend
+                data={(data?.platforms ?? []).map((p) => ({
+                  key: p.platform,
+                  label: platformLabel(p.platform),
+                  count: Number(p.count),
+                  icon: PLATFORM_META[p.platform as Platform]?.icon,
+                }))}
+              />
             </ChartPanel>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <ChartPanel title="Top Tools">
-              <ResponsiveContainer width="100%" height={256}>
-                <BarChart data={data?.topTools ?? []} layout="vertical">
-                  <CartesianGrid {...COMMON_GRID_PROPS} />
-                  <XAxis type="number" {...COMMON_AXIS_PROPS} />
-                  <YAxis dataKey="toolName" type="category" width={120} {...COMMON_AXIS_PROPS} />
-                  <Tooltip />
-                  <Bar dataKey="callCount" fill={CHART_COLORS[0]} animationDuration={0} />
-                </BarChart>
-              </ResponsiveContainer>
-            </ChartPanel>
-          </div>
+          <ChartPanel title="Top Tools">
+            <ResponsiveContainer width="100%" height={256}>
+              <BarChart data={data?.topTools ?? []} layout="vertical">
+                <CartesianGrid {...COMMON_GRID_PROPS} />
+                <XAxis
+                  type="number"
+                  tickFormatter={(v: number) => formatNumber(v)}
+                  {...COMMON_AXIS_PROPS}
+                />
+                <YAxis
+                  dataKey="toolName"
+                  type="category"
+                  width={160}
+                  tickFormatter={(v: string) => (v.length > 22 ? `${v.slice(0, 21)}…` : v)}
+                  {...COMMON_AXIS_PROPS}
+                />
+                <Tooltip
+                  cursor={false}
+                  formatter={(value?: number) => [(value ?? 0).toLocaleString(), "Calls"]}
+                />
+                <Bar dataKey="callCount" fill={CHART_COLORS[0]} animationDuration={0} />
+              </BarChart>
+            </ResponsiveContainer>
+          </ChartPanel>
         </>
       )}
     </div>

@@ -56,6 +56,9 @@ const analyticsNavItems = [
 ];
 
 const COLLAPSED_STORAGE_KEY = "yavio.sidebar-collapsed";
+// Below this viewport width the sidebar starts collapsed so a
+// half-screen browser window keeps its space for content.
+const WIDE_VIEWPORT_QUERY = "(min-width: 1024px)";
 
 export function Sidebar({ workspaces, projects }: SidebarProps) {
   const pathname = usePathname();
@@ -63,15 +66,27 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
   const router = useRouter();
   const [mounted, setMounted] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  const [isWide, setIsWide] = useState(true);
 
   useEffect(() => {
     setMounted(true);
-    setCollapsed(localStorage.getItem(COLLAPSED_STORAGE_KEY) === "1");
+    const media = window.matchMedia(WIDE_VIEWPORT_QUERY);
+    const apply = () => {
+      setIsWide(media.matches);
+      setCollapsed(media.matches ? localStorage.getItem(COLLAPSED_STORAGE_KEY) === "1" : true);
+    };
+    apply();
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
   }, []);
 
   function toggleCollapsed() {
     setCollapsed((prev) => {
-      localStorage.setItem(COLLAPSED_STORAGE_KEY, prev ? "0" : "1");
+      // Only persist the preference for wide windows; collapsing in a
+      // narrow window is automatic and shouldn't stick.
+      if (isWide) {
+        localStorage.setItem(COLLAPSED_STORAGE_KEY, prev ? "0" : "1");
+      }
       return !prev;
     });
   }

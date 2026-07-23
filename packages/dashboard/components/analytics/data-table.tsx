@@ -67,7 +67,9 @@ export function DataTable<T>({
 
   return (
     <div>
-      <Table>
+      {/* Wide tables keep readable column widths and scroll horizontally
+          (the Table wrapper is overflow-x-auto) instead of crushing. */}
+      <Table className={cn(columns.length >= 4 && "min-w-[640px]")}>
         <TableHeader>
           <TableRow>
             {isExpandable && <TableHead className="w-8" />}

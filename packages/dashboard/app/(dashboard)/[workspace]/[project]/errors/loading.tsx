@@ -8,7 +8,7 @@ export default function ErrorsLoading() {
         <div className="h-8 w-32 animate-pulse rounded bg-muted" />
         <div className="h-8 w-64 animate-pulse rounded bg-muted" />
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <SkeletonChart />
         <SkeletonChart />
       </div>
