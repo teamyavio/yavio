@@ -61,8 +61,11 @@ describe("user queries", () => {
       mockQueryAnalytics.mockResolvedValue([{ bucket: "2025-01-01", dau: 10, wau: 50, mau: 200 }]);
 
       const result = await queryActiveUsers(baseCtx, "day");
+      // 7-day range zero-fills to 7 buckets; the real row keeps its values.
+      expect(result).toHaveLength(7);
       expect(result[0].dau).toBe(10);
       expect(result[0].wau).toBe(50);
+      expect(result[1].dau).toBe(0);
     });
   });
 
@@ -110,9 +113,11 @@ describe("user queries", () => {
       ]);
 
       const result = await queryNewVsReturning(baseCtx, "day");
-      expect(result).toHaveLength(2);
+      // 7-day range zero-fills to 7 buckets; real rows keep their values.
+      expect(result).toHaveLength(7);
       expect(result[0].newUsers).toBe(10);
       expect(result[0].returningUsers).toBe(30);
+      expect(result[2].newUsers).toBe(0);
     });
 
     it("uses correct granularity function", async () => {

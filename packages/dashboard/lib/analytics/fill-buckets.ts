@@ -41,7 +41,8 @@ function bucketString(d: Date, granularity: Granularity): string {
 
 /** Match buckets regardless of date-only vs. datetime serialisation. */
 function canonical(bucket: string): string {
-  return bucket.slice(0, 13);
+  const hour = bucket.length >= 13 ? bucket.slice(11, 13) : "00";
+  return `${bucket.slice(0, 10)} ${hour}`;
 }
 
 const MAX_BUCKETS = 1000;
