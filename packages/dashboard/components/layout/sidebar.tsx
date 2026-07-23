@@ -256,33 +256,30 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
             </>
           ) : (
             currentWorkspace &&
-            visibleSettingsItems.length > 0 && (
-              <>
-                {visibleSettingsItems.map((item) => {
-                  const Icon = item.icon;
-                  const active = activeSettingsTab === item.tab;
-                  return (
-                    <Link
-                      key={item.tab}
-                      href={`/${currentWorkspaceSlug}/settings?tab=${item.tab}`}
-                      replace
-                      scroll={false}
-                      title={collapsed ? item.label : undefined}
-                      className={cn(
-                        "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
-                        collapsed ? "justify-center px-2" : "px-3",
-                        active
-                          ? "bg-accent text-accent-foreground"
-                          : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-                      )}
-                    >
-                      <Icon className="h-4 w-4 flex-shrink-0" />
-                      {!collapsed && item.label}
-                    </Link>
-                  );
-                })}
-              </>
-            )
+            visibleSettingsItems.length > 0 &&
+            visibleSettingsItems.map((item) => {
+              const Icon = item.icon;
+              const active = activeSettingsTab === item.tab;
+              return (
+                <Link
+                  key={item.tab}
+                  href={`/${currentWorkspaceSlug}/settings?tab=${item.tab}`}
+                  replace
+                  scroll={false}
+                  title={collapsed ? item.label : undefined}
+                  className={cn(
+                    "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
+                    collapsed ? "justify-center px-2" : "px-3",
+                    active
+                      ? "bg-accent text-accent-foreground"
+                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                  )}
+                >
+                  <Icon className="h-4 w-4 flex-shrink-0" />
+                  {!collapsed && item.label}
+                </Link>
+              );
+            })
           )
         ) : (
           <>
