@@ -1145,3 +1145,59 @@ describe("createProxy — client identity on connection events", () => {
     expect(connection.platform).toBe("unknown");
   });
 });
+
+describe("createProxy — platform detection from HTTP request headers", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue(null);
+    _resetGlobalState();
+  });
+
+  it("falls back to User-Agent when the handshake identity is unrecognised", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    (server.server as unknown as Record<string, unknown>).getClientVersion = () => ({
+      name: "SomeUnknownClient",
+      version: "1.0.0",
+    });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+
+    proxy.tool("ua_tool", () => ({ content: [{ type: "text", text: "ok" }] }));
+    const tool = getRegisteredTool(server, "ua_tool");
+    await tool?.handler({
+      signal: new AbortController().signal,
+      requestId: "req-ua-1",
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+      requestInfo: { headers: { "user-agent": "Cursor/1.0" } },
+    });
+
+    const toolCall = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+      string,
+      unknown
+    >;
+    expect(toolCall.platform).toBe("cursor");
+  });
+
+  it("detects the platform from the Origin header when nothing else matches", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+
+    proxy.tool("origin_tool", () => ({ content: [{ type: "text", text: "ok" }] }));
+    const tool = getRegisteredTool(server, "origin_tool");
+    await tool?.handler({
+      signal: new AbortController().signal,
+      requestId: "req-or-1",
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+      requestInfo: { headers: { origin: "https://gemini.google.com" } },
+    });
+
+    const toolCall = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+      string,
+      unknown
+    >;
+    expect(toolCall.platform).toBe("gemini");
+  });
+});

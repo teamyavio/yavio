@@ -21,6 +21,17 @@ function isMintResult(result: unknown): result is MintResult {
   return result !== null && typeof result === "object" && "token" in result;
 }
 
+/** Read a header from an IsomorphicHeaders-shaped record (string or string[]). */
+function headerValue(
+  headers: Record<string, unknown> | undefined,
+  name: string,
+): string | undefined {
+  const value = headers?.[name];
+  if (typeof value === "string") return value;
+  if (Array.isArray(value) && typeof value[0] === "string") return value[0];
+  return undefined;
+}
+
 /**
  * Get a widget token, reusing a cached one if still valid (30s buffer).
  * Invalidates cache on 401/403 (key rotation, revocation).
@@ -88,22 +99,41 @@ function wrapToolCallback(
     const session = resolveSession(sessionKey);
 
     // Client identity from the MCP initialize handshake — available by the
-    // time the first tool call arrives.
+    // time the first tool call arrives. Only fetched while still needed:
+    // for the once-per-session connection event and unresolved platforms.
     let clientInfo: { name?: string; version?: string } | undefined;
-    try {
-      clientInfo = (
-        server.server as unknown as {
-          getClientVersion?: () => { name?: string; version?: string } | undefined;
-        }
-      ).getClientVersion?.();
-    } catch {
-      clientInfo = undefined;
+    if (session.platform === "unknown" || !emittedConnections.has(session.sessionId)) {
+      try {
+        clientInfo = (
+          server.server as unknown as {
+            getClientVersion?: () => { name?: string; version?: string } | undefined;
+          }
+        ).getClientVersion?.();
+      } catch {
+        clientInfo = undefined;
+      }
     }
 
     // Lazy platform detection — must run before the connection event is
     // built so the event carries the resolved platform, not "unknown".
-    if (session.platform === "unknown" && clientInfo?.name) {
-      session.platform = detectPlatform({ clientName: clientInfo.name });
+    // HTTP transports also expose request headers via extra.requestInfo,
+    // which cover clients whose handshake identity is unrecognised.
+    if (session.platform === "unknown") {
+      const requestInfo =
+        extra && typeof extra === "object"
+          ? (extra as Record<string, unknown>).requestInfo
+          : undefined;
+      const httpHeaders =
+        requestInfo && typeof requestInfo === "object"
+          ? ((requestInfo as Record<string, unknown>).headers as
+              | Record<string, unknown>
+              | undefined)
+          : undefined;
+      const userAgent = headerValue(httpHeaders, "user-agent");
+      const origin = headerValue(httpHeaders, "origin");
+      if (clientInfo?.name || userAgent || origin) {
+        session.platform = detectPlatform({ clientName: clientInfo?.name, userAgent, origin });
+      }
     }
 
     // Emit deferred connection event on the first tool call for this session.

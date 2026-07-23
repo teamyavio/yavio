@@ -12,8 +12,8 @@ Platform detection runs a layered heuristic against signals from the MCP transpo
 | Priority | Signal | Description |
 |----------|--------|-------------|
 | 1 | `clientName` | Client name from the MCP `initialize` handshake |
-| 2 | `userAgent` | HTTP User-Agent header (for HTTP/SSE transports) |
-| 3 | `origin` | HTTP Origin header |
+| 2 | `userAgent` | HTTP User-Agent header (HTTP transports, via the request's `requestInfo`) |
+| 3 | `origin` | HTTP Origin header (HTTP transports, via the request's `requestInfo`) |
 | 4 | — | Falls back to `"unknown"` |
 
 All matching is case-insensitive substring matching (except `zed`, which requires an exact name to avoid false positives). Specific product names are matched before the generic vendor patterns they contain — `claude-code` before `claude`, `gemini-cli` before `gemini`, and `cursor` before `vscode` (Cursor identifies as `cursor-vscode`).
