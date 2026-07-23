@@ -347,7 +347,20 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
 
       <Separator />
 
-      <div className="p-2">
+      <div className="space-y-1 p-2">
+        {!inSettings && currentWorkspaceSlug && (
+          <Link
+            href={`/${currentWorkspaceSlug}/settings`}
+            title={collapsed ? "Settings" : undefined}
+            className={cn(
+              "flex h-9 items-center gap-3 rounded-md text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
+              collapsed ? "justify-center px-2" : "px-3",
+            )}
+          >
+            <Settings className="h-4 w-4 flex-shrink-0" />
+            {!collapsed && "Settings"}
+          </Link>
+        )}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button

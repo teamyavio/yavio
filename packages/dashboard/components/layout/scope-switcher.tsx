@@ -4,10 +4,9 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Check, ChevronsUpDown, FolderPlus, Settings } from "lucide-react";
+import { Check, ChevronsUpDown } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 
@@ -37,7 +36,7 @@ interface ScopeSwitcherProps {
  * Single switcher for the full scope (workspace + project): the closed
  * trigger shows where you are, the open menu shows every project the
  * user can reach, grouped by workspace, so a complete scope switch is
- * one click. Each workspace row carries its settings entry.
+ * one click. Pure navigation — settings live in the sidebar.
  */
 export function ScopeSwitcher({
   workspaces,
@@ -63,9 +62,9 @@ export function ScopeSwitcher({
                 ? `${currentWorkspace.name} / ${currentProject.name}`
                 : "Switch project"
             }
-            className="flex h-9 w-full items-center justify-center rounded-md border text-sm font-semibold transition-colors hover:bg-accent hover:text-accent-foreground"
+            className="flex h-9 w-full items-center justify-center rounded-md border text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
           >
-            {(currentProject?.name?.[0] ?? "?").toUpperCase()}
+            <ChevronsUpDown className="h-4 w-4" />
           </button>
         ) : (
           <button
@@ -89,18 +88,10 @@ export function ScopeSwitcher({
           const wsProjects = projects.filter((p) => p.workspaceId === ws.id);
           return (
             <div key={ws.id}>
-              <div className="flex items-center justify-between gap-2 px-2 pt-2 pb-1">
-                <span className="truncate text-xs font-medium text-muted-foreground">
+              <div className="px-2 pt-2 pb-1">
+                <span className="block truncate text-xs font-medium text-muted-foreground">
                   {ws.name}
                 </span>
-                <Link
-                  href={`/${ws.slug}/settings`}
-                  title={`${ws.name} settings`}
-                  onClick={() => setOpen(false)}
-                  className="rounded-sm p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-                >
-                  <Settings className="h-3.5 w-3.5" />
-                </Link>
               </div>
               {wsProjects.map((proj) => {
                 const active = ws.slug === currentWorkspaceSlug && proj.slug === currentProjectSlug;
@@ -119,13 +110,6 @@ export function ScopeSwitcher({
             </div>
           );
         })}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem asChild>
-          <Link href={`/${currentWorkspaceSlug}/settings?tab=projects`}>
-            <FolderPlus className="h-4 w-4" />
-            New project
-          </Link>
-        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
