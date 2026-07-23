@@ -4,6 +4,7 @@ import { EVENT_TYPE_COLORS } from "@/components/analytics/chart-config";
 import { EmptyState } from "@/components/analytics/empty-state";
 import { EventBadge } from "@/components/analytics/event-badge";
 import { PageHeader } from "@/components/analytics/page-header";
+import { platformLabel } from "@/components/analytics/platform-meta";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -176,7 +177,7 @@ export function LiveContent({ projectId }: { projectId: string }) {
                     {event.platform && (
                       <>
                         <dt className="text-muted-foreground">Platform</dt>
-                        <dd>{event.platform}</dd>
+                        <dd>{platformLabel(event.platform)}</dd>
                       </>
                     )}
                     {event.errorCategory && (

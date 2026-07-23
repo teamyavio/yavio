@@ -5,18 +5,9 @@ const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 export const granularityValues = ["hour", "day", "week", "month"] as const;
 export type Granularity = (typeof granularityValues)[number];
 
-export const platformValues = [
-  "claude-desktop",
-  "cursor",
-  "windsurf",
-  "cline",
-  "continue",
-  "zed",
-  "chatgpt",
-  "custom",
-  "unknown",
-] as const;
-export type Platform = (typeof platformValues)[number];
+import { type Platform, platformValues } from "@yavio/shared/platform";
+
+export { platformValues, type Platform } from "@yavio/shared/platform";
 
 /** Strip trailing "Z" — ClickHouse DateTime64 rejects the timezone suffix. */
 const clickHouseDateTime = (iso: string) => iso.replace("T", " ").replace("Z", "");
@@ -32,10 +23,14 @@ export const analyticsFiltersSchema = z.object({
     .datetime()
     .default(() => new Date().toISOString())
     .transform(clickHouseDateTime),
+  // Unrecognised values are dropped rather than rejected — bookmarked URLs
+  // may carry platform values from older releases (e.g. "claude-desktop"),
+  // and a stale filter should degrade to "no filter", not a 400.
   platform: z
     .string()
-    .transform((v) => v.split(",").filter(Boolean))
-    .pipe(z.array(z.enum(platformValues)))
+    .transform((v) =>
+      v.split(",").filter((p): p is Platform => (platformValues as readonly string[]).includes(p)),
+    )
     .optional(),
   granularity: z.enum(granularityValues).default("day"),
 });

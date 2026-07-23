@@ -27,16 +27,25 @@ describe("analyticsFiltersSchema", () => {
 
   it("parses comma-separated platforms", () => {
     const result = analyticsFiltersSchema.parse({
-      platform: "cursor,claude-desktop",
+      platform: "cursor,claude-code",
     });
-    expect(result.platform).toEqual(["cursor", "claude-desktop"]);
+    expect(result.platform).toEqual(["cursor", "claude-code"]);
   });
 
-  it("rejects invalid platform values", () => {
-    const result = analyticsFiltersSchema.safeParse({
+  it("drops unrecognised platform values instead of rejecting", () => {
+    // Bookmarked URLs may carry values from older releases (e.g.
+    // "claude-desktop") — they must degrade to "no filter", not a 400.
+    const result = analyticsFiltersSchema.parse({
+      platform: "cursor,claude-desktop",
+    });
+    expect(result.platform).toEqual(["cursor"]);
+  });
+
+  it("degrades to an empty filter when no platform value is recognised", () => {
+    const result = analyticsFiltersSchema.parse({
       platform: "invalid-platform",
     });
-    expect(result.success).toBe(false);
+    expect(result.platform).toEqual([]);
   });
 
   it("rejects invalid granularity", () => {
