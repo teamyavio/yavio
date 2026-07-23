@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import {
   Activity,
   AlertTriangle,
+  ArrowLeft,
   Filter,
   GitBranch,
   LayoutDashboard,
@@ -60,6 +61,12 @@ const COLLAPSED_STORAGE_KEY = "yavio.sidebar-collapsed";
 // half-screen browser window keeps its space for content.
 const WIDE_VIEWPORT_QUERY = "(min-width: 1024px)";
 
+// Settings routes carry no project (and the account page no workspace)
+// in the URL, so the sidebar remembers the last visited pair — without
+// this, settings pages silently fall back to the first project.
+const LAST_WORKSPACE_KEY = "yavio.last-workspace";
+const lastProjectKey = (workspaceSlug: string) => `yavio.last-project.${workspaceSlug}`;
+
 export function Sidebar({ workspaces, projects }: SidebarProps) {
   const pathname = usePathname();
   const params = useParams();
@@ -91,17 +98,61 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
     });
   }
 
-  const currentWorkspaceSlug = (params.workspace as string | undefined) ?? workspaces[0]?.slug;
+  const paramWorkspace = params.workspace as string | undefined;
+  const paramProject = params.project as string | undefined;
+
+  useEffect(() => {
+    if (paramWorkspace) {
+      localStorage.setItem(LAST_WORKSPACE_KEY, paramWorkspace);
+      if (paramProject) {
+        localStorage.setItem(lastProjectKey(paramWorkspace), paramProject);
+      }
+    }
+  }, [paramWorkspace, paramProject]);
+
+  // localStorage is only consulted after mount so the first client
+  // render matches the server-rendered HTML.
+  const rememberedWorkspace = mounted ? localStorage.getItem(LAST_WORKSPACE_KEY) : null;
+  const currentWorkspaceSlug =
+    paramWorkspace ??
+    (rememberedWorkspace && workspaces.some((ws) => ws.slug === rememberedWorkspace)
+      ? rememberedWorkspace
+      : undefined) ??
+    workspaces[0]?.slug;
   const currentWorkspace = workspaces.find((ws) => ws.slug === currentWorkspaceSlug);
   const workspaceProjects = currentWorkspace
     ? projects.filter((p) => p.workspaceId === currentWorkspace.id)
     : [];
-  const currentProjectSlug = (params.project as string | undefined) ?? workspaceProjects[0]?.slug;
+  const rememberedProject =
+    mounted && currentWorkspaceSlug
+      ? localStorage.getItem(lastProjectKey(currentWorkspaceSlug))
+      : null;
+  const currentProjectSlug =
+    paramProject ??
+    (rememberedProject && workspaceProjects.some((p) => p.slug === rememberedProject)
+      ? rememberedProject
+      : undefined) ??
+    workspaceProjects[0]?.slug;
 
   const basePath =
     currentWorkspaceSlug && currentProjectSlug
       ? `/${currentWorkspaceSlug}/${currentProjectSlug}`
       : "";
+
+  // Settings pages are workspace- (or account-)scoped: the project
+  // selector has no honest job there, so it is replaced by an explicit
+  // way back to the project.
+  const inSettings = pathname === "/settings/account" || /^\/[^/]+\/settings/.test(pathname);
+  const currentProjectName = workspaceProjects.find((p) => p.slug === currentProjectSlug)?.name;
+
+  function projectSlugFor(workspaceSlug: string): string | undefined {
+    const ws = workspaces.find((w) => w.slug === workspaceSlug);
+    const wsProjects = ws ? projects.filter((p) => p.workspaceId === ws.id) : [];
+    const remembered = mounted ? localStorage.getItem(lastProjectKey(workspaceSlug)) : null;
+    return remembered && wsProjects.some((p) => p.slug === remembered)
+      ? remembered
+      : wsProjects[0]?.slug;
+  }
 
   return (
     <aside
@@ -146,11 +197,15 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
               <Select
                 value={currentWorkspaceSlug ?? ""}
                 onValueChange={(slug) => {
-                  const ws = workspaces.find((w) => w.slug === slug);
-                  const wsProjects = ws ? projects.filter((p) => p.workspaceId === ws.id) : [];
-                  const project = wsProjects[0];
-                  if (project) {
-                    router.push(`/${slug}/${project.slug}/overview`);
+                  // Switching workspace inside settings stays in settings;
+                  // everywhere else it opens that workspace's dashboard.
+                  if (inSettings && pathname !== "/settings/account") {
+                    router.push(`/${slug}/settings`);
+                    return;
+                  }
+                  const projectSlug = projectSlugFor(slug);
+                  if (projectSlug) {
+                    router.push(`/${slug}/${projectSlug}/overview`);
                   }
                 }}
               >
@@ -166,7 +221,7 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
                 </SelectContent>
               </Select>
 
-              {currentWorkspaceSlug && workspaceProjects.length > 0 && (
+              {!inSettings && currentWorkspaceSlug && workspaceProjects.length > 0 && (
                 <Select
                   value={currentProjectSlug ?? ""}
                   onValueChange={(slug) => {
@@ -191,7 +246,7 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
               <div className="flex h-8 items-center rounded-md border border-input px-3 text-xs">
                 {currentWorkspace?.name ?? "Select workspace"}
               </div>
-              {currentWorkspaceSlug && workspaceProjects.length > 0 && (
+              {!inSettings && currentWorkspaceSlug && workspaceProjects.length > 0 && (
                 <div className="flex h-8 items-center rounded-md border border-input px-3 text-xs">
                   {workspaceProjects.find((p) => p.slug === currentProjectSlug)?.name ??
                     "Select project"}
@@ -205,6 +260,23 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
       {!collapsed && <Separator />}
 
       <nav className="flex-1 space-y-1 overflow-y-auto p-2">
+        {inSettings && basePath && (
+          <Link
+            href={`${basePath}/overview`}
+            title={
+              collapsed
+                ? `Back to ${currentProjectName ?? "project"}`
+                : (currentProjectName ?? undefined)
+            }
+            className={cn(
+              "mb-2 flex h-9 items-center gap-3 rounded-md border text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
+              collapsed ? "justify-center px-2" : "px-3",
+            )}
+          >
+            <ArrowLeft className="h-4 w-4 flex-shrink-0" />
+            {!collapsed && <span className="truncate">Back to project</span>}
+          </Link>
+        )}
         {analyticsNavItems.map((item) => {
           const Icon = item.icon;
           const href = `${basePath}/${item.path}`;
