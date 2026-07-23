@@ -27,6 +27,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Settings,
+  SlidersHorizontal,
   User,
   Users,
   Wrench,
@@ -79,7 +80,7 @@ const accountSettingsItems = [
 ];
 
 const workspaceSettingsItems = [
-  { tab: "general", label: "General", icon: Settings, minRole: ROLE_LEVEL.admin },
+  { tab: "general", label: "General", icon: SlidersHorizontal, minRole: ROLE_LEVEL.admin },
   { tab: "members", label: "Members", icon: Users, minRole: ROLE_LEVEL.admin },
   { tab: "projects", label: "Projects", icon: FolderKanban, minRole: ROLE_LEVEL.member },
   { tab: "api-keys", label: "API Keys", icon: KeyRound, minRole: ROLE_LEVEL.member },
