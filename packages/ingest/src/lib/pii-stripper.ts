@@ -38,9 +38,13 @@ const PII_PATTERNS: Array<{
   replacement: string;
   validate?: (match: string) => boolean;
 }> = [
-  // Email addresses
+  // Email addresses. Quantifiers are bounded to the RFC 5321 limits (local
+  // part 64, domain 255): the unbounded `+` made the scan quadratic — every
+  // position in a long benign string consumed to the end before failing at
+  // the `@` — letting one size-limit-compliant batch block the event loop
+  // for tens of seconds.
   {
-    pattern: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
+    pattern: /[a-zA-Z0-9._%+-]{1,64}@[a-zA-Z0-9.-]{1,255}\.[a-zA-Z]{2,24}/g,
     replacement: "[EMAIL_REDACTED]",
   },
   // Credit card numbers (13-19 digits with optional space/dash separators, Luhn-validated)

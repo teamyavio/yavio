@@ -32,8 +32,10 @@ const PII_PATTERNS: Array<{
   replacement: string;
   validate?: (match: string) => boolean;
 }> = [
+  // Bounded to RFC 5321 limits — the unbounded local part made scanning
+  // quadratic on long benign strings (mirrors the ingest-side stripper).
   {
-    pattern: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
+    pattern: /[a-zA-Z0-9._%+-]{1,64}@[a-zA-Z0-9.-]{1,255}\.[a-zA-Z]{2,24}/g,
     replacement: "[EMAIL_REDACTED]",
   },
   {

@@ -153,5 +153,7 @@ export async function queryErrorList(
     },
   });
 
-  return { errors, total: countRows[0]?.total ?? 0 };
+  // ClickHouse serialises count() (UInt64) as a JSON string; coerce so
+  // consumers' `total === 0` checks and pager math actually work.
+  return { errors, total: Number(countRows[0]?.total ?? 0) };
 }
