@@ -1,5 +1,6 @@
 "use client";
 
+import { deriveGranularity } from "@/lib/analytics/format";
 import type { Granularity } from "@/lib/analytics/validation";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef } from "react";
@@ -11,6 +12,7 @@ export interface AnalyticsFiltersState {
   from: Date;
   to: Date;
   platform: string[];
+  /** Derived from the range — not user-settable, not a URL param. */
   granularity: Granularity;
 }
 
@@ -22,20 +24,22 @@ export function useAnalyticsFilters() {
 
   const filters: AnalyticsFiltersState = useMemo(() => {
     const now = new Date();
+    const from = searchParams.get("from")
+      ? new Date(searchParams.get("from") as string)
+      : new Date(now.getTime() - SEVEN_DAYS_MS);
+    const to = searchParams.get("to") ? new Date(searchParams.get("to") as string) : now;
     return {
-      from: searchParams.get("from")
-        ? new Date(searchParams.get("from") as string)
-        : new Date(now.getTime() - SEVEN_DAYS_MS),
-      to: searchParams.get("to") ? new Date(searchParams.get("to") as string) : now,
+      from,
+      to,
       platform: searchParams.get("platform")
         ? (searchParams.get("platform") as string).split(",").filter(Boolean)
         : [],
-      granularity: (searchParams.get("granularity") as Granularity) ?? "day",
+      granularity: deriveGranularity(from, to),
     };
   }, [searchParams]);
 
   const setFilter = useCallback(
-    (updates: Partial<AnalyticsFiltersState>) => {
+    (updates: Partial<Omit<AnalyticsFiltersState, "granularity">>) => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
 
       debounceRef.current = setTimeout(() => {
@@ -49,7 +53,7 @@ export function useAnalyticsFilters() {
             params.delete("platform");
           }
         }
-        if (updates.granularity) params.set("granularity", updates.granularity);
+        params.delete("granularity");
         router.replace(`${pathname}?${params.toString()}`, { scroll: false });
       }, DEBOUNCE_MS);
     },

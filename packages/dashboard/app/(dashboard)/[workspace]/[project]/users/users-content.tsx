@@ -5,6 +5,7 @@ import {
   COMMON_AXIS_PROPS,
   COMMON_CHART_PROPS,
   COMMON_GRID_PROPS,
+  timeTickInterval,
 } from "@/components/analytics/chart-config";
 import { ChartPanel } from "@/components/analytics/chart-panel";
 import { type Column, DataTable } from "@/components/analytics/data-table";
@@ -181,17 +182,14 @@ export function UsersContent({ projectId }: { projectId: string }) {
             <ErrorAlert message={activeError.message} retry={activeRetry} />
           ) : (
             <>
-              <ChartPanel
-                title="DAU / WAU / MAU"
-                granularity={filters.granularity}
-                onGranularityChange={(g) => setFilter({ granularity: g })}
-              >
+              <ChartPanel title="DAU / WAU / MAU">
                 <ResponsiveContainer width="100%" height={256}>
-                  <LineChart data={activeData?.activeUsers ?? []}>
+                  <LineChart data={activeData?.activeUsers ?? []} margin={{ right: 20 }}>
                     <CartesianGrid {...COMMON_GRID_PROPS} />
                     <XAxis
                       dataKey="bucket"
-                      minTickGap={32}
+                      minTickGap={8}
+                      interval={timeTickInterval((activeData?.activeUsers ?? []).length)}
                       tickFormatter={(v: string) => formatBucketLabel(v, filters.granularity)}
                       {...COMMON_AXIS_PROPS}
                     />
@@ -226,11 +224,12 @@ export function UsersContent({ projectId }: { projectId: string }) {
 
               <ChartPanel title="New vs Returning Users">
                 <ResponsiveContainer width="100%" height={256}>
-                  <AreaChart data={activeData?.newVsReturning ?? []}>
+                  <AreaChart data={activeData?.newVsReturning ?? []} margin={{ right: 20 }}>
                     <CartesianGrid {...COMMON_GRID_PROPS} />
                     <XAxis
                       dataKey="bucket"
-                      minTickGap={32}
+                      minTickGap={8}
+                      interval={timeTickInterval((activeData?.newVsReturning ?? []).length)}
                       tickFormatter={(v: string) => formatBucketLabel(v, filters.granularity)}
                       {...COMMON_AXIS_PROPS}
                     />

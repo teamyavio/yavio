@@ -60,8 +60,16 @@ export function KPICard({
         <p className="mt-1 truncate text-2xl font-semibold tracking-tight" title={formattedValue}>
           {formattedValue}
         </p>
-        {trendPercent !== null && (
-          <div className="mt-1 flex items-center gap-1 text-xs">
+        {/* Fixed-height row so cards keep the same size when no trend exists. */}
+        <div
+          className="mt-1 flex h-4 items-center gap-1 text-xs"
+          title={
+            trendPercent !== null
+              ? `${trendUp ? "Up" : "Down"} ${Math.abs(trendPercent).toFixed(1)}% vs. previous period`
+              : undefined
+          }
+        >
+          {trendPercent !== null && (
             <span
               className={cn(
                 "flex items-center gap-0.5",
@@ -71,9 +79,8 @@ export function KPICard({
               {trendUp ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />}
               {Math.abs(trendPercent).toFixed(1)}%
             </span>
-            <span className="truncate text-muted-foreground">vs. previous period</span>
-          </div>
-        )}
+          )}
+        </div>
       </CardContent>
     </Card>
   );

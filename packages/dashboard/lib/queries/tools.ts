@@ -1,3 +1,4 @@
+import { fillTimeBuckets } from "@/lib/analytics/fill-buckets";
 import { granularityToFunction } from "@/lib/analytics/format";
 import type { Granularity } from "@/lib/analytics/validation";
 import { queryAnalytics } from "@/lib/clickhouse/analytics-client";
@@ -136,7 +137,7 @@ export async function queryToolErrorRateTimeSeries(
   const fn = granularityToFunction(granularity);
   const pf = platformFilter(ctx.platform);
 
-  return queryAnalytics<TimeSeriesPoint>({
+  const rows = await queryAnalytics<TimeSeriesPoint>({
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
@@ -160,4 +161,5 @@ export async function queryToolErrorRateTimeSeries(
       ...platformParams(ctx.platform),
     },
   });
+  return fillTimeBuckets(rows, ctx.from, ctx.to, granularity, (bucket) => ({ bucket, value: 0 }));
 }

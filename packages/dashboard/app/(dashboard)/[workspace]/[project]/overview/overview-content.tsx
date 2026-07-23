@@ -5,6 +5,7 @@ import {
   COMMON_AXIS_PROPS,
   COMMON_CHART_PROPS,
   COMMON_GRID_PROPS,
+  timeTickInterval,
 } from "@/components/analytics/chart-config";
 import { ChartPanel } from "@/components/analytics/chart-panel";
 import { DateRangePicker } from "@/components/analytics/date-range-picker";
@@ -88,17 +89,14 @@ export function OverviewContent({ projectId }: { projectId: string }) {
           </div>
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <ChartPanel
-              title="Invocations"
-              granularity={filters.granularity}
-              onGranularityChange={(g) => setFilter({ granularity: g })}
-            >
+            <ChartPanel title="Invocations">
               <ResponsiveContainer width="100%" height={256}>
-                <AreaChart data={data?.timeSeries ?? []}>
+                <AreaChart data={data?.timeSeries ?? []} margin={{ right: 20 }}>
                   <CartesianGrid {...COMMON_GRID_PROPS} />
                   <XAxis
                     dataKey="bucket"
-                    minTickGap={32}
+                    minTickGap={8}
+                    interval={timeTickInterval((data?.timeSeries ?? []).length)}
                     tickFormatter={(v: string) => formatBucketLabel(v, filters.granularity)}
                     {...COMMON_AXIS_PROPS}
                   />
