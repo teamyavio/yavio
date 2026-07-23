@@ -1,39 +1,9 @@
-/**
- * All platform values the SDK can emit. Single source of truth — the
- * dashboard filter imports this list, so the two can never drift apart.
- *
- * Every entry is backed by a verified client identity (the `clientInfo.name`
- * sent in the MCP initialize handshake):
- * - "chatgpt"      ChatGPT apps/connectors (also matched via user agent/origin)
- * - "codex"        OpenAI Codex — sends "codex-mcp-client"
- * - "claude"       claude.ai and Claude Desktop — both send "claude-ai"
- * - "claude-code"  Claude Code — sends "claude-code"
- * - "cursor"       Cursor — client name contains "cursor" (e.g. "cursor-vscode")
- * - "opencode"     opencode — sends "opencode"
- * - "vscode"       VS Code (Copilot agent mode and other VS Code MCP clients)
- * - "windsurf"     Windsurf (formerly Codeium)
- * - "cline"        Cline — sends "@cline/core"
- * - "continue"     Continue — sends "continue-client"
- * - "zed"          Zed — sends "Zed"
- * - "unknown"      no recognised signal (includes clients that send no usable
- *                  identity, e.g. Python SDK default "mcp")
- */
-export const platformValues = [
-  "chatgpt",
-  "codex",
-  "claude",
-  "claude-code",
-  "cursor",
-  "opencode",
-  "vscode",
-  "windsurf",
-  "cline",
-  "continue",
-  "zed",
-  "unknown",
-] as const;
+import type { Platform } from "@yavio/shared/platform";
 
-export type Platform = (typeof platformValues)[number];
+// The platform list lives in @yavio/shared so the dashboard can import it
+// without pulling in server-only SDK code. Re-exported here for npm consumers.
+export { platformValues } from "@yavio/shared/platform";
+export type { Platform } from "@yavio/shared/platform";
 
 export interface PlatformSignals {
   userAgent?: string;
