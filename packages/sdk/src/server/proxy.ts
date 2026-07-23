@@ -87,6 +87,25 @@ function wrapToolCallback(
           : undefined;
     const session = resolveSession(sessionKey);
 
+    // Client identity from the MCP initialize handshake — available by the
+    // time the first tool call arrives.
+    let clientInfo: { name?: string; version?: string } | undefined;
+    try {
+      clientInfo = (
+        server.server as unknown as {
+          getClientVersion?: () => { name?: string; version?: string } | undefined;
+        }
+      ).getClientVersion?.();
+    } catch {
+      clientInfo = undefined;
+    }
+
+    // Lazy platform detection — must run before the connection event is
+    // built so the event carries the resolved platform, not "unknown".
+    if (session.platform === "unknown" && clientInfo?.name) {
+      session.platform = detectPlatform({ clientName: clientInfo.name });
+    }
+
     // Emit deferred connection event on the first tool call for this session.
     // Deferred from connect() so that OpenAI's per-tool-call reconnects don't
     // spam a connection event for every tool call in the same conversation.
@@ -99,25 +118,12 @@ function wrapToolCallback(
           platform: session.platform,
           sdkVersion,
         },
-        {},
+        {
+          clientName: clientInfo?.name,
+          clientVersion: clientInfo?.version,
+        },
       );
       transport.send([connectionEvent]);
-    }
-
-    // Lazy platform detection — clientInfo is available after initialize
-    if (session.platform === "unknown") {
-      try {
-        const clientVersion = (
-          server.server as unknown as {
-            getClientVersion?: () => { name: string } | undefined;
-          }
-        ).getClientVersion?.();
-        if (clientVersion?.name) {
-          session.platform = detectPlatform({ clientName: clientVersion.name });
-        }
-      } catch {
-        // Keep "unknown"
-      }
     }
 
     const traceId = generateTraceId();

@@ -1070,3 +1070,78 @@ describe("createProxy — session reuse", () => {
     expect(firstSessionId).toMatch(/^ses_/);
   });
 });
+
+describe("createProxy — client identity on connection events", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue(null);
+    _resetGlobalState();
+  });
+
+  async function invokeTool(server: McpServer, name: string) {
+    const tool = getRegisteredTool(server, name);
+    await tool?.handler({
+      signal: new AbortController().signal,
+      requestId: "req-ci-1",
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+    });
+  }
+
+  it("persists client_name and client_version from the MCP handshake", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    (server.server as unknown as Record<string, unknown>).getClientVersion = () => ({
+      name: "claude-code",
+      version: "2.1.218",
+    });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+
+    proxy.tool("identity_tool", () => ({ content: [{ type: "text", text: "ok" }] }));
+    await invokeTool(server, "identity_tool");
+
+    const connection = transport.sent.flat().find((e) => e.event_type === "connection") as Record<
+      string,
+      unknown
+    >;
+    expect(connection).toBeDefined();
+    expect(connection.client_name).toBe("claude-code");
+    expect(connection.client_version).toBe("2.1.218");
+  });
+
+  it("resolves the platform before the connection event is emitted", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    (server.server as unknown as Record<string, unknown>).getClientVersion = () => ({
+      name: "codex-mcp-client",
+      version: "0.108.0",
+    });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+
+    proxy.tool("platform_tool", () => ({ content: [{ type: "text", text: "ok" }] }));
+    await invokeTool(server, "platform_tool");
+
+    const connection = transport.sent.flat().find((e) => e.event_type === "connection") as Record<
+      string,
+      unknown
+    >;
+    expect(connection.platform).toBe("codex");
+  });
+
+  it("omits client identity when the handshake exposes none", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+
+    proxy.tool("anonymous_tool", () => ({ content: [{ type: "text", text: "ok" }] }));
+    await invokeTool(server, "anonymous_tool");
+
+    const connection = transport.sent.flat().find((e) => e.event_type === "connection") as Record<
+      string,
+      unknown
+    >;
+    expect(connection).toBeDefined();
+    expect(connection.client_name).toBeUndefined();
+    expect(connection.platform).toBe("unknown");
+  });
+});

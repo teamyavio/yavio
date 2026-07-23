@@ -61,3 +61,5 @@ export function withYavio<T extends McpServer>(server: T, options?: WithYavioOpt
 export const yavio: YavioContext = createYavioContext();
 
 export type { CaptureConfig, WithYavioOptions, YavioContext } from "../core/types.js";
+export { platformValues } from "../core/platform.js";
+export type { Platform } from "../core/platform.js";

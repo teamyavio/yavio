@@ -16,18 +16,24 @@ Platform detection runs a layered heuristic against signals from the MCP transpo
 | 3 | `origin` | HTTP Origin header |
 | 4 | — | Falls back to `"unknown"` |
 
-All matching is case-insensitive substring matching.
+All matching is case-insensitive substring matching (except `zed`, which requires an exact name to avoid false positives). Specific product names are matched before the generic vendor patterns they contain — `claude-code` is checked before `claude`, and `cursor` before `vscode` (Cursor identifies as `cursor-vscode`).
 
 ## Supported platforms
 
-| Platform | Detected from `clientName` | Detected from `userAgent` | Detected from `origin` |
-|----------|---------------------------|--------------------------|----------------------|
-| `chatgpt` | `chatgpt`, `openai` | `chatgpt`, `openai` | `openai.com`, `chatgpt.com` |
-| `claude` | `claude`, `anthropic` | `claude`, `anthropic` | `claude.ai`, `anthropic.com` |
-| `cursor` | `cursor` | `cursor` | — |
-| `vscode` | `vscode` | `vscode` | — |
-| `windsurf` | `windsurf`, `codeium` | `windsurf`, `codeium` | — |
-| `unknown` | — | — | — |
+| Platform | Matched pattern | Real-world identity |
+|----------|----------------|---------------------|
+| `chatgpt` | `chatgpt`, `openai` | ChatGPT apps and connectors; also via `openai.com` / `chatgpt.com` origin |
+| `codex` | `codex` | OpenAI Codex sends `codex-mcp-client` |
+| `claude` | `claude`, `anthropic` | claude.ai and Claude Desktop both send `claude-ai`; also via `claude.ai` / `anthropic.com` origin |
+| `claude-code` | `claude-code` | Claude Code sends `claude-code` |
+| `cursor` | `cursor` | Cursor sends `cursor-vscode` |
+| `opencode` | `opencode` | opencode sends `opencode` |
+| `vscode` | `vscode`, `visual studio code` | VS Code MCP clients (e.g. Copilot agent mode) |
+| `windsurf` | `windsurf`, `codeium` | Windsurf (formerly Codeium) |
+| `cline` | `cline` | Cline sends `@cline/core` |
+| `continue` | `continue` | Continue sends `continue-client` |
+| `zed` | `zed` (exact), `zed/` prefix | Zed sends `Zed` |
+| `unknown` | — | No recognised signal, including clients that send no usable identity (e.g. the Python SDK default `mcp`) |
 
 ## When detection runs
 
@@ -44,6 +50,6 @@ Platform detection is fully automatic. The `platform` field appears on all event
 - **Segmentation** — compare metrics across platforms
 - **Funnel analysis** — see where users drop off on each platform
 
-## Custom platforms
+## Unrecognised clients
 
-If your MCP client isn't in the supported list, it will appear as `"unknown"`. The raw `clientName` and `userAgent` are available in the event metadata for custom segmentation.
+If an MCP client isn't in the supported list, it appears as `"unknown"`. The raw client identity from the MCP handshake is persisted on every `connection` event as `client_name` and `client_version`, so unrecognised clients can still be inspected in your data — and promoted to a first-class platform once their identity is known.
