@@ -29,6 +29,7 @@ function matchIdentity(raw: string): Platform | undefined {
   if (name.includes("chatgpt") || name.includes("openai")) return "chatgpt";
   if (name.includes("claude") || name.includes("anthropic")) return "claude";
   if (name.includes("cursor")) return "cursor";
+  if (name.includes("gemini")) return "gemini";
   if (name.includes("windsurf") || name.includes("codeium")) return "windsurf";
   if (name.includes("cline")) return "cline";
   if (name.includes("continue")) return "continue";
@@ -62,6 +63,7 @@ export function detectPlatform(signals: PlatformSignals): Platform {
     const origin = signals.origin.toLowerCase();
     if (origin.includes("openai.com") || origin.includes("chatgpt.com")) return "chatgpt";
     if (origin.includes("claude.ai") || origin.includes("anthropic.com")) return "claude";
+    if (origin.includes("gemini.google.com")) return "gemini";
   }
 
   return "unknown";

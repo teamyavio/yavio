@@ -56,6 +56,10 @@ describe("detectPlatform", () => {
       expect(detectPlatform({ clientName: "continue-client" })).toBe("continue");
     });
 
+    it("detects Gemini from the CLI's real client name", () => {
+      expect(detectPlatform({ clientName: "gemini-cli-mcp-client" })).toBe("gemini");
+    });
+
     it("detects Zed from its real client name", () => {
       expect(detectPlatform({ clientName: "Zed" })).toBe("zed");
     });
@@ -96,6 +100,10 @@ describe("detectPlatform", () => {
 
     it("detects Claude from origin", () => {
       expect(detectPlatform({ origin: "https://claude.ai" })).toBe("claude");
+    });
+
+    it("detects Gemini from origin", () => {
+      expect(detectPlatform({ origin: "https://gemini.google.com" })).toBe("gemini");
     });
   });
 
@@ -142,6 +150,7 @@ describe("detectPlatform", () => {
         detectPlatform({ clientName: "claude-ai" }),
         detectPlatform({ clientName: "claude-code" }),
         detectPlatform({ clientName: "cursor-vscode" }),
+        detectPlatform({ clientName: "gemini-cli-mcp-client" }),
         detectPlatform({ clientName: "opencode" }),
         detectPlatform({ clientName: "vscode" }),
         detectPlatform({ clientName: "windsurf" }),
