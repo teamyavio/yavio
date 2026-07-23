@@ -38,8 +38,20 @@ describe("fillTimeBuckets", () => {
   });
 
   it("parses ClickHouse-format bounds (no timezone marker) as UTC", () => {
-    const iso = fillTimeBuckets([], "2025-01-01T00:00:00.000Z", "2025-01-02T00:00:00.000Z", "hour", empty);
-    const ch = fillTimeBuckets([], "2025-01-01 00:00:00.000", "2025-01-02 00:00:00.000", "hour", empty);
+    const iso = fillTimeBuckets(
+      [],
+      "2025-01-01T00:00:00.000Z",
+      "2025-01-02T00:00:00.000Z",
+      "hour",
+      empty,
+    );
+    const ch = fillTimeBuckets(
+      [],
+      "2025-01-01 00:00:00.000",
+      "2025-01-02 00:00:00.000",
+      "hour",
+      empty,
+    );
     expect(ch).toEqual(iso);
     expect(ch).toHaveLength(24);
     expect(ch[0].bucket).toBe("2025-01-01 00:00:00");
@@ -54,7 +66,12 @@ describe("fillTimeBuckets", () => {
       "week",
       empty,
     );
-    expect(result.map((r) => r.bucket)).toEqual(["2024-12-29", "2025-01-05", "2025-01-12", "2025-01-19"]);
+    expect(result.map((r) => r.bucket)).toEqual([
+      "2024-12-29",
+      "2025-01-05",
+      "2025-01-12",
+      "2025-01-19",
+    ]);
     expect(result[1].value).toBe(3);
   });
 
