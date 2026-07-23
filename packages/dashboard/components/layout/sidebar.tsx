@@ -2,6 +2,14 @@
 
 import { YavioLogo } from "@/components/layout/yavio-logo";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -46,6 +54,7 @@ interface Project {
 interface SidebarProps {
   workspaces: Workspace[];
   projects: Project[];
+  user: { name: string | null; email: string };
 }
 
 const analyticsNavItems = [
@@ -69,7 +78,7 @@ const WIDE_VIEWPORT_QUERY = "(min-width: 1024px)";
 const LAST_WORKSPACE_KEY = "yavio.last-workspace";
 const lastProjectKey = (workspaceSlug: string) => `yavio.last-project.${workspaceSlug}`;
 
-export function Sidebar({ workspaces, projects }: SidebarProps) {
+export function Sidebar({ workspaces, projects, user }: SidebarProps) {
   const pathname = usePathname();
   const params = useParams();
   const router = useRouter();
@@ -146,6 +155,8 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
   // way back to the project.
   const inSettings = pathname === "/settings/account" || /^\/[^/]+\/settings/.test(pathname);
   const currentProjectName = workspaceProjects.find((p) => p.slug === currentProjectSlug)?.name;
+  const displayName = user.name?.trim() || user.email;
+  const initial = (displayName[0] ?? "?").toUpperCase();
 
   function projectSlugFor(workspaceSlug: string): string | undefined {
     const ws = workspaces.find((w) => w.slug === workspaceSlug);
@@ -310,49 +321,50 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
 
       <Separator />
 
-      <div className="space-y-1 p-2">
-        {currentWorkspaceSlug && (
-          <Link
-            href={`/${currentWorkspaceSlug}/settings`}
-            title={collapsed ? "Settings" : undefined}
-            className={cn(
-              "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
-              collapsed ? "justify-center px-2" : "px-3",
-              pathname.includes("/settings") && !pathname.includes("/settings/account")
-                ? "bg-accent text-accent-foreground"
-                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+      <div className="p-2">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              title={collapsed ? displayName : undefined}
+              className={cn(
+                "flex h-10 w-full items-center gap-2 rounded-md text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
+                collapsed ? "justify-center px-2" : "px-2",
+              )}
+            >
+              <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-foreground text-[11px] font-semibold text-background">
+                {initial}
+              </span>
+              {!collapsed && <span className="truncate">{displayName}</span>}
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent side="top" align="start" className="w-56">
+            <DropdownMenuLabel className="font-normal">
+              <span className="block truncate text-sm font-medium">{displayName}</span>
+              <span className="block truncate text-xs text-muted-foreground">{user.email}</span>
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            {currentWorkspaceSlug && (
+              <DropdownMenuItem asChild>
+                <Link href={`/${currentWorkspaceSlug}/settings`}>
+                  <Settings className="h-4 w-4" />
+                  Workspace settings
+                </Link>
+              </DropdownMenuItem>
             )}
-          >
-            <Settings className="h-4 w-4 flex-shrink-0" />
-            {!collapsed && "Settings"}
-          </Link>
-        )}
-        <Link
-          href="/settings/account"
-          title={collapsed ? "Account" : undefined}
-          className={cn(
-            "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
-            collapsed ? "justify-center px-2" : "px-3",
-            pathname === "/settings/account"
-              ? "bg-accent text-accent-foreground"
-              : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-          )}
-        >
-          <User className="h-4 w-4 flex-shrink-0" />
-          {!collapsed && "Account"}
-        </Link>
-        <button
-          type="button"
-          onClick={() => signOut({ callbackUrl: "/login" })}
-          title={collapsed ? "Log out" : undefined}
-          className={cn(
-            "flex h-9 w-full items-center gap-3 rounded-md text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
-            collapsed ? "justify-center px-2" : "px-3",
-          )}
-        >
-          <LogOut className="h-4 w-4 flex-shrink-0" />
-          {!collapsed && "Log out"}
-        </button>
+            <DropdownMenuItem asChild>
+              <Link href="/settings/account">
+                <User className="h-4 w-4" />
+                Account
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => signOut({ callbackUrl: "/login" })}>
+              <LogOut className="h-4 w-4" />
+              Log out
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </aside>
   );

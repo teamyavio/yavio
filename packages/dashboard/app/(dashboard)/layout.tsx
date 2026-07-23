@@ -1,7 +1,7 @@
 import { Sidebar } from "@/components/layout/sidebar";
 import { getServerSession } from "@/lib/auth/get-session";
 import { getDb } from "@/lib/db";
-import { projects, workspaceMembers, workspaces } from "@yavio/db/schema";
+import { projects, users, workspaceMembers, workspaces } from "@yavio/db/schema";
 import { asc, eq, inArray } from "drizzle-orm";
 import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
@@ -11,6 +11,12 @@ export default async function DashboardLayout({ children }: { children: ReactNod
   if (!session) redirect("/login");
 
   const db = getDb();
+
+  const [user] = await db
+    .select({ name: users.name, email: users.email })
+    .from(users)
+    .where(eq(users.id, session.userId))
+    .limit(1);
 
   const userWorkspaces = await db
     .select({
@@ -40,7 +46,11 @@ export default async function DashboardLayout({ children }: { children: ReactNod
 
   return (
     <div className="flex h-screen overflow-hidden">
-      <Sidebar workspaces={userWorkspaces} projects={userProjects} />
+      <Sidebar
+        workspaces={userWorkspaces}
+        projects={userProjects}
+        user={{ name: user?.name ?? null, email: user?.email ?? "" }}
+      />
       <main className="min-w-0 flex-1 overflow-auto p-6">{children}</main>
     </div>
   );
