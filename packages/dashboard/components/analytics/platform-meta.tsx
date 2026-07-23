@@ -66,7 +66,8 @@ export interface PlatformMeta {
 
 /**
  * Display metadata for every platform the SDK can emit, in display order:
- * consumer assistants first, then coding agents alphabetically, Unknown last.
+ * alphabetical, except Codex sits under ChatGPT (pairing each vendor's
+ * consumer product with its coding agent) and Unknown is pinned last.
  *
  * Brand marks are from simple-icons (CC0) or the vendor's own repository;
  * Codex has no published monochrome mark yet, so it uses a terminal glyph.
@@ -91,13 +92,13 @@ export const PLATFORM_META: Record<Platform, PlatformMeta> = {
 /** Platforms in display order. */
 export const orderedPlatforms = [
   "chatgpt",
-  "claude",
-  "gemini",
-  "claude-code",
   "codex",
+  "claude",
+  "claude-code",
   "cline",
   "continue",
   "cursor",
+  "gemini",
   "gemini-cli",
   "opencode",
   "vscode",
