@@ -32,12 +32,17 @@ interface ConfigFile {
   intent?: boolean;
 }
 
-/** Parse an env var as a boolean. Accepts "1"/"true"/"yes" (case-insensitive). */
+/**
+ * Parse an env var as a boolean. Accepts "1"/"true"/"yes"/"on" (and their
+ * negatives), case-insensitive. An empty or unrecognised value yields
+ * undefined so the next configuration source still applies — an env var set
+ * to "" (a common container default) must not silently override a config file.
+ */
 function parseBoolEnv(value: string | undefined): boolean | undefined {
   if (value === undefined) return undefined;
   const v = value.trim().toLowerCase();
-  if (v === "1" || v === "true" || v === "yes") return true;
-  if (v === "0" || v === "false" || v === "no" || v === "") return false;
+  if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "no" || v === "off") return false;
   return undefined;
 }
 

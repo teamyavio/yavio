@@ -58,7 +58,10 @@ export async function queryIntentFeed(
         session_id AS sessionId
       FROM events
       ${baseWhere}
-      ORDER BY timestamp DESC
+      -- event_id breaks timestamp ties so paging is deterministic: without
+      -- it, rows sharing a millisecond can shuffle between pages and appear
+      -- twice or not at all.
+      ORDER BY timestamp DESC, event_id DESC
       LIMIT 1 BY event_id
       LIMIT {limit:UInt32} OFFSET {offset:UInt32}
     `,

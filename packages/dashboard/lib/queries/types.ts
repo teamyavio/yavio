@@ -159,6 +159,18 @@ export interface IntentKPIs {
   toolsWithIntents: number;
 }
 
+/**
+ * Response contract of GET /api/analytics/[projectId]/intents. Shared by the
+ * route and the page so a rename on either side is a compile error rather
+ * than a silently undefined field at runtime.
+ */
+export interface IntentsResponse {
+  intents: IntentFeedItem[];
+  total: number;
+  kpis: IntentKPIs;
+  intentStatus: IntentStatus;
+}
+
 /** A captured user intent for one tool call. */
 export interface RecentIntent {
   eventId: string;

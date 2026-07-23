@@ -3,6 +3,7 @@ import { parseAnalyticsParams } from "@/lib/analytics/validation";
 import { AnalyticsQueryError } from "@/lib/clickhouse/analytics-client";
 import { queryIntentFeed, queryIntentKPIs } from "@/lib/queries/intents";
 import { queryIntentStatus } from "@/lib/queries/tool-detail";
+import type { IntentsResponse } from "@/lib/queries/types";
 import { rateLimitConfigs } from "@/lib/rate-limit/config";
 import { RateLimiter } from "@/lib/rate-limit/rate-limiter";
 import { ErrorCode } from "@yavio/shared/error-codes";
@@ -49,7 +50,8 @@ export const GET = withAnalyticsAuth("viewer")(async (request, ctx) => {
       queryIntentStatus(queryCtx),
     ]);
 
-    return NextResponse.json({ ...feed, kpis, intentStatus });
+    const body: IntentsResponse = { ...feed, kpis, intentStatus };
+    return NextResponse.json(body);
   } catch (err) {
     if (err instanceof AnalyticsQueryError) return err.toResponse();
     throw err;

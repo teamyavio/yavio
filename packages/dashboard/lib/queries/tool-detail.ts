@@ -347,7 +347,7 @@ export async function queryToolRecentIntents(
         AND JSONExtractString(intent_signals, 'intent') != ''
         AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}
         ${pf}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, event_id DESC
       LIMIT 1 BY event_id
       LIMIT 20
     `,

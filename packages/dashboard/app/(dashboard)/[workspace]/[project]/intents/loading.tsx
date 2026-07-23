@@ -12,7 +12,7 @@ export default function IntentsLoading() {
         <div className="h-24 animate-pulse rounded-lg bg-muted" />
         <div className="h-24 animate-pulse rounded-lg bg-muted" />
       </div>
-      <SkeletonTable rows={10} columns={6} />
+      <SkeletonTable rows={10} columns={5} />
     </div>
   );
 }

@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpServer as McpServerCtor } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { BaseEvent, ToolCallEvent } from "@yavio/shared/events";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -439,6 +440,137 @@ describe("intent capture — enabled", () => {
     expect(toolCallEvents(h.events)[0]?.intent_signals).toBeUndefined();
   });
 
+  it("never strips context from a wrapped schema whose keys are unreadable", async () => {
+    // z.object().refine() stores a ZodEffects: no .shape, no .properties. The
+    // customer's `context` is invisible to introspection, so the tool must be
+    // left alone rather than have a required argument deleted.
+    let seenArgs: unknown;
+    const h = await setup(INTENT_ON, (proxy) => {
+      proxy.registerTool(
+        "translate",
+        {
+          inputSchema: z
+            .object({ text: z.string(), context: z.string() })
+            .refine((v) => v.text.length > 0) as unknown as { text: z.ZodString },
+        },
+        async (args: unknown) => {
+          seenArgs = args;
+          return ok("done");
+        },
+      );
+    });
+    await h.client.listTools();
+
+    const result = await h.client.callTool({
+      name: "translate",
+      arguments: { text: "hallo", context: "formal register" },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(seenArgs).toEqual({ text: "hallo", context: "formal register" });
+  });
+
+  it("never strips context from a schema that accepts unknown keys", async () => {
+    let seenArgs: unknown;
+    const h = await setup(INTENT_ON, (proxy) => {
+      proxy.registerTool(
+        "forward",
+        {
+          inputSchema: z.object({ text: z.string() }).catchall(z.string()) as unknown as {
+            text: z.ZodString;
+          },
+        },
+        async (args: unknown) => {
+          seenArgs = args;
+          return ok("done");
+        },
+      );
+    });
+    await h.client.listTools();
+
+    await h.client.callTool({
+      name: "forward",
+      arguments: { text: "x", context: "GENUINE" },
+    });
+    expect(seenArgs).toEqual({ text: "x", context: "GENUINE" });
+    expect(toolCallEvents(h.events)[0]?.intent_signals).toBeUndefined();
+  });
+
+  it("keeps advertising and stripping symmetric for opted-out tools", async () => {
+    const h = await setup(INTENT_ON, (proxy) => {
+      proxy.registerTool(
+        "translate",
+        { inputSchema: { text: z.string(), context: z.string() } },
+        async () => ok("x"),
+      );
+      proxy.registerTool("plain", { inputSchema: { q: z.string() } }, async () => ok("x"));
+    });
+
+    const list = await h.client.listTools();
+    // Opted out: keeps the customer's own context, no injected description
+    const translate = listedTool(list, "translate");
+    const translateProps = translate.inputSchema.properties as Record<
+      string,
+      { description?: string }
+    >;
+    expect(translateProps.context?.description).toBeUndefined();
+    // Instrumented: gains the required, described parameter
+    const plain = listedTool(list, "plain");
+    expect(plain.inputSchema.required).toContain("context");
+  });
+
+  it("honours a tools/list opt-out even when the live schema looks eligible", async () => {
+    // Gateway pattern: a forwarding tool is registered locally while the real
+    // upstream schema — which owns `context` — is served from a custom
+    // tools/list. The advertised opt-out must veto the live-schema check, so
+    // the value is treated as the customer's argument and never captured.
+    const server = new McpServerCtor({ name: "intent-test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, makeConfig(INTENT_ON), transport, "0.2.0");
+    proxy.registerTool("upstream", { inputSchema: { text: z.string() } }, async () => ok("done"));
+    server.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: [
+        {
+          name: "upstream",
+          inputSchema: {
+            type: "object" as const,
+            properties: { text: { type: "string" }, context: { type: "string" } },
+            required: ["text", "context"],
+          },
+        },
+      ],
+    }));
+    const h = await connect(proxy, transport.sent);
+
+    // The advertised schema stays the customer's — no injected description
+    const advertised = listedTool(await h.client.listTools(), "upstream");
+    const props = advertised.inputSchema.properties as Record<string, { description?: string }>;
+    expect(props.context?.description).toBeUndefined();
+
+    await h.client.callTool({
+      name: "upstream",
+      arguments: { text: "hallo", context: "translation register" },
+    });
+    // Treated as the customer's argument, so no intent is recorded
+    expect(toolCallEvents(h.events)[0]?.intent_signals).toBeUndefined();
+  });
+
+  it("survives a malformed tool entry without dropping the tool list", async () => {
+    const h = await setup(INTENT_ON, (proxy) => {
+      proxy.registerTool("good", { inputSchema: { q: z.string() } }, async () => ok("x"));
+      // A hand-written/gateway-forwarded entry whose schema is not shaped as
+      // the SDK expects must not take the whole listing down.
+      const tools = (proxy as unknown as { _registeredTools: Record<string, unknown> })
+        ._registeredTools;
+      tools.weird = {
+        inputSchema: { type: "object", properties: "all" },
+        callback: async () => ok("x"),
+      };
+    });
+
+    const list = await h.client.listTools();
+    expect(list.tools.map((t) => t.name)).toContain("good");
+  });
+
   it("keeps concurrent calls' intents isolated", async () => {
     const h = await setup(INTENT_ON, (proxy) => {
       proxy.registerTool(
@@ -570,14 +702,24 @@ describe("intent config resolution", () => {
     }
   });
 
-  it("treats YAVIO_INTENT=0 and =no as disabled", () => {
-    for (const value of ["0", "no"]) {
+  it("treats YAVIO_INTENT=0, =no and =off as disabled", () => {
+    for (const value of ["0", "no", "off"]) {
       vi.stubEnv("YAVIO_INTENT", value);
       try {
         expect(resolveConfig({ apiKey: "k" })?.intent.enabled).toBe(false);
       } finally {
         vi.unstubAllEnvs();
       }
+    }
+  });
+
+  it("ignores an empty YAVIO_INTENT instead of treating it as disabled", () => {
+    // A container default of "" must not silently override other sources.
+    vi.stubEnv("YAVIO_INTENT", "");
+    try {
+      expect(resolveConfig({ apiKey: "k", intent: true })?.intent.enabled).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
     }
   });
 });

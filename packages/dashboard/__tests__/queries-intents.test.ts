@@ -35,7 +35,8 @@ describe("intents queries", () => {
             sessionId: "ses_1",
           },
         ])
-        .mockResolvedValueOnce([{ total: 42 }]);
+        // ClickHouse serialises count()/UInt64 as a JSON string
+        .mockResolvedValueOnce([{ total: "42" }]);
 
       const result = await queryIntentFeed(baseCtx, 1, 25);
       expect(result.intents).toHaveLength(1);
@@ -57,6 +58,15 @@ describe("intents queries", () => {
       expect(call.params.limit).toBe(10);
       expect(call.query).toContain("platform IN");
       expect(call.params.platforms).toEqual(["claude"]);
+    });
+
+    it("orders deterministically so pages cannot shuffle on timestamp ties", async () => {
+      mockQueryAnalytics.mockResolvedValueOnce([]).mockResolvedValueOnce([{ total: "0" }]);
+
+      await queryIntentFeed(baseCtx, 1, 25);
+      expect(mockQueryAnalytics.mock.calls[0][0].query).toContain(
+        "ORDER BY timestamp DESC, event_id DESC",
+      );
     });
   });
 
@@ -83,6 +93,20 @@ describe("intents queries", () => {
         coverage: 0,
         toolsWithIntents: 0,
       });
+    });
+
+    it("applies the platform filter to the KPI aggregates", async () => {
+      // The KPI query builds its own filter clause; without this assertion the
+      // filter can be dropped and the headline numbers would silently disagree
+      // with the (correctly filtered) feed below them.
+      mockQueryAnalytics.mockResolvedValueOnce([
+        { captured: 3, totalCalls: 10, toolsWithIntents: 2 },
+      ]);
+
+      await queryIntentKPIs({ ...baseCtx, platform: ["gemini"] });
+      const call = mockQueryAnalytics.mock.calls[0][0];
+      expect(call.query).toContain("platform IN");
+      expect(call.params.platforms).toEqual(["gemini"]);
     });
 
     it("coerces ClickHouse string aggregates to numbers", async () => {

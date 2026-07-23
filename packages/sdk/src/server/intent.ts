@@ -46,26 +46,73 @@ function normalizeIntent(value: unknown): string | null {
 }
 
 /**
- * Does a schema argument define its own `context` key? Handles ZodRawShape /
- * plain-object shorthand (keys directly), Zod object schemas (`.shape`), and
- * raw JSON Schema (`.properties`). Checked as an OR across all three shapes:
- * a false positive merely skips capture for one tool, while a false negative
- * would strip a genuine customer argument — so ambiguity resolves to true.
+ * Does a Zod object accept keys it does not declare? Such a schema hands
+ * `context` to the customer's handler as a real argument even though it is
+ * absent from `.shape`, so the tool must be left alone.
+ */
+function acceptsUnknownKeys(obj: Record<string, unknown>): boolean {
+  // Zod 4 also exposes `_def`, so branch on the version marker first —
+  // otherwise the v3 probes below misread a v4 schema's catchall.
+  const v4Def = (obj._zod as { def?: { catchall?: unknown } } | undefined)?.def;
+  if (v4Def) {
+    const catchall = v4Def.catchall as { _zod?: { def?: { type?: string } } } | undefined;
+    // strict()/strictObject() set a `never` catchall; loose/catchall set a real one.
+    return catchall !== undefined && catchall._zod?.def?.type !== "never";
+  }
+
+  const v3 = obj._def as
+    | { unknownKeys?: string; catchall?: { _def?: { typeName?: string } } }
+    | undefined;
+  if (v3?.unknownKeys === "passthrough") return true;
+  if (v3?.catchall && v3.catchall._def?.typeName !== "ZodNever") return true;
+  return false;
+}
+
+/**
+ * Does a schema argument define (or accept) its own `context` key? Handles
+ * ZodRawShape / plain-object shorthand (keys directly), Zod object schemas
+ * (`.shape`, including the internal defs where it is lazy), and raw JSON
+ * Schema (`.properties`).
+ *
+ * A false positive merely skips capture for one tool; a false negative would
+ * delete a genuine customer argument and break their tool. So anything we
+ * cannot read confidently — a wrapped schema (`.refine`, `.transform`, union,
+ * lazy) whose keys are invisible, or one that accepts unknown keys — resolves
+ * to true.
  */
 function shapeHasContext(schema: unknown): boolean {
   if (!schema || typeof schema !== "object") return false;
   const obj = schema as Record<string, unknown>;
   try {
+    // Raw shape / plain-object shorthand: parameter names are the keys.
     if ("context" in obj) return true;
-    const shape = obj.shape;
-    if (shape && typeof shape === "object" && "context" in (shape as object)) return true;
+
+    // Raw JSON Schema.
     const properties = obj.properties;
     if (properties && typeof properties === "object" && "context" in (properties as object)) {
       return true;
     }
-    return false;
+
+    const isZod = "_def" in obj || "_zod" in obj;
+    if (!isZod) return false;
+
+    const rawShape =
+      obj.shape ??
+      (obj._zod as { def?: { shape?: unknown } } | undefined)?.def?.shape ??
+      (obj._def as { shape?: unknown } | undefined)?.shape;
+    const shape = typeof rawShape === "function" ? (rawShape as () => unknown)() : rawShape;
+
+    if (shape && typeof shape === "object") {
+      if ("context" in (shape as object)) return true;
+      return acceptsUnknownKeys(obj);
+    }
+
+    // A Zod schema whose keys we cannot see (ZodEffects from .refine/
+    // .transform, ZodUnion, ZodOptional, ZodLazy…). It may well declare
+    // `context`; never strip on a guess.
+    return true;
   } catch {
-    return true; // treat unreadable schemas as owning `context` — never capture/strip
+    return true;
   }
 }
 
@@ -140,13 +187,17 @@ export function createIntentController(config: IntentConfig): IntentController {
     }
   }
 
+  /**
+   * Every signal can VETO capture; none can force it. A tool is stripped only
+   * when it was positively classified as not owning `context` (at install,
+   * registration or tools/list) AND its live schema still agrees. That keeps
+   * opt-outs recorded at tools/list — advertised `context`, unreadable
+   * schemas, oneOf/allOf/anyOf — from being overridden by the live check.
+   */
   const isEligible = (toolName: unknown): toolName is string => {
     if (typeof toolName !== "string") return false;
-    // The live schema is authoritative; the registration/list-time map is the
-    // fallback when the private registry is unreadable on this MCP SDK version.
-    const live = liveOwnsContext(toolName);
-    if (live !== undefined) return live === false;
-    return hasOwnContext.get(toolName) === false;
+    if (hasOwnContext.get(toolName) !== false) return false;
+    return liveOwnsContext(toolName) !== true;
   };
 
   function wrapCallHandler(handler: RequestHandler): RequestHandler {
@@ -189,21 +240,33 @@ export function createIntentController(config: IntentConfig): IntentController {
     [key: string]: unknown;
   }
 
+  const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+    typeof value === "object" && value !== null && !Array.isArray(value);
+
   function injectIntoListedTool(tool: ToolEntry): ToolEntry {
     const name = typeof tool?.name === "string" ? tool.name : undefined;
     const schema = tool?.inputSchema;
 
-    // The advertised JSON Schema is authoritative for classification: we never
-    // touch registered schemas, so a `context` property here is the customer's.
-    if (schema && typeof schema === "object") {
-      if (schema.oneOf || schema.allOf || schema.anyOf) {
-        if (name) hasOwnContext.set(name, true); // opt this tool out entirely
-        return tool;
-      }
-      const properties = schema.properties;
-      if (properties && typeof properties === "object" && "context" in (properties as object)) {
-        if (name) hasOwnContext.set(name, true);
-        return tool;
+    /** Advertise nothing and never strip: the tool keeps its own `context`. */
+    const optOut = (): ToolEntry => {
+      if (name) hasOwnContext.set(name, true);
+      return tool;
+    };
+
+    // Symmetry: only advertise `context` on tools we will strip it from again.
+    // Advertising it on an opted-out tool would push the model into sending an
+    // argument the customer's own schema then rejects.
+    if (name && hasOwnContext.get(name) === true) return tool;
+
+    if (schema !== undefined) {
+      if (!isPlainObject(schema)) return optOut();
+      if (schema.oneOf || schema.allOf || schema.anyOf) return optOut();
+      if (schema.properties !== undefined && !isPlainObject(schema.properties)) return optOut();
+      if (isPlainObject(schema.properties) && "context" in schema.properties) return optOut();
+      // Declares no `context` but accepts unknown keys, so `context` may still
+      // reach the handler as a real argument (passthrough / catchall).
+      if (schema.additionalProperties !== undefined && schema.additionalProperties !== false) {
+        return optOut();
       }
     }
     if (name) hasOwnContext.set(name, false);
@@ -214,7 +277,7 @@ export function createIntentController(config: IntentConfig): IntentController {
     if (copy.additionalProperties === false) {
       copy.additionalProperties = undefined;
     }
-    const properties = (copy.properties ?? {}) as Record<string, unknown>;
+    const properties = isPlainObject(copy.properties) ? copy.properties : {};
     properties.context = { type: "string", description: config.description };
     copy.properties = properties;
     if (config.required) {
@@ -230,7 +293,17 @@ export function createIntentController(config: IntentConfig): IntentController {
     const wrapped: RequestHandler = async (request, extra) => {
       const result = (await handler(request, extra)) as { tools?: ToolEntry[] } | undefined;
       if (result && Array.isArray(result.tools)) {
-        return { ...result, tools: result.tools.map(injectIntoListedTool) };
+        return {
+          ...result,
+          // One unexpected entry must never take down the whole tool list.
+          tools: result.tools.map((tool) => {
+            try {
+              return injectIntoListedTool(tool);
+            } catch {
+              return tool;
+            }
+          }),
+        };
       }
       return result;
     };

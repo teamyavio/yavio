@@ -8,20 +8,14 @@ import { KPICard } from "@/components/analytics/kpi-card";
 import { PageHeader } from "@/components/analytics/page-header";
 import { PlatformFilter } from "@/components/analytics/platform-filter";
 import { platformLabel } from "@/components/analytics/platform-meta";
+import { SkeletonTable } from "@/components/analytics/skeleton-table";
 import { Badge } from "@/components/ui/badge";
 import { useAnalyticsFilters } from "@/hooks/use-analytics-filters";
 import { useAnalyticsQuery } from "@/hooks/use-analytics-query";
 import { formatRelativeTime } from "@/lib/analytics/format";
-import type { IntentFeedItem, IntentKPIs, IntentStatus } from "@/lib/queries/types";
+import type { IntentFeedItem, IntentStatus, IntentsResponse } from "@/lib/queries/types";
 import Link from "next/link";
-import { useState } from "react";
-
-interface IntentsData {
-  intents: IntentFeedItem[];
-  total: number;
-  kpis: IntentKPIs;
-  intentStatus: IntentStatus;
-}
+import { useEffect, useState } from "react";
 
 interface IntentsContentProps {
   projectId: string;
@@ -68,9 +62,17 @@ export function IntentsContent({ projectId, workspaceSlug, projectSlug }: Intent
   const { filters, setFilter, queryString } = useAnalyticsFilters();
   const [page, setPage] = useState(1);
 
+  // A narrower range or platform can leave the current page past the end of
+  // the new result set — which renders an empty table while the pager hides
+  // itself (one page), stranding the user with no way back.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: resets paging when the filters change
+  useEffect(() => {
+    setPage(1);
+  }, [queryString]);
+
   const fullQuery = `${queryString}&page=${page}&pageSize=25`;
 
-  const { data, isLoading, isRefetching, error, retry } = useAnalyticsQuery<IntentsData>({
+  const { data, isRefetching, error, retry } = useAnalyticsQuery<IntentsResponse>({
     url: `/api/analytics/${projectId}/intents`,
     queryString: fullQuery,
   });
@@ -147,26 +149,38 @@ export function IntentsContent({ projectId, workspaceSlug, projectSlug }: Intent
 
       {error ? (
         <ErrorAlert message={error.message} retry={retry} />
-      ) : !isLoading && data && !hasIntents ? (
+      ) : !data ? (
+        // Counts and "no intents" copy are claims about the customer's data —
+        // never render them before the first response arrives. Refetches keep
+        // showing the previous data (dimmed) instead of falling back here.
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="h-24 animate-pulse rounded-lg bg-muted" />
+            <div className="h-24 animate-pulse rounded-lg bg-muted" />
+            <div className="h-24 animate-pulse rounded-lg bg-muted" />
+          </div>
+          <SkeletonTable rows={10} columns={5} />
+        </div>
+      ) : !hasIntents ? (
         <EmptyState title={empty.title} description={empty.description} />
       ) : (
         <>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <KPICard label="Intents Captured" value={data?.kpis.captured ?? 0} format="number" />
-            <KPICard label="Call Coverage" value={data?.kpis.coverage ?? 0} format="percent" />
+            <KPICard label="Intents Captured" value={data.kpis.captured} format="number" />
+            <KPICard label="Call Coverage" value={data.kpis.coverage} format="percent" />
             <KPICard
               label="Tools with Intents"
-              value={data?.kpis.toolsWithIntents ?? 0}
+              value={data.kpis.toolsWithIntents}
               format="number"
             />
           </div>
 
           <DataTable
             columns={columns}
-            data={data?.intents ?? []}
+            data={data.intents}
             page={page}
             pageSize={25}
-            total={data?.total}
+            total={data.total}
             onPageChange={setPage}
             emptyMessage="No intents in this time range"
           />
