@@ -9,8 +9,8 @@
  * - "claude"       claude.ai and Claude Desktop — both send "claude-ai"
  * - "claude-code"  Claude Code — sends "claude-code"
  * - "cursor"       Cursor — client name contains "cursor" (e.g. "cursor-vscode")
- * - "gemini"       Google Gemini surfaces (app, Enterprise, CLI) — the CLI
- *                  sends "gemini-cli-mcp-client"
+ * - "gemini"       Google Gemini app and Enterprise connector
+ * - "gemini-cli"   Gemini CLI — sends "gemini-cli-mcp-client"
  * - "opencode"     opencode — sends "opencode"
  * - "vscode"       VS Code (Copilot agent mode and other VS Code MCP clients)
  * - "windsurf"     Windsurf (formerly Codeium)
@@ -27,6 +27,7 @@ export const platformValues = [
   "claude-code",
   "cursor",
   "gemini",
+  "gemini-cli",
   "opencode",
   "vscode",
   "windsurf",

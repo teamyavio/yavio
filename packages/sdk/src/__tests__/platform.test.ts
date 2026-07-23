@@ -56,8 +56,14 @@ describe("detectPlatform", () => {
       expect(detectPlatform({ clientName: "continue-client" })).toBe("continue");
     });
 
-    it("detects Gemini from the CLI's real client name", () => {
-      expect(detectPlatform({ clientName: "gemini-cli-mcp-client" })).toBe("gemini");
+    it("detects Gemini CLI from its real client name", () => {
+      // Must not collapse into the generic "gemini" bucket despite
+      // containing "gemini".
+      expect(detectPlatform({ clientName: "gemini-cli-mcp-client" })).toBe("gemini-cli");
+    });
+
+    it("detects the Gemini app from a generic gemini client name", () => {
+      expect(detectPlatform({ clientName: "google-gemini" })).toBe("gemini");
     });
 
     it("detects Zed from its real client name", () => {
@@ -150,6 +156,7 @@ describe("detectPlatform", () => {
         detectPlatform({ clientName: "claude-ai" }),
         detectPlatform({ clientName: "claude-code" }),
         detectPlatform({ clientName: "cursor-vscode" }),
+        detectPlatform({ clientName: "google-gemini" }),
         detectPlatform({ clientName: "gemini-cli-mcp-client" }),
         detectPlatform({ clientName: "opencode" }),
         detectPlatform({ clientName: "vscode" }),
