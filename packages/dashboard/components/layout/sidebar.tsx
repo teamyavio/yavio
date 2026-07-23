@@ -178,6 +178,7 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
   const onWorkspaceSettings = currentWorkspaceSlug
     ? pathname === `/${currentWorkspaceSlug}/settings`
     : false;
+  const onAccountSettings = pathname === "/settings/account";
   const activeSettingsTab = onWorkspaceSettings
     ? (searchParams.get("tab") ?? defaultSettingsTab)
     : null;
@@ -234,26 +235,38 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
 
       <nav className="flex-1 space-y-1 overflow-y-auto p-2">
         {inSettings ? (
-          <>
-            {basePath && (
-              <Link
-                href={`${basePath}/overview`}
-                title={
-                  collapsed
-                    ? `Back to ${currentProjectName ?? "project"}`
-                    : (currentProjectName ?? undefined)
-                }
-                className={cn(
-                  "mb-2 flex h-9 items-center gap-3 rounded-md border text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
-                  collapsed ? "justify-center px-2" : "px-3",
-                )}
-              >
-                <ArrowLeft className="h-4 w-4 flex-shrink-0" />
-                {!collapsed && <span className="truncate">Back to project</span>}
-              </Link>
-            )}
-
-            {currentWorkspace && visibleSettingsItems.length > 0 && (
+          onAccountSettings ? (
+            <>
+              {!collapsed && (
+                <div className="px-3 pt-3 pb-1">
+                  <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                    Account
+                  </p>
+                </div>
+              )}
+              {(() => {
+                const active = true;
+                return (
+                  <Link
+                    href="/settings/account"
+                    title={collapsed ? "Account settings" : undefined}
+                    className={cn(
+                      "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
+                      collapsed ? "justify-center px-2" : "px-3",
+                      active
+                        ? "bg-accent text-accent-foreground"
+                        : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                    )}
+                  >
+                    <User className="h-4 w-4 flex-shrink-0" />
+                    {!collapsed && "Account settings"}
+                  </Link>
+                );
+              })()}
+            </>
+          ) : (
+            currentWorkspace &&
+            visibleSettingsItems.length > 0 && (
               <>
                 {!collapsed && (
                   <div className="px-3 pt-3 pb-1">
@@ -285,35 +298,8 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
                   );
                 })}
               </>
-            )}
-
-            {!collapsed && (
-              <div className="px-3 pt-4 pb-1">
-                <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                  Account
-                </p>
-              </div>
-            )}
-            {(() => {
-              const active = pathname === "/settings/account";
-              return (
-                <Link
-                  href="/settings/account"
-                  title={collapsed ? "Account settings" : undefined}
-                  className={cn(
-                    "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
-                    collapsed ? "justify-center px-2" : "px-3",
-                    active
-                      ? "bg-accent text-accent-foreground"
-                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-                  )}
-                >
-                  <User className="h-4 w-4 flex-shrink-0" />
-                  {!collapsed && "Account settings"}
-                </Link>
-              );
-            })()}
-          </>
+            )
+          )
         ) : (
           <>
             {analyticsNavItems.map((item) => {
@@ -359,6 +345,26 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
           </>
         )}
       </nav>
+
+      {inSettings && basePath && (
+        <div className="p-2">
+          <Link
+            href={`${basePath}/overview`}
+            title={
+              collapsed
+                ? `Back to ${currentProjectName ?? "project"}`
+                : (currentProjectName ?? undefined)
+            }
+            className={cn(
+              "flex h-9 items-center gap-3 rounded-md border text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
+              collapsed ? "justify-center px-2" : "px-3",
+            )}
+          >
+            <ArrowLeft className="h-4 w-4 flex-shrink-0" />
+            {!collapsed && <span className="truncate">Back to project</span>}
+          </Link>
+        </div>
+      )}
 
       <Separator />
 
