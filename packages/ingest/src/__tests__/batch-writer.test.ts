@@ -167,6 +167,40 @@ describe("BatchWriter", () => {
     expect(writer.bufferedCount).toBe(0);
   });
 
+  it("awaits an in-flight flush instead of skipping it", async () => {
+    // Regression: flush() used to return immediately when another flush
+    // was already running, so `await writer.flush()` gave no guarantee
+    // that a just-enqueued event had been written (e.g. when the timer
+    // flush grabbed it a moment earlier and its insert was still in
+    // flight). Callers must observe completed writes after awaiting.
+    vi.useRealTimers();
+    let resolveInsert: () => void = () => {};
+    const insertFn = vi.fn().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveInsert = resolve;
+        }),
+    );
+    const writer = new BatchWriter({ clickhouse: mockClickHouse(insertFn) });
+
+    writer.enqueue([makeEvent("evt-slow")]);
+    const first = writer.flush(); // starts the slow insert
+
+    let secondDone = false;
+    const second = writer.flush().then(() => {
+      secondDone = true;
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(secondDone).toBe(false); // must wait for the in-flight insert
+
+    resolveInsert();
+    await first;
+    await second;
+    expect(secondDone).toBe(true);
+    expect(insertFn).toHaveBeenCalledTimes(1);
+  });
+
   it("start is idempotent", () => {
     const writer = new BatchWriter({ clickhouse: mockClickHouse() });
     writer.start();
