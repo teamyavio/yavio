@@ -23,6 +23,7 @@ export default async function DashboardLayout({ children }: { children: ReactNod
       id: workspaces.id,
       name: workspaces.name,
       slug: workspaces.slug,
+      role: workspaceMembers.role,
     })
     .from(workspaces)
     .innerJoin(workspaceMembers, eq(workspaceMembers.workspaceId, workspaces.id))

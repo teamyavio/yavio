@@ -1,8 +1,7 @@
 "use client";
 
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { WorkspaceRole } from "@yavio/shared/validation";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { ApiKeysTab } from "./tabs/api-keys-tab";
 import { BillingTab } from "./tabs/billing-tab";
 import { GeneralTab } from "./tabs/general-tab";
@@ -34,7 +33,6 @@ export function WorkspaceSettingsContent({
   userId,
 }: WorkspaceSettingsContentProps) {
   const searchParams = useSearchParams();
-  const router = useRouter();
 
   const isAdmin = ROLE_LEVEL[userRole] >= ROLE_LEVEL.admin;
   const isMember = ROLE_LEVEL[userRole] >= ROLE_LEVEL.member;
@@ -42,56 +40,28 @@ export function WorkspaceSettingsContent({
   const defaultTab = isAdmin ? "general" : isMember ? "projects" : "billing";
   const activeTab = searchParams.get("tab") ?? defaultTab;
 
-  function setTab(tab: string) {
-    router.replace(`/${workspaceSlug}/settings?tab=${tab}`, {
-      scroll: false,
-    });
-  }
-
   return (
     <div className="max-w-3xl space-y-6">
       <div>
         <h1 className="text-2xl font-semibold">Workspace Settings</h1>
         <p className="text-muted-foreground text-sm">{workspaceName}</p>
       </div>
-      <Tabs value={activeTab} onValueChange={setTab}>
-        <TabsList>
-          {isAdmin && <TabsTrigger value="general">General</TabsTrigger>}
-          {isAdmin && <TabsTrigger value="members">Members</TabsTrigger>}
-          {isMember && <TabsTrigger value="projects">Projects</TabsTrigger>}
-          {isMember && <TabsTrigger value="api-keys">API Keys</TabsTrigger>}
-          <TabsTrigger value="billing">Billing</TabsTrigger>
-        </TabsList>
-
-        {isAdmin && (
-          <TabsContent value="general">
-            <GeneralTab
-              workspaceId={workspaceId}
-              workspaceName={workspaceName}
-              workspaceSlug={workspaceSlug}
-              isOwner={isOwner}
-            />
-          </TabsContent>
-        )}
-        {isAdmin && (
-          <TabsContent value="members">
-            <MembersTab workspaceId={workspaceId} userRole={userRole} userId={userId} />
-          </TabsContent>
-        )}
-        {isMember && (
-          <TabsContent value="projects">
-            <ProjectsTab workspaceId={workspaceId} workspaceSlug={workspaceSlug} />
-          </TabsContent>
-        )}
-        {isMember && (
-          <TabsContent value="api-keys">
-            <ApiKeysTab workspaceId={workspaceId} />
-          </TabsContent>
-        )}
-        <TabsContent value="billing">
-          <BillingTab />
-        </TabsContent>
-      </Tabs>
+      {activeTab === "general" && isAdmin && (
+        <GeneralTab
+          workspaceId={workspaceId}
+          workspaceName={workspaceName}
+          workspaceSlug={workspaceSlug}
+          isOwner={isOwner}
+        />
+      )}
+      {activeTab === "members" && isAdmin && (
+        <MembersTab workspaceId={workspaceId} userRole={userRole} userId={userId} />
+      )}
+      {activeTab === "projects" && isMember && (
+        <ProjectsTab workspaceId={workspaceId} workspaceSlug={workspaceSlug} />
+      )}
+      {activeTab === "api-keys" && isMember && <ApiKeysTab workspaceId={workspaceId} />}
+      {activeTab === "billing" && <BillingTab />}
     </div>
   );
 }

@@ -22,8 +22,11 @@ import {
   Activity,
   AlertTriangle,
   ArrowLeft,
+  CreditCard,
   Filter,
+  FolderKanban,
   GitBranch,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   PanelLeftClose,
@@ -35,13 +38,14 @@ import {
 } from "lucide-react";
 import { signOut } from "next-auth/react";
 import Link from "next/link";
-import { useParams, usePathname, useRouter } from "next/navigation";
+import { useParams, usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
 interface Workspace {
   id: string;
   name: string;
   slug: string;
+  role: string;
 }
 
 interface Project {
@@ -67,6 +71,21 @@ const analyticsNavItems = [
   { path: "errors", label: "Errors", icon: AlertTriangle },
 ];
 
+const ROLE_LEVEL: Record<string, number> = {
+  owner: 4,
+  admin: 3,
+  member: 2,
+  viewer: 1,
+};
+
+const workspaceSettingsItems = [
+  { tab: "general", label: "General", icon: Settings, minRole: ROLE_LEVEL.admin },
+  { tab: "members", label: "Members", icon: Users, minRole: ROLE_LEVEL.admin },
+  { tab: "projects", label: "Projects", icon: FolderKanban, minRole: ROLE_LEVEL.member },
+  { tab: "api-keys", label: "API Keys", icon: KeyRound, minRole: ROLE_LEVEL.member },
+  { tab: "billing", label: "Billing", icon: CreditCard, minRole: ROLE_LEVEL.viewer },
+];
+
 const COLLAPSED_STORAGE_KEY = "yavio.sidebar-collapsed";
 // Below this viewport width the sidebar starts collapsed so a
 // half-screen browser window keeps its space for content.
@@ -82,6 +101,7 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
   const pathname = usePathname();
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [mounted, setMounted] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [isWide, setIsWide] = useState(true);
@@ -158,6 +178,16 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
   const displayName = user.name?.trim() || user.email;
   const initial = (displayName[0] ?? "?").toUpperCase();
 
+  const roleLevel = ROLE_LEVEL[currentWorkspace?.role ?? ""] ?? 0;
+  const visibleSettingsItems = workspaceSettingsItems.filter((item) => roleLevel >= item.minRole);
+  const defaultSettingsTab = visibleSettingsItems[0]?.tab;
+  const onWorkspaceSettings = currentWorkspaceSlug
+    ? pathname === `/${currentWorkspaceSlug}/settings`
+    : false;
+  const activeSettingsTab = onWorkspaceSettings
+    ? (searchParams.get("tab") ?? defaultSettingsTab)
+    : null;
+
   function projectSlugFor(workspaceSlug: string): string | undefined {
     const ws = workspaces.find((w) => w.slug === workspaceSlug);
     const wsProjects = ws ? projects.filter((p) => p.workspaceId === ws.id) : [];
@@ -203,7 +233,7 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
         </button>
       </div>
 
-      {!collapsed && (
+      {!collapsed && !inSettings && (
         <div className="space-y-2 p-3">
           {mounted ? (
             <>
@@ -270,53 +300,119 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
         </div>
       )}
 
-      {!collapsed && <Separator />}
+      {!collapsed && !inSettings && <Separator />}
 
       <nav className="flex-1 space-y-1 overflow-y-auto p-2">
-        {inSettings && basePath && (
-          <Link
-            href={`${basePath}/overview`}
-            title={
-              collapsed
-                ? `Back to ${currentProjectName ?? "project"}`
-                : (currentProjectName ?? undefined)
-            }
-            className={cn(
-              "mb-2 flex h-9 items-center gap-3 rounded-md border text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
-              collapsed ? "justify-center px-2" : "px-3",
+        {inSettings ? (
+          <>
+            {basePath && (
+              <Link
+                href={`${basePath}/overview`}
+                title={
+                  collapsed
+                    ? `Back to ${currentProjectName ?? "project"}`
+                    : (currentProjectName ?? undefined)
+                }
+                className={cn(
+                  "mb-2 flex h-9 items-center gap-3 rounded-md border text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
+                  collapsed ? "justify-center px-2" : "px-3",
+                )}
+              >
+                <ArrowLeft className="h-4 w-4 flex-shrink-0" />
+                {!collapsed && <span className="truncate">Back to project</span>}
+              </Link>
             )}
-          >
-            <ArrowLeft className="h-4 w-4 flex-shrink-0" />
-            {!collapsed && <span className="truncate">Back to project</span>}
-          </Link>
+
+            {currentWorkspace && visibleSettingsItems.length > 0 && (
+              <>
+                {!collapsed && (
+                  <div className="px-3 pt-3 pb-1">
+                    <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                      Workspace
+                    </p>
+                    <p className="truncate text-sm font-medium">{currentWorkspace.name}</p>
+                  </div>
+                )}
+                {visibleSettingsItems.map((item) => {
+                  const Icon = item.icon;
+                  const active = activeSettingsTab === item.tab;
+                  return (
+                    <Link
+                      key={item.tab}
+                      href={`/${currentWorkspaceSlug}/settings?tab=${item.tab}`}
+                      title={collapsed ? item.label : undefined}
+                      className={cn(
+                        "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
+                        collapsed ? "justify-center px-2" : "px-3",
+                        active
+                          ? "bg-accent text-accent-foreground"
+                          : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                      )}
+                    >
+                      <Icon className="h-4 w-4 flex-shrink-0" />
+                      {!collapsed && item.label}
+                    </Link>
+                  );
+                })}
+              </>
+            )}
+
+            {!collapsed && (
+              <div className="px-3 pt-4 pb-1">
+                <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                  Account
+                </p>
+              </div>
+            )}
+            {(() => {
+              const active = pathname === "/settings/account";
+              return (
+                <Link
+                  href="/settings/account"
+                  title={collapsed ? "Profile" : undefined}
+                  className={cn(
+                    "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
+                    collapsed ? "justify-center px-2" : "px-3",
+                    active
+                      ? "bg-accent text-accent-foreground"
+                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                  )}
+                >
+                  <User className="h-4 w-4 flex-shrink-0" />
+                  {!collapsed && "Profile"}
+                </Link>
+              );
+            })()}
+          </>
+        ) : (
+          analyticsNavItems.map((item) => {
+            const Icon = item.icon;
+            const href = `${basePath}/${item.path}`;
+            const active = pathname === href || pathname.startsWith(`${href}/`);
+            return (
+              <Link
+                key={item.path}
+                href={href}
+                title={collapsed ? item.label : undefined}
+                className={cn(
+                  "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
+                  collapsed ? "justify-center px-2" : "px-3",
+                  active
+                    ? "bg-accent text-accent-foreground"
+                    : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                )}
+              >
+                <Icon className="h-4 w-4 flex-shrink-0" />
+                {!collapsed && item.label}
+                {!collapsed && item.comingSoon && (
+                  <span className="ml-auto rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                    Soon
+                  </span>
+                )}
+              </Link>
+            );
+          })
         )}
-        {analyticsNavItems.map((item) => {
-          const Icon = item.icon;
-          const href = `${basePath}/${item.path}`;
-          const active = pathname === href || pathname.startsWith(`${href}/`);
-          return (
-            <Link
-              key={item.path}
-              href={href}
-              title={collapsed ? item.label : undefined}
-              className={cn(
-                "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
-                collapsed ? "justify-center px-2" : "px-3",
-                active
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-              )}
-            >
-              <Icon className="h-4 w-4 flex-shrink-0" />
-              {!collapsed && item.label}
-              {!collapsed && item.comingSoon && (
-                <span className="ml-auto rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
-                  Soon
-                </span>
-              )}
-            </Link>
-          );
-        })}
       </nav>
 
       <Separator />
