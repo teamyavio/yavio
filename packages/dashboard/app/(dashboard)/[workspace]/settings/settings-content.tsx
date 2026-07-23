@@ -1,5 +1,6 @@
 "use client";
 
+import { ROLE_LEVEL, resolveWorkspaceTab } from "@/lib/settings-nav";
 import type { WorkspaceRole } from "@yavio/shared/validation";
 import { useSearchParams } from "next/navigation";
 import { ApiKeysTab } from "./tabs/api-keys-tab";
@@ -17,13 +18,6 @@ interface WorkspaceSettingsContentProps {
   userId: string;
 }
 
-const ROLE_LEVEL: Record<string, number> = {
-  owner: 4,
-  admin: 3,
-  member: 2,
-  viewer: 1,
-};
-
 export function WorkspaceSettingsContent({
   workspaceId,
   workspaceSlug,
@@ -37,8 +31,9 @@ export function WorkspaceSettingsContent({
   const isAdmin = ROLE_LEVEL[userRole] >= ROLE_LEVEL.admin;
   const isMember = ROLE_LEVEL[userRole] >= ROLE_LEVEL.member;
 
-  const defaultTab = isAdmin ? "general" : isMember ? "projects" : "billing";
-  const activeTab = searchParams.get("tab") ?? defaultTab;
+  // Unknown or role-forbidden ?tab= values fall back to the first tab
+  // this role may see instead of rendering an empty page.
+  const activeTab = resolveWorkspaceTab(searchParams.get("tab"), userRole);
 
   return (
     <div className="max-w-3xl space-y-6">

@@ -12,23 +12,24 @@ export default async function DashboardLayout({ children }: { children: ReactNod
 
   const db = getDb();
 
-  const [user] = await db
-    .select({ name: users.name, email: users.email })
-    .from(users)
-    .where(eq(users.id, session.userId))
-    .limit(1);
-
-  const userWorkspaces = await db
-    .select({
-      id: workspaces.id,
-      name: workspaces.name,
-      slug: workspaces.slug,
-      role: workspaceMembers.role,
-    })
-    .from(workspaces)
-    .innerJoin(workspaceMembers, eq(workspaceMembers.workspaceId, workspaces.id))
-    .where(eq(workspaceMembers.userId, session.userId))
-    .orderBy(asc(workspaces.createdAt));
+  const [[user], userWorkspaces] = await Promise.all([
+    db
+      .select({ name: users.name, email: users.email })
+      .from(users)
+      .where(eq(users.id, session.userId))
+      .limit(1),
+    db
+      .select({
+        id: workspaces.id,
+        name: workspaces.name,
+        slug: workspaces.slug,
+        role: workspaceMembers.role,
+      })
+      .from(workspaces)
+      .innerJoin(workspaceMembers, eq(workspaceMembers.workspaceId, workspaces.id))
+      .where(eq(workspaceMembers.userId, session.userId))
+      .orderBy(asc(workspaces.createdAt)),
+  ]);
 
   const wsIds = userWorkspaces.map((w) => w.id);
   let userProjects: { id: string; name: string; slug: string; workspaceId: string }[] = [];

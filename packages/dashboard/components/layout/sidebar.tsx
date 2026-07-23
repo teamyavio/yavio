@@ -11,30 +11,31 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
+import {
+  accountSettingsTabs,
+  resolveAccountTab,
+  resolveWorkspaceTab,
+  visibleWorkspaceTabs,
+} from "@/lib/settings-nav";
 import { cn } from "@/lib/utils";
 import {
   Activity,
   AlertTriangle,
   ArrowLeft,
-  CreditCard,
   Filter,
-  FolderKanban,
   GitBranch,
-  KeyRound,
   LayoutDashboard,
-  LockKeyhole,
   LogOut,
   PanelLeftClose,
   PanelLeftOpen,
   Settings,
-  SlidersHorizontal,
   User,
   Users,
   Wrench,
 } from "lucide-react";
 import { signOut } from "next-auth/react";
 import Link from "next/link";
-import { useParams, usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useParams, usePathname, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
 interface Workspace {
@@ -67,26 +68,6 @@ const analyticsNavItems = [
   { path: "errors", label: "Errors", icon: AlertTriangle },
 ];
 
-const ROLE_LEVEL: Record<string, number> = {
-  owner: 4,
-  admin: 3,
-  member: 2,
-  viewer: 1,
-};
-
-const accountSettingsItems = [
-  { tab: "profile", label: "Profile", icon: User },
-  { tab: "security", label: "Security", icon: LockKeyhole },
-];
-
-const workspaceSettingsItems = [
-  { tab: "general", label: "General", icon: SlidersHorizontal, minRole: ROLE_LEVEL.admin },
-  { tab: "members", label: "Members", icon: Users, minRole: ROLE_LEVEL.admin },
-  { tab: "projects", label: "Projects", icon: FolderKanban, minRole: ROLE_LEVEL.member },
-  { tab: "api-keys", label: "API Keys", icon: KeyRound, minRole: ROLE_LEVEL.member },
-  { tab: "billing", label: "Billing", icon: CreditCard, minRole: ROLE_LEVEL.viewer },
-];
-
 const COLLAPSED_STORAGE_KEY = "yavio.sidebar-collapsed";
 // Below this viewport width the sidebar starts collapsed so a
 // half-screen browser window keeps its space for content.
@@ -101,7 +82,6 @@ const lastProjectKey = (workspaceSlug: string) => `yavio.last-project.${workspac
 export function Sidebar({ workspaces, projects, user }: SidebarProps) {
   const pathname = usePathname();
   const params = useParams();
-  const router = useRouter();
   const searchParams = useSearchParams();
   const [mounted, setMounted] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -179,15 +159,13 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
   const displayName = user.name?.trim() || user.email;
   const initial = (displayName[0] ?? "?").toUpperCase();
 
-  const roleLevel = ROLE_LEVEL[currentWorkspace?.role ?? ""] ?? 0;
-  const visibleSettingsItems = workspaceSettingsItems.filter((item) => roleLevel >= item.minRole);
-  const defaultSettingsTab = visibleSettingsItems[0]?.tab;
+  const visibleSettingsItems = visibleWorkspaceTabs(currentWorkspace?.role ?? "");
   const onWorkspaceSettings = currentWorkspaceSlug
     ? pathname === `/${currentWorkspaceSlug}/settings`
     : false;
   const onAccountSettings = pathname === "/settings/account";
   const activeSettingsTab = onWorkspaceSettings
-    ? (searchParams.get("tab") ?? defaultSettingsTab)
+    ? resolveWorkspaceTab(searchParams.get("tab"), currentWorkspace?.role ?? "")
     : null;
 
   return (
@@ -252,13 +230,15 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
                   </p>
                 </div>
               )}
-              {accountSettingsItems.map((item) => {
+              {accountSettingsTabs.map((item) => {
                 const Icon = item.icon;
-                const active = (searchParams.get("tab") ?? "profile") === item.tab;
+                const active = resolveAccountTab(searchParams.get("tab")) === item.tab;
                 return (
                   <Link
                     key={item.tab}
                     href={`/settings/account?tab=${item.tab}`}
+                    replace
+                    scroll={false}
                     title={collapsed ? item.label : undefined}
                     className={cn(
                       "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
@@ -285,6 +265,8 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
                     <Link
                       key={item.tab}
                       href={`/${currentWorkspaceSlug}/settings?tab=${item.tab}`}
+                      replace
+                      scroll={false}
                       title={collapsed ? item.label : undefined}
                       className={cn(
                         "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",

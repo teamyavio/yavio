@@ -22,6 +22,7 @@ import {
   changePasswordSchema,
   updateProfileSchema,
 } from "@/lib/account/validation";
+import { resolveAccountTab } from "@/lib/settings-nav";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { signOut } from "next-auth/react";
 import { useSearchParams } from "next/navigation";
@@ -127,7 +128,7 @@ export function AccountSettingsContent({ name, email, hasPassword }: AccountSett
   }
 
   const searchParams = useSearchParams();
-  const activeTab = searchParams.get("tab") ?? "profile";
+  const activeTab = resolveAccountTab(searchParams.get("tab"));
 
   return (
     <div className="max-w-3xl space-y-6">
@@ -222,10 +223,10 @@ export function AccountSettingsContent({ name, email, hasPassword }: AccountSett
         </Card>
       )}
 
-      <Separator />
-
       {activeTab === "profile" && (
         <>
+          <Separator />
+
           {/* Danger Zone */}
           <DangerZone description="Permanently delete your account and all owned workspaces. This action cannot be undone.">
             <Button variant="destructive" onClick={() => setDeleteOpen(true)}>

@@ -8,7 +8,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Check, ChevronsUpDown } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
 
 interface Workspace {
   id: string;
@@ -50,22 +49,23 @@ export function ScopeSwitcher({
   mode = "scope",
 }: ScopeSwitcherProps) {
   const inSettingsMode = mode === "workspace-settings";
-  const [open, setOpen] = useState(false);
   const currentWorkspace = workspaces.find((ws) => ws.slug === currentWorkspaceSlug);
   const currentProject = projects.find(
     (p) => p.workspaceId === currentWorkspace?.id && p.slug === currentProjectSlug,
   );
 
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
+    <DropdownMenu>
       <DropdownMenuTrigger asChild>
         {collapsed ? (
           <button
             type="button"
             title={
-              currentWorkspace && currentProject
-                ? `${currentWorkspace.name} / ${currentProject.name}`
-                : "Switch project"
+              inSettingsMode
+                ? `${currentWorkspace?.name ?? "Workspace"} settings`
+                : currentWorkspace && currentProject
+                  ? `${currentWorkspace.name} / ${currentProject.name}`
+                  : "Switch project"
             }
             className="flex h-9 w-full items-center justify-center rounded-md border text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
           >
