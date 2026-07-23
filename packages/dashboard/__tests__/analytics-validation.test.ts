@@ -27,9 +27,9 @@ describe("analyticsFiltersSchema", () => {
 
   it("parses comma-separated platforms", () => {
     const result = analyticsFiltersSchema.parse({
-      platform: "cursor,claude-desktop",
+      platform: "cursor,claude-code",
     });
-    expect(result.platform).toEqual(["cursor", "claude-desktop"]);
+    expect(result.platform).toEqual(["cursor", "claude-code"]);
   });
 
   it("rejects invalid platform values", () => {

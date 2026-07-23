@@ -13,6 +13,7 @@ import { ErrorAlert } from "@/components/analytics/error-alert";
 import { KPICard } from "@/components/analytics/kpi-card";
 import { PageHeader } from "@/components/analytics/page-header";
 import { PlatformFilter } from "@/components/analytics/platform-filter";
+import { platformLabel } from "@/components/analytics/platform-meta";
 import { useAnalyticsFilters } from "@/hooks/use-analytics-filters";
 import { useAnalyticsQuery } from "@/hooks/use-analytics-query";
 import type {
@@ -113,7 +114,10 @@ export function OverviewContent({ projectId }: { projectId: string }) {
               <ResponsiveContainer width="100%" height={256}>
                 <PieChart>
                   <Pie
-                    data={data?.platforms ?? []}
+                    data={(data?.platforms ?? []).map((p) => ({
+                      ...p,
+                      platform: platformLabel(p.platform),
+                    }))}
                     dataKey="count"
                     nameKey="platform"
                     cx="50%"

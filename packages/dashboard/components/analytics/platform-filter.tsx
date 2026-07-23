@@ -1,9 +1,9 @@
 "use client";
 
+import { PLATFORM_META, orderedPlatforms } from "@/components/analytics/platform-meta";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { platformValues } from "@/lib/analytics/validation";
 import { cn } from "@/lib/utils";
 import { Filter } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -54,19 +54,25 @@ export function PlatformFilter({ selected, onChange }: PlatformFilterProps) {
       </PopoverTrigger>
       <PopoverContent className="w-48 p-2" align="end">
         <div className="space-y-1">
-          {platformValues.map((platform) => (
-            <button
-              type="button"
-              key={platform}
-              className={cn(
-                "flex w-full items-center rounded-md px-2 py-1.5 text-sm transition-colors",
-                selected.includes(platform) ? "bg-accent text-accent-foreground" : "hover:bg-muted",
-              )}
-              onClick={() => toggle(platform)}
-            >
-              {platform}
-            </button>
-          ))}
+          {orderedPlatforms.map((platform) => {
+            const { label, icon: Icon } = PLATFORM_META[platform];
+            return (
+              <button
+                type="button"
+                key={platform}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+                  selected.includes(platform)
+                    ? "bg-accent text-accent-foreground"
+                    : "hover:bg-muted",
+                )}
+                onClick={() => toggle(platform)}
+              >
+                <Icon className="h-4 w-4 flex-shrink-0" />
+                {label}
+              </button>
+            );
+          })}
           {selected.length > 0 && (
             <button
               type="button"

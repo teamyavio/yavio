@@ -5,18 +5,9 @@ const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 export const granularityValues = ["hour", "day", "week", "month"] as const;
 export type Granularity = (typeof granularityValues)[number];
 
-export const platformValues = [
-  "claude-desktop",
-  "cursor",
-  "windsurf",
-  "cline",
-  "continue",
-  "zed",
-  "chatgpt",
-  "custom",
-  "unknown",
-] as const;
-export type Platform = (typeof platformValues)[number];
+import { platformValues } from "@yavio/shared/platform";
+
+export { platformValues, type Platform } from "@yavio/shared/platform";
 
 /** Strip trailing "Z" — ClickHouse DateTime64 rejects the timezone suffix. */
 const clickHouseDateTime = (iso: string) => iso.replace("T", " ").replace("Z", "");
