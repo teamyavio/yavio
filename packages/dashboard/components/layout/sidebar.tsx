@@ -1,21 +1,31 @@
 "use client";
 
+import { ScopeSwitcher } from "@/components/layout/scope-switcher";
 import { YavioLogo } from "@/components/layout/yavio-logo";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
+import {
+  accountSettingsTabs,
+  resolveAccountTab,
+  resolveWorkspaceTab,
+  visibleWorkspaceTabs,
+} from "@/lib/settings-nav";
 import { cn } from "@/lib/utils";
 import {
   Activity,
   AlertTriangle,
+  ArrowLeft,
   Filter,
   GitBranch,
   LayoutDashboard,
+  LogOut,
   PanelLeftClose,
   PanelLeftOpen,
   Settings,
@@ -23,14 +33,16 @@ import {
   Users,
   Wrench,
 } from "lucide-react";
+import { signOut } from "next-auth/react";
 import Link from "next/link";
-import { useParams, usePathname, useRouter } from "next/navigation";
+import { useParams, usePathname, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
 interface Workspace {
   id: string;
   name: string;
   slug: string;
+  role: string;
 }
 
 interface Project {
@@ -43,6 +55,7 @@ interface Project {
 interface SidebarProps {
   workspaces: Workspace[];
   projects: Project[];
+  user: { name: string | null; email: string };
 }
 
 const analyticsNavItems = [
@@ -60,10 +73,16 @@ const COLLAPSED_STORAGE_KEY = "yavio.sidebar-collapsed";
 // half-screen browser window keeps its space for content.
 const WIDE_VIEWPORT_QUERY = "(min-width: 1024px)";
 
-export function Sidebar({ workspaces, projects }: SidebarProps) {
+// Settings routes carry no project (and the account page no workspace)
+// in the URL, so the sidebar remembers the last visited pair — without
+// this, settings pages silently fall back to the first project.
+const LAST_WORKSPACE_KEY = "yavio.last-workspace";
+const lastProjectKey = (workspaceSlug: string) => `yavio.last-project.${workspaceSlug}`;
+
+export function Sidebar({ workspaces, projects, user }: SidebarProps) {
   const pathname = usePathname();
   const params = useParams();
-  const router = useRouter();
+  const searchParams = useSearchParams();
   const [mounted, setMounted] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [isWide, setIsWide] = useState(true);
@@ -91,17 +110,63 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
     });
   }
 
-  const currentWorkspaceSlug = (params.workspace as string | undefined) ?? workspaces[0]?.slug;
+  const paramWorkspace = params.workspace as string | undefined;
+  const paramProject = params.project as string | undefined;
+
+  useEffect(() => {
+    if (paramWorkspace) {
+      localStorage.setItem(LAST_WORKSPACE_KEY, paramWorkspace);
+      if (paramProject) {
+        localStorage.setItem(lastProjectKey(paramWorkspace), paramProject);
+      }
+    }
+  }, [paramWorkspace, paramProject]);
+
+  // localStorage is only consulted after mount so the first client
+  // render matches the server-rendered HTML.
+  const rememberedWorkspace = mounted ? localStorage.getItem(LAST_WORKSPACE_KEY) : null;
+  const currentWorkspaceSlug =
+    paramWorkspace ??
+    (rememberedWorkspace && workspaces.some((ws) => ws.slug === rememberedWorkspace)
+      ? rememberedWorkspace
+      : undefined) ??
+    workspaces[0]?.slug;
   const currentWorkspace = workspaces.find((ws) => ws.slug === currentWorkspaceSlug);
   const workspaceProjects = currentWorkspace
     ? projects.filter((p) => p.workspaceId === currentWorkspace.id)
     : [];
-  const currentProjectSlug = (params.project as string | undefined) ?? workspaceProjects[0]?.slug;
+  const rememberedProject =
+    mounted && currentWorkspaceSlug
+      ? localStorage.getItem(lastProjectKey(currentWorkspaceSlug))
+      : null;
+  const currentProjectSlug =
+    paramProject ??
+    (rememberedProject && workspaceProjects.some((p) => p.slug === rememberedProject)
+      ? rememberedProject
+      : undefined) ??
+    workspaceProjects[0]?.slug;
 
   const basePath =
     currentWorkspaceSlug && currentProjectSlug
       ? `/${currentWorkspaceSlug}/${currentProjectSlug}`
       : "";
+
+  // Settings pages are workspace- (or account-)scoped: the project
+  // selector has no honest job there, so it is replaced by an explicit
+  // way back to the project.
+  const inSettings = pathname === "/settings/account" || /^\/[^/]+\/settings/.test(pathname);
+  const currentProjectName = workspaceProjects.find((p) => p.slug === currentProjectSlug)?.name;
+  const displayName = user.name?.trim() || user.email;
+  const initial = (displayName[0] ?? "?").toUpperCase();
+
+  const visibleSettingsItems = visibleWorkspaceTabs(currentWorkspace?.role ?? "");
+  const onWorkspaceSettings = currentWorkspaceSlug
+    ? pathname === `/${currentWorkspaceSlug}/settings`
+    : false;
+  const onAccountSettings = pathname === "/settings/account";
+  const activeSettingsTab = onWorkspaceSettings
+    ? resolveWorkspaceTab(searchParams.get("tab"), currentWorkspace?.role ?? "")
+    : null;
 
   return (
     <aside
@@ -139,134 +204,183 @@ export function Sidebar({ workspaces, projects }: SidebarProps) {
         </button>
       </div>
 
-      {!collapsed && (
-        <div className="space-y-2 p-3">
-          {mounted ? (
-            <>
-              <Select
-                value={currentWorkspaceSlug ?? ""}
-                onValueChange={(slug) => {
-                  const ws = workspaces.find((w) => w.slug === slug);
-                  const wsProjects = ws ? projects.filter((p) => p.workspaceId === ws.id) : [];
-                  const project = wsProjects[0];
-                  if (project) {
-                    router.push(`/${slug}/${project.slug}/overview`);
-                  }
-                }}
-              >
-                <SelectTrigger className="h-8 text-xs">
-                  <SelectValue placeholder="Select workspace" />
-                </SelectTrigger>
-                <SelectContent>
-                  {workspaces.map((ws) => (
-                    <SelectItem key={ws.id} value={ws.slug}>
-                      {ws.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-
-              {currentWorkspaceSlug && workspaceProjects.length > 0 && (
-                <Select
-                  value={currentProjectSlug ?? ""}
-                  onValueChange={(slug) => {
-                    router.push(`/${currentWorkspaceSlug}/${slug}/overview`);
-                  }}
-                >
-                  <SelectTrigger className="h-8 text-xs">
-                    <SelectValue placeholder="Select project" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {workspaceProjects.map((proj) => (
-                      <SelectItem key={proj.id} value={proj.slug}>
-                        {proj.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              )}
-            </>
-          ) : (
-            <>
-              <div className="flex h-8 items-center rounded-md border border-input px-3 text-xs">
-                {currentWorkspace?.name ?? "Select workspace"}
-              </div>
-              {currentWorkspaceSlug && workspaceProjects.length > 0 && (
-                <div className="flex h-8 items-center rounded-md border border-input px-3 text-xs">
-                  {workspaceProjects.find((p) => p.slug === currentProjectSlug)?.name ??
-                    "Select project"}
-                </div>
-              )}
-            </>
-          )}
+      {!(inSettings && onAccountSettings) && (
+        <div className={collapsed ? "p-2" : "p-3"}>
+          <ScopeSwitcher
+            workspaces={workspaces}
+            projects={projects}
+            currentWorkspaceSlug={currentWorkspaceSlug}
+            currentProjectSlug={currentProjectSlug}
+            collapsed={collapsed}
+            mode={inSettings ? "workspace-settings" : "scope"}
+          />
         </div>
       )}
 
-      {!collapsed && <Separator />}
+      {!(inSettings && onAccountSettings) && <Separator />}
 
       <nav className="flex-1 space-y-1 overflow-y-auto p-2">
-        {analyticsNavItems.map((item) => {
-          const Icon = item.icon;
-          const href = `${basePath}/${item.path}`;
-          const active = pathname === href || pathname.startsWith(`${href}/`);
-          return (
-            <Link
-              key={item.path}
-              href={href}
-              title={collapsed ? item.label : undefined}
-              className={cn(
-                "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
-                collapsed ? "justify-center px-2" : "px-3",
-                active
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+        {inSettings ? (
+          onAccountSettings ? (
+            <>
+              {!collapsed && (
+                <div className="px-3 pt-3 pb-1">
+                  <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                    Account
+                  </p>
+                </div>
               )}
-            >
-              <Icon className="h-4 w-4 flex-shrink-0" />
-              {!collapsed && item.label}
-              {!collapsed && item.comingSoon && (
-                <span className="ml-auto rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
-                  Soon
-                </span>
-              )}
-            </Link>
-          );
-        })}
+              {accountSettingsTabs.map((item) => {
+                const Icon = item.icon;
+                const active = resolveAccountTab(searchParams.get("tab")) === item.tab;
+                return (
+                  <Link
+                    key={item.tab}
+                    href={`/settings/account?tab=${item.tab}`}
+                    replace
+                    scroll={false}
+                    title={collapsed ? item.label : undefined}
+                    className={cn(
+                      "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
+                      collapsed ? "justify-center px-2" : "px-3",
+                      active
+                        ? "bg-accent text-accent-foreground"
+                        : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                    )}
+                  >
+                    <Icon className="h-4 w-4 flex-shrink-0" />
+                    {!collapsed && item.label}
+                  </Link>
+                );
+              })}
+            </>
+          ) : (
+            currentWorkspace &&
+            visibleSettingsItems.length > 0 &&
+            visibleSettingsItems.map((item) => {
+              const Icon = item.icon;
+              const active = activeSettingsTab === item.tab;
+              return (
+                <Link
+                  key={item.tab}
+                  href={`/${currentWorkspaceSlug}/settings?tab=${item.tab}`}
+                  replace
+                  scroll={false}
+                  title={collapsed ? item.label : undefined}
+                  className={cn(
+                    "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
+                    collapsed ? "justify-center px-2" : "px-3",
+                    active
+                      ? "bg-accent text-accent-foreground"
+                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                  )}
+                >
+                  <Icon className="h-4 w-4 flex-shrink-0" />
+                  {!collapsed && item.label}
+                </Link>
+              );
+            })
+          )
+        ) : (
+          <>
+            {analyticsNavItems.map((item) => {
+              const Icon = item.icon;
+              const href = `${basePath}/${item.path}`;
+              const active = pathname === href || pathname.startsWith(`${href}/`);
+              return (
+                <Link
+                  key={item.path}
+                  href={href}
+                  title={collapsed ? item.label : undefined}
+                  className={cn(
+                    "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
+                    collapsed ? "justify-center px-2" : "px-3",
+                    active
+                      ? "bg-accent text-accent-foreground"
+                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                  )}
+                >
+                  <Icon className="h-4 w-4 flex-shrink-0" />
+                  {!collapsed && item.label}
+                  {!collapsed && item.comingSoon && (
+                    <span className="ml-auto rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                      Soon
+                    </span>
+                  )}
+                </Link>
+              );
+            })}
+            {currentWorkspaceSlug && (
+              <Link
+                href={`/${currentWorkspaceSlug}/settings`}
+                title={collapsed ? "Settings" : undefined}
+                className={cn(
+                  "flex h-9 items-center gap-3 rounded-md text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
+                  collapsed ? "justify-center px-2" : "px-3",
+                )}
+              >
+                <Settings className="h-4 w-4 flex-shrink-0" />
+                {!collapsed && "Settings"}
+              </Link>
+            )}
+          </>
+        )}
       </nav>
+
+      {inSettings && basePath && (
+        <div className="p-2">
+          <Link
+            href={`${basePath}/overview`}
+            title={collapsed ? "Back to Dashboard" : (currentProjectName ?? undefined)}
+            className={cn(
+              "flex h-9 items-center gap-3 rounded-md border text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
+              collapsed ? "justify-center px-2" : "px-3",
+            )}
+          >
+            <ArrowLeft className="h-4 w-4 flex-shrink-0" />
+            {!collapsed && <span className="truncate">Back to Dashboard</span>}
+          </Link>
+        </div>
+      )}
 
       <Separator />
 
-      <div className="space-y-1 p-2">
-        {currentWorkspaceSlug && (
-          <Link
-            href={`/${currentWorkspaceSlug}/settings`}
-            title={collapsed ? "Settings" : undefined}
-            className={cn(
-              "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
-              collapsed ? "justify-center px-2" : "px-3",
-              pathname.includes("/settings") && !pathname.includes("/settings/account")
-                ? "bg-accent text-accent-foreground"
-                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-            )}
-          >
-            <Settings className="h-4 w-4 flex-shrink-0" />
-            {!collapsed && "Settings"}
-          </Link>
-        )}
-        <Link
-          href="/settings/account"
-          title={collapsed ? "Account" : undefined}
-          className={cn(
-            "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
-            collapsed ? "justify-center px-2" : "px-3",
-            pathname === "/settings/account"
-              ? "bg-accent text-accent-foreground"
-              : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-          )}
-        >
-          <User className="h-4 w-4 flex-shrink-0" />
-          {!collapsed && "Account"}
-        </Link>
+      <div className="p-2">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              title={collapsed ? displayName : undefined}
+              className={cn(
+                "flex h-10 w-full items-center gap-2 rounded-md text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
+                collapsed ? "justify-center px-2" : "px-2",
+              )}
+            >
+              <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-foreground text-[11px] font-semibold text-background">
+                {initial}
+              </span>
+              {!collapsed && <span className="truncate">{displayName}</span>}
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent side="top" align="start" className="w-56">
+            <DropdownMenuLabel className="font-normal">
+              <span className="block truncate text-sm font-medium">{displayName}</span>
+              <span className="block truncate text-xs text-muted-foreground">{user.email}</span>
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem asChild>
+              <Link href="/settings/account">
+                <User className="h-4 w-4" />
+                Account settings
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => signOut({ callbackUrl: "/login" })}>
+              <LogOut className="h-4 w-4" />
+              Log out
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </aside>
   );

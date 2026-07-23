@@ -1,7 +1,7 @@
 import { Sidebar } from "@/components/layout/sidebar";
 import { getServerSession } from "@/lib/auth/get-session";
 import { getDb } from "@/lib/db";
-import { projects, workspaceMembers, workspaces } from "@yavio/db/schema";
+import { projects, users, workspaceMembers, workspaces } from "@yavio/db/schema";
 import { asc, eq, inArray } from "drizzle-orm";
 import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
@@ -12,16 +12,24 @@ export default async function DashboardLayout({ children }: { children: ReactNod
 
   const db = getDb();
 
-  const userWorkspaces = await db
-    .select({
-      id: workspaces.id,
-      name: workspaces.name,
-      slug: workspaces.slug,
-    })
-    .from(workspaces)
-    .innerJoin(workspaceMembers, eq(workspaceMembers.workspaceId, workspaces.id))
-    .where(eq(workspaceMembers.userId, session.userId))
-    .orderBy(asc(workspaces.createdAt));
+  const [[user], userWorkspaces] = await Promise.all([
+    db
+      .select({ name: users.name, email: users.email })
+      .from(users)
+      .where(eq(users.id, session.userId))
+      .limit(1),
+    db
+      .select({
+        id: workspaces.id,
+        name: workspaces.name,
+        slug: workspaces.slug,
+        role: workspaceMembers.role,
+      })
+      .from(workspaces)
+      .innerJoin(workspaceMembers, eq(workspaceMembers.workspaceId, workspaces.id))
+      .where(eq(workspaceMembers.userId, session.userId))
+      .orderBy(asc(workspaces.createdAt)),
+  ]);
 
   const wsIds = userWorkspaces.map((w) => w.id);
   let userProjects: { id: string; name: string; slug: string; workspaceId: string }[] = [];
@@ -40,7 +48,11 @@ export default async function DashboardLayout({ children }: { children: ReactNod
 
   return (
     <div className="flex h-screen overflow-hidden">
-      <Sidebar workspaces={userWorkspaces} projects={userProjects} />
+      <Sidebar
+        workspaces={userWorkspaces}
+        projects={userProjects}
+        user={{ name: user?.name ?? null, email: user?.email ?? "" }}
+      />
       <main className="min-w-0 flex-1 overflow-auto p-6">{children}</main>
     </div>
   );
