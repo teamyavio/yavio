@@ -49,3 +49,11 @@ export const COMMON_AXIS_PROPS = {
   tickLine: false,
   axisLine: false,
 } as const;
+
+/**
+ * Sparse series show every tick label; dense ones decimate evenly so no
+ * single label vanishes from the middle of the axis.
+ */
+export function timeTickInterval(count: number): number | "equidistantPreserveStart" {
+  return count > 0 && count <= 10 ? 0 : "equidistantPreserveStart";
+}

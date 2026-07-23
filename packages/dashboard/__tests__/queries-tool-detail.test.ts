@@ -76,8 +76,11 @@ describe("tool detail queries", () => {
       ]);
 
       const result = await queryToolCallVolume(baseCtx, "search", "day");
-      expect(result).toHaveLength(2);
+      // 7-day range zero-fills to 7 buckets; real rows keep their values.
+      expect(result).toHaveLength(7);
       expect(result[0].bucket).toBe("2025-01-01");
+      expect(result[0].value).toBe(100);
+      expect(result[2].value).toBe(0);
     });
 
     it("passes tool and uses granularity function", async () => {

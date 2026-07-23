@@ -6,6 +6,7 @@ import {
   COMMON_CHART_PROPS,
   COMMON_GRID_PROPS,
   SEMANTIC_COLORS,
+  timeTickInterval,
 } from "@/components/analytics/chart-config";
 import { ChartPanel } from "@/components/analytics/chart-panel";
 import { type Column, DataTable } from "@/components/analytics/data-table";
@@ -241,17 +242,14 @@ export function ToolDetailContent({
           </div>
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <ChartPanel
-              title="Call Volume"
-              granularity={filters.granularity}
-              onGranularityChange={(g) => setFilter({ granularity: g })}
-            >
+            <ChartPanel title="Call Volume">
               <ResponsiveContainer width="100%" height={256}>
-                <AreaChart data={data?.callVolume ?? []}>
+                <AreaChart data={data?.callVolume ?? []} margin={{ right: 20 }}>
                   <CartesianGrid {...COMMON_GRID_PROPS} />
                   <XAxis
                     dataKey="bucket"
-                    minTickGap={32}
+                    minTickGap={8}
+                    interval={timeTickInterval((data?.callVolume ?? []).length)}
                     tickFormatter={(v: string) => formatBucketLabel(v, filters.granularity)}
                     {...COMMON_AXIS_PROPS}
                   />
@@ -290,11 +288,12 @@ export function ToolDetailContent({
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <ChartPanel title="Latency Percentiles">
               <ResponsiveContainer width="100%" height={256}>
-                <LineChart data={data?.latencyPercentiles ?? []}>
+                <LineChart data={data?.latencyPercentiles ?? []} margin={{ right: 20 }}>
                   <CartesianGrid {...COMMON_GRID_PROPS} />
                   <XAxis
                     dataKey="bucket"
-                    minTickGap={32}
+                    minTickGap={8}
+                    interval={timeTickInterval((data?.latencyPercentiles ?? []).length)}
                     tickFormatter={(v: string) => formatBucketLabel(v, filters.granularity)}
                     {...COMMON_AXIS_PROPS}
                   />
@@ -335,17 +334,14 @@ export function ToolDetailContent({
               </ResponsiveContainer>
             </ChartPanel>
 
-            <ChartPanel
-              title="Error Rate"
-              granularity={filters.granularity}
-              onGranularityChange={(g) => setFilter({ granularity: g })}
-            >
+            <ChartPanel title="Error Rate">
               <ResponsiveContainer width="100%" height={256}>
-                <AreaChart data={data?.errorRateTimeSeries ?? []}>
+                <AreaChart data={data?.errorRateTimeSeries ?? []} margin={{ right: 20 }}>
                   <CartesianGrid {...COMMON_GRID_PROPS} />
                   <XAxis
                     dataKey="bucket"
-                    minTickGap={32}
+                    minTickGap={8}
+                    interval={timeTickInterval((data?.errorRateTimeSeries ?? []).length)}
                     tickFormatter={(v: string) => formatBucketLabel(v, filters.granularity)}
                     {...COMMON_AXIS_PROPS}
                   />

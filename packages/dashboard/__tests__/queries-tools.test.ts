@@ -84,8 +84,11 @@ describe("tool queries", () => {
       ]);
 
       const result = await queryToolErrorRateTimeSeries(baseCtx, "search", "day");
-      expect(result).toHaveLength(2);
+      // 7-day range zero-fills to 7 buckets; real rows keep their values.
+      expect(result).toHaveLength(7);
       expect(result[0].value).toBe(0.05);
+      expect(result[1].value).toBe(0.1);
+      expect(result[2].value).toBe(0);
     });
 
     it("uses correct granularity function", async () => {

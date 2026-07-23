@@ -67,13 +67,14 @@ const MONTH_NAMES = [
  * axis label appropriate for the granularity, e.g. "Jul 17" or "14:00".
  */
 export function formatBucketLabel(bucket: string, granularity: Granularity): string {
-  const match = bucket.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  // Week/month buckets arrive date-only ("2026-07-12"), finer ones with time.
+  const match = bucket.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/);
   if (!match) return bucket;
   const [, year, month, day, hour, minute] = match;
   const monthName = MONTH_NAMES[Number(month) - 1] ?? month;
   switch (granularity) {
     case "hour":
-      return `${hour}:${minute}`;
+      return hour ? `${hour}:${minute}` : `${monthName} ${Number(day)}`;
     case "month":
       return `${monthName} ${year}`;
     default:
@@ -85,12 +86,13 @@ export function formatBucketLabel(bucket: string, granularity: Granularity): str
  * Verbose bucket label for chart tooltips ("Jul 17, 14:00" / "Jul 17, 2026").
  */
 export function formatBucketTooltip(bucket: string, granularity: Granularity): string {
-  const match = bucket.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  const match = bucket.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/);
   if (!match) return bucket;
   const [, year, month, day, hour, minute] = match;
   const monthName = MONTH_NAMES[Number(month) - 1] ?? month;
-  if (granularity === "hour") return `${monthName} ${Number(day)}, ${hour}:${minute}`;
+  if (granularity === "hour" && hour) return `${monthName} ${Number(day)}, ${hour}:${minute}`;
   if (granularity === "month") return `${monthName} ${year}`;
+  if (granularity === "week") return `Week of ${monthName} ${Number(day)}`;
   return `${monthName} ${Number(day)}, ${year}`;
 }
 
@@ -124,6 +126,22 @@ export function formatRelativeTime(timestamp: string | Date): string {
 
   const months = Math.floor(days / 30);
   return `${months}mo ago`;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Pick the chart bucket size for a date range so every range renders at a
+ * sensible resolution: hourly up to 2 days, daily up to 2 months, weekly
+ * up to 6 months, monthly beyond. There is deliberately no user-facing
+ * granularity control — the range picker is the single time control.
+ */
+export function deriveGranularity(from: Date, to: Date): Granularity {
+  const rangeMs = to.getTime() - from.getTime();
+  if (rangeMs <= 2 * DAY_MS) return "hour";
+  if (rangeMs <= 60 * DAY_MS) return "day";
+  if (rangeMs <= 184 * DAY_MS) return "week";
+  return "month";
 }
 
 /**

@@ -1,3 +1,4 @@
+import { fillTimeBuckets } from "@/lib/analytics/fill-buckets";
 import { granularityToFunction } from "@/lib/analytics/format";
 import type { Granularity } from "@/lib/analytics/validation";
 import { queryAnalytics } from "@/lib/clickhouse/analytics-client";
@@ -131,7 +132,7 @@ export async function queryActiveUsers(
   const fn = granularityToFunction(granularity);
   const interval = granularity === "hour" ? "HOUR" : "DAY";
 
-  return queryAnalytics<ActiveUsersPoint>({
+  const rows = await queryAnalytics<ActiveUsersPoint>({
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
@@ -167,6 +168,12 @@ export async function queryActiveUsers(
     `,
     params: { projectId: ctx.projectId, from: ctx.from, to: ctx.to },
   });
+  return fillTimeBuckets(rows, ctx.from, ctx.to, granularity, (bucket) => ({
+    bucket,
+    dau: 0,
+    wau: 0,
+    mau: 0,
+  }));
 }
 
 export async function queryNewVsReturning(
@@ -175,7 +182,7 @@ export async function queryNewVsReturning(
 ): Promise<NewVsReturningPoint[]> {
   const fn = granularityToFunction(granularity);
 
-  return queryAnalytics<NewVsReturningPoint>({
+  const rows = await queryAnalytics<NewVsReturningPoint>({
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
@@ -201,6 +208,11 @@ export async function queryNewVsReturning(
     `,
     params: { projectId: ctx.projectId, from: ctx.from, to: ctx.to },
   });
+  return fillTimeBuckets(rows, ctx.from, ctx.to, granularity, (bucket) => ({
+    bucket,
+    newUsers: 0,
+    returningUsers: 0,
+  }));
 }
 
 export async function queryUserDetail(
