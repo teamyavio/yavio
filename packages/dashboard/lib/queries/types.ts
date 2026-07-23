@@ -139,6 +139,26 @@ export interface LatencyPercentilePoint {
 }
 
 /** A single tool invocation row. */
+/** One row of the project-wide intents feed. */
+export interface IntentFeedItem {
+  eventId: string;
+  timestamp: string;
+  intent: string;
+  source: string;
+  toolName: string;
+  platform: string;
+  status: string;
+  sessionId: string;
+}
+
+/** Headline numbers for the intents page. */
+export interface IntentKPIs {
+  captured: number;
+  /** Share of tool calls in the period that carried an intent (0..1). */
+  coverage: number;
+  toolsWithIntents: number;
+}
+
 /** A captured user intent for one tool call. */
 export interface RecentIntent {
   eventId: string;
