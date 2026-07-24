@@ -1,0 +1,44 @@
+name: Release SDK
+
+# Publishes @yavio/sdk to npm via OIDC trusted publishing — no tokens or
+# secrets involved. npm trusts this exact workflow file in this repository
+# (configured under the package's "Trusted Publisher" settings on npmjs.com).
+#
+# Release procedure:
+#   1. Land the version bump in packages/sdk/package.json on main.
+#   2. Tag that commit `sdk-v<version>` (e.g. sdk-v0.2.0) and push the tag.
+#   3. This workflow builds, tests, and publishes with provenance.
+
+on:
+  push:
+    tags:
+      - "sdk-v*"
+
+permissions:
+  contents: read
+  id-token: write # mint the OIDC token npm exchanges for publish access
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup
+
+      - name: Verify tag matches package.json version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#sdk-v}"
+          PKG_VERSION="$(node -p "require('./packages/sdk/package.json').version")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "Tag says $TAG_VERSION but packages/sdk/package.json says $PKG_VERSION" >&2
+            exit 1
+          fi
+
+      - run: pnpm turbo build --filter=@yavio/sdk...
+      - run: pnpm --filter @yavio/sdk exec vitest run
+
+      # Node 22 ships npm 10; OIDC trusted publishing needs npm >= 11.5.1
+      - run: npm install -g npm@latest
+
+      - run: npm publish --access public
+        working-directory: packages/sdk
