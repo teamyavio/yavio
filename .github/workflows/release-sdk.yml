@@ -4,6 +4,12 @@ name: Release SDK
 # secrets involved. npm trusts this exact workflow file in this repository
 # (configured under the package's "Trusted Publisher" settings on npmjs.com).
 #
+# NOTE: this workflow deliberately does NOT use ./.github/actions/setup —
+# that action configures setup-node with registry-url, which writes a
+# token-auth .npmrc and exports a NODE_AUTH_TOKEN placeholder. npm prefers
+# that over the OIDC exchange and publishing fails (ENEEDAUTH/E404).
+# Trusted publishing requires a setup with no registry auth configured.
+#
 # Release procedure:
 #   1. Land the version bump in packages/sdk/package.json on main.
 #   2. Tag that commit `sdk-v<version>` (e.g. sdk-v0.2.0) and push the tag.
@@ -23,7 +29,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: ./.github/actions/setup
+
+      # Token-free setup (no registry-url → no .npmrc, no NODE_AUTH_TOKEN)
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4.2.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
 
       - name: Verify tag matches package.json version
         run: |
@@ -40,10 +53,12 @@ jobs:
       # Node 22 ships npm 10; OIDC trusted publishing needs npm >= 11.5.1
       - run: npm install -g npm@latest
 
-      # The shared setup action writes a token-auth .npmrc (NODE_AUTH_TOKEN
-      # placeholder) which overrides OIDC — point npm at an empty userconfig
-      # so it falls through to the trusted-publishing exchange instead.
+      - name: Publish diagnostics
+        run: |
+          echo "npm version: $(npm --version)"
+          echo "OIDC env present: ${ACTIONS_ID_TOKEN_REQUEST_URL:+yes}"
+          echo "NODE_AUTH_TOKEN present: ${NODE_AUTH_TOKEN:+yes}"
+          echo "userconfig: $(npm config get userconfig)"
+
       - run: npm publish --access public
         working-directory: packages/sdk
-        env:
-          NPM_CONFIG_USERCONFIG: /dev/null
