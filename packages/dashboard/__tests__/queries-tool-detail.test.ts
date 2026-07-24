@@ -7,11 +7,13 @@ vi.mock("@/lib/clickhouse/analytics-client", () => ({
 }));
 
 import {
+  queryIntentStatus,
   queryToolCallVolume,
   queryToolDetailKPIs,
   queryToolErrorCategories,
   queryToolLatencyPercentiles,
   queryToolPlatformBreakdown,
+  queryToolRecentIntents,
   queryToolRecentInvocations,
   queryToolRegistryEntry,
 } from "@/lib/queries/tool-detail";
@@ -243,6 +245,102 @@ describe("tool detail queries", () => {
       await queryToolRegistryEntry(baseCtx, "search");
       const call = mockQueryAnalytics.mock.calls[0][0];
       expect(call.query).toContain("tool_registry FINAL");
+    });
+  });
+
+  describe("queryToolRecentIntents", () => {
+    it("returns intent rows and filters empty intent_signals", async () => {
+      mockQueryAnalytics.mockResolvedValueOnce([
+        {
+          eventId: "evt_1",
+          timestamp: "2025-01-02 10:00:00.000",
+          intent: "Searching the catalog for the user",
+          source: "context_parameter",
+          sessionId: "ses_1",
+          status: "success",
+        },
+      ]);
+
+      const result = await queryToolRecentIntents(baseCtx, "search");
+      expect(result).toHaveLength(1);
+      expect(result[0].intent).toBe("Searching the catalog for the user");
+      const call = mockQueryAnalytics.mock.calls[0][0];
+      expect(call.query).toContain("intent_signals != '{}'");
+      expect(call.query).toContain("JSONExtractString(intent_signals, 'intent')");
+      expect(call.params.tool).toBe("search");
+    });
+
+    it("applies date range and platform filters like sibling queries", async () => {
+      mockQueryAnalytics.mockResolvedValueOnce([]);
+
+      await queryToolRecentIntents({ ...baseCtx, platform: ["claude"] }, "search");
+      const call = mockQueryAnalytics.mock.calls[0][0];
+      expect(call.query).toContain("timestamp >= {from:DateTime64(3)}");
+      expect(call.query).toContain("platform IN");
+      expect(call.params.platforms).toEqual(["claude"]);
+    });
+  });
+
+  describe("queryIntentStatus", () => {
+    it("reports enabled from the 7-day window in a single query", async () => {
+      mockQueryAnalytics.mockResolvedValueOnce([
+        { cnt: 5, hasFlag: 1, enabled: 1, sdkVersion: "0.2.0" },
+      ]);
+
+      expect(await queryIntentStatus(baseCtx)).toEqual({
+        status: "enabled",
+        sdkVersion: "0.2.0",
+      });
+      expect(mockQueryAnalytics).toHaveBeenCalledTimes(1);
+      expect(mockQueryAnalytics.mock.calls[0][0].query).toContain("INTERVAL 7 DAY");
+    });
+
+    it("reports enabled when a mixed fleet has any enabled instance", async () => {
+      // max() aggregation: one 0.1.x connection + one 0.2.0 enabled connection
+      mockQueryAnalytics.mockResolvedValueOnce([
+        { cnt: 2, hasFlag: 1, enabled: 1, sdkVersion: "0.1.7" },
+      ]);
+
+      expect((await queryIntentStatus(baseCtx)).status).toBe("enabled");
+    });
+
+    it("reports disabled when the flag is present but false", async () => {
+      mockQueryAnalytics.mockResolvedValueOnce([
+        { cnt: 3, hasFlag: 1, enabled: 0, sdkVersion: "0.2.0" },
+      ]);
+
+      expect((await queryIntentStatus(baseCtx)).status).toBe("disabled");
+    });
+
+    it("reports unsupported for pre-0.2.0 connections without the flag", async () => {
+      mockQueryAnalytics.mockResolvedValueOnce([
+        { cnt: 1, hasFlag: 0, enabled: 0, sdkVersion: "0.1.7" },
+      ]);
+
+      expect(await queryIntentStatus(baseCtx)).toEqual({
+        status: "unsupported",
+        sdkVersion: "0.1.7",
+      });
+    });
+
+    it("falls back to the latest connection ever when the window is empty", async () => {
+      mockQueryAnalytics
+        .mockResolvedValueOnce([{ cnt: 0, hasFlag: 0, enabled: 0, sdkVersion: null }])
+        .mockResolvedValueOnce([{ cnt: 1, hasFlag: 1, enabled: 1, sdkVersion: "0.2.0" }]);
+
+      expect(await queryIntentStatus(baseCtx)).toEqual({
+        status: "enabled",
+        sdkVersion: "0.2.0",
+      });
+      expect(mockQueryAnalytics).toHaveBeenCalledTimes(2);
+    });
+
+    it("reports unknown when no connection events exist at all", async () => {
+      mockQueryAnalytics
+        .mockResolvedValueOnce([{ cnt: 0, hasFlag: 0, enabled: 0, sdkVersion: null }])
+        .mockResolvedValueOnce([]);
+
+      expect(await queryIntentStatus(baseCtx)).toEqual({ status: "unknown", sdkVersion: null });
     });
   });
 });

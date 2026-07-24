@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SDK_VERSION, withYavio, yavio } from "../server/index.js";
@@ -48,8 +49,11 @@ describe("withYavio", () => {
     expect(result).not.toBe(server);
   });
 
-  it("exports SDK_VERSION", () => {
-    expect(SDK_VERSION).toBe("0.0.1");
+  it("exports SDK_VERSION matching package.json", () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../../package.json", import.meta.url), "utf-8"),
+    ) as { version: string };
+    expect(SDK_VERSION).toBe(pkg.version);
   });
 });
 

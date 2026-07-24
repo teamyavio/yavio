@@ -48,10 +48,12 @@ import {
 } from "@/lib/analytics/format";
 import type {
   ErrorCategoryCount,
+  IntentStatus,
   KPIResult,
   LatencyBucket,
   LatencyPercentilePoint,
   PlatformBreakdown,
+  RecentIntent,
   TimeSeriesPoint,
   ToolInvocation,
   ToolRegistryEntry,
@@ -89,6 +91,8 @@ interface ToolDetailData {
   platforms: PlatformBreakdown[];
   invocations: ToolInvocation[];
   invocationsTotal: number;
+  recentIntents: RecentIntent[];
+  intentStatus: IntentStatus;
 }
 
 interface ToolDetailContentProps {
@@ -388,6 +392,11 @@ export function ToolDetailContent({
             </ChartPanel>
           </div>
 
+          {/* Rendered only once data is in — the empty-state copy makes
+              factual claims about the project's SDK setup that must not
+              flash during loading */}
+          {data && <IntentsPanel intents={data.recentIntents ?? []} status={data.intentStatus} />}
+
           <DataTable
             columns={invocationColumns}
             data={data?.invocations ?? []}
@@ -403,6 +412,81 @@ export function ToolDetailContent({
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * Explains an empty intents list honestly: the SDK reports its intent-capture
+ * state on every connection, so "off" and "not supported yet" are
+ * distinguishable from "on, but nothing arrived".
+ */
+function intentEmptyCopy(status?: IntentStatus): { title: string; description: string } {
+  switch (status?.status) {
+    case "enabled":
+      return {
+        title: "No intents captured in this period",
+        description:
+          "Intent capture is on, but no calls to this tool carried a context argument in the selected time range. Some MCP clients do not fill optional or unknown parameters.",
+      };
+    case "disabled":
+      return {
+        title: "Intent capture is off",
+        description:
+          "See why agents call this tool: enable intent capture with withYavio(server, { intent: true }). The SDK asks the calling model to state its goal on every tool call.",
+      };
+    case "unsupported":
+      return {
+        title: "Intent capture requires SDK 0.2.0 or later",
+        description: `This project last connected with ${status.sdkVersion ? `SDK ${status.sdkVersion}` : "an older SDK version"}. Update @yavio/sdk and enable intent capture with intent: true.`,
+      };
+    default:
+      return {
+        title: "No SDK connection recorded yet",
+        description:
+          "Once your server serves its first tool call on @yavio/sdk 0.2.0 or later, intent capture status and captured intents appear here.",
+      };
+  }
+}
+
+function IntentsPanel({ intents, status }: { intents: RecentIntent[]; status?: IntentStatus }) {
+  if (intents.length === 0) {
+    const copy = intentEmptyCopy(status);
+    return (
+      <ChartPanel title="User Intents">
+        <div className="flex h-36 flex-col items-center justify-center gap-1 text-center">
+          <p className="text-sm font-medium">{copy.title}</p>
+          <p className="max-w-lg text-sm text-muted-foreground">{copy.description}</p>
+        </div>
+      </ChartPanel>
+    );
+  }
+
+  return (
+    <ChartPanel title="User Intents">
+      <ul className="divide-y">
+        {intents.map((row) => (
+          <li key={row.eventId} className="flex items-start gap-3 py-2.5 first:pt-0 last:pb-0">
+            {/* Intent text is model-written content — render as plain text
+                only; min-w-0 + break-words so unbroken tokens (URLs, JSON)
+                wrap instead of forcing horizontal scroll */}
+            <span className="min-w-0 flex-1 break-words text-sm">{row.intent}</span>
+            {row.source === "inferred" && (
+              <Badge variant="outline" className="shrink-0 text-xs">
+                inferred
+              </Badge>
+            )}
+            {row.status === "error" && (
+              <Badge variant="destructive" className="shrink-0 text-xs">
+                error
+              </Badge>
+            )}
+            <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground">
+              {formatRelativeTime(row.timestamp)}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </ChartPanel>
   );
 }
 

@@ -147,3 +147,23 @@ describe("stripPii (recursive)", () => {
     expect(piiDetected).toBe(false);
   });
 });
+
+describe("pathological input performance", () => {
+  it("scans long benign strings in linear time", () => {
+    // The unbounded email local-part made this quadratic: 32 KB of plain
+    // text took multiple SECONDS, letting one size-limit-compliant batch
+    // block the ingest event loop. Bounded pattern: ~45ms. The generous
+    // threshold only guards against reintroducing the quadratic scan.
+    const benign = "a".repeat(32_000);
+    const start = performance.now();
+    const { redacted } = stripPiiFromString(benign);
+    expect(performance.now() - start).toBeLessThan(1_000);
+    expect(redacted).toBe(false);
+  });
+
+  it("still redacts an email with the RFC-maximum 64-char local part", () => {
+    const email = `${"l".repeat(64)}@example.com`;
+    const { result } = stripPiiFromString(`mail ${email} end`);
+    expect(result).toBe("mail [EMAIL_REDACTED] end");
+  });
+});

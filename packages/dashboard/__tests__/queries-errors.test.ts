@@ -58,11 +58,19 @@ describe("error queries", () => {
             platform: "cursor",
           },
         ])
-        .mockResolvedValueOnce([{ total: 100 }]);
+        // ClickHouse serialises count() (UInt64) as a JSON string
+        .mockResolvedValueOnce([{ total: "100" }]);
 
       const result = await queryErrorList(baseCtx, 1, 25);
       expect(result.errors).toHaveLength(1);
       expect(result.total).toBe(100);
+    });
+
+    it("coerces a string zero so empty-state checks work", async () => {
+      mockQueryAnalytics.mockResolvedValueOnce([]).mockResolvedValueOnce([{ total: "0" }]);
+
+      const result = await queryErrorList(baseCtx, 1, 25);
+      expect(result.total).toBe(0);
     });
 
     it("applies error category filter", async () => {

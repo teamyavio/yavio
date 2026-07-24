@@ -32,34 +32,51 @@ jobs:
         id: filter
         with:
           filters: |
+            # Root package.json + lockfile are in every filter: a dependency
+            # bump (pnpm override, version pin) changes what every package
+            # runs against, so it must not skip any test suite.
             shared:
               - 'packages/shared/**'
               - '.github/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
             db:
               - 'packages/db/**'
               - 'packages/shared/**'
               - '.github/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
             sdk:
               - 'packages/sdk/**'
               - 'packages/shared/**'
               - '.github/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
             ingest:
               - 'packages/ingest/**'
               - 'packages/shared/**'
               - 'packages/db/**'
               - '.github/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
             dashboard:
               - 'packages/dashboard/**'
               - 'packages/shared/**'
               - 'packages/db/**'
               - '.github/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
             cli:
               - 'packages/cli/**'
               - 'packages/shared/**'
               - '.github/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
             docs:
               - 'packages/docs/**'
               - '.github/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
 
   # ── Lint & Format ──────────────────────────────────────────────────
   lint:

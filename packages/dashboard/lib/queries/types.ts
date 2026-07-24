@@ -139,6 +139,59 @@ export interface LatencyPercentilePoint {
 }
 
 /** A single tool invocation row. */
+/** One row of the project-wide intents feed. */
+export interface IntentFeedItem {
+  eventId: string;
+  timestamp: string;
+  intent: string;
+  source: string;
+  toolName: string;
+  platform: string;
+  status: string;
+  sessionId: string;
+}
+
+/** Headline numbers for the intents page. */
+export interface IntentKPIs {
+  captured: number;
+  /** Share of tool calls in the period that carried an intent (0..1). */
+  coverage: number;
+  toolsWithIntents: number;
+}
+
+/**
+ * Response contract of GET /api/analytics/[projectId]/intents. Shared by the
+ * route and the page so a rename on either side is a compile error rather
+ * than a silently undefined field at runtime.
+ */
+export interface IntentsResponse {
+  intents: IntentFeedItem[];
+  total: number;
+  kpis: IntentKPIs;
+  intentStatus: IntentStatus;
+}
+
+/** A captured user intent for one tool call. */
+export interface RecentIntent {
+  eventId: string;
+  timestamp: string;
+  intent: string;
+  source: string;
+  sessionId: string;
+  status: string;
+}
+
+/**
+ * Whether the project's SDK reports intent capture as active.
+ * - enabled/disabled: latest connection event carried an explicit flag
+ * - unsupported: connections exist but predate SDK 0.2.0 (no flag)
+ * - unknown: no connection events at all
+ */
+export interface IntentStatus {
+  status: "enabled" | "disabled" | "unsupported" | "unknown";
+  sdkVersion: string | null;
+}
+
 export interface ToolInvocation {
   eventId: string;
   timestamp: string;

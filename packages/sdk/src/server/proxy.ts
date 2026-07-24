@@ -9,6 +9,7 @@ import { detectPlatform } from "../core/platform.js";
 import type { SessionState, YavioConfig } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
 import { type RequestStore, runInContext } from "./context.js";
+import { type IntentController, createIntentController, getCapturedIntent } from "./intent.js";
 import { type MintResult, mintWidgetToken } from "./token.js";
 
 /** Cached widget token with parsed expiry for reuse across tool calls. */
@@ -151,6 +152,7 @@ function wrapToolCallback(
         {
           clientName: clientInfo?.name,
           clientVersion: clientInfo?.version,
+          intentEnabled: config.intent.enabled,
         },
       );
       transport.send([connectionEvent]);
@@ -186,6 +188,7 @@ function wrapToolCallback(
           inputTypes: captureInput ? extractInputTypes(cbArgs[0]) : undefined,
           inputValues: captureInput ? extractInputValues(cbArgs[0], extra) : undefined,
           outputContent: config.capture.outputValues ? extractOutputContent(result) : undefined,
+          intentSignals: getCapturedIntent() ?? undefined,
         },
       );
       transport.send([toolCallEvent]);
@@ -237,6 +240,7 @@ function wrapToolCallback(
           errorCategory: "unknown",
           errorMessage: error instanceof Error ? error.message : String(error),
           inputValues: captureInputOnError ? extractInputValues(cbArgs[0], extra) : undefined,
+          intentSignals: getCapturedIntent() ?? undefined,
         },
       );
       transport.send([toolCallEvent]);
@@ -279,6 +283,14 @@ export function createProxy<T extends McpServer>(
 
   // Widget token cache — shared across tool calls, reset on reconnect
   const tokenCache: { current: CachedWidgetToken | null } = { current: null };
+
+  // Intent capture operates at the protocol layer (wrapped tools/list and
+  // tools/call handlers on the low-level server) — registered tool schemas
+  // are never modified.
+  const intent: IntentController | null = config.intent.enabled
+    ? createIntentController(config.intent)
+    : null;
+  intent?.install(server);
 
   // Reference to the current MCP transport for lazy sessionId lookup
   let currentMcpTransport: Record<string, unknown> | null = null;
@@ -352,6 +364,10 @@ export function createProxy<T extends McpServer>(
 
           const originalCb = args[cbIndex] as (...cbArgs: unknown[]) => unknown;
           const toolName = typeof args[0] === "string" ? args[0] : "unknown";
+          intent?.noteToolRegistration(
+            toolName,
+            args.filter((a, i) => i > 0 && i < cbIndex && typeof a === "object" && a !== null),
+          );
           args[cbIndex] = wrapToolCallback(
             originalCb,
             toolName,
@@ -411,6 +427,10 @@ export function createProxy<T extends McpServer>(
               : typeof configArg?.name === "string"
                 ? configArg.name
                 : "unknown";
+          intent?.noteToolRegistration(
+            toolName,
+            configArg?.inputSchema ? [configArg.inputSchema] : [],
+          );
           if (cbIndex !== -1) {
             const originalCb = args[cbIndex] as (...cbArgs: unknown[]) => unknown;
             args[cbIndex] = wrapToolCallback(

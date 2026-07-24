@@ -15,11 +15,12 @@ Import the `yavio` singleton and call its methods from within any tool handler w
 
 ```ts
 import { withYavio, yavio } from "@yavio/sdk";
+import { z } from "zod";
 
 // Using registerTool (recommended, MCP SDK v1.26+)
 instrumented.registerTool("search", {
   description: "Search for items",
-  inputSchema: { query: { type: "string" } },
+  inputSchema: { query: z.string() },
 }, async ({ query }) => {
   yavio.identify("user_123");
   yavio.track("search_executed", { query });
@@ -28,7 +29,7 @@ instrumented.registerTool("search", {
 });
 
 // Using tool (deprecated but still supported)
-instrumented.tool("search", { query: { type: "string" } }, async ({ query }) => {
+instrumented.tool("search", { query: z.string() }, async ({ query }) => {
   yavio.identify("user_123");
   yavio.track("search_executed", { query });
 
@@ -100,7 +101,7 @@ yavio.step(name: string, meta?: Record<string, unknown>): void
 ### Example
 
 ```ts
-instrumented.tool("wizard", { step: { type: "string" } }, async ({ step }) => {
+instrumented.tool("wizard", { step: z.string() }, async ({ step }) => {
   yavio.step(step, { page: 1 });
 
   // ... handle the step

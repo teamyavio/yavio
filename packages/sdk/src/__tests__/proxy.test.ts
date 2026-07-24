@@ -36,6 +36,7 @@ const testConfig: YavioConfig = {
     retries: true,
   } satisfies CaptureConfig,
   serverOnly: false,
+  intent: { enabled: false, required: true, description: "test" },
 };
 
 describe("createProxy", () => {

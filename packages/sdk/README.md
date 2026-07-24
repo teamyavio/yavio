@@ -49,6 +49,7 @@ withYavio(server, {
   apiKey: "yav_...",
   endpoint: "https://ingest.yavio.app",
   serverOnly: false,     // skip _meta.yavio injection + widget token mint (default: false)
+  intent: false,         // capture the agent's stated intent per tool call (default: false)
   capture: {
     inputValues: true,   // capture tool input values (default: true)
     outputValues: true,  // capture tool output values (default: true)
@@ -58,6 +59,12 @@ withYavio(server, {
   },
 });
 ```
+
+### Intent capture
+
+With `intent: true`, every tool advertises a required `context` parameter so the calling model states the user's goal on each call. The value is captured as the call's intent, stripped before your handler runs, and shown on the tool detail page in the dashboard. Tool code, schemas, and calls without `context` are unaffected; tools that define their own `context` parameter are left alone.
+
+Intent text is derived from the end user's conversation — disclose the collection in your privacy policy, and review the ChatGPT App Store / Claude Directory data-collection policies before enabling it for a listed app. See the [intent capture docs](https://docs.yavio.ai/docs/02-sdk/07-intent-capture) for details.
 
 ### Server-only mode
 

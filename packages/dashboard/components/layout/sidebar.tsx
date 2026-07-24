@@ -29,6 +29,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Settings,
+  Target,
   User,
   Users,
   Wrench,
@@ -61,6 +62,7 @@ interface SidebarProps {
 const analyticsNavItems = [
   { path: "overview", label: "Overview", icon: LayoutDashboard },
   { path: "tools", label: "Tools", icon: Wrench },
+  { path: "intents", label: "Intents", icon: Target },
   { path: "funnels", label: "Funnels", icon: Filter, comingSoon: true },
   { path: "users", label: "Users", icon: Users },
   { path: "paths", label: "Paths", icon: GitBranch, comingSoon: true },

@@ -4,10 +4,12 @@ import type { Granularity } from "@/lib/analytics/validation";
 import { queryAnalytics } from "@/lib/clickhouse/analytics-client";
 import type {
   ErrorCategoryCount,
+  IntentStatus,
   KPIResult,
   LatencyBucket,
   LatencyPercentilePoint,
   PlatformBreakdown,
+  RecentIntent,
   TimeSeriesPoint,
   ToolInvocation,
   ToolRegistryEntry,
@@ -318,6 +320,112 @@ export async function queryToolRecentInvocations(
   });
 
   return { invocations, total: countRows[0]?.total ?? 0 };
+}
+
+export async function queryToolRecentIntents(
+  ctx: QueryContext,
+  tool: string,
+): Promise<RecentIntent[]> {
+  const pf = platformFilter(ctx.platform);
+
+  return queryAnalytics<RecentIntent>({
+    workspaceId: ctx.workspaceId,
+    projectId: ctx.projectId,
+    query: `
+      SELECT
+        event_id AS eventId,
+        timestamp,
+        JSONExtractString(intent_signals, 'intent') AS intent,
+        JSONExtractString(intent_signals, 'source') AS source,
+        session_id AS sessionId,
+        coalesce(status, 'unknown') AS status
+      FROM events
+      WHERE project_id = {projectId:String}
+        AND event_type = 'tool_call'
+        AND event_name = {tool:String}
+        AND intent_signals != '{}'
+        AND JSONExtractString(intent_signals, 'intent') != ''
+        AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}
+        ${pf}
+      ORDER BY timestamp DESC, event_id DESC
+      LIMIT 1 BY event_id
+      LIMIT 20
+    `,
+    params: {
+      projectId: ctx.projectId,
+      tool,
+      from: ctx.from,
+      to: ctx.to,
+      ...platformParams(ctx.platform),
+    },
+  });
+}
+
+/**
+ * Read the intent-capture state the SDK reports on connection events.
+ * Aggregated over the last 7 days so a mixed fleet (rolling deploy, staging
+ * and production sharing a project) doesn't flap the status with every
+ * connection — any recent instance reporting enabled wins. Falls back to the
+ * latest connection ever when the window is empty. Deliberately unfiltered
+ * by the dashboard date range: the status reflects current SDK
+ * configuration, not the selected period.
+ */
+export async function queryIntentStatus(ctx: QueryContext): Promise<IntentStatus> {
+  interface StatusRow {
+    cnt: number;
+    hasFlag: number;
+    enabled: number;
+    sdkVersion: string | null;
+  }
+
+  const toStatus = (row: StatusRow | undefined): IntentStatus | null => {
+    if (!row || !Number(row.cnt)) return null;
+    if (!Number(row.hasFlag)) return { status: "unsupported", sdkVersion: row.sdkVersion };
+    return {
+      status: Number(row.enabled) ? "enabled" : "disabled",
+      sdkVersion: row.sdkVersion,
+    };
+  };
+
+  const recent = await queryAnalytics<StatusRow>({
+    workspaceId: ctx.workspaceId,
+    projectId: ctx.projectId,
+    query: `
+      SELECT
+        count() AS cnt,
+        max(JSONHas(metadata, 'intent_enabled')) AS hasFlag,
+        max(JSONExtractBool(metadata, 'intent_enabled')) AS enabled,
+        argMax(sdk_version, timestamp) AS sdkVersion
+      FROM events
+      WHERE project_id = {projectId:String}
+        AND event_type = 'connection'
+        AND timestamp >= now() - INTERVAL 7 DAY
+    `,
+    params: { projectId: ctx.projectId },
+  });
+
+  const recentStatus = toStatus(recent[0]);
+  if (recentStatus) return recentStatus;
+
+  const latest = await queryAnalytics<StatusRow>({
+    workspaceId: ctx.workspaceId,
+    projectId: ctx.projectId,
+    query: `
+      SELECT
+        1 AS cnt,
+        JSONHas(metadata, 'intent_enabled') AS hasFlag,
+        JSONExtractBool(metadata, 'intent_enabled') AS enabled,
+        sdk_version AS sdkVersion
+      FROM events
+      WHERE project_id = {projectId:String}
+        AND event_type = 'connection'
+      ORDER BY timestamp DESC
+      LIMIT 1
+    `,
+    params: { projectId: ctx.projectId },
+  });
+
+  return toStatus(latest[0]) ?? { status: "unknown", sdkVersion: null };
 }
 
 export async function queryToolRegistryEntry(

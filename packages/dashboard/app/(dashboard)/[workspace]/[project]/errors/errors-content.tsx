@@ -25,7 +25,7 @@ import {
   formatRelativeTime,
 } from "@/lib/analytics/format";
 import type { ErrorCategoryCount, ErrorListItem, TimeSeriesPoint } from "@/lib/queries/types";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -70,6 +70,14 @@ const columns: Column<ErrorListItem>[] = [
 export function ErrorsContent({ projectId }: { projectId: string }) {
   const { filters, setFilter, queryString } = useAnalyticsFilters();
   const [page, setPage] = useState(1);
+
+  // A narrower range or platform can leave the current page past the end of
+  // the new result set, stranding the user on an empty table with the pager
+  // hidden. Same fix as the Intents page.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: resets paging when the filters change
+  useEffect(() => {
+    setPage(1);
+  }, [queryString]);
 
   const fullQuery = `${queryString}&page=${page}&pageSize=25`;
 

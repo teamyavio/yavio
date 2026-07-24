@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { dirname, join, parse } from "node:path";
-import type { CaptureConfig, WithYavioOptions, YavioConfig } from "./types.js";
+import type { CaptureConfig, IntentConfig, WithYavioOptions, YavioConfig } from "./types.js";
 
 const DEFAULT_ENDPOINT = "https://ingest.yavio.ai/v1/events";
 
@@ -12,6 +12,16 @@ const DEFAULT_CAPTURE: CaptureConfig = {
   retries: true,
 };
 
+/**
+ * Model-facing description of the injected `context` parameter. Kept short:
+ * this text lands in every tool's schema and therefore in the model's context
+ * window once per advertised tool.
+ */
+export const DEFAULT_INTENT_DESCRIPTION =
+  "State in 15-25 words, third person, why this tool is being called and how it serves " +
+  "the user's current goal. Never include credentials or personal data. " +
+  'Example: "Searching order history for recent shipments to help the user track a delayed package."';
+
 const CONFIG_FILENAME = ".yaviorc.json";
 
 interface ConfigFile {
@@ -19,14 +29,20 @@ interface ConfigFile {
   endpoint?: string;
   capture?: Partial<CaptureConfig>;
   serverOnly?: boolean;
+  intent?: boolean;
 }
 
-/** Parse an env var as a boolean. Accepts "1"/"true"/"yes" (case-insensitive). */
+/**
+ * Parse an env var as a boolean. Accepts "1"/"true"/"yes"/"on" (and their
+ * negatives), case-insensitive. An empty or unrecognised value yields
+ * undefined so the next configuration source still applies — an env var set
+ * to "" (a common container default) must not silently override a config file.
+ */
 function parseBoolEnv(value: string | undefined): boolean | undefined {
   if (value === undefined) return undefined;
   const v = value.trim().toLowerCase();
-  if (v === "1" || v === "true" || v === "yes") return true;
-  if (v === "0" || v === "false" || v === "no" || v === "") return false;
+  if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "no" || v === "off") return false;
   return undefined;
 }
 
@@ -80,5 +96,24 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
     fileConfig?.serverOnly ??
     false;
 
-  return { apiKey, endpoint, capture, serverOnly };
+  const intent = resolveIntent(
+    options?.intent ?? parseBoolEnv(process.env.YAVIO_INTENT) ?? fileConfig?.intent ?? false,
+  );
+
+  return { apiKey, endpoint, capture, serverOnly, intent };
+}
+
+function resolveIntent(option: NonNullable<WithYavioOptions["intent"]>): IntentConfig {
+  if (option === false) {
+    return { enabled: false, required: true, description: DEFAULT_INTENT_DESCRIPTION };
+  }
+  if (option === true) {
+    return { enabled: true, required: true, description: DEFAULT_INTENT_DESCRIPTION };
+  }
+  return {
+    enabled: true,
+    required: option.required ?? true,
+    description: option.description ?? DEFAULT_INTENT_DESCRIPTION,
+    fallback: option.fallback,
+  };
 }

@@ -6,7 +6,8 @@ import { HttpTransport } from "../transport/http.js";
 import { createYavioContext } from "./context.js";
 import { createProxy } from "./proxy.js";
 
-export const SDK_VERSION = "0.0.1";
+// Keep in sync with package.json "version" — sent on every event batch.
+export const SDK_VERSION = "0.2.0";
 
 /**
  * Wrap an MCP server with Yavio instrumentation.
@@ -29,6 +30,12 @@ export function withYavio<T extends McpServer>(server: T, options?: WithYavioOpt
   if (config.serverOnly) {
     console.info(
       "[yavio] Server-only mode: skipping _meta.yavio injection and widget token minting. The React widget will not auto-connect.",
+    );
+  }
+
+  if (config.intent.enabled) {
+    console.info(
+      "[yavio] Intent capture enabled: tools advertise a required 'context' parameter (pass intent: false to disable).",
     );
   }
 
@@ -60,6 +67,11 @@ export function withYavio<T extends McpServer>(server: T, options?: WithYavioOpt
  */
 export const yavio: YavioContext = createYavioContext();
 
-export type { CaptureConfig, WithYavioOptions, YavioContext } from "../core/types.js";
+export type {
+  CaptureConfig,
+  IntentOptions,
+  WithYavioOptions,
+  YavioContext,
+} from "../core/types.js";
 export { platformValues } from "../core/platform.js";
 export type { Platform } from "../core/platform.js";

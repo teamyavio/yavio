@@ -2,11 +2,13 @@ import { withAnalyticsAuth } from "@/lib/analytics/auth";
 import { parseAnalyticsParams } from "@/lib/analytics/validation";
 import { AnalyticsQueryError } from "@/lib/clickhouse/analytics-client";
 import {
+  queryIntentStatus,
   queryToolCallVolume,
   queryToolDetailKPIs,
   queryToolErrorCategories,
   queryToolLatencyPercentiles,
   queryToolPlatformBreakdown,
+  queryToolRecentIntents,
   queryToolRecentInvocations,
   queryToolRegistryEntry,
 } from "@/lib/queries/tool-detail";
@@ -73,6 +75,8 @@ export const GET = withAnalyticsAuth("viewer")(async (request, ctx) => {
       platforms,
       invocationsResult,
       registry,
+      recentIntents,
+      intentStatus,
     ] = await Promise.all([
       queryToolDetailKPIs(queryCtx, toolName),
       queryToolCallVolume(queryCtx, toolName, granularity),
@@ -83,6 +87,8 @@ export const GET = withAnalyticsAuth("viewer")(async (request, ctx) => {
       queryToolPlatformBreakdown(queryCtx, toolName),
       queryToolRecentInvocations(queryCtx, toolName, page, pageSize),
       queryToolRegistryEntry(queryCtx, toolName),
+      queryToolRecentIntents(queryCtx, toolName),
+      queryIntentStatus(queryCtx),
     ]);
 
     return NextResponse.json({
@@ -96,6 +102,8 @@ export const GET = withAnalyticsAuth("viewer")(async (request, ctx) => {
       platforms,
       invocations: invocationsResult.invocations,
       invocationsTotal: invocationsResult.total,
+      recentIntents,
+      intentStatus,
     });
   } catch (err) {
     if (err instanceof AnalyticsQueryError) return err.toResponse();
