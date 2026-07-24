@@ -40,5 +40,10 @@ jobs:
       # Node 22 ships npm 10; OIDC trusted publishing needs npm >= 11.5.1
       - run: npm install -g npm@latest
 
+      # The shared setup action writes a token-auth .npmrc (NODE_AUTH_TOKEN
+      # placeholder) which overrides OIDC — point npm at an empty userconfig
+      # so it falls through to the trusted-publishing exchange instead.
       - run: npm publish --access public
         working-directory: packages/sdk
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
