@@ -7,7 +7,7 @@
   "author": "Yavio GmbH",
   "repository": {
     "type": "git",
-    "url": "https://github.com/teamyavio/yavio.git",
+    "url": "git+https://github.com/teamyavio/yavio.git",
     "directory": "packages/sdk"
   },
   "homepage": "https://yavio.ai",
