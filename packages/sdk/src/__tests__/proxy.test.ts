@@ -1202,3 +1202,104 @@ describe("createProxy — platform detection from HTTP request headers", () => {
     expect(toolCall.platform).toBe("gemini");
   });
 });
+
+describe("request info capture", () => {
+  async function callWithRequestInfo(requestInfo: unknown) {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+
+    proxy.tool("ri_tool", { q: z.string() }, () => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+    const tool = getRegisteredTool(server, "ri_tool");
+    await tool?.handler(
+      { q: "hello" },
+      {
+        signal: new AbortController().signal,
+        requestId: "req-ri-1",
+        sendNotification: async () => {},
+        sendRequest: async () => ({}),
+        requestInfo,
+      },
+    );
+
+    const toolCall = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+      string,
+      unknown
+    >;
+    return (toolCall.input_values ?? {}) as Record<string, unknown>;
+  }
+
+  it("never stores credential-bearing headers", async () => {
+    const inputValues = await callWithRequestInfo({
+      headers: {
+        authorization: "Bearer super-secret-token",
+        cookie: "session=abc123",
+        "x-api-key": "sk-live-4242",
+        "proxy-authorization": "Basic dXNlcjpwYXNz",
+        "user-agent": "Cursor/1.0",
+      },
+    });
+
+    const serialized = JSON.stringify(inputValues);
+    expect(serialized).not.toContain("super-secret-token");
+    expect(serialized).not.toContain("abc123");
+    expect(serialized).not.toContain("sk-live-4242");
+    expect(serialized).not.toContain("dXNlcjpwYXNz");
+
+    const requestInfo = inputValues._requestInfo as { headers: Record<string, string> };
+    expect(Object.keys(requestInfo.headers)).toEqual(["user-agent"]);
+  });
+
+  it("drops an end-user IP forwarded by a proxy", async () => {
+    const inputValues = await callWithRequestInfo({
+      headers: { "x-forwarded-for": "203.0.113.7", "x-real-ip": "203.0.113.7" },
+    });
+
+    expect(JSON.stringify(inputValues)).not.toContain("203.0.113.7");
+    expect(inputValues._requestInfo).toBeUndefined();
+  });
+
+  it("keeps the allowlisted headers, normalizing name case and array values", async () => {
+    const inputValues = await callWithRequestInfo({
+      headers: {
+        "User-Agent": "ChatGPT/1.2",
+        "Accept-Language": ["de-DE", "de"],
+        host: "example.test",
+      },
+    });
+
+    expect(inputValues._requestInfo).toEqual({
+      headers: { "user-agent": "ChatGPT/1.2", "accept-language": "de-DE, de" },
+    });
+  });
+
+  it("rejects a hand-built Authorization header regardless of case", async () => {
+    const inputValues = await callWithRequestInfo({
+      headers: { Authorization: "Bearer leaked", AUTHORIZATION: "Bearer leaked-too" },
+    });
+
+    expect(JSON.stringify(inputValues)).not.toContain("leaked");
+    expect(inputValues._requestInfo).toBeUndefined();
+  });
+
+  it("strips the query string and fragment from the URL", async () => {
+    const inputValues = await callWithRequestInfo({
+      headers: { "user-agent": "ChatGPT/1.2" },
+      url: "https://app.example.test/mcp?access_token=secret-value#frag",
+    });
+
+    const requestInfo = inputValues._requestInfo as { url: string };
+    expect(requestInfo.url).toBe("https://app.example.test/mcp");
+    expect(JSON.stringify(inputValues)).not.toContain("secret-value");
+  });
+
+  it("still records the tool's own arguments", async () => {
+    const inputValues = await callWithRequestInfo({
+      headers: { authorization: "Bearer nope" },
+    });
+
+    expect(inputValues.q).toBe("hello");
+  });
+});

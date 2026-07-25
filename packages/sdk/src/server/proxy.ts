@@ -567,12 +567,63 @@ function extractInputValues(args: unknown, extra: unknown): Record<string, unkno
       if (ex.requestId != null) clone._requestId = ex.requestId;
       if (typeof ex.taskId === "string") clone._taskId = ex.taskId;
       if (ex.taskRequestedTtl !== undefined) clone._taskRequestedTtl = ex.taskRequestedTtl;
-      if (ex.requestInfo != null) clone._requestInfo = JSON.parse(JSON.stringify(ex.requestInfo));
+      if (ex.requestInfo != null) {
+        const requestInfo = sanitizeRequestInfo(ex.requestInfo);
+        if (requestInfo) clone._requestInfo = requestInfo;
+      }
     }
     return clone;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Request headers kept on an event. Everything else is dropped.
+ *
+ * An allowlist, not a denylist: the header map is written by whoever calls the
+ * MCP server, so a denylist can only ever exclude the credential names we
+ * thought of. `Authorization`, `Cookie`, `X-Api-Key` and friends must never
+ * reach analytics, and `X-Forwarded-For` would put an end-user IP on an event
+ * that is otherwise anonymous.
+ *
+ * These two survive because they answer questions the dashboard actually asks —
+ * which client called (beyond the coarse `platform` field) and in which
+ * language — and neither identifies a person.
+ */
+const CAPTURED_HEADERS = new Set(["user-agent", "accept-language"]);
+
+/**
+ * Reduce `RequestHandlerExtra.requestInfo` to the parts that are safe to store:
+ * allowlisted headers, and the URL without its query string (query params are a
+ * common place for tokens).
+ *
+ * Returns undefined when nothing survives, so the event carries no empty shell.
+ */
+function sanitizeRequestInfo(requestInfo: unknown): Record<string, unknown> | undefined {
+  if (!requestInfo || typeof requestInfo !== "object") return undefined;
+  const info = requestInfo as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+
+  if (info.headers && typeof info.headers === "object" && !Array.isArray(info.headers)) {
+    const headers: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(info.headers as Record<string, unknown>)) {
+      // Node lowercases incoming header names, but the shape is only typed as a
+      // plain object — normalize so a hand-built `Authorization` cannot slip by.
+      if (!CAPTURED_HEADERS.has(name.toLowerCase())) continue;
+      if (typeof value === "string") headers[name.toLowerCase()] = value;
+      else if (Array.isArray(value)) headers[name.toLowerCase()] = value.join(", ");
+    }
+    if (Object.keys(headers).length > 0) out.headers = headers;
+  }
+
+  if (typeof info.url === "string") {
+    const [withoutFragment] = info.url.split("#");
+    const [withoutQuery] = withoutFragment.split("?");
+    if (withoutQuery) out.url = withoutQuery;
+  }
+
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /**
