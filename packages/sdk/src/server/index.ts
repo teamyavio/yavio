@@ -7,7 +7,7 @@ import { createYavioContext } from "./context.js";
 import { createProxy } from "./proxy.js";
 
 // Keep in sync with package.json "version" — sent on every event batch.
-export const SDK_VERSION = "0.2.0";
+export const SDK_VERSION = "0.2.1";
 
 /**
  * Wrap an MCP server with Yavio instrumentation.

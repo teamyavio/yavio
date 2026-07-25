@@ -60,6 +60,12 @@ withYavio(server, {
 });
 ```
 
+With `inputValues` on, each event also carries a small `_requestInfo` block: the
+calling request's `user-agent` and `accept-language` headers, plus its URL
+without the query string. Every other header is dropped — `Authorization`,
+`Cookie`, `X-Api-Key` and the like never reach analytics, and no
+`X-Forwarded-For` means an event stays free of end-user IPs.
+
 ### Intent capture
 
 With `intent: true`, every tool advertises a required `context` parameter so the calling model states the user's goal on each call. The value is captured as the call's intent, stripped before your handler runs, and shown on the tool detail page in the dashboard. Tool code, schemas, and calls without `context` are unaffected; tools that define their own `context` parameter are left alone.
