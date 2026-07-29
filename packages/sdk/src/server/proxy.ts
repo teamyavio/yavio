@@ -189,6 +189,7 @@ function wrapToolCallback(
           inputValues: captureInput ? extractInputValues(cbArgs[0], extra) : undefined,
           outputContent: config.capture.outputValues ? extractOutputContent(result) : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
+          clientMeta: captureInput ? extractClientMeta(extra, config.capture.geo) : undefined,
         },
       );
       transport.send([toolCallEvent]);
@@ -241,6 +242,9 @@ function wrapToolCallback(
           errorMessage: error instanceof Error ? error.message : String(error),
           inputValues: captureInputOnError ? extractInputValues(cbArgs[0], extra) : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
+          clientMeta: captureInputOnError
+            ? extractClientMeta(extra, config.capture.geo)
+            : undefined,
         },
       );
       transport.send([toolCallEvent]);
@@ -591,7 +595,59 @@ function extractInputValues(args: unknown, extra: unknown): Record<string, unkno
  * which client called (beyond the coarse `platform` field) and in which
  * language — and neither identifies a person.
  */
-const CAPTURED_HEADERS = new Set(["user-agent", "accept-language"]);
+const CAPTURED_HEADERS = new Set([
+  "user-agent",
+  "accept-language",
+  // Anthropic's surface marker ("ClaudeAI", "Cowork") — the trustworthy way
+  // to tell Claude surfaces apart, verified in live traffic 2026-07-29.
+  "x-anthropic-client",
+  // Wire protocol version and W3C trace context for log correlation.
+  // None of these carry personal data.
+  "mcp-protocol-version",
+  "traceparent",
+]);
+
+/**
+ * Extract client metadata the platform relays in request `_meta` into
+ * first-class event fields. Purely a restructuring of data that already
+ * arrives on every call — nothing is requested from the client. ChatGPT
+ * sends all of these; platforms that send none produce undefined.
+ *
+ * The location part is gated behind `capture.geo` and reduced to the
+ * 2-letter country code — city and coordinates never leave the process
+ * as structured fields.
+ */
+function extractClientMeta(
+  extra: unknown,
+  geoEnabled: boolean,
+): import("../core/events.js").ClientMeta | undefined {
+  if (!extra || typeof extra !== "object") return undefined;
+  const meta = (extra as Record<string, unknown>)._meta;
+  if (!meta || typeof meta !== "object") return undefined;
+  const m = meta as Record<string, unknown>;
+
+  const str = (v: unknown, max: number): string | undefined =>
+    typeof v === "string" && v.length > 0 ? v.slice(0, max) : undefined;
+
+  let countryCode: string | undefined;
+  if (geoEnabled) {
+    const loc = m["openai/userLocation"];
+    if (loc && typeof loc === "object") {
+      const country = (loc as Record<string, unknown>).country;
+      if (typeof country === "string" && /^[A-Za-z]{2}$/.test(country)) {
+        countryCode = country.toUpperCase();
+      }
+    }
+  }
+
+  const out = {
+    countryCode,
+    locale: str(m["openai/locale"], 35),
+    endUserAgent: str(m["openai/userAgent"], 512),
+    subjectId: str(m["openai/subject"], 256),
+  };
+  return out.countryCode || out.locale || out.endUserAgent || out.subjectId ? out : undefined;
+}
 
 /**
  * Reduce `RequestHandlerExtra.requestInfo` to the parts that are safe to store:

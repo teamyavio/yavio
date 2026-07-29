@@ -228,7 +228,7 @@ describe("WidgetTransport", () => {
     };
 
     expect(body.events).toHaveLength(1);
-    expect(body.sdk_version).toBe("0.2.2");
+    expect(body.sdk_version).toBe("0.3.0");
     expect(body.sent_at).toBeDefined();
     expect(body.events[0].event_name).toBe("test_event");
   });
