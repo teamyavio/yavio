@@ -119,8 +119,8 @@ describe("React Widget SDK Integration", () => {
 
     await vi.advanceTimersByTimeAsync(5_000);
 
-    expect(sentBatches[0].sdk_version).toBe("0.2.1");
+    expect(sentBatches[0].sdk_version).toBe("0.2.2");
     const trackEvent = sentBatches[0].events.find((e) => e.event_type === "track");
-    expect(trackEvent?.sdk_version).toBe("0.2.1");
+    expect(trackEvent?.sdk_version).toBe("0.2.2");
   });
 });

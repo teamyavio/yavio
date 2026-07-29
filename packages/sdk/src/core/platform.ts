@@ -44,9 +44,22 @@ function matchIdentity(raw: string): Platform | undefined {
 /**
  * Detect the MCP client platform from available signals.
  *
- * Priority: clientName > userAgent > origin > unknown.
+ * Priority: OpenAI connector marker (any signal) > clientName > userAgent >
+ * origin > unknown.
  */
 export function detectPlatform(signals: PlatformSignals): Platform {
+  // 0. OpenAI's hosted MCP connector ("openai-mcp") is decisive over every
+  // per-signal match: all ChatGPT surfaces (chat, ChatGPT Work agents, Codex
+  // inside the ChatGPT app) reach the server through it, and sessions driven
+  // by the Codex runtime present Codex identifiers — user-agent
+  // "openai-mcp/1.0.0 (Codex)", clientInfo.name "codex-mcp-client" — that are
+  // indistinguishable from the standalone Codex CLI signal-by-signal. The
+  // runtime marker even flaps between requests of a single conversation, so
+  // it cannot be a platform: connector traffic is "chatgpt", and "codex" is
+  // reserved for a Codex CLI connecting directly (no connector marker).
+  const connectorScope = `${signals.clientName ?? ""} ${signals.userAgent ?? ""}`.toLowerCase();
+  if (connectorScope.includes("openai-mcp")) return "chatgpt";
+
   // 1. Client name (highest reliability — from MCP initialize)
   if (signals.clientName) {
     const match = matchIdentity(signals.clientName);

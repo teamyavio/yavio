@@ -44,6 +44,29 @@ describe("detectPlatform", () => {
       expect(detectPlatform({ clientName: "codex-mcp-client" })).toBe("codex");
     });
 
+    it("classifies OpenAI-connector traffic as chatgpt even when the Codex runtime drives it", () => {
+      // ChatGPT Work / Codex-in-ChatGPT sessions arrive through OpenAI's
+      // hosted connector with Codex identifiers on BOTH signals. Observed
+      // live 2026-07-29: one conversation mixed "(Codex)" and plain
+      // connector user-agents across its tool calls, so the runtime marker
+      // must never split a conversation into two platforms.
+      expect(
+        detectPlatform({
+          clientName: "codex-mcp-client",
+          userAgent: "openai-mcp/1.0.0 (Codex)",
+        }),
+      ).toBe("chatgpt");
+      expect(detectPlatform({ userAgent: "openai-mcp/1.0.0 (Codex)" })).toBe("chatgpt");
+      expect(detectPlatform({ userAgent: "openai-mcp/1.0.0" })).toBe("chatgpt");
+    });
+
+    it("keeps a direct Codex CLI connection classified as codex", () => {
+      // No connector marker anywhere: a CLI on the developer's machine.
+      expect(detectPlatform({ clientName: "codex-mcp-client", userAgent: "codex/1.4.2" })).toBe(
+        "codex",
+      );
+    });
+
     it("detects opencode from its real client name", () => {
       expect(detectPlatform({ clientName: "opencode" })).toBe("opencode");
     });
