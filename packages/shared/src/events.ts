@@ -87,6 +87,12 @@ export const ToolCallEvent = BaseEvent.extend({
   tokens_in: z.number().int().optional(),
   tokens_out: z.number().int().optional(),
   country_code: z.string().length(2).optional(),
+  // Client metadata relayed by the platform in request _meta (ChatGPT sends
+  // these on every call; other platforms may not). All optional — absence
+  // means the platform did not transmit them or the SDK's capture is off.
+  locale: z.string().max(35).optional(),
+  end_user_agent: z.string().max(512).optional(),
+  subject_id: z.string().max(256).optional(),
 });
 export type ToolCallEvent = z.infer<typeof ToolCallEvent>;
 

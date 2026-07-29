@@ -1303,3 +1303,90 @@ describe("request info capture", () => {
     expect(inputValues.q).toBe("hello");
   });
 });
+
+describe("client metadata capture", () => {
+  const CHATGPT_META = {
+    "openai/locale": "de-DE",
+    "openai/userAgent": "ChatGPT/1.2026.195 (Android 15; SM-S921B; build 2619512)",
+    "openai/subject": "v1/2vDU0AOje8kKSAasHqXU4Y",
+    "openai/userLocation": {
+      city: "Duisburg",
+      region: "North Rhine-Westphalia",
+      country: "DE",
+      timezone: "Europe/Berlin",
+      latitude: "51.43247",
+      longitude: "6.76516",
+    },
+    "openai/session": "v1/49A5b4dMHXWnQuVmyqIS4O",
+  };
+
+  async function callWithMeta(config: YavioConfig, _meta: unknown) {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, config, transport, "0.0.1");
+    proxy.tool("meta_tool", { q: z.string() }, () => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+    const tool = getRegisteredTool(server, "meta_tool");
+    await tool?.handler(
+      { q: "hello" },
+      {
+        signal: new AbortController().signal,
+        requestId: "req-cm-1",
+        sendNotification: async () => {},
+        sendRequest: async () => ({}),
+        _meta,
+      },
+    );
+    return transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+      string,
+      unknown
+    >;
+  }
+
+  it("lifts ChatGPT client metadata into first-class fields, country as code only", async () => {
+    const event = await callWithMeta(testConfig, CHATGPT_META);
+    expect(event.country_code).toBe("DE");
+    expect(event.locale).toBe("de-DE");
+    expect(event.end_user_agent).toContain("Android 15");
+    expect(event.subject_id).toBe("v1/2vDU0AOje8kKSAasHqXU4Y");
+    // City and coordinates must never appear as structured fields
+    expect(JSON.stringify({ ...event, input_values: undefined })).not.toContain("Duisburg");
+    expect(JSON.stringify({ ...event, input_values: undefined })).not.toContain("51.43247");
+  });
+
+  it("omits the country when capture.geo is off, keeps the rest", async () => {
+    const event = await callWithMeta(
+      { ...testConfig, capture: { ...testConfig.capture, geo: false } },
+      CHATGPT_META,
+    );
+    expect(event.country_code).toBeUndefined();
+    expect(event.locale).toBe("de-DE");
+    expect(event.subject_id).toBe("v1/2vDU0AOje8kKSAasHqXU4Y");
+  });
+
+  it("captures nothing when inputValues capture is off", async () => {
+    const event = await callWithMeta(
+      { ...testConfig, capture: { ...testConfig.capture, inputValues: false } },
+      CHATGPT_META,
+    );
+    expect(event.country_code).toBeUndefined();
+    expect(event.locale).toBeUndefined();
+    expect(event.end_user_agent).toBeUndefined();
+    expect(event.subject_id).toBeUndefined();
+  });
+
+  it("produces no fields for platforms that send no metadata (claude.ai)", async () => {
+    const event = await callWithMeta(testConfig, undefined);
+    expect(event.country_code).toBeUndefined();
+    expect(event.locale).toBeUndefined();
+    expect(event.subject_id).toBeUndefined();
+  });
+
+  it("rejects a malformed country instead of storing junk", async () => {
+    const event = await callWithMeta(testConfig, {
+      "openai/userLocation": { country: "Germany" },
+    });
+    expect(event.country_code).toBeUndefined();
+  });
+});
