@@ -115,37 +115,34 @@ export default async function AuthorizePage({
   const redirectHost = new URL(request.redirectUri).hostname;
   const isLoopback =
     redirectHost === "localhost" || redirectHost === "127.0.0.1" || redirectHost === "[::1]";
+  // The identity document is only worth showing when it disagrees with where
+  // the code is actually sent — matching hosts tell the user nothing extra.
+  const identityHost = isVerifiedIdentity ? new URL(request.client.clientId).hostname : null;
+  const identityMismatch = identityHost !== null && identityHost !== redirectHost;
 
   return (
-    <AuthCard
-      title="Authorize access"
-      description="An application wants to read your Yavio analytics"
-    >
+    <AuthCard title="Authorize access">
       <div className="space-y-4">
-        <div className="rounded-md border p-3 text-sm">
+        <div className="text-sm">
           <p className="font-medium">
             {clientLabel}
             {!isVerifiedIdentity && (
               <span className="ml-2 font-normal text-muted-foreground">(unverified name)</span>
             )}
           </p>
-          <p className="mt-1 font-medium">
-            {isLoopback
-              ? "Redirects to an application on this device"
-              : `Redirects to ${redirectHost}`}
+          <p className="text-muted-foreground">
+            {isLoopback ? "an app on this device" : redirectHost}
           </p>
-          {isVerifiedIdentity && (
+          {identityMismatch && (
             <p className="mt-1 break-all text-xs text-muted-foreground">
-              Identity document: {request.client.clientId}
+              Identity verified by {identityHost}
             </p>
           )}
         </div>
 
-        <div className="rounded-md bg-muted p-3 text-sm text-muted-foreground">
-          Read-only access to analytics data of one workspace. It can never change anything. Access
-          ends when you are removed from the workspace, when the application revokes its tokens, or
-          30 days after its last use.
-        </div>
+        <p className="text-sm text-muted-foreground">
+          Read-only access to one workspace. It cannot change anything.
+        </p>
 
         <form action={approveConsent} className="space-y-4">
           {Object.entries(params).map(([key, value]) =>
@@ -153,7 +150,7 @@ export default async function AuthorizePage({
           )}
 
           <div className="space-y-2">
-            <Label htmlFor="workspace_id">Workspace to share</Label>
+            <Label htmlFor="workspace_id">Workspace</Label>
             <select
               id="workspace_id"
               name="workspace_id"
@@ -178,10 +175,7 @@ export default async function AuthorizePage({
           </div>
         </form>
 
-        <p className="text-xs text-muted-foreground">
-          Signed in as {session.email}. Access is granted to this application for the selected
-          workspace only.
-        </p>
+        <p className="text-xs text-muted-foreground">Signed in as {session.email}</p>
       </div>
     </AuthCard>
   );
