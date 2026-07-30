@@ -98,6 +98,26 @@ describe("run_query SQL guard — attack corpus", () => {
     rejected("SELECT * FROM sessions_mv AS s, anotherOne(1) AS a GROUP BY s.session_id");
   });
 
+  it("rejects comma-position table functions AFTER a join condition (ON/USING must not end the table list)", () => {
+    rejected(
+      "SELECT m.* FROM events AS e JOIN sessions_mv AS s ON e.session_id = s.session_id, someFutureIntrospector(default, events) AS m",
+    );
+    rejected(
+      "SELECT m.* FROM events AS e JOIN sessions_mv AS s USING (session_id), someFutureIntrospector(default, events) AS m",
+    );
+    rejected(
+      "SELECT * FROM events AS e JOIN sessions_mv AS s ON greatest(e.latency_ms, 0) > 0, brandNew(1) AS b",
+    );
+  });
+
+  it("rejects table functions inside a subquery's table list", () => {
+    rejected("SELECT * FROM (SELECT * FROM events, brandNewFunc(1)) AS sub");
+    rejected("SELECT * FROM (SELECT * FROM brandNewFunc(1)) AS sub");
+    rejected(
+      "WITH t AS (SELECT * FROM events AS e, futureIntrospector(default, events) AS f) SELECT * FROM t",
+    );
+  });
+
   it("rejects output redirection and format overrides", () => {
     rejected("SELECT 1 INTO OUTFILE '/tmp/x'");
     rejected("SELECT 1 FORMAT Native");
@@ -167,5 +187,17 @@ describe("run_query SQL guard — legitimate analytics queries pass", () => {
     validateFreeQuery(
       "SELECT * FROM events AS e, sessions_mv AS s WHERE e.session_id = s.session_id",
     );
+    // function calls after a join condition, in ORDER/GROUP, and in subqueries
+    validateFreeQuery(
+      "SELECT e.event_name FROM events AS e JOIN sessions_mv AS s ON e.session_id = s.session_id ORDER BY toStartOfHour(e.timestamp), count() DESC",
+    );
+    validateFreeQuery(
+      "SELECT * FROM (SELECT session_id, count() c FROM events GROUP BY session_id) AS sub WHERE sub.c > 1",
+    );
+    validateFreeQuery(
+      "SELECT s.session_id, arrayStringConcat(groupArray(e.event_name), ',') FROM events AS e JOIN sessions_mv AS s USING (session_id) GROUP BY s.session_id",
+    );
+    // a comma inside a string literal must not be read as a table separator
+    validateFreeQuery("SELECT count() FROM events WHERE event_name = 'a, count(x)'");
   });
 });

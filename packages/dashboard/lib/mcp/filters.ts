@@ -64,13 +64,32 @@ export function resolveDateRange(input: RangeInput): { from: string; to: string 
   };
 }
 
-/** Silently drops unknown platform names, same as the dashboard filters. */
+/**
+ * Unknown platform names are an ERROR here, unlike the dashboard filters
+ * which drop them so a bookmarked URL degrades to "no filter". A model has
+ * no way to notice that degradation: it would ask for ChatGPT numbers, get
+ * project-wide totals, and report them as ChatGPT's. Fail loudly instead,
+ * naming the valid values so the caller can retry correctly.
+ */
 export function resolvePlatforms(platform?: string[]): string[] | undefined {
   if (!platform || platform.length === 0) return undefined;
-  const valid = platform.filter((p): p is Platform =>
-    (platformValues as readonly string[]).includes(p),
-  );
-  return valid.length > 0 ? valid : undefined;
+  const unknown = platform.filter((p) => !(platformValues as readonly string[]).includes(p));
+  if (unknown.length > 0) {
+    throw new McpToolError(
+      `Unknown platform(s): ${unknown.join(", ")}. Valid values are: ${platformValues.join(", ")}.`,
+    );
+  }
+  return platform as Platform[];
 }
 
-export const PLATFORM_VALUES = platformValues;
+/**
+ * Echoed in every tool result so the model can see exactly which filters
+ * produced the numbers, rather than inferring them from its own request.
+ */
+export function appliedFilters(ctx: McpQueryContext): {
+  from: string;
+  to: string;
+  platform: string[] | "all";
+} {
+  return { from: ctx.from, to: ctx.to, platform: ctx.platform ?? "all" };
+}

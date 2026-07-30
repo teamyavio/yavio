@@ -62,26 +62,86 @@ export const QUERYABLE_TABLES = ["events", "sessions_mv", "users_mv", "tool_regi
 
 /**
  * Table references may also be comma-separated (`FROM a, b`), which the
- * FROM/JOIN rule above cannot see. Commas are only unambiguously table
- * separators inside the table-list region, so isolate that region — from a
- * FROM/JOIN keyword up to the next clause keyword — and reject any function
- * call in it. Verified live: `FROM events AS e, mergeTreeIndex(default,
- * events) AS m` reads raw index tuples straight past the row policies, and
- * needs no source privilege, so the database itself does not stop it.
+ * FROM/JOIN rule above cannot see. Verified live: `FROM events AS e,
+ * mergeTreeIndex(default, events) AS m` reads raw index tuples straight past
+ * the row policies, and needs no source privilege, so the database itself
+ * does not stop it.
+ *
+ * Finding the table list needs real state, not a region regex: a join
+ * condition (`ON …`, `USING (…)`) sits inside the FROM clause, and
+ * subqueries nest their own. So scan once, tracking string literals and one
+ * "am I in a table list" flag per parenthesis depth. A comma seen at the
+ * current depth while that flag is set is a table separator — the token
+ * after it must be a table name, never a function call.
  */
-const TABLE_LIST_REGION =
-  /\b(?:from|join)\b([\s\S]*?)(?=\b(?:where|prewhere|group|order|limit|having|union|settings|window|on|using|format|into)\b|$)/gi;
+const CLAUSE_TERMINATORS = new Set([
+  "where",
+  "prewhere",
+  "group",
+  "order",
+  "limit",
+  "having",
+  "union",
+  "settings",
+  "window",
+  "format",
+  "into",
+  "select",
+  "qualify",
+]);
 
-function assertNoCommaTableFunction(sql: string): void {
-  TABLE_LIST_REGION.lastIndex = 0;
-  let match: RegExpExecArray | null = TABLE_LIST_REGION.exec(sql);
-  while (match !== null) {
-    if (/,\s*[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(match[1])) {
-      throw new McpToolError(
-        "Query rejected: table functions are not allowed (query the events/sessions_mv/users_mv/tool_registry tables).",
-      );
+function assertNoTableFunctionInTableList(sql: string): void {
+  const reject = () => {
+    throw new McpToolError(
+      "Query rejected: table functions are not allowed (query the events/sessions_mv/users_mv/tool_registry tables).",
+    );
+  };
+
+  // One flag per paren depth: is this level currently inside a table list?
+  const inTableList: boolean[] = [false];
+  let quote: string | null = null;
+
+  for (let i = 0; i < sql.length; i++) {
+    const char = sql[i];
+
+    if (quote !== null) {
+      if (char === "\\") i++;
+      else if (char === quote) quote = null;
+      continue;
     }
-    match = TABLE_LIST_REGION.exec(sql);
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      continue;
+    }
+
+    if (char === "(") {
+      inTableList.push(false);
+      continue;
+    }
+    if (char === ")") {
+      if (inTableList.length > 1) inTableList.pop();
+      continue;
+    }
+
+    if (char === "," && inTableList[inTableList.length - 1]) {
+      // Table separator: whatever follows must not be a function call.
+      if (/^\s*[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(sql.slice(i + 1))) reject();
+      continue;
+    }
+
+    // Keywords that open or close a table list at this depth.
+    const word = /^[A-Za-z_][A-Za-z0-9_]*/.exec(sql.slice(i));
+    if (!word) continue;
+    const lower = word[0].toLowerCase();
+    if (lower === "from" || lower === "join") {
+      inTableList[inTableList.length - 1] = true;
+      // Directly-following function call (also covered by the regex above,
+      // kept here so the scanner is correct on its own).
+      if (/^\s*[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(sql.slice(i + word[0].length))) reject();
+    } else if (CLAUSE_TERMINATORS.has(lower)) {
+      inTableList[inTableList.length - 1] = false;
+    }
+    i += word[0].length - 1;
   }
 }
 
@@ -105,6 +165,6 @@ export function validateFreeQuery(rawSql: string): string {
       throw new McpToolError(`Query rejected: ${reason}.`);
     }
   }
-  assertNoCommaTableFunction(sql);
+  assertNoTableFunctionInTableList(sql);
   return sql;
 }

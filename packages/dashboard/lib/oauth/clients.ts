@@ -3,7 +3,7 @@ import { getDb } from "@/lib/db";
 import { oauthClients } from "@yavio/db/schema";
 import { eq } from "drizzle-orm";
 import { fetchClientMetadata, isAcceptableRedirectUri } from "./cimd";
-import { CIMD_CACHE_TTL_MS } from "./constants";
+import { CIMD_CACHE_TTL_MS, CIMD_STALE_GRACE_MS } from "./constants";
 import { sanitizeClientName } from "./display";
 import { OAuthError } from "./errors";
 
@@ -47,7 +47,31 @@ export async function resolveClient(clientId: string): Promise<OAuthClient> {
       };
     }
 
-    const metadata = await fetchClientMetadata(clientId);
+    let metadata: Awaited<ReturnType<typeof fetchClientMetadata>>;
+    try {
+      metadata = await fetchClientMetadata(clientId);
+    } catch (err) {
+      // The document host is down or slow. A cached copy inside the stale
+      // grace window is far better than failing every authorization for this
+      // connector — clients read invalid_client as "re-register from scratch".
+      const staleButUsable =
+        cached.length === 1 &&
+        cached[0].metadataRefreshedAt !== null &&
+        Date.now() - cached[0].metadataRefreshedAt.getTime() < CIMD_STALE_GRACE_MS;
+      if (staleButUsable) {
+        console.warn(
+          `[oauth] CIMD refetch failed for ${clientId}; serving cached metadata from ${cached[0].metadataRefreshedAt?.toISOString()}`,
+        );
+        return {
+          clientId,
+          registrationType: "cimd",
+          clientName: cached[0].clientName,
+          redirectUris: cached[0].redirectUris,
+        };
+      }
+      throw err;
+    }
+
     await db
       .insert(oauthClients)
       .values({

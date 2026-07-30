@@ -114,13 +114,12 @@ export async function validateAuthorizeRequest(
     fail("invalid_request", "code_challenge_method must be S256");
   }
 
+  // RFC 6749 §3.3: the AS may ignore scopes it does not grant. Hard-failing
+  // would lock out any client that tacks on `openid`/`profile`/a vendor
+  // scope alongside ours — and dropping is not permissive, since only
+  // ALLOWED_SCOPES can ever end up in the grant.
   const requested = (params.scope ?? "").split(" ").filter((s) => s.length > 0);
-  for (const scope of requested) {
-    if (!ALLOWED_SCOPES.has(scope)) {
-      fail("invalid_scope", `unknown scope ${scope}`);
-    }
-  }
-  const granted = requested.length > 0 ? requested : [ANALYTICS_SCOPE];
+  const granted = requested.filter((scope) => ALLOWED_SCOPES.has(scope));
   if (!granted.includes(ANALYTICS_SCOPE)) granted.unshift(ANALYTICS_SCOPE);
 
   const resource = params.resource ?? null;

@@ -92,7 +92,6 @@ describe("authorization request validation", () => {
       [{ ...VALID, response_type: "token" }, "unsupported_response_type"],
       [{ ...VALID, code_challenge: undefined }, "invalid_request"],
       [{ ...VALID, code_challenge_method: "plain" }, "invalid_request"],
-      [{ ...VALID, scope: "admin:write" }, "invalid_scope"],
       [{ ...VALID, resource: "https://other.example/api/mcp" }, "invalid_target"],
     ];
     for (const [params, expectedError] of cases) {
@@ -114,6 +113,20 @@ describe("authorization request validation", () => {
   it("defaults empty scope to analytics:read", async () => {
     const request = await validateAuthorizeRequest({ ...VALID, scope: undefined });
     expect(request.scope).toBe("analytics:read");
+  });
+
+  it("drops unrequestable scopes instead of failing (RFC 6749 §3.3) but never grants them", async () => {
+    // a client that tacks on openid/profile/a vendor scope still connects
+    const request = await validateAuthorizeRequest({
+      ...VALID,
+      scope: "openid profile analytics:read offline_access vendor:thing",
+    });
+    expect(request.scope).toBe("analytics:read offline_access");
+
+    // asking ONLY for something unrequestable still yields the read scope
+    const readOnly = await validateAuthorizeRequest({ ...VALID, scope: "admin:write" });
+    expect(readOnly.scope).toBe("analytics:read");
+    expect(readOnly.scope).not.toContain("admin:write");
   });
 
   it("builds success redirects with code, state and iss", async () => {

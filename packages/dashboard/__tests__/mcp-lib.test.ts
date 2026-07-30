@@ -9,7 +9,7 @@ import { checkWorkspaceAccess } from "../lib/auth/workspace-access";
 import { AnalyticsQueryError } from "../lib/clickhouse/analytics-client";
 import { mcpAuthContext, verifyMcpBearerToken } from "../lib/mcp/auth";
 import { McpToolError, runTool, toolError, toolText } from "../lib/mcp/errors";
-import { resolveDateRange, resolvePlatforms } from "../lib/mcp/filters";
+import { appliedFilters, resolveDateRange, resolvePlatforms } from "../lib/mcp/filters";
 import { requireProjectInWorkspace } from "../lib/mcp/project-access";
 import { verifyAccessToken } from "../lib/oauth/store";
 
@@ -147,10 +147,31 @@ describe("date range + platform filters", () => {
     expect(() => resolveDateRange({ from: "2026-07-15", to: "2026-07-01" })).toThrow(McpToolError);
   });
 
-  it("drops unknown platforms, keeps known ones", () => {
-    expect(resolvePlatforms(["chatgpt", "not-a-platform"])).toEqual(["chatgpt"]);
-    expect(resolvePlatforms(["bogus"])).toBeUndefined();
+  it("REJECTS unknown platforms rather than silently returning unfiltered totals", () => {
+    // silently dropping would answer 'how many ChatGPT calls?' with the
+    // project-wide number, and the model could not tell
+    expect(() => resolvePlatforms(["chatgpt", "not-a-platform"])).toThrow(McpToolError);
+    expect(() => resolvePlatforms(["ChatGPT"])).toThrow(/Unknown platform/);
+    expect(() => resolvePlatforms(["bogus"])).toThrow(McpToolError);
+    expect(resolvePlatforms(["chatgpt"])).toEqual(["chatgpt"]);
     expect(resolvePlatforms([])).toBeUndefined();
     expect(resolvePlatforms(undefined)).toBeUndefined();
+  });
+
+  it("appliedFilters echoes what was actually applied, incl. 'all' when unfiltered", () => {
+    expect(appliedFilters({ workspaceId: "w", projectId: "p", from: "F", to: "T" })).toEqual({
+      from: "F",
+      to: "T",
+      platform: "all",
+    });
+    expect(
+      appliedFilters({
+        workspaceId: "w",
+        projectId: "p",
+        from: "F",
+        to: "T",
+        platform: ["chatgpt"],
+      }),
+    ).toEqual({ from: "F", to: "T", platform: ["chatgpt"] });
   });
 });

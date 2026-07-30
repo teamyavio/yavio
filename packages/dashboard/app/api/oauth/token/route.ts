@@ -7,7 +7,7 @@ import {
   pruneExpired,
   rotateRefreshToken,
 } from "@/lib/oauth/store";
-import { verifyPkceS256 } from "@/lib/oauth/tokens";
+import { hashToken, verifyPkceS256 } from "@/lib/oauth/tokens";
 import { rateLimitConfigs } from "@/lib/rate-limit/config";
 import { RateLimiter } from "@/lib/rate-limit/rate-limiter";
 
@@ -133,8 +133,10 @@ async function handleRefreshToken(params: URLSearchParams): Promise<Response> {
   );
 }
 
-// Keyed by ip:client_id — ChatGPT/Claude egress IPs are shared across users,
-// so a bare per-IP bucket would throttle unrelated tenants together.
+// Keyed by the presented grant (code or refresh token), which is per-user —
+// a CIMD client_id is one fixed URL shared by every user of that connector,
+// and connector egress IPs are shared too, so either alone would throttle
+// unrelated tenants against each other.
 const limiter = new RateLimiter(rateLimitConfigs.analytics);
 limiter.start();
 
@@ -143,7 +145,8 @@ export async function POST(request: Request): Promise<Response> {
     const params = await parseBody(request);
 
     const clientIp = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
-    const limit = limiter.consume(`${clientIp}:${params.get("client_id") ?? ""}`);
+    const grant = params.get("refresh_token") ?? params.get("code") ?? "";
+    const limit = limiter.consume(grant !== "" ? hashToken(grant) : `ip:${clientIp}`);
     if (!limit.allowed) {
       return Response.json(
         { error: "slow_down", error_description: "too many token requests" },

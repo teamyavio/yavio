@@ -23,6 +23,14 @@ export const REFRESH_ROTATION_GRACE_MS = 30_000;
 export const CIMD_CACHE_TTL_MS = 60 * 60 * 1000;
 
 /**
+ * How long a cached CIMD document may still be served if the re-fetch fails.
+ * Keeps a client's document-host outage from breaking every authorization
+ * for that connector; redirect URIs move rarely, so a bounded staleness is a
+ * far better trade than hard-failing.
+ */
+export const CIMD_STALE_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
  * Canonical origin of this deployment, no trailing slash. Falls back to
  * NEXTAUTH_URL so a deployment that only sets the auth URL cannot silently
  * mint tokens with a localhost issuer/audience.

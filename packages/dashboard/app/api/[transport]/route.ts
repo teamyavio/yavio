@@ -5,13 +5,14 @@ import { runTool, toolText } from "@/lib/mcp/errors";
 import {
   type McpQueryContext,
   type RangeInput,
+  appliedFilters,
   resolveDateRange,
   resolvePlatforms,
 } from "@/lib/mcp/filters";
 import { requireProjectInWorkspace } from "@/lib/mcp/project-access";
 import { SCHEMA_DOC } from "@/lib/mcp/schema-doc";
 import { validateFreeQuery } from "@/lib/mcp/sql-guard";
-import { ANALYTICS_SCOPE } from "@/lib/oauth/constants";
+import { ANALYTICS_SCOPE, canonicalOrigin } from "@/lib/oauth/constants";
 import { queryErrorList } from "@/lib/queries/errors";
 import { queryIntentFeed, queryIntentKPIs } from "@/lib/queries/intents";
 import {
@@ -120,7 +121,7 @@ const handler = createMcpHandler(
             queryOverviewKPIs(ctx),
             queryPlatformBreakdown(ctx),
           ]);
-          return toolText({ range: { from: ctx.from, to: ctx.to }, kpis, platforms });
+          return toolText({ filters: appliedFilters(ctx), kpis, platforms });
         });
       },
     );
@@ -142,7 +143,7 @@ const handler = createMcpHandler(
         return runTool(async () => {
           const ctx = await projectContext(auth, args);
           const series = await queryInvocationsTimeSeries(ctx, args.granularity ?? "day");
-          return toolText({ range: { from: ctx.from, to: ctx.to }, series });
+          return toolText({ filters: appliedFilters(ctx), series });
         });
       },
     );
@@ -164,7 +165,7 @@ const handler = createMcpHandler(
         return runTool(async () => {
           const ctx = await projectContext(auth, args);
           const { tools, total } = await queryToolList(ctx, 1, args.limit ?? 25);
-          return toolText({ range: { from: ctx.from, to: ctx.to }, total, tools });
+          return toolText({ filters: appliedFilters(ctx), total, tools });
         });
       },
     );
@@ -191,7 +192,7 @@ const handler = createMcpHandler(
             queryToolRegistryEntry(ctx, args.tool_name),
           ]);
           return toolText({
-            range: { from: ctx.from, to: ctx.to },
+            filters: appliedFilters(ctx),
             kpis,
             errorCategories,
             registryEntry,
@@ -222,7 +223,7 @@ const handler = createMcpHandler(
             args.limit ?? 25,
             args.error_category,
           );
-          return toolText({ range: { from: ctx.from, to: ctx.to }, total, errors });
+          return toolText({ filters: appliedFilters(ctx), total, errors });
         });
       },
     );
@@ -247,7 +248,7 @@ const handler = createMcpHandler(
             queryIntentFeed(ctx, 1, args.limit ?? 25),
             queryIntentKPIs(ctx),
           ]);
-          return toolText({ range: { from: ctx.from, to: ctx.to }, kpis, total, intents });
+          return toolText({ filters: appliedFilters(ctx), kpis, total, intents });
         });
       },
     );
@@ -288,10 +289,14 @@ const handler = createMcpHandler(
             projectId: args.project_id,
             query: sql,
             settings: {
+              // Hard limits, not truncation — ClickHouse throws on overflow.
+              // The read budget has to clear a full 90-day scan of a busy
+              // project, or plain aggregates would fail where the curated
+              // tools (running the same scan) succeed.
               max_execution_time: 30,
               max_result_rows: 10_000,
-              max_rows_to_read: 1_000_000,
-              max_bytes_to_read: 1_000_000_000,
+              max_rows_to_read: 50_000_000,
+              max_bytes_to_read: 5_000_000_000,
             },
           });
           if (rows.length === 0) {
@@ -322,6 +327,13 @@ const authHandler = withMcpAuth(handler, verifyMcpBearerToken, {
   required: true,
   requiredScopes: [ANALYTICS_SCOPE],
   resourceMetadataPath: "/.well-known/oauth-protected-resource/api/mcp",
+  // Pin the origin. Without this, mcp-handler derives it from
+  // X-Forwarded-Host, so a spoofed header would point the 401 challenge's
+  // resource_metadata at an attacker-chosen document — and from there at an
+  // attacker-chosen authorization server. Every other URL here is pinned the
+  // same way.
+  // mcp-handler treats this as the ORIGIN it joins resourceMetadataPath onto.
+  resourceUrl: canonicalOrigin(),
 });
 
 // Same budget as the per-user analytics rate limit in the HTTP routes, keyed

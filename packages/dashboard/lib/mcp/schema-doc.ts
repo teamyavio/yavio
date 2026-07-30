@@ -50,5 +50,7 @@ to run_query — rows of other projects are invisible.
   above (the database user can read nothing else).
 - No SETTINGS or FORMAT clauses, no comments, no quoted identifiers,
   no system tables, no table functions (incl. numbers()).
-- Results are capped (10k rows / 30s / 1M scanned rows per query) — aggregate
-  instead of dumping raw rows.`;
+- Budgets are hard limits, NOT truncation: a query that would return more than
+  10k rows, scan more than 50M rows, or run longer than 30s FAILS with a
+  ClickHouse error instead of returning partial data. Aggregate and filter by
+  timestamp rather than dumping raw rows.`;
