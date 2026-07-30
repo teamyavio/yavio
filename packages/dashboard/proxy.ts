@@ -10,6 +10,11 @@ const PUBLIC_PATHS = [
   "/forgot-password",
   "/reset-password",
   "/verify-email",
+  // OAuth authorization endpoint: must be reachable unauthenticated so it can
+  // send users through /login with the full query string preserved.
+  "/oauth/authorize",
+  // RFC 8414 / RFC 9728 discovery documents.
+  "/.well-known",
 ];
 // NextAuth's own routes that handle their own CSRF — exempt from our checks.
 // All live under the [...nextauth] catch-all: /api/auth/<slug>
@@ -23,8 +28,17 @@ const NEXTAUTH_ROUTES = [
   "/api/auth/signout",
 ];
 
+// Cookieless OAuth/MCP endpoints: called by MCP clients that send no Origin
+// header and no CSRF cookie. They are CSRF-immune by construction (no cookie
+// auth — bearer tokens, PKCE and one-time codes only).
+const CSRF_EXEMPT_ROUTES = ["/api/oauth/token", "/api/oauth/register", "/api/mcp"];
+
 function isNextAuthRoute(pathname: string): boolean {
   return NEXTAUTH_ROUTES.some((r) => pathname === r || pathname.startsWith(`${r}/`));
+}
+
+function isCsrfExemptRoute(pathname: string): boolean {
+  return CSRF_EXEMPT_ROUTES.some((r) => pathname === r || pathname.startsWith(`${r}/`));
 }
 
 function isPublicPath(pathname: string): boolean {
@@ -61,7 +75,7 @@ export function proxy(request: NextRequest) {
   ) {
     // NextAuth routes handle their own CSRF; all other API routes must pass
     // origin OR CSRF validation.
-    if (!isNextAuthRoute(pathname)) {
+    if (!isNextAuthRoute(pathname) && !isCsrfExemptRoute(pathname)) {
       if (!validateOrigin(request) && !validateCsrf(request)) {
         return NextResponse.json(
           { error: "Origin validation failed", code: ErrorCode.DASHBOARD.ORIGIN_VALIDATION_FAILED },

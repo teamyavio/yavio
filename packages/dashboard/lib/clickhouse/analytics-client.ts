@@ -34,6 +34,12 @@ export interface AnalyticsQueryOptions<T> {
   query: string;
   params?: Record<string, unknown>;
   format?: string;
+  /**
+   * Extra per-query ClickHouse settings (e.g. execution/row caps for
+   * free-form MCP queries). Merged BEFORE the tenant-isolation settings so
+   * they can never override SQL_workspace_id / SQL_project_id.
+   */
+  settings?: Record<string, string | number>;
 }
 
 /**
@@ -52,6 +58,7 @@ export async function queryAnalytics<T>(options: AnalyticsQueryOptions<T>): Prom
       query_params: params,
       format: "JSONEachRow",
       clickhouse_settings: {
+        ...options.settings,
         SQL_workspace_id: workspaceId,
         SQL_project_id: projectId,
       },

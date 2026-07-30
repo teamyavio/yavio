@@ -3,6 +3,7 @@ import {
   boolean,
   index,
   inet,
+  jsonb,
   numeric,
   pgTable,
   primaryKey,
@@ -196,6 +197,88 @@ export const apiKeys = pgTable(
     index("idx_api_keys_project").on(table.projectId),
     index("idx_api_keys_workspace").on(table.workspaceId),
   ],
+);
+
+// =============================================================================
+// 8b. OAuth Authorization Server (MCP connector clients)
+// =============================================================================
+// Not related to oauth_accounts (next-auth sign-in). These tables back the
+// dashboard's own OAuth 2.1 authorization server that MCP clients (Claude,
+// ChatGPT) authorize against. Tokens are opaque and stored HMAC-SHA256 hashed,
+// same pattern as api_keys.key_hash.
+
+export const oauthClients = pgTable("oauth_clients", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  // CIMD clients: the https:// metadata-document URL itself.
+  // DCR clients: a generated opaque id.
+  clientId: text("client_id").unique().notNull(),
+  registrationType: text("registration_type").notNull(), // 'cimd' | 'dcr'
+  clientName: text("client_name"),
+  clientUri: text("client_uri"),
+  redirectUris: jsonb("redirect_uris").$type<string[]>().notNull(),
+  tokenEndpointAuthMethod: text("token_endpoint_auth_method").notNull().default("none"),
+  applicationType: text("application_type"),
+  // CIMD only: when the metadata document was last re-fetched.
+  metadataRefreshedAt: timestamp("metadata_refreshed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
+export const oauthCodes = pgTable(
+  "oauth_codes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    codeHash: text("code_hash").unique().notNull(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.clientId, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    redirectUri: text("redirect_uri").notNull(),
+    scope: text("scope").notNull(),
+    codeChallenge: text("code_challenge").notNull(), // PKCE S256, base64url
+    resource: text("resource"), // RFC 8707 audience requested at /oauth/authorize
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  },
+  (table) => [index("idx_oauth_codes_expiry").on(table.expiresAt)],
+);
+
+export const oauthTokens = pgTable(
+  "oauth_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // Grant family: constant across refresh rotations. Revoking the family
+    // invalidates every token that ever belonged to this authorization.
+    grantId: uuid("grant_id").notNull(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.clientId, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    scope: text("scope").notNull(),
+    audience: text("audience").notNull(), // canonical MCP URL (RFC 8707)
+    accessTokenHash: text("access_token_hash").unique().notNull(),
+    accessTokenExpiresAt: timestamp("access_token_expires_at", { withTimezone: true }).notNull(),
+    refreshTokenHash: text("refresh_token_hash").unique(),
+    refreshTokenExpiresAt: timestamp("refresh_token_expires_at", { withTimezone: true }),
+    // Set when a newer rotation superseded this row. A rotated-out refresh
+    // token arriving within the grace window is a benign client race; after
+    // the window it is treated as replay and revokes the whole family.
+    rotatedAt: timestamp("rotated_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  },
+  (table) => [index("idx_oauth_tokens_grant").on(table.grantId)],
 );
 
 // =============================================================================
