@@ -5,6 +5,18 @@ import { verifyAccessToken } from "@/lib/oauth/store";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { WorkspaceRole } from "@yavio/shared/validation";
 
+/**
+ * Raised when the token could not be checked at all (database down, pool
+ * exhausted). Distinct from "the token is bad" so the route can answer 503
+ * instead of telling every client its grant is dead.
+ */
+export class McpUnavailableError extends Error {
+  constructor() {
+    super("token verification is temporarily unavailable");
+    this.name = "McpUnavailableError";
+  }
+}
+
 export interface McpAuthContext {
   userId: string;
   workspaceId: string;
@@ -22,15 +34,24 @@ export async function verifyMcpBearerToken(
 ): Promise<AuthInfo | undefined> {
   if (!bearerToken) return undefined;
 
-  const verified = await verifyAccessToken(bearerToken);
-  if (!verified) return undefined;
+  // mcp-handler turns ANY throw from here into 401 invalid_token — the code
+  // clients treat as "this grant is dead, re-authorize". A database blip must
+  // not do that to every connected user at once, so infrastructure failures
+  // are re-thrown as McpUnavailableError, which the route maps to 503.
+  let verified: Awaited<ReturnType<typeof verifyAccessToken>>;
+  let access: Awaited<ReturnType<typeof checkWorkspaceAccess>>;
+  try {
+    verified = await verifyAccessToken(bearerToken);
+    // RFC 8707: the token must have been minted for exactly this resource.
+    if (!verified || verified.audience !== mcpResourceUri()) return undefined;
 
-  // RFC 8707: the token must have been minted for exactly this resource.
-  if (verified.audience !== mcpResourceUri()) return undefined;
-
-  // Live membership re-check: removing someone from a workspace kills their
-  // connector access on the next call, not at token expiry.
-  const access = await checkWorkspaceAccess(verified.userId, verified.workspaceId);
+    // Live membership re-check: removing someone from a workspace kills their
+    // connector access on the next call, not at token expiry.
+    access = await checkWorkspaceAccess(verified.userId, verified.workspaceId);
+  } catch (err) {
+    console.error("[mcp] token verification failed for infrastructure reasons:", err);
+    throw new McpUnavailableError();
+  }
   if (!access) return undefined;
 
   // Same floor the analytics HTTP routes enforce. A no-op today (every role

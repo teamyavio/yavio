@@ -115,10 +115,12 @@ export default async function AuthorizePage({
   const redirectHost = new URL(request.redirectUri).hostname;
   const isLoopback =
     redirectHost === "localhost" || redirectHost === "127.0.0.1" || redirectHost === "[::1]";
-  // The identity document is only worth showing when it disagrees with where
-  // the code is actually sent — matching hosts tell the user nothing extra.
+  // For a CIMD client the name is only as trustworthy as the domain serving
+  // the identity document, so that domain is the trust signal and is always
+  // shown. Hiding it when it matched the redirect host — as an earlier trim
+  // did — removed it precisely in the self-hosted impersonation case, where
+  // an attacker controls both.
   const identityHost = isVerifiedIdentity ? new URL(request.client.clientId).hostname : null;
-  const identityMismatch = identityHost !== null && identityHost !== redirectHost;
 
   return (
     <AuthCard title="Authorize access">
@@ -131,17 +133,16 @@ export default async function AuthorizePage({
             )}
           </p>
           <p className="text-muted-foreground">
-            {isLoopback ? "an app on this device" : redirectHost}
+            Sends data to {isLoopback ? "an app on this device" : redirectHost}
           </p>
-          {identityMismatch && (
-            <p className="mt-1 break-all text-xs text-muted-foreground">
-              Identity verified by {identityHost}
-            </p>
+          {identityHost !== null && identityHost !== redirectHost && (
+            <p className="text-muted-foreground">Identity published by {identityHost}</p>
           )}
         </div>
 
         <p className="text-sm text-muted-foreground">
-          Read-only access to one workspace. It cannot change anything.
+          Read-only access to one workspace. It cannot change anything, and access ends when you
+          leave the workspace.
         </p>
 
         <form action={approveConsent} className="space-y-4">

@@ -20,6 +20,38 @@ export function hashToken(raw: string): string {
   return crypto.createHmac("sha256", secret).update(raw).digest("hex");
 }
 
+/**
+ * Derive the successor pair of a rotation deterministically from the token
+ * being rotated plus a server-stored nonce.
+ *
+ * This is what makes rotation idempotent: two concurrent refreshes with the
+ * same token produce the same successor, so the loser of the race can be
+ * handed the winner's pair instead of a second, independently-rotating chain
+ * (which would make replay detection unreachable for the rest of the grant).
+ * The nonce never leaves the server, so holding the refresh token alone does
+ * not let anyone precompute the chain.
+ */
+export function deriveSuccessorTokens(
+  rawRefreshToken: string,
+  nonce: string,
+): { accessToken: string; refreshToken: string } {
+  const secret = process.env.API_KEY_HASH_SECRET;
+  if (!secret) {
+    throw new Error("API_KEY_HASH_SECRET is not set");
+  }
+  const derive = (kind: TokenKind) =>
+    `yvo_${kind}_${crypto
+      .createHmac("sha256", secret)
+      .update(`rotate:${nonce}:${rawRefreshToken}:${kind}`)
+      .digest("hex")}`;
+  return { accessToken: derive("at"), refreshToken: derive("rt") };
+}
+
+/** Server-side randomness for one rotation; never sent to a client. */
+export function generateRotationNonce(): string {
+  return crypto.randomBytes(16).toString("hex");
+}
+
 /** RFC 7636 S256: BASE64URL(SHA256(verifier)) must equal the stored challenge. */
 export function verifyPkceS256(verifier: string, challenge: string): boolean {
   if (!/^[A-Za-z0-9\-._~]{43,128}$/.test(verifier)) return false;

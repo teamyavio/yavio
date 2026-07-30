@@ -51,9 +51,12 @@ export async function resolveClient(clientId: string): Promise<OAuthClient> {
     try {
       metadata = await fetchClientMetadata(clientId);
     } catch (err) {
-      // The document host is down or slow. A cached copy inside the stale
-      // grace window is far better than failing every authorization for this
-      // connector — clients read invalid_client as "re-register from scratch".
+      // Only TRANSPORT failures may fall back to cache. An OAuthError means
+      // the document was reachable and rejected — gone, non-200, no longer
+      // claiming this client_id, or pointing somewhere non-public. Those are
+      // exactly the signals an operator uses to kill a compromised client, so
+      // honouring the cache for a week would defeat the kill switch.
+      if (err instanceof OAuthError) throw err;
       const staleButUsable =
         cached.length === 1 &&
         cached[0].metadataRefreshedAt !== null &&
@@ -115,6 +118,23 @@ export async function resolveClient(clientId: string): Promise<OAuthClient> {
     clientName: rows[0].clientName,
     redirectUris: rows[0].redirectUris,
   };
+}
+
+/**
+ * Cheap "is this client_id known to us" check for the token endpoint: a DB
+ * read, never a network fetch. CIMD ids are accepted once they have been
+ * cached by an authorization request; a code cannot exist for a client that
+ * never reached /oauth/authorize.
+ */
+export async function requireKnownClient(clientId: string): Promise<void> {
+  const rows = await getDb()
+    .select({ clientId: oauthClients.clientId })
+    .from(oauthClients)
+    .where(eq(oauthClients.clientId, clientId))
+    .limit(1);
+  if (rows.length === 0) {
+    throw new OAuthError("invalid_client", "unknown client_id", 401);
+  }
 }
 
 /**

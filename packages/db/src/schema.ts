@@ -278,6 +278,12 @@ export const oauthTokens = pgTable(
     // good for exactly one replacement — a second reuse is replay, even
     // inside the window, and revokes the whole family.
     graceUsedAt: timestamp("grace_used_at", { withTimezone: true }),
+    // Server-chosen randomness recorded when this row is rotated. The
+    // successor pair is derived from (presented refresh token, this nonce),
+    // so a concurrent duplicate refresh re-derives the SAME successor instead
+    // of forking a second chain. Useless to anyone who does not already hold
+    // the refresh token, and never returned to a client.
+    rotationNonce: text("rotation_nonce"),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),

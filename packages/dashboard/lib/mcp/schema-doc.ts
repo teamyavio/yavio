@@ -30,12 +30,17 @@ field_name, nav_from, nav_to, device_touch, device_pixel_ratio, load_time_ms.
 
 Use JSONExtractString(intent_signals, 'intent') etc. for the JSON columns.
 
-## sessions_mv — one row per session (aggregated)
+## sessions_mv — per-session rollup (AggregatingMergeTree)
+IMPORTANT: a session can appear as MORE THAN ONE ROW — the engine merges parts
+in the background and events of one session often arrive in several batches.
+Always re-aggregate (min/max/sum + GROUP BY session_id); do NOT count rows, and
+do not use FINAL, which collapses to one row per key but keeps only one part's
+values. Prefer deriving session counts from events with uniqExact(session_id).
 workspace_id, project_id, session_id, user_id, session_start, session_end,
 platform, country_code, tool_count, invocation_count, event_count,
 conversion_count, total_revenue, revenue_currency, duration_ms, has_widget, ttfi_ms
 
-## users_mv — one row per identified user (aggregated)
+## users_mv — per-user rollup (AggregatingMergeTree; same multi-row caveat as sessions_mv)
 workspace_id, project_id, user_id, first_seen, last_seen, total_events,
 total_sessions, total_tool_calls, total_conversions, total_revenue,
 revenue_currency, last_platform

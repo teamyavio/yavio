@@ -110,6 +110,40 @@ describe("run_query SQL guard — attack corpus", () => {
     );
   });
 
+  it("rejects table functions hidden behind an ALIAS that spells a clause keyword", () => {
+    // an alias is attacker-controlled text; it must not be able to switch the
+    // table-list scan off (verified bypass before the state machine)
+    rejected("SELECT * FROM events AS window, oss('https://a/x.csv','CSV','c String') AS m");
+    rejected("SELECT * FROM events AS into, futureFn(1) AS m");
+    rejected("SELECT * FROM events AS qualify, futureFn(1) AS m");
+    rejected("SELECT * FROM events window, futureFn(1) AS m");
+    rejected("SELECT * FROM events AS format, futureFn(1) AS m");
+  });
+
+  it("rejects dollar-quoted strings (they hid the rest of the query from the scan)", () => {
+    rejected("SELECT $$'$$ AS x FROM events AS e, oss('https://a/x.csv','CSV','c String') AS m");
+    rejected("SELECT $tag$'$tag$ AS x FROM events AS e, futureFn(1) AS m");
+    rejected(
+      "WITH q AS (SELECT $$'$$ AS z FROM events AS e, futureIntrospector(default, events) AS f) SELECT * FROM q",
+    );
+  });
+
+  it("rejects database-qualified table functions, spaced or not", () => {
+    rejected("SELECT * FROM default.futureIntrospector(1)");
+    rejected("SELECT * FROM default . futureIntrospector(1)");
+    rejected("SELECT * FROM events AS e, default.futureFn(1) AS m");
+    rejected("SELECT * FROM  default  .  mergeTreeIndex ( default , events )");
+  });
+
+  it("rejects the table functions the name list previously missed", () => {
+    rejected("SELECT * FROM oss('https://a/x.csv','CSV','c String')");
+    rejected("SELECT * FROM cosn('https://a/x.csv','CSV','c String')");
+    rejected("SELECT * FROM hive('a','b','c','d')");
+    rejected("SELECT * FROM generate_series(1, 10)");
+    rejected("SELECT * FROM null('x String')");
+    rejected("SELECT joinGet('db.j','v',1) FROM events");
+  });
+
   it("rejects table functions inside a subquery's table list", () => {
     rejected("SELECT * FROM (SELECT * FROM events, brandNewFunc(1)) AS sub");
     rejected("SELECT * FROM (SELECT * FROM brandNewFunc(1)) AS sub");
@@ -199,5 +233,12 @@ describe("run_query SQL guard — legitimate analytics queries pass", () => {
     );
     // a comma inside a string literal must not be read as a table separator
     validateFreeQuery("SELECT count() FROM events WHERE event_name = 'a, count(x)'");
+    // database-qualified TABLES stay legal (only qualified CALLS are refused)
+    validateFreeQuery("SELECT count() FROM default.events");
+    validateFreeQuery("SELECT count() FROM default . events");
+    validateFreeQuery(
+      "SELECT * FROM default.events AS e, default.sessions_mv AS s WHERE e.session_id = s.session_id",
+    );
+    validateFreeQuery("SELECT * FROM events AS a, sessions_mv AS b, users_mv AS c");
   });
 });

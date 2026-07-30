@@ -1,6 +1,11 @@
 import { queryAnalytics } from "@/lib/clickhouse/analytics-client";
 import { getDb } from "@/lib/db";
-import { type McpAuthContext, mcpAuthContext, verifyMcpBearerToken } from "@/lib/mcp/auth";
+import {
+  type McpAuthContext,
+  McpUnavailableError,
+  mcpAuthContext,
+  verifyMcpBearerToken,
+} from "@/lib/mcp/auth";
 import { runTool, toolText } from "@/lib/mcp/errors";
 import {
   type McpQueryContext,
@@ -292,9 +297,13 @@ const handler = createMcpHandler(
               // Hard limits, not truncation — ClickHouse throws on overflow.
               // The read budget has to clear a full 90-day scan of a busy
               // project, or plain aggregates would fail where the curated
-              // tools (running the same scan) succeed.
+              // tools (running the same scan) succeed. max_result_bytes caps
+              // the RESPONSE: input_values/output_content are unbounded
+              // strings, so a 10k-row select of them would otherwise build an
+              // arbitrarily large string in this shared process.
               max_execution_time: 30,
               max_result_rows: 10_000,
+              max_result_bytes: 32_000_000,
               max_rows_to_read: 50_000_000,
               max_bytes_to_read: 5_000_000_000,
             },
@@ -305,7 +314,27 @@ const handler = createMcpHandler(
               note: "Empty result. Row policies only return data of the authorized workspace; also check project_id and time filters.",
             });
           }
-          return toolText({ rowCount: rows.length, rows });
+          // Second cap, on what we serialise: the model has to read this, and
+          // the process has to hold it. Truncate loudly rather than build a
+          // huge string.
+          const MAX_RESPONSE_CHARS = 200_000;
+          let payload = { rowCount: rows.length, rows } as Record<string, unknown>;
+          if (JSON.stringify(payload).length > MAX_RESPONSE_CHARS) {
+            const kept: Record<string, unknown>[] = [];
+            let size = 0;
+            for (const row of rows) {
+              size += JSON.stringify(row).length + 1;
+              if (size > MAX_RESPONSE_CHARS) break;
+              kept.push(row);
+            }
+            payload = {
+              rowCount: rows.length,
+              truncated: true,
+              note: `Result too large to return in full; showing the first ${kept.length} of ${rows.length} rows. Aggregate or select fewer columns.`,
+              rows: kept,
+            };
+          }
+          return toolText(payload);
         });
       },
     );
@@ -353,22 +382,39 @@ async function route(
     return new Response("Not found", { status: 404 });
   }
 
-  const bearer = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-  if (bearer) {
-    const limit = limiter.consume(bearer);
-    if (!limit.allowed) {
+  // Keyed by client IP, BEFORE authentication and without touching the token:
+  // keying on the raw bearer let an attacker rotate a random value per request
+  // (fresh full bucket every time), pinned a Map entry per value, and kept
+  // live plaintext tokens in the heap — the one limiter in the repo that
+  // stored a secret unhashed.
+  const clientIp = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+  const limit = limiter.consume(clientIp);
+  if (!limit.allowed) {
+    return Response.json(
+      {
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Rate limited, retry shortly" },
+        id: null,
+      },
+      { status: 429, headers: { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) } },
+    );
+  }
+
+  try {
+    return await authHandler(request);
+  } catch (err) {
+    if (err instanceof McpUnavailableError) {
       return Response.json(
         {
           jsonrpc: "2.0",
-          error: { code: -32000, message: "Rate limited, retry shortly" },
+          error: { code: -32000, message: "Analytics backend temporarily unavailable" },
           id: null,
         },
-        { status: 429, headers: { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) } },
+        { status: 503, headers: { "Retry-After": "10" } },
       );
     }
+    throw err;
   }
-
-  return authHandler(request);
 }
 
 export { route as GET, route as POST, route as DELETE };

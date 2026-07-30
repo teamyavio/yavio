@@ -23,7 +23,7 @@ import {
   rotateRefreshToken,
   verifyAccessToken,
 } from "../lib/oauth/store";
-import { hashToken } from "../lib/oauth/tokens";
+import { deriveSuccessorTokens, hashToken } from "../lib/oauth/tokens";
 
 let insertedValues: Record<string, unknown>[];
 let updateSets: Record<string, unknown>[];
@@ -57,6 +57,17 @@ function chainSelect(rows: unknown[]) {
     from: () => ({ where: () => ({ limit: () => Promise.resolve(rows) }) }),
   }));
 }
+/** Successive SELECTs return successive entries (last one repeats). */
+function chainSelectQueue(queue: unknown[][]) {
+  let i = 0;
+  db.select.mockImplementation(() => ({
+    from: () => ({
+      where: () => ({
+        limit: () => Promise.resolve(queue[Math.min(i++, queue.length - 1)]),
+      }),
+    }),
+  }));
+}
 
 const baseTokenRow = {
   id: "row-1",
@@ -72,6 +83,7 @@ const baseTokenRow = {
   refreshTokenExpiresAt: new Date(Date.now() + 86400_000),
   rotatedAt: null as Date | null,
   graceUsedAt: null as Date | null,
+  rotationNonce: null as string | null,
   revokedAt: null as Date | null,
 };
 
@@ -157,32 +169,37 @@ describe("oauth token store", () => {
   });
 
   it("rotate: replay beyond the grace window revokes the whole family", async () => {
-    chainSelect([{ ...baseTokenRow, rotatedAt: new Date(Date.now() - 60_000) }]);
+    chainSelect([
+      { ...baseTokenRow, rotatedAt: new Date(Date.now() - 60_000), rotationNonce: "n" },
+    ]);
     chainUpdate([]);
     await expect(rotateRefreshToken("yvo_rt_x", "yvc_client")).rejects.toBeInstanceOf(OAuthError);
-    // the family revocation is the update that set revokedAt
     expect(updateSets.some((s) => s.revokedAt instanceof Date)).toBe(true);
   });
 
-  it("rotate: replay within the grace window issues ONE fresh pair and marks the grace used", async () => {
-    chainSelect([{ ...baseTokenRow, rotatedAt: new Date(Date.now() - 5_000) }]);
+  it("rotate: a concurrent duplicate returns the SAME pair the winner got — no second chain", async () => {
+    const nonce = "fixed-nonce";
+    const winner = deriveSuccessorTokens("yvo_rt_x", nonce);
+    chainSelectQueue([
+      // 1) the presented (already rotated) row
+      [{ ...baseTokenRow, rotatedAt: new Date(Date.now() - 5_000), rotationNonce: nonce }],
+      // 2) the successor row the winner inserted — still live
+      [{ expiresAt: new Date(Date.now() + 3_500_000), revokedAt: null }],
+    ]);
     chainUpdate([{ id: "row-1" }]);
+
     const result = await rotateRefreshToken("yvo_rt_x", "yvc_client");
-    expect(result.accessToken).toMatch(/^yvo_at_/);
-    expect(result.refreshToken).toMatch(/^yvo_rt_/);
-    // no revocation happened
+
+    expect(result.accessToken).toBe(winner.accessToken);
+    expect(result.refreshToken).toBe(winner.refreshToken);
+    // nothing new inserted — a second chain is what made replay undetectable
+    expect(insertedValues).toHaveLength(0);
     expect(updateSets.some((s) => s.revokedAt instanceof Date)).toBe(false);
-    // new pair stays in the same grant family
-    expect(insertedValues[0].grantId).toBe("grant-1");
-    // the window is spent, so it cannot be milked for further forks
-    expect(updateSets.some((s) => s.graceUsedAt instanceof Date)).toBe(true);
-    // the token hash stays in place — a later replay must still be detectable
-    expect(updateSets.some((s) => s.refreshTokenHash === null)).toBe(false);
   });
 
-  it("rotate: a SECOND grace-window reuse revokes the family", async () => {
+  it("rotate: a rotated row with no recorded nonce is treated as replay", async () => {
     chainSelect([
-      { ...baseTokenRow, rotatedAt: new Date(Date.now() - 5_000), graceUsedAt: new Date() },
+      { ...baseTokenRow, rotatedAt: new Date(Date.now() - 5_000), rotationNonce: null },
     ]);
     chainUpdate([]);
     await expect(rotateRefreshToken("yvo_rt_x", "yvc_client")).rejects.toMatchObject({
@@ -191,33 +208,31 @@ describe("oauth token store", () => {
     expect(updateSets.some((s) => s.revokedAt instanceof Date)).toBe(true);
   });
 
-  it("rotate: losing the grace claim to a parallel request also revokes the family", async () => {
-    chainSelect([{ ...baseTokenRow, rotatedAt: new Date(Date.now() - 5_000) }]);
-    chainUpdate([]); // conditional graceUsedAt claim wins nothing
+  it("rotate: a duplicate whose successor was already revoked revokes the family", async () => {
+    const nonce = "fixed-nonce";
+    chainSelectQueue([
+      [{ ...baseTokenRow, rotatedAt: new Date(Date.now() - 5_000), rotationNonce: nonce }],
+      [{ expiresAt: new Date(Date.now() + 1000), revokedAt: new Date() }],
+    ]);
+    chainUpdate([]);
     await expect(rotateRefreshToken("yvo_rt_x", "yvc_client")).rejects.toMatchObject({
       error: "invalid_grant",
     });
     expect(updateSets.some((s) => s.revokedAt instanceof Date)).toBe(true);
   });
 
-  it("rotate: losing the rotation claim falls back to the bounded grace path", async () => {
-    chainSelect([baseTokenRow]);
-    // first update (rotatedAt claim) loses, second (hash consume) wins
-    let call = 0;
-    db.update.mockImplementation(() => ({
-      set: (s: Record<string, unknown>) => {
-        updateSets.push(s);
-        call++;
-        const rows = call === 1 ? [] : [{ id: "row-1" }];
-        return {
-          where: () =>
-            Object.assign(Promise.resolve(rows), { returning: () => Promise.resolve(rows) }),
-        };
-      },
-    }));
+  it("rotate: losing the rotation claim replays the winner instead of forking", async () => {
+    const nonce = "winner-nonce";
+    const winner = deriveSuccessorTokens("yvo_rt_x", nonce);
+    chainSelectQueue([
+      [baseTokenRow], // looked pristine when we read it
+      [{ rotationNonce: nonce }], // re-read after losing the claim
+      [{ expiresAt: new Date(Date.now() + 3_500_000), revokedAt: null }],
+    ]);
+    chainUpdate([]); // our conditional UPDATE won nothing
     const result = await rotateRefreshToken("yvo_rt_x", "yvc_client");
-    expect(result.refreshToken).toMatch(/^yvo_rt_/);
-    expect(updateSets.some((s) => s.graceUsedAt instanceof Date)).toBe(true);
+    expect(result.refreshToken).toBe(winner.refreshToken);
+    expect(insertedValues).toHaveLength(0);
     expect(updateSets.some((s) => s.revokedAt instanceof Date)).toBe(false);
   });
 

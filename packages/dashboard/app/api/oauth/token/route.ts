@@ -1,4 +1,4 @@
-import { resolveClient } from "@/lib/oauth/clients";
+import { requireKnownClient } from "@/lib/oauth/clients";
 import { mcpResourceUri } from "@/lib/oauth/constants";
 import { OAuthError } from "@/lib/oauth/errors";
 import {
@@ -7,7 +7,7 @@ import {
   pruneExpired,
   rotateRefreshToken,
 } from "@/lib/oauth/store";
-import { hashToken, verifyPkceS256 } from "@/lib/oauth/tokens";
+import { verifyPkceS256 } from "@/lib/oauth/tokens";
 import { rateLimitConfigs } from "@/lib/rate-limit/config";
 import { RateLimiter } from "@/lib/rate-limit/rate-limiter";
 
@@ -65,8 +65,12 @@ async function handleAuthorizationCode(params: URLSearchParams): Promise<Respons
   const redirectUri = require(params, "redirect_uri");
   checkResource(params);
 
-  // Unknown DCR ids answer 401 invalid_client — Claude's re-register signal.
-  await resolveClient(clientId);
+  // Existence check only: an unknown client_id answers 401 invalid_client,
+  // which is Claude's re-register signal. Deliberately NOT resolveClient() —
+  // that would fetch an attacker-named CIMD host from an unauthenticated
+  // endpoint, and its result is unused here anyway: the client binding,
+  // redirect_uri and PKCE are all re-checked against the stored code below.
+  await requireKnownClient(clientId);
 
   const grant = await consumeAuthorizationCode(code);
   if (grant.clientId !== clientId) {
@@ -133,10 +137,10 @@ async function handleRefreshToken(params: URLSearchParams): Promise<Response> {
   );
 }
 
-// Keyed by the presented grant (code or refresh token), which is per-user —
-// a CIMD client_id is one fixed URL shared by every user of that connector,
-// and connector egress IPs are shared too, so either alone would throttle
-// unrelated tenants against each other.
+// Keyed by client IP. Keying on the presented grant looked more per-user but
+// made the limiter useless: a caller varying `code=` per request gets a fresh
+// full bucket every time, so it could never fire on the one caller worth
+// limiting — an unauthenticated one guessing codes.
 const limiter = new RateLimiter(rateLimitConfigs.analytics);
 limiter.start();
 
@@ -145,8 +149,7 @@ export async function POST(request: Request): Promise<Response> {
     const params = await parseBody(request);
 
     const clientIp = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
-    const grant = params.get("refresh_token") ?? params.get("code") ?? "";
-    const limit = limiter.consume(grant !== "" ? hashToken(grant) : `ip:${clientIp}`);
+    const limit = limiter.consume(clientIp);
     if (!limit.allowed) {
       return Response.json(
         { error: "slow_down", error_description: "too many token requests" },

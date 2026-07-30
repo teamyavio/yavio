@@ -9,7 +9,7 @@ import {
   REFRESH_TOKEN_TTL_MS,
 } from "./constants";
 import { OAuthError } from "./errors";
-import { generateToken, hashToken } from "./tokens";
+import { deriveSuccessorTokens, generateRotationNonce, generateToken, hashToken } from "./tokens";
 
 export interface IssuedTokens {
   accessToken: string;
@@ -99,11 +99,18 @@ interface IssueParams {
   scope: string;
   audience: string;
   includeRefreshToken: boolean;
+  /**
+   * Pre-derived pair, supplied by rotation so a concurrent duplicate refresh
+   * can reproduce it exactly. Omitted for a fresh grant, which is random.
+   */
+  tokens?: { accessToken: string; refreshToken: string };
 }
 
 export async function issueTokens(params: IssueParams): Promise<IssuedTokens> {
-  const accessToken = generateToken("at");
-  const refreshToken = params.includeRefreshToken ? generateToken("rt") : null;
+  const accessToken = params.tokens?.accessToken ?? generateToken("at");
+  const refreshToken = params.includeRefreshToken
+    ? (params.tokens?.refreshToken ?? generateToken("rt"))
+    : null;
   const now = Date.now();
 
   await getDb()
@@ -136,18 +143,22 @@ async function revokeGrantFamily(grantId: string): Promise<void> {
 }
 
 /**
- * Refresh-token rotation with reuse detection:
- * - normal path: atomically mark the row rotated, issue a fresh pair in the
- *   same grant family;
- * - a rotated-out token re-presented within the grace window is treated as a
- *   parallel-refresh race (Claude/ChatGPT are known to double-refresh) and
- *   gets ONE replacement pair — the reuse atomically consumes the old hash,
- *   so the window cannot be milked for unbounded forks;
- * - beyond the grace window, or on a second reuse, it is replay: the whole
- *   grant family is revoked.
+ * Refresh-token rotation with reuse detection.
  *
- * Dead tokens answer with RFC 6749 `invalid_grant` verbatim — Claude keys its
- * re-auth flow off that exact code.
+ * Rotation is IDEMPOTENT inside the grace window: the successor pair is
+ * derived from (presented token, a nonce chosen by the winning rotation), so
+ * a concurrent duplicate refresh — which Claude and ChatGPT both do — is
+ * answered with exactly the pair the winner received.
+ *
+ * That property is the whole point. An earlier design minted a *second* pair
+ * for the loser, which silently forked the grant into two independently
+ * rotating chains: neither ever re-presented a stale token again, so reuse
+ * detection could never fire and a stolen refresh token turned into
+ * permanent, undetectable access. One chain per grant keeps replay visible.
+ *
+ * Beyond the grace window a rotated-out token is replay: the whole family is
+ * revoked. Dead tokens answer with RFC 6749 `invalid_grant` verbatim, which
+ * is the code Claude keys its re-authorization flow off.
  */
 export async function rotateRefreshToken(
   rawRefreshToken: string,
@@ -178,44 +189,82 @@ export async function rotateRefreshToken(
     throw new OAuthError("invalid_grant", "refresh token has expired", 400);
   }
 
-  const claimGraceReuse = async (): Promise<void> => {
-    // The window is worth exactly one replacement. Claiming graceUsedAt
-    // atomically bounds the fork, while the token hash stays in place so a
-    // later replay is still recognised as this grant's token and revokes it.
-    const claimed = await db
-      .update(oauthTokens)
-      .set({ graceUsedAt: new Date(), lastUsedAt: new Date() })
-      .where(and(eq(oauthTokens.id, row.id), isNull(oauthTokens.graceUsedAt)))
-      .returning({ id: oauthTokens.id });
-    if (claimed.length === 0) {
+  /**
+   * Re-derive and return the successor of an already-rotated row. Because the
+   * pair is a deterministic function of (presented token, stored nonce), the
+   * loser of a concurrent refresh gets exactly what the winner got — one
+   * chain, so a later replay of this token is still detectable.
+   */
+  const replayWinningRotation = async (nonce: string): Promise<IssuedTokens> => {
+    const successor = deriveSuccessorTokens(rawRefreshToken, nonce);
+    const rows = await db
+      .select({ expiresAt: oauthTokens.accessTokenExpiresAt, revokedAt: oauthTokens.revokedAt })
+      .from(oauthTokens)
+      .where(eq(oauthTokens.accessTokenHash, hashToken(successor.accessToken)))
+      .limit(1);
+    if (rows.length === 0 || rows[0].revokedAt !== null) {
       await revokeGrantFamily(row.grantId);
       throw new OAuthError("invalid_grant", "refresh token has been revoked", 400);
     }
-    console.warn(
-      `[oauth] grace-window refresh reuse on grant ${row.grantId} (client ${row.clientId}) — one replacement issued`,
-    );
+    const remainingMs = rows[0].expiresAt.getTime() - Date.now();
+    return {
+      accessToken: successor.accessToken,
+      accessTokenExpiresInSeconds: Math.max(1, Math.floor(remainingMs / 1000)),
+      refreshToken: successor.refreshToken,
+    };
   };
 
   if (row.rotatedAt !== null) {
     const sinceRotation = Date.now() - row.rotatedAt.getTime();
-    if (sinceRotation > REFRESH_ROTATION_GRACE_MS || row.graceUsedAt !== null) {
+    if (sinceRotation > REFRESH_ROTATION_GRACE_MS || row.rotationNonce === null) {
       await revokeGrantFamily(row.grantId);
       throw new OAuthError("invalid_grant", "refresh token has been revoked", 400);
     }
-    await claimGraceReuse();
-  } else {
-    const claimed = await db
-      .update(oauthTokens)
-      .set({ rotatedAt: new Date(), lastUsedAt: new Date() })
-      .where(and(eq(oauthTokens.id, row.id), isNull(oauthTokens.rotatedAt)))
-      .returning({ id: oauthTokens.id });
-    if (claimed.length === 0) {
-      // A parallel request rotated between our SELECT and UPDATE — same
-      // race, same bounded handling.
-      await claimGraceReuse();
-    }
+    console.warn(
+      `[oauth] concurrent refresh on grant ${row.grantId} (client ${row.clientId}) — replaying the winning rotation`,
+    );
+    const replayed = await replayWinningRotation(row.rotationNonce);
+    return {
+      ...replayed,
+      workspaceId: row.workspaceId,
+      userId: row.userId,
+      scope: row.scope,
+      audience: row.audience,
+    };
   }
 
+  // Claim the rotation. The nonce is written in the same conditional UPDATE,
+  // so exactly one caller ever chooses it.
+  const nonce = generateRotationNonce();
+  const claimed = await db
+    .update(oauthTokens)
+    .set({ rotatedAt: new Date(), lastUsedAt: new Date(), rotationNonce: nonce })
+    .where(and(eq(oauthTokens.id, row.id), isNull(oauthTokens.rotatedAt)))
+    .returning({ nonce: oauthTokens.rotationNonce });
+
+  if (claimed.length === 0) {
+    // Lost the race between our SELECT and UPDATE: re-read the winner's nonce
+    // and hand back the same successor.
+    const fresh = await db
+      .select({ rotationNonce: oauthTokens.rotationNonce })
+      .from(oauthTokens)
+      .where(eq(oauthTokens.id, row.id))
+      .limit(1);
+    if (fresh.length === 0 || fresh[0].rotationNonce === null) {
+      await revokeGrantFamily(row.grantId);
+      throw new OAuthError("invalid_grant", "refresh token has been revoked", 400);
+    }
+    const replayed = await replayWinningRotation(fresh[0].rotationNonce);
+    return {
+      ...replayed,
+      workspaceId: row.workspaceId,
+      userId: row.userId,
+      scope: row.scope,
+      audience: row.audience,
+    };
+  }
+
+  const successor = deriveSuccessorTokens(rawRefreshToken, nonce);
   const issued = await issueTokens({
     grantId: row.grantId,
     clientId: row.clientId,
@@ -224,6 +273,7 @@ export async function rotateRefreshToken(
     scope: row.scope,
     audience: row.audience,
     includeRefreshToken: true,
+    tokens: successor,
   });
 
   return {

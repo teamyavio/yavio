@@ -157,6 +157,28 @@ export function validateClientIdUrl(clientId: string): URL {
 
 function rawFetch(url: URL): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
+    // `timeout` on https.request is a per-socket INACTIVITY timer: a host
+    // trickling one byte every few seconds keeps it alive indefinitely and
+    // pins a request handler with it. Measured: a 1s timeout survived >10s of
+    // drip. So arm a real wall-clock deadline as well.
+    let settled = false;
+    const deadline = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      request.destroy();
+      reject(new OAuthError("invalid_client", "client metadata document timed out", 400));
+    }, FETCH_TIMEOUT_MS);
+    const finish = <T>(fn: (value: T) => void) => {
+      return (value: T) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        fn(value);
+      };
+    };
+    const done = finish(resolve);
+    const fail = finish(reject);
+
     const request = https.request(
       url,
       {
@@ -172,13 +194,13 @@ function rawFetch(url: URL): Promise<{ status: number; body: string }> {
           size += chunk.length;
           if (size > MAX_DOCUMENT_BYTES) {
             request.destroy();
-            reject(new OAuthError("invalid_client", "client metadata document too large", 400));
+            fail(new OAuthError("invalid_client", "client metadata document too large", 400));
             return;
           }
           chunks.push(chunk);
         });
         response.on("end", () => {
-          resolve({
+          done({
             status: response.statusCode ?? 0,
             body: Buffer.concat(chunks).toString("utf8"),
           });
@@ -188,7 +210,7 @@ function rawFetch(url: URL): Promise<{ status: number; body: string }> {
     request.on("timeout", () => {
       request.destroy(new Error("timeout"));
     });
-    request.on("error", (err) => reject(err));
+    request.on("error", (err) => fail(err));
     request.end();
   });
 }

@@ -1,5 +1,5 @@
 {
-  "id": "b93352b5-ac95-4146-9f73-9d411bf3dd54",
+  "id": "173a690c-fd8e-4db9-9ea3-87524bc5955d",
   "prevId": "3dc48d5c-2eab-435c-9041-741b638ce80b",
   "version": "7",
   "dialect": "postgresql",
@@ -782,6 +782,12 @@
         "grace_used_at": {
           "name": "grace_used_at",
           "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "rotation_nonce": {
+          "name": "rotation_nonce",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
