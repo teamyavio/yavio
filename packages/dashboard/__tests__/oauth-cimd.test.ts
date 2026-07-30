@@ -4,9 +4,50 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   fetchClientMetadata,
   isAcceptableRedirectUri,
+  isBlockedAddress,
   validateClientIdUrl,
 } from "../lib/oauth/cimd";
 import { OAuthError } from "../lib/oauth/errors";
+
+/**
+ * The SSRF address check. These cases are the ones the loopback-based
+ * document tests below can never reach, and the reason the first live
+ * connection attempt failed: a `::ffff:0.0.0.0/96` entry made net.BlockList
+ * reject EVERY public IPv4 address, because it maps IPv4 into that range.
+ */
+describe("SSRF address guard", () => {
+  it("allows real public addresses (regression: claude.ai was blocked)", () => {
+    expect(isBlockedAddress("160.79.104.10", 4)).toBe(false); // claude.ai
+    expect(isBlockedAddress("2607:6bc0::10", 6)).toBe(false); // claude.ai AAAA
+    expect(isBlockedAddress("8.8.8.8", 4)).toBe(false);
+    expect(isBlockedAddress("104.18.0.1", 4)).toBe(false);
+    expect(isBlockedAddress("2606:4700::1111", 6)).toBe(false);
+  });
+
+  it("blocks loopback, private, link-local and cloud metadata", () => {
+    expect(isBlockedAddress("127.0.0.1", 4)).toBe(true);
+    expect(isBlockedAddress("10.1.2.3", 4)).toBe(true);
+    expect(isBlockedAddress("172.16.0.1", 4)).toBe(true);
+    expect(isBlockedAddress("192.168.1.1", 4)).toBe(true);
+    expect(isBlockedAddress("169.254.169.254", 4)).toBe(true); // GCP/AWS metadata
+    expect(isBlockedAddress("100.64.0.1", 4)).toBe(true); // CGNAT
+    expect(isBlockedAddress("0.0.0.0", 4)).toBe(true);
+    expect(isBlockedAddress("255.255.255.255", 4)).toBe(true);
+    expect(isBlockedAddress("::1", 6)).toBe(true);
+    expect(isBlockedAddress("fd00::1", 6)).toBe(true); // unique local
+    expect(isBlockedAddress("fe80::1", 6)).toBe(true); // link-local
+  });
+
+  it("still blocks IPv4-mapped private addresses without a v4-mapped rule", () => {
+    // Node normalises these onto the IPv4 rules — this is what makes it safe
+    // to omit ::ffff:0.0.0.0/96.
+    expect(isBlockedAddress("::ffff:127.0.0.1", 6)).toBe(true);
+    expect(isBlockedAddress("::ffff:169.254.169.254", 6)).toBe(true);
+    expect(isBlockedAddress("::ffff:10.0.0.1", 6)).toBe(true);
+    // ...while a mapped PUBLIC address is correctly allowed
+    expect(isBlockedAddress("::ffff:8.8.8.8", 6)).toBe(false);
+  });
+});
 
 describe("client_id URL validation", () => {
   it("accepts plain https URLs", () => {

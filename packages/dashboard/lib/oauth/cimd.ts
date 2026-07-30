@@ -40,14 +40,22 @@ blockList.addSubnet("224.0.0.0", 3); // multicast + class E + broadcast
 // IPv6
 blockList.addSubnet("::", 128, "ipv6"); // unspecified
 blockList.addSubnet("::1", 128, "ipv6"); // loopback
-blockList.addSubnet("::ffff:0.0.0.0", 96, "ipv6"); // ALL v4-mapped (legit A records arrive as plain v4)
 blockList.addSubnet("64:ff9b::", 96, "ipv6"); // NAT64
 blockList.addSubnet("fc00::", 7, "ipv6"); // unique local
 blockList.addSubnet("fe80::", 10, "ipv6"); // link-local
+// NOTE: deliberately NO ::ffff:0.0.0.0/96 rule. net.BlockList maps IPv4 into
+// that range when checking, so listing it blocks EVERY public IPv4 address —
+// it rejected claude.ai (160.79.104.10) in the first live test. Mapped
+// addresses are still covered: Node normalises ::ffff:127.0.0.1 against the
+// IPv4 rules above, which is asserted in the tests.
+
+/** Exported for tests: the address check the DNS hook enforces. */
+export function isBlockedAddress(address: string, family: number): boolean {
+  return blockList.check(address, family === 6 ? "ipv6" : "ipv4");
+}
 
 function assertPublicAddress(address: string, family: number): void {
-  const type = family === 6 ? "ipv6" : "ipv4";
-  if (blockList.check(address, type)) {
+  if (isBlockedAddress(address, family)) {
     throw new OAuthError("invalid_client", "client_id URL resolves to a non-public address", 400);
   }
 }
