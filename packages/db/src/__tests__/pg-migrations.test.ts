@@ -11,7 +11,7 @@ describe("PostgreSQL migrations", () => {
   });
 
   describe("fresh migration — all tables created", () => {
-    it("creates all 11 application tables", async () => {
+    it("creates all 14 application tables", async () => {
       const { sql } = getServiceDb();
       const tables = await sql`
         SELECT table_name FROM information_schema.tables
@@ -20,13 +20,16 @@ describe("PostgreSQL migrations", () => {
       `;
       const names = tables.map((r) => r.table_name);
       const appTables = names.filter((n: string) => !n.startsWith("__"));
-      expect(appTables).toHaveLength(11);
+      expect(appTables).toHaveLength(14);
       expect(names).toEqual(
         expect.arrayContaining([
           "api_keys",
           "invitations",
           "login_attempts",
           "oauth_accounts",
+          "oauth_clients",
+          "oauth_codes",
+          "oauth_tokens",
           "projects",
           "sessions",
           "stripe_webhook_events",

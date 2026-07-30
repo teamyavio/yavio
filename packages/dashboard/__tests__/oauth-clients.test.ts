@@ -17,10 +17,10 @@ function chainInsert() {
   db.insert.mockImplementation(() => ({
     values: (v: Record<string, unknown>) => {
       insertedValues.push(v);
-      return {
+      // awaitable AND chainable: a real Promise with the conflict method
+      return Object.assign(Promise.resolve(), {
         onConflictDoUpdate: () => Promise.resolve(),
-        then: (resolve: () => void) => Promise.resolve().then(resolve),
-      };
+      });
     },
   }));
 }
