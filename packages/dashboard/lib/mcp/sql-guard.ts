@@ -60,6 +60,31 @@ const BANNED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 /** Tables the row policies cover — the only ones worth querying anyway. */
 export const QUERYABLE_TABLES = ["events", "sessions_mv", "users_mv", "tool_registry"] as const;
 
+/**
+ * Table references may also be comma-separated (`FROM a, b`), which the
+ * FROM/JOIN rule above cannot see. Commas are only unambiguously table
+ * separators inside the table-list region, so isolate that region — from a
+ * FROM/JOIN keyword up to the next clause keyword — and reject any function
+ * call in it. Verified live: `FROM events AS e, mergeTreeIndex(default,
+ * events) AS m` reads raw index tuples straight past the row policies, and
+ * needs no source privilege, so the database itself does not stop it.
+ */
+const TABLE_LIST_REGION =
+  /\b(?:from|join)\b([\s\S]*?)(?=\b(?:where|prewhere|group|order|limit|having|union|settings|window|on|using|format|into)\b|$)/gi;
+
+function assertNoCommaTableFunction(sql: string): void {
+  TABLE_LIST_REGION.lastIndex = 0;
+  let match: RegExpExecArray | null = TABLE_LIST_REGION.exec(sql);
+  while (match !== null) {
+    if (/,\s*[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(match[1])) {
+      throw new McpToolError(
+        "Query rejected: table functions are not allowed (query the events/sessions_mv/users_mv/tool_registry tables).",
+      );
+    }
+    match = TABLE_LIST_REGION.exec(sql);
+  }
+}
+
 export function validateFreeQuery(rawSql: string): string {
   const sql = rawSql.trim().replace(/;+\s*$/, "");
 
@@ -80,5 +105,6 @@ export function validateFreeQuery(rawSql: string): string {
       throw new McpToolError(`Query rejected: ${reason}.`);
     }
   }
+  assertNoCommaTableFunction(sql);
   return sql;
 }

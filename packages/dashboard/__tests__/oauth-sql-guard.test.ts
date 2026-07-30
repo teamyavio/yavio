@@ -89,6 +89,15 @@ describe("run_query SQL guard — attack corpus", () => {
     rejected("select * from x(1)");
   });
 
+  it("rejects table functions in COMMA position too (verified live: comma-position mergeTreeIndex leaks other tenants' index tuples)", () => {
+    rejected("SELECT m.* FROM events AS e, mergeTreeIndex(default, events) AS m");
+    rejected("SELECT * FROM events, numbers(3)");
+    // the point of the rule: names the denylist has never heard of
+    rejected("SELECT * FROM events AS e, someFutureIntrospector(default, events) AS m");
+    rejected("SELECT * FROM events e , brandNewFunc('x') f WHERE e.status = 'error'");
+    rejected("SELECT * FROM sessions_mv AS s, anotherOne(1) AS a GROUP BY s.session_id");
+  });
+
   it("rejects output redirection and format overrides", () => {
     rejected("SELECT 1 INTO OUTFILE '/tmp/x'");
     rejected("SELECT 1 FORMAT Native");
@@ -138,5 +147,25 @@ describe("run_query SQL guard — legitimate analytics queries pass", () => {
     validateFreeQuery("SELECT count() FROM sessions_mv");
     validateFreeQuery("SELECT count() FROM users_mv");
     validateFreeQuery("SELECT tool_name FROM tool_registry LIMIT 50");
+  });
+
+  it("the comma rule does not trip on ordinary function calls elsewhere", () => {
+    // commas inside SELECT-list, WHERE, GROUP BY, ON and HAVING function calls
+    validateFreeQuery("SELECT concat(event_name, upper(status)) FROM events");
+    validateFreeQuery("SELECT count() FROM events WHERE position(event_name, 'search') > 0");
+    validateFreeQuery(
+      "SELECT e.event_name FROM events AS e JOIN sessions_mv AS s ON s.session_id = e.session_id AND greatest(e.latency_ms, 0) > 0",
+    );
+    validateFreeQuery(
+      "SELECT if(status = 'error', 1, 0) AS failed, count() FROM events GROUP BY failed HAVING count() > toUInt8(1)",
+    );
+    validateFreeQuery(
+      "SELECT formatDateTime(timestamp, '%Y-%m-%d') d, count() FROM events GROUP BY d ORDER BY d LIMIT 10",
+    );
+    // plain multi-table comma joins stay legal
+    validateFreeQuery("SELECT * FROM events, sessions_mv");
+    validateFreeQuery(
+      "SELECT * FROM events AS e, sessions_mv AS s WHERE e.session_id = s.session_id",
+    );
   });
 });
