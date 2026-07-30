@@ -1,8 +1,15 @@
 import { resolveClient } from "@/lib/oauth/clients";
 import { mcpResourceUri } from "@/lib/oauth/constants";
 import { OAuthError } from "@/lib/oauth/errors";
-import { consumeAuthorizationCode, issueTokens, rotateRefreshToken } from "@/lib/oauth/store";
+import {
+  consumeAuthorizationCode,
+  issueTokens,
+  pruneExpired,
+  rotateRefreshToken,
+} from "@/lib/oauth/store";
 import { verifyPkceS256 } from "@/lib/oauth/tokens";
+import { rateLimitConfigs } from "@/lib/rate-limit/config";
+import { RateLimiter } from "@/lib/rate-limit/rate-limiter";
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -126,9 +133,36 @@ async function handleRefreshToken(params: URLSearchParams): Promise<Response> {
   );
 }
 
+// Keyed by ip:client_id — ChatGPT/Claude egress IPs are shared across users,
+// so a bare per-IP bucket would throttle unrelated tenants together.
+const limiter = new RateLimiter(rateLimitConfigs.analytics);
+limiter.start();
+
 export async function POST(request: Request): Promise<Response> {
   try {
     const params = await parseBody(request);
+
+    const clientIp = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+    const limit = limiter.consume(`${clientIp}:${params.get("client_id") ?? ""}`);
+    if (!limit.allowed) {
+      return Response.json(
+        { error: "slow_down", error_description: "too many token requests" },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)),
+            ...RESPONSE_HEADERS,
+          },
+        },
+      );
+    }
+
+    // Opportunistic cleanup instead of a cron: ~1% of token requests sweep
+    // long-expired codes and token rows.
+    if (Math.random() < 0.01) {
+      pruneExpired().catch(() => {});
+    }
+
     const grantType = require(params, "grant_type");
 
     if (grantType === "authorization_code") {

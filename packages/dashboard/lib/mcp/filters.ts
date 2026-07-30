@@ -17,7 +17,15 @@ function toClickHouseDateTime(date: Date): string {
 }
 
 function parseDate(value: string, name: string): Date {
-  const date = new Date(value);
+  // Timezone-less inputs are treated as UTC — bare `new Date("...T12:00:00")`
+  // would silently parse as server-local while all output is UTC.
+  let normalized = value.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    normalized = `${normalized}T00:00:00Z`;
+  } else if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(normalized)) {
+    normalized = `${normalized.replace(" ", "T")}Z`;
+  }
+  const date = new Date(normalized);
   if (Number.isNaN(date.getTime())) {
     throw new McpToolError(
       `${name} is not a valid date. Use ISO format, e.g. 2026-07-01 or 2026-07-01T00:00:00Z.`,

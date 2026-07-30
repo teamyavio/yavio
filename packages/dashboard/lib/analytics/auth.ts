@@ -1,4 +1,5 @@
 import { getServerSession } from "@/lib/auth/get-session";
+import { ROLE_HIERARCHY } from "@/lib/auth/role-hierarchy";
 import { checkWorkspaceAccess } from "@/lib/auth/workspace-access";
 import { getDb } from "@/lib/db";
 import { projects } from "@yavio/db/schema";
@@ -7,12 +8,7 @@ import type { WorkspaceRole } from "@yavio/shared/validation";
 import { and, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
 
-const ROLE_HIERARCHY: Record<WorkspaceRole, number> = {
-  owner: 4,
-  admin: 3,
-  member: 2,
-  viewer: 1,
-};
+export { ROLE_HIERARCHY };
 
 export interface AnalyticsAuthContext {
   userId: string;

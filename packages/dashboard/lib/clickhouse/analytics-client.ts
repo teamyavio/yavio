@@ -68,12 +68,17 @@ export async function queryAnalytics<T>(options: AnalyticsQueryOptions<T>): Prom
   } catch (err) {
     console.error("[ClickHouse] Query failed:", err);
     const message = err instanceof Error ? err.message : "Unknown ClickHouse error";
+    // Raw ClickHouse error text: never sent to browsers (toResponse omits
+    // it), but the MCP run_query tool surfaces it — it is the model's only
+    // way to correct a bad column name instead of retrying forever.
+    const detail = message.slice(0, 600);
 
     if (message.includes("TIMEOUT") || message.includes("timeout")) {
       throw new AnalyticsQueryError(
         ErrorCode.DASHBOARD.ANALYTICS_QUERY_TIMEOUT,
         "Analytics query timed out. Please try a smaller date range.",
         504,
+        detail,
       );
     }
 
@@ -81,6 +86,7 @@ export async function queryAnalytics<T>(options: AnalyticsQueryOptions<T>): Prom
       ErrorCode.DASHBOARD.CLICKHOUSE_UNAVAILABLE,
       "Analytics query failed. Please try again later.",
       502,
+      detail,
     );
   }
 }
@@ -90,6 +96,7 @@ export class AnalyticsQueryError extends Error {
     public readonly code: string,
     message: string,
     public readonly status: number,
+    public readonly detail?: string,
   ) {
     super(message);
     this.name = "AnalyticsQueryError";

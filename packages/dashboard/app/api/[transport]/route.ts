@@ -25,6 +25,8 @@ import {
   queryToolRegistryEntry,
 } from "@/lib/queries/tool-detail";
 import { queryToolList } from "@/lib/queries/tools";
+import { rateLimitConfigs } from "@/lib/rate-limit/config";
+import { RateLimiter } from "@/lib/rate-limit/rate-limiter";
 import { projects, workspaces } from "@yavio/db/schema";
 import { eq } from "drizzle-orm";
 import { createMcpHandler, withMcpAuth } from "mcp-handler";
@@ -322,6 +324,12 @@ const authHandler = withMcpAuth(handler, verifyMcpBearerToken, {
   resourceMetadataPath: "/.well-known/oauth-protected-resource/api/mcp",
 });
 
+// Same budget as the per-user analytics rate limit in the HTTP routes, keyed
+// by bearer token (≈ per user/connector) so one runaway agent loop cannot
+// monopolize ClickHouse.
+const limiter = new RateLimiter(rateLimitConfigs.analytics);
+limiter.start();
+
 async function route(
   request: Request,
   { params }: { params: Promise<{ transport: string }> },
@@ -332,6 +340,22 @@ async function route(
   if (transport !== "mcp") {
     return new Response("Not found", { status: 404 });
   }
+
+  const bearer = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+  if (bearer) {
+    const limit = limiter.consume(bearer);
+    if (!limit.allowed) {
+      return Response.json(
+        {
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Rate limited, retry shortly" },
+          id: null,
+        },
+        { status: 429, headers: { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) } },
+      );
+    }
+  }
+
   return authHandler(request);
 }
 

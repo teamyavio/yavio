@@ -19,6 +19,7 @@ import {
   consumeAuthorizationCode,
   createAuthorizationCode,
   issueTokens,
+  revokeToken,
   rotateRefreshToken,
   verifyAccessToken,
 } from "../lib/oauth/store";
@@ -70,6 +71,7 @@ const baseTokenRow = {
   refreshTokenHash: "rhash",
   refreshTokenExpiresAt: new Date(Date.now() + 86400_000),
   rotatedAt: null as Date | null,
+  graceUsedAt: null as Date | null,
   revokedAt: null as Date | null,
 };
 
@@ -162,7 +164,7 @@ describe("oauth token store", () => {
     expect(updateSets.some((s) => s.revokedAt instanceof Date)).toBe(true);
   });
 
-  it("rotate: replay within the grace window issues a fresh pair (parallel-refresh race)", async () => {
+  it("rotate: replay within the grace window issues ONE fresh pair and marks the grace used", async () => {
     chainSelect([{ ...baseTokenRow, rotatedAt: new Date(Date.now() - 5_000) }]);
     chainUpdate([{ id: "row-1" }]);
     const result = await rotateRefreshToken("yvo_rt_x", "yvc_client");
@@ -172,6 +174,51 @@ describe("oauth token store", () => {
     expect(updateSets.some((s) => s.revokedAt instanceof Date)).toBe(false);
     // new pair stays in the same grant family
     expect(insertedValues[0].grantId).toBe("grant-1");
+    // the window is spent, so it cannot be milked for further forks
+    expect(updateSets.some((s) => s.graceUsedAt instanceof Date)).toBe(true);
+    // the token hash stays in place — a later replay must still be detectable
+    expect(updateSets.some((s) => s.refreshTokenHash === null)).toBe(false);
+  });
+
+  it("rotate: a SECOND grace-window reuse revokes the family", async () => {
+    chainSelect([
+      { ...baseTokenRow, rotatedAt: new Date(Date.now() - 5_000), graceUsedAt: new Date() },
+    ]);
+    chainUpdate([]);
+    await expect(rotateRefreshToken("yvo_rt_x", "yvc_client")).rejects.toMatchObject({
+      error: "invalid_grant",
+    });
+    expect(updateSets.some((s) => s.revokedAt instanceof Date)).toBe(true);
+  });
+
+  it("rotate: losing the grace claim to a parallel request also revokes the family", async () => {
+    chainSelect([{ ...baseTokenRow, rotatedAt: new Date(Date.now() - 5_000) }]);
+    chainUpdate([]); // conditional graceUsedAt claim wins nothing
+    await expect(rotateRefreshToken("yvo_rt_x", "yvc_client")).rejects.toMatchObject({
+      error: "invalid_grant",
+    });
+    expect(updateSets.some((s) => s.revokedAt instanceof Date)).toBe(true);
+  });
+
+  it("rotate: losing the rotation claim falls back to the bounded grace path", async () => {
+    chainSelect([baseTokenRow]);
+    // first update (rotatedAt claim) loses, second (hash consume) wins
+    let call = 0;
+    db.update.mockImplementation(() => ({
+      set: (s: Record<string, unknown>) => {
+        updateSets.push(s);
+        call++;
+        const rows = call === 1 ? [] : [{ id: "row-1" }];
+        return {
+          where: () =>
+            Object.assign(Promise.resolve(rows), { returning: () => Promise.resolve(rows) }),
+        };
+      },
+    }));
+    const result = await rotateRefreshToken("yvo_rt_x", "yvc_client");
+    expect(result.refreshToken).toMatch(/^yvo_rt_/);
+    expect(updateSets.some((s) => s.graceUsedAt instanceof Date)).toBe(true);
+    expect(updateSets.some((s) => s.revokedAt instanceof Date)).toBe(false);
   });
 
   it("rotate: normal path claims the row and issues in the same family", async () => {
@@ -182,6 +229,17 @@ describe("oauth token store", () => {
     expect(insertedValues[0].grantId).toBe("grant-1");
     expect(result.workspaceId).toBe("ws-1");
     expect(result.scope).toBe("analytics:read offline_access");
+  });
+
+  it("revokeToken: revokes the whole family, and is a silent no-op for unknown tokens", async () => {
+    chainUpdate([]);
+    chainSelect([]);
+    await expect(revokeToken("yvo_rt_unknown")).resolves.toBeUndefined();
+    expect(updateSets).toHaveLength(0);
+
+    chainSelect([{ grantId: "grant-1" }]);
+    await revokeToken("yvo_rt_known");
+    expect(updateSets.some((s) => s.revokedAt instanceof Date)).toBe(true);
   });
 
   it("verifyAccessToken: unknown, revoked and expired → null; valid → context", async () => {

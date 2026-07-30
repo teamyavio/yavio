@@ -8,18 +8,42 @@ import {
   RenderAuthorizeError,
   validateAuthorizeRequest,
 } from "@/lib/oauth/authorize";
+import { sanitizeClientName } from "@/lib/oauth/display";
+import { rateLimitConfigs } from "@/lib/rate-limit/config";
+import { RateLimiter } from "@/lib/rate-limit/rate-limiter";
 import { workspaceMembers, workspaces } from "@yavio/db/schema";
 import { eq } from "drizzle-orm";
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { approveConsent, denyConsent } from "./actions";
 
 export const dynamic = "force-dynamic";
 
+const limiter = new RateLimiter(rateLimitConfigs.authOther);
+limiter.start();
+
 type SearchParams = Record<string, string | string[] | undefined>;
 
-function firstValues(params: SearchParams): Record<string, string | undefined> {
+/**
+ * Only these request params are echoed into the consent form. Everything
+ * else from the URL is dropped — a stray `workspace_id` or `$ACTION_ID_*`
+ * in the query string must never reach the form POST.
+ */
+const AUTHORIZE_PARAMS = [
+  "client_id",
+  "redirect_uri",
+  "response_type",
+  "state",
+  "code_challenge",
+  "code_challenge_method",
+  "scope",
+  "resource",
+] as const;
+
+function authorizeValues(params: SearchParams): Record<string, string | undefined> {
   const result: Record<string, string | undefined> = {};
-  for (const [key, value] of Object.entries(params)) {
+  for (const key of AUTHORIZE_PARAMS) {
+    const value = params[key];
     result[key] = Array.isArray(value) ? value[0] : value;
   }
   return result;
@@ -41,7 +65,24 @@ export default async function AuthorizePage({
 }: {
   searchParams: Promise<SearchParams>;
 }) {
-  const params = firstValues(await searchParams);
+  const params = authorizeValues(await searchParams);
+
+  const requestHeaders = await headers();
+  const clientIp = requestHeaders.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+  if (!limiter.consume(clientIp).allowed) {
+    return <ErrorCard message="Too many authorization requests. Wait a moment and try again." />;
+  }
+
+  // Session first: nothing attacker-controlled (in particular no CIMD fetch)
+  // runs on behalf of anonymous callers.
+  const session = await getServerSession();
+  if (!session) {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined) query.set(key, value);
+    }
+    redirect(`/login?callbackUrl=${encodeURIComponent(`/oauth/authorize?${query.toString()}`)}`);
+  }
 
   let request: Awaited<ReturnType<typeof validateAuthorizeRequest>>;
   try {
@@ -54,15 +95,6 @@ export default async function AuthorizePage({
       redirect(err.redirectTo);
     }
     throw err;
-  }
-
-  const session = await getServerSession();
-  if (!session) {
-    const query = new URLSearchParams();
-    for (const [key, value] of Object.entries(params)) {
-      if (value !== undefined) query.set(key, value);
-    }
-    redirect(`/login?callbackUrl=${encodeURIComponent(`/oauth/authorize?${query.toString()}`)}`);
   }
 
   const memberships = await getDb()
@@ -78,9 +110,11 @@ export default async function AuthorizePage({
     );
   }
 
-  const clientLabel = request.client.clientName ?? request.client.clientId;
+  const clientLabel = sanitizeClientName(request.client.clientName) ?? "Unnamed application";
+  const isVerifiedIdentity = request.client.registrationType === "cimd";
   const redirectHost = new URL(request.redirectUri).hostname;
-  const isLoopback = redirectHost === "localhost" || redirectHost === "127.0.0.1";
+  const isLoopback =
+    redirectHost === "localhost" || redirectHost === "127.0.0.1" || redirectHost === "[::1]";
 
   return (
     <AuthCard
@@ -89,17 +123,28 @@ export default async function AuthorizePage({
     >
       <div className="space-y-4">
         <div className="rounded-md border p-3 text-sm">
-          <p className="font-medium">{clientLabel}</p>
-          <p className="mt-1 text-muted-foreground">
+          <p className="font-medium">
+            {clientLabel}
+            {!isVerifiedIdentity && (
+              <span className="ml-2 font-normal text-muted-foreground">(unverified name)</span>
+            )}
+          </p>
+          <p className="mt-1 font-medium">
             {isLoopback
-              ? "Redirects to an application on your own device"
+              ? "Redirects to an application on this device"
               : `Redirects to ${redirectHost}`}
           </p>
+          {isVerifiedIdentity && (
+            <p className="mt-1 break-all text-xs text-muted-foreground">
+              Identity document: {request.client.clientId}
+            </p>
+          )}
         </div>
 
         <div className="rounded-md bg-muted p-3 text-sm text-muted-foreground">
-          Read-only access to analytics data of one workspace. It can never change anything, and you
-          can revoke access at any time by removing the connector.
+          Read-only access to analytics data of one workspace. It can never change anything. Access
+          ends when you are removed from the workspace, when the application revokes its tokens, or
+          30 days after its last use.
         </div>
 
         <form action={approveConsent} className="space-y-4">

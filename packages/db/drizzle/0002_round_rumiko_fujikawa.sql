@@ -41,6 +41,7 @@ CREATE TABLE "oauth_tokens" (
 	"refresh_token_hash" text,
 	"refresh_token_expires_at" timestamp with time zone,
 	"rotated_at" timestamp with time zone,
+	"grace_used_at" timestamp with time zone,
 	"revoked_at" timestamp with time zone,
 	"last_used_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now(),

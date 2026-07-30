@@ -40,9 +40,19 @@ const BANNED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   // ClickHouse analytics SQL needs neither backticks nor double quotes.
   { pattern: /`/, reason: "backquoted identifiers are not allowed" },
   { pattern: /"/, reason: "double-quoted identifiers are not allowed (use plain names)" },
+  // Structural rule: a function call directly in FROM/JOIN position is a
+  // table function, whatever its name — this catches variants the name list
+  // below has never heard of (mergeTreeIndex, urlCluster, next release's).
+  {
+    pattern: /\b(from|join)\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/i,
+    reason:
+      "table functions are not allowed (query the events/sessions_mv/users_mv/tool_registry tables)",
+  },
+  // Name rule, prefix-matched: `merge` also bans mergeTreeIndex(,
+  // `cluster` also bans clusterAllReplicas(, `url` also bans urlCluster(.
   {
     pattern:
-      /\b(url|remote|remoteSecure|file|s3|s3Cluster|azureBlobStorage|gcs|hdfs|iceberg|deltaLake|hudi|mysql|postgresql|sqlite|mongodb|redis|jdbc|odbc|cluster|clusterAllReplicas|dictionary|executable|input|merge|view|loop|fuzzJSON|generateRandom)\s*\(/i,
+      /\b(url|remote|file|s3|azureBlobStorage|gcs|hdfs|iceberg|deltaLake|hudi|mysql|postgresql|sqlite|mongodb|redis|jdbc|odbc|cluster|dictionary|executable|input|merge|view|loop|fuzz|generateRandom|generateSeries|numbers|zeros|values|timeSeries)[A-Za-z0-9_]*\s*\(/i,
     reason: "table functions are not allowed",
   },
 ];

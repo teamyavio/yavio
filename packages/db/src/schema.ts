@@ -274,6 +274,10 @@ export const oauthTokens = pgTable(
     // token arriving within the grace window is a benign client race; after
     // the window it is treated as replay and revokes the whole family.
     rotatedAt: timestamp("rotated_at", { withTimezone: true }),
+    // Set when the grace window was already spent on this row. The window is
+    // good for exactly one replacement — a second reuse is replay, even
+    // inside the window, and revokes the whole family.
+    graceUsedAt: timestamp("grace_used_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),

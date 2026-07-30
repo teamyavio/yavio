@@ -2,6 +2,7 @@ import { lookup as dnsLookup } from "node:dns";
 import type { LookupAddress, LookupOptions } from "node:dns";
 import https from "node:https";
 import net from "node:net";
+import { sanitizeClientName } from "./display";
 import { OAuthError } from "./errors";
 
 /**
@@ -261,10 +262,18 @@ export async function fetchClientMetadata(clientId: string): Promise<ClientMetad
     );
   }
 
+  if (redirectUris.length > 10 || redirectUris.some((u) => u.length > 2048)) {
+    throw new OAuthError(
+      "invalid_client",
+      "metadata document has too many or too long redirect_uris",
+      400,
+    );
+  }
+
   return {
     clientId,
-    clientName: typeof metadata.client_name === "string" ? metadata.client_name : null,
-    clientUri: typeof metadata.client_uri === "string" ? metadata.client_uri : null,
+    clientName: sanitizeClientName(metadata.client_name as string | undefined),
+    clientUri: typeof metadata.client_uri === "string" ? metadata.client_uri.slice(0, 2048) : null,
     redirectUris,
   };
 }

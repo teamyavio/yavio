@@ -31,7 +31,12 @@ const NEXTAUTH_ROUTES = [
 // Cookieless OAuth/MCP endpoints: called by MCP clients that send no Origin
 // header and no CSRF cookie. They are CSRF-immune by construction (no cookie
 // auth — bearer tokens, PKCE and one-time codes only).
-const CSRF_EXEMPT_ROUTES = ["/api/oauth/token", "/api/oauth/register", "/api/mcp"];
+const CSRF_EXEMPT_ROUTES = [
+  "/api/oauth/token",
+  "/api/oauth/register",
+  "/api/oauth/revoke",
+  "/api/mcp",
+];
 
 function isNextAuthRoute(pathname: string): boolean {
   return NEXTAUTH_ROUTES.some((r) => pathname === r || pathname.startsWith(`${r}/`));

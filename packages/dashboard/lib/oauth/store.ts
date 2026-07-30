@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { getDb } from "@/lib/db";
 import { oauthCodes, oauthTokens } from "@yavio/db/schema";
-import { and, eq, gt, isNull, sql } from "drizzle-orm";
+import { and, eq, gt, isNull, or, sql } from "drizzle-orm";
 import {
   ACCESS_TOKEN_TTL_MS,
   AUTH_CODE_TTL_MS,
@@ -139,9 +139,12 @@ async function revokeGrantFamily(grantId: string): Promise<void> {
  * Refresh-token rotation with reuse detection:
  * - normal path: atomically mark the row rotated, issue a fresh pair in the
  *   same grant family;
- * - a rotated-out token re-presented within the grace window is a benign
- *   parallel-refresh race and gets its own fresh pair;
- * - beyond the grace window it is replay: the whole family is revoked.
+ * - a rotated-out token re-presented within the grace window is treated as a
+ *   parallel-refresh race (Claude/ChatGPT are known to double-refresh) and
+ *   gets ONE replacement pair — the reuse atomically consumes the old hash,
+ *   so the window cannot be milked for unbounded forks;
+ * - beyond the grace window, or on a second reuse, it is replay: the whole
+ *   grant family is revoked.
  *
  * Dead tokens answer with RFC 6749 `invalid_grant` verbatim — Claude keys its
  * re-auth flow off that exact code.
@@ -153,10 +156,11 @@ export async function rotateRefreshToken(
   IssuedTokens & { workspaceId: string; userId: string; scope: string; audience: string }
 > {
   const db = getDb();
+  const presentedHash = hashToken(rawRefreshToken);
   const rows = await db
     .select()
     .from(oauthTokens)
-    .where(eq(oauthTokens.refreshTokenHash, hashToken(rawRefreshToken)))
+    .where(eq(oauthTokens.refreshTokenHash, presentedHash))
     .limit(1);
 
   if (rows.length === 0) {
@@ -174,22 +178,42 @@ export async function rotateRefreshToken(
     throw new OAuthError("invalid_grant", "refresh token has expired", 400);
   }
 
-  if (row.rotatedAt !== null) {
-    const sinceRotation = Date.now() - row.rotatedAt.getTime();
-    if (sinceRotation > REFRESH_ROTATION_GRACE_MS) {
+  const claimGraceReuse = async (): Promise<void> => {
+    // The window is worth exactly one replacement. Claiming graceUsedAt
+    // atomically bounds the fork, while the token hash stays in place so a
+    // later replay is still recognised as this grant's token and revokes it.
+    const claimed = await db
+      .update(oauthTokens)
+      .set({ graceUsedAt: new Date(), lastUsedAt: new Date() })
+      .where(and(eq(oauthTokens.id, row.id), isNull(oauthTokens.graceUsedAt)))
+      .returning({ id: oauthTokens.id });
+    if (claimed.length === 0) {
       await revokeGrantFamily(row.grantId);
       throw new OAuthError("invalid_grant", "refresh token has been revoked", 400);
     }
-    // Benign race: a parallel refresh already rotated this token.
+    console.warn(
+      `[oauth] grace-window refresh reuse on grant ${row.grantId} (client ${row.clientId}) — one replacement issued`,
+    );
+  };
+
+  if (row.rotatedAt !== null) {
+    const sinceRotation = Date.now() - row.rotatedAt.getTime();
+    if (sinceRotation > REFRESH_ROTATION_GRACE_MS || row.graceUsedAt !== null) {
+      await revokeGrantFamily(row.grantId);
+      throw new OAuthError("invalid_grant", "refresh token has been revoked", 400);
+    }
+    await claimGraceReuse();
   } else {
     const claimed = await db
       .update(oauthTokens)
       .set({ rotatedAt: new Date(), lastUsedAt: new Date() })
       .where(and(eq(oauthTokens.id, row.id), isNull(oauthTokens.rotatedAt)))
       .returning({ id: oauthTokens.id });
-    // Losing the claim means a parallel request rotated between our SELECT and
-    // UPDATE — same benign race, fall through and issue a pair anyway.
-    void claimed;
+    if (claimed.length === 0) {
+      // A parallel request rotated between our SELECT and UPDATE — same
+      // race, same bounded handling.
+      await claimGraceReuse();
+    }
   }
 
   const issued = await issueTokens({
@@ -251,7 +275,23 @@ export async function verifyAccessToken(rawToken: string): Promise<VerifiedAcces
   };
 }
 
-/** Expired-row cleanup, callable from a cron later; safe to skip in v1. */
+/**
+ * RFC 7009 revocation: presenting either token of a grant revokes the whole
+ * family (public clients — access and refresh belong to one authorization).
+ * Unknown tokens are a silent no-op per spec.
+ */
+export async function revokeToken(rawToken: string): Promise<void> {
+  const hash = hashToken(rawToken);
+  const rows = await getDb()
+    .select({ grantId: oauthTokens.grantId })
+    .from(oauthTokens)
+    .where(or(eq(oauthTokens.refreshTokenHash, hash), eq(oauthTokens.accessTokenHash, hash)))
+    .limit(1);
+  if (rows.length === 0) return;
+  await revokeGrantFamily(rows[0].grantId);
+}
+
+/** Expired-row cleanup, called opportunistically from the token endpoint. */
 export async function pruneExpired(): Promise<void> {
   const db = getDb();
   await db.delete(oauthCodes).where(sql`expires_at < now() - interval '1 day'`);

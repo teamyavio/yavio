@@ -1,5 +1,7 @@
 import { registerDcrClient } from "@/lib/oauth/clients";
 import { OAuthError } from "@/lib/oauth/errors";
+import { rateLimitConfigs } from "@/lib/rate-limit/config";
+import { RateLimiter } from "@/lib/rate-limit/rate-limiter";
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -7,16 +9,37 @@ const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
+const limiter = new RateLimiter(rateLimitConfigs.authOther);
+limiter.start();
+
 /**
  * RFC 7591 Dynamic Client Registration (the deprecated-but-required fallback
  * for clients without CIMD support). Public clients only.
  */
 export async function POST(request: Request): Promise<Response> {
+  const clientIp = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+  const limit = limiter.consume(clientIp);
+  if (!limit.allowed) {
+    return Response.json(
+      { error: "slow_down", error_description: "too many registrations" },
+      {
+        status: 429,
+        headers: { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)), ...CORS_HEADERS },
+      },
+    );
+  }
+
   let body: Record<string, unknown>;
   try {
     body = (await request.json()) as Record<string, unknown>;
   } catch {
-    return new OAuthError("invalid_client_metadata", "request body must be JSON", 400).toResponse();
+    const response = new OAuthError(
+      "invalid_client_metadata",
+      "request body must be JSON",
+      400,
+    ).toResponse();
+    for (const [k, v] of Object.entries(CORS_HEADERS)) response.headers.set(k, v);
+    return response;
   }
 
   try {

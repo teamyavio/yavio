@@ -22,9 +22,13 @@ export const REFRESH_ROTATION_GRACE_MS = 30_000;
 /** How long a fetched CIMD document is trusted before re-fetching. */
 export const CIMD_CACHE_TTL_MS = 60 * 60 * 1000;
 
-/** Canonical origin of this deployment, no trailing slash. */
+/**
+ * Canonical origin of this deployment, no trailing slash. Falls back to
+ * NEXTAUTH_URL so a deployment that only sets the auth URL cannot silently
+ * mint tokens with a localhost issuer/audience.
+ */
 export function canonicalOrigin(): string {
-  const url = process.env.APP_URL ?? "http://localhost:3000";
+  const url = process.env.APP_URL ?? process.env.NEXTAUTH_URL ?? "http://localhost:3000";
   return url.replace(/\/+$/, "");
 }
 

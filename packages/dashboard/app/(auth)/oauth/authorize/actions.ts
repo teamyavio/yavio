@@ -12,20 +12,28 @@ import {
 import { createAuthorizationCode } from "@/lib/oauth/store";
 import { redirect } from "next/navigation";
 
+/**
+ * Reads the LAST value for a field. FormData preserves submission order, and
+ * a duplicated field (an injected hidden input ahead of the real control)
+ * must not be able to shadow what the user actually chose.
+ */
+function lastValue(formData: FormData, name: string): string | undefined {
+  const values = formData
+    .getAll(name)
+    .filter((v): v is string => typeof v === "string" && v !== "");
+  return values.length > 0 ? values[values.length - 1] : undefined;
+}
+
 function authorizeParams(formData: FormData): Record<string, string | undefined> {
-  const read = (name: string): string | undefined => {
-    const value = formData.get(name);
-    return typeof value === "string" && value !== "" ? value : undefined;
-  };
   return {
-    client_id: read("client_id"),
-    redirect_uri: read("redirect_uri"),
-    response_type: read("response_type"),
-    state: read("state"),
-    code_challenge: read("code_challenge"),
-    code_challenge_method: read("code_challenge_method"),
-    scope: read("scope"),
-    resource: read("resource"),
+    client_id: lastValue(formData, "client_id"),
+    redirect_uri: lastValue(formData, "redirect_uri"),
+    response_type: lastValue(formData, "response_type"),
+    state: lastValue(formData, "state"),
+    code_challenge: lastValue(formData, "code_challenge"),
+    code_challenge_method: lastValue(formData, "code_challenge_method"),
+    scope: lastValue(formData, "scope"),
+    resource: lastValue(formData, "resource"),
   };
 }
 
@@ -48,7 +56,9 @@ export async function approveConsent(formData: FormData): Promise<void> {
     throw err;
   }
 
-  const workspaceId = formData.get("workspace_id");
+  // The workspace picker is the last workspace_id field in the form; taking
+  // the last value keeps an injected duplicate from overriding the choice.
+  const workspaceId = lastValue(formData, "workspace_id");
   if (typeof workspaceId !== "string" || workspaceId === "") {
     redirect(
       errorRedirect(request.redirectUri, request.state, "access_denied", "no workspace selected"),

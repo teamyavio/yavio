@@ -1,3 +1,4 @@
+import { ROLE_HIERARCHY } from "@/lib/auth/role-hierarchy";
 import { checkWorkspaceAccess } from "@/lib/auth/workspace-access";
 import { mcpResourceUri } from "@/lib/oauth/constants";
 import { verifyAccessToken } from "@/lib/oauth/store";
@@ -31,6 +32,10 @@ export async function verifyMcpBearerToken(
   // connector access on the next call, not at token expiry.
   const access = await checkWorkspaceAccess(verified.userId, verified.workspaceId);
   if (!access) return undefined;
+
+  // Same floor the analytics HTTP routes enforce. A no-op today (every role
+  // is >= viewer) but keeps the two surfaces from silently diverging.
+  if (ROLE_HIERARCHY[access.role] < ROLE_HIERARCHY.viewer) return undefined;
 
   const context: McpAuthContext = {
     userId: verified.userId,

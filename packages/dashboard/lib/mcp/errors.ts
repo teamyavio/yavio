@@ -34,7 +34,10 @@ export async function runTool(fn: () => Promise<ToolResult>): Promise<ToolResult
       return toolError(err.message);
     }
     if (err instanceof AnalyticsQueryError) {
-      return toolError(`Analytics query failed (${err.code}): ${err.message}`);
+      // The raw database error is the model's feedback channel — without it
+      // a bad column name reads as a transient outage and gets retried.
+      const detail = err.detail ? ` Database says: ${err.detail}` : "";
+      return toolError(`Analytics query failed (${err.code}): ${err.message}${detail}`);
     }
     console.error("[mcp] tool failed:", err);
     return toolError("Internal error while answering this request. Try again.");

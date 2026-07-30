@@ -69,6 +69,26 @@ describe("run_query SQL guard — attack corpus", () => {
     rejected("SELECT * FROM executable('cat /etc/passwd', 'TSV', 's String')");
   });
 
+  it("rejects prefix-variant table functions (verified live: mergeTreeIndex reads raw index tuples PAST the row policies)", () => {
+    rejected("SELECT * FROM mergeTreeIndex(default, events)");
+    rejected("SELECT * FROM mergeTreeIndex(default, events, with_marks = true)");
+    rejected("SELECT * FROM mergeTreeProjection(default, events, 'p')");
+    rejected("SELECT * FROM urlCluster('c', 'http://x/', 'CSV')");
+    rejected("SELECT * FROM icebergS3('http://bucket/t')");
+    rejected("SELECT * FROM deltaLakeCluster('c', 'http://x')");
+    rejected("SELECT * FROM hdfsCluster('c', 'hdfs://x', 'CSV')");
+    rejected("SELECT * FROM numbers(100)");
+    rejected("SELECT * FROM zeros(10)");
+    rejected("SELECT * FROM generateSeries(1, 10)");
+    rejected("SELECT * FROM timeSeriesData('db', 'ts')");
+  });
+
+  it("rejects ANY function call in FROM/JOIN position, known name or not", () => {
+    rejected("SELECT * FROM someBrandNewTableFunc(1)");
+    rejected("SELECT * FROM events JOIN whatever('x') ON 1=1");
+    rejected("select * from x(1)");
+  });
+
   it("rejects output redirection and format overrides", () => {
     rejected("SELECT 1 INTO OUTFILE '/tmp/x'");
     rejected("SELECT 1 FORMAT Native");
@@ -96,12 +116,18 @@ describe("run_query SQL guard — legitimate analytics queries pass", () => {
 
   it("accepts ClickHouse functions whose names embed banned words", () => {
     // formatDateTime contains "format", countMerge contains "merge",
+    // arrayJoin contains "join", fromUnixTimestamp starts with "from",
     // offset contains "set", input_values contains "input"
     validateFreeQuery(
       "SELECT formatDateTime(timestamp, '%Y-%m') m, count() FROM events GROUP BY m LIMIT 10 OFFSET 5",
     );
     validateFreeQuery("SELECT JSONExtractString(input_values, 'query') FROM events LIMIT 5");
-    validateFreeQuery("SELECT numbers.number FROM numbers(7)");
+    validateFreeQuery("SELECT countMerge(x) FROM sessions_mv GROUP BY session_id");
+    validateFreeQuery("SELECT arrayJoin([1, 2, 3]) FROM events LIMIT 3");
+    validateFreeQuery("SELECT fromUnixTimestamp(1690000000) FROM events LIMIT 1");
+    validateFreeQuery(
+      "SELECT e.event_name FROM events AS e JOIN sessions_mv AS s ON e.session_id = s.session_id",
+    );
   });
 
   it("strips a trailing semicolon", () => {

@@ -4,6 +4,7 @@ import { oauthClients } from "@yavio/db/schema";
 import { eq } from "drizzle-orm";
 import { fetchClientMetadata, isAcceptableRedirectUri } from "./cimd";
 import { CIMD_CACHE_TTL_MS } from "./constants";
+import { sanitizeClientName } from "./display";
 import { OAuthError } from "./errors";
 
 export interface OAuthClient {
@@ -109,8 +110,8 @@ export function validateRedirectUri(client: OAuthClient, presented: string): voi
     } catch {
       continue;
     }
-    const loopback =
-      reg.protocol === "http:" && (reg.hostname === "localhost" || reg.hostname === "127.0.0.1");
+    const loopbackHosts = ["localhost", "127.0.0.1", "[::1]"];
+    const loopback = reg.protocol === "http:" && loopbackHosts.includes(reg.hostname);
     if (
       loopback &&
       pres.protocol === reg.protocol &&
@@ -140,16 +141,19 @@ export async function registerDcrClient(body: Record<string, unknown>): Promise<
   if (
     !Array.isArray(redirectUris) ||
     redirectUris.length === 0 ||
-    !redirectUris.every((u): u is string => typeof u === "string" && isAcceptableRedirectUri(u))
+    redirectUris.length > 10 ||
+    !redirectUris.every(
+      (u): u is string => typeof u === "string" && u.length <= 2048 && isAcceptableRedirectUri(u),
+    )
   ) {
     throw new OAuthError(
       "invalid_redirect_uri",
-      "redirect_uris must be https URLs or http loopback URLs",
+      "redirect_uris must be 1-10 https URLs or http loopback URLs",
       400,
     );
   }
 
-  const clientName = typeof body.client_name === "string" ? body.client_name.slice(0, 256) : null;
+  const clientName = sanitizeClientName(body.client_name as string | undefined);
   const clientUri = typeof body.client_uri === "string" ? body.client_uri.slice(0, 2048) : null;
   // SEP-837: clients now send application_type; accept and record it.
   const applicationType =

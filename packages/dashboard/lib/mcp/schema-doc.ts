@@ -46,8 +46,9 @@ NOTE: queries touching tool_registry are filtered to the project_id you pass
 to run_query — rows of other projects are invisible.
 
 ## Rules for run_query
-- Single SELECT (or WITH ... SELECT) statement only.
+- Single SELECT (or WITH ... SELECT) statement only, against the four tables
+  above (the database user can read nothing else).
 - No SETTINGS or FORMAT clauses, no comments, no quoted identifiers,
-  no system tables, no table functions.
+  no system tables, no table functions (incl. numbers()).
 - Results are capped (10k rows / 30s / 1M scanned rows per query) — aggregate
   instead of dumping raw rows.`;
