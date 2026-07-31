@@ -26,11 +26,11 @@ const VALID_TOKEN = {
 
 describe("verifyMcpBearerToken", () => {
   beforeEach(() => {
-    process.env.APP_URL = "https://dashboard.test";
+    vi.stubEnv("APP_URL", "https://dashboard.test");
     vi.clearAllMocks();
   });
   afterEach(() => {
-    delete process.env.APP_URL;
+    vi.unstubAllEnvs();
   });
 
   it("rejects missing/unknown tokens", async () => {

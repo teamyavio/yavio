@@ -103,14 +103,14 @@ const baseTokenRow = {
 
 describe("oauth token store", () => {
   beforeEach(() => {
-    process.env.API_KEY_HASH_SECRET = "unit-secret";
+    vi.stubEnv("API_KEY_HASH_SECRET", "unit-secret");
     insertedValues = [];
     updateSets = [];
     vi.clearAllMocks();
     chainInsert();
   });
   afterEach(() => {
-    delete process.env.API_KEY_HASH_SECRET;
+    vi.unstubAllEnvs();
   });
 
   it("stores authorization codes hashed, never raw", async () => {
@@ -296,7 +296,7 @@ describe("oauth token store", () => {
 
 describe("rotation grace window is single-use", () => {
   beforeEach(() => {
-    process.env.API_KEY_HASH_SECRET = "unit-secret";
+    vi.stubEnv("API_KEY_HASH_SECRET", "unit-secret");
     insertedValues = [];
     updateSets = [];
     vi.clearAllMocks();

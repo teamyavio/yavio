@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { authorizationServerMetadata, protectedResourceMetadata } from "../lib/oauth/metadata";
 
 /**
@@ -10,10 +10,10 @@ import { authorizationServerMetadata, protectedResourceMetadata } from "../lib/o
  */
 describe("authorization server metadata", () => {
   beforeEach(() => {
-    process.env.APP_URL = "https://dashboard.apps.yavio.ai";
+    vi.stubEnv("APP_URL", "https://dashboard.apps.yavio.ai");
   });
   afterEach(() => {
-    delete process.env.APP_URL;
+    vi.unstubAllEnvs();
   });
 
   it("satisfies Claude's two-condition CIMD gate", () => {
@@ -50,10 +50,10 @@ describe("authorization server metadata", () => {
 
 describe("protected resource metadata", () => {
   beforeEach(() => {
-    process.env.APP_URL = "https://dashboard.apps.yavio.ai";
+    vi.stubEnv("APP_URL", "https://dashboard.apps.yavio.ai");
   });
   afterEach(() => {
-    delete process.env.APP_URL;
+    vi.unstubAllEnvs();
   });
 
   it("identifies the canonical MCP resource and a single AS", () => {

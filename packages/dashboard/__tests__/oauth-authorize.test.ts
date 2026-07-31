@@ -43,11 +43,11 @@ const VALID = {
 
 describe("authorization request validation", () => {
   beforeEach(() => {
-    process.env.APP_URL = "https://dashboard.test";
+    vi.stubEnv("APP_URL", "https://dashboard.test");
     mockResolveClient.mockResolvedValue(CLAUDE_CLIENT);
   });
   afterEach(() => {
-    delete process.env.APP_URL;
+    vi.unstubAllEnvs();
     vi.clearAllMocks();
   });
 

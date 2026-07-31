@@ -1,12 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateToken, hashToken, verifyPkceS256 } from "../lib/oauth/tokens";
 
 describe("token generation and hashing", () => {
   beforeEach(() => {
-    process.env.API_KEY_HASH_SECRET = "test-secret";
+    vi.stubEnv("API_KEY_HASH_SECRET", "test-secret");
   });
   afterEach(() => {
-    delete process.env.API_KEY_HASH_SECRET;
+    vi.unstubAllEnvs();
   });
 
   it("generates prefixed 256-bit tokens", () => {
@@ -20,12 +20,12 @@ describe("token generation and hashing", () => {
     const hash = hashToken("yvo_at_x");
     expect(hash).toMatch(/^[0-9a-f]{64}$/);
     expect(hashToken("yvo_at_x")).toBe(hash);
-    process.env.API_KEY_HASH_SECRET = "other-secret";
+    vi.stubEnv("API_KEY_HASH_SECRET", "other-secret");
     expect(hashToken("yvo_at_x")).not.toBe(hash);
   });
 
   it("refuses to hash without a secret", () => {
-    process.env.API_KEY_HASH_SECRET = "";
+    vi.stubEnv("API_KEY_HASH_SECRET", "");
     expect(() => hashToken("x")).toThrow("API_KEY_HASH_SECRET");
   });
 });
