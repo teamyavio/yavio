@@ -109,8 +109,14 @@ describe("error classification", () => {
     // Claude flagged this in live testing: an unknown column came back as
     // "please try again later", which invites a retry loop on a query that
     // can never succeed no matter how often it is repeated.
+    // Shape the real client produces: the numeric code is lifted OUT of the
+    // message into a `code` field, which is why matching the message alone
+    // was not enough (observed live against the dev deployment).
     mockQuery.mockRejectedValue(
-      new Error("Code: 47. DB::Exception: Unknown expression identifier 'nope' in scope SELECT..."),
+      Object.assign(new Error("Unknown expression identifier 'nope' in scope SELECT..."), {
+        code: "47",
+        type: "UNKNOWN_IDENTIFIER",
+      }),
     );
     const err = await queryAnalytics({
       workspaceId: "w",
@@ -127,7 +133,9 @@ describe("error classification", () => {
   });
 
   it("keeps a genuine outage retryable", async () => {
-    mockQuery.mockRejectedValue(new Error("connect ECONNREFUSED 127.0.0.1:8123"));
+    mockQuery.mockRejectedValue(
+      Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8123"), { code: "ECONNREFUSED" }),
+    );
     const err = await queryAnalytics({
       workspaceId: "w",
       projectId: "p",

@@ -82,11 +82,20 @@ export async function queryAnalytics<T>(options: AnalyticsQueryOptions<T>): Prom
       );
     }
 
-    // A `Code: NNN` prefix means ClickHouse parsed the request and rejected
-    // it — an unknown column, a bad function, a budget overrun. That is
-    // permanent: telling the caller to "try again later" sends a model into a
-    // retry loop on a query that will never succeed.
-    if (/Code:\s*\d+/.test(message)) {
+    // Did ClickHouse parse the request and reject it (unknown column, bad
+    // function, budget overrun)? That is permanent — telling the caller to
+    // "try again later" sends a model into a retry loop on a query that can
+    // never succeed. @clickhouse/client lifts the `Code: NNN` prefix into a
+    // numeric `code` field, so the message alone does not always carry it;
+    // network failures use non-numeric codes like ECONNREFUSED.
+    const clientCode = (err as { code?: unknown })?.code;
+    const rejectedByServer =
+      /Code:\s*\d+/.test(message) ||
+      message.includes("DB::Exception") ||
+      typeof clientCode === "number" ||
+      (typeof clientCode === "string" && /^\d+$/.test(clientCode));
+
+    if (rejectedByServer) {
       throw new AnalyticsQueryError(
         ErrorCode.DASHBOARD.CLICKHOUSE_UNAVAILABLE,
         "The database rejected this query. Retrying unchanged will fail the same way.",
