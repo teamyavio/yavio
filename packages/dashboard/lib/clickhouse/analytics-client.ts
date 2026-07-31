@@ -82,6 +82,19 @@ export async function queryAnalytics<T>(options: AnalyticsQueryOptions<T>): Prom
       );
     }
 
+    // A `Code: NNN` prefix means ClickHouse parsed the request and rejected
+    // it — an unknown column, a bad function, a budget overrun. That is
+    // permanent: telling the caller to "try again later" sends a model into a
+    // retry loop on a query that will never succeed.
+    if (/Code:\s*\d+/.test(message)) {
+      throw new AnalyticsQueryError(
+        ErrorCode.DASHBOARD.CLICKHOUSE_UNAVAILABLE,
+        "The database rejected this query. Retrying unchanged will fail the same way.",
+        400,
+        detail,
+      );
+    }
+
     throw new AnalyticsQueryError(
       ErrorCode.DASHBOARD.CLICKHOUSE_UNAVAILABLE,
       "Analytics query failed. Please try again later.",
