@@ -148,6 +148,44 @@ const HARD_TERMINATORS = new Set([
  */
 const SOFT_TERMINATORS = new Set(["window", "format", "into", "settings"]);
 
+/**
+ * Words that may never be used as a table alias. An alias is attacker-chosen
+ * text, and four review rounds of this scanner were defeated by aliases that
+ * spell a keyword: `FROM events AS window, evil(1)` and — verified executable
+ * against ClickHouse — `FROM events AS array JOIN evil(1)`, where the alias
+ * makes a real JOIN look like an ARRAY JOIN. Rather than teach the scanner one
+ * more special case, refuse the ambiguity outright. Legitimate analytics SQL
+ * has no reason to alias a table `limit` or `array`.
+ */
+const RESERVED_ALIASES = new Set([
+  ...HARD_TERMINATORS,
+  ...SOFT_TERMINATORS,
+  "array",
+  "as",
+  "on",
+  "using",
+  "from",
+  "join",
+  "left",
+  "right",
+  "inner",
+  "outer",
+  "full",
+  "cross",
+  "any",
+  "all",
+  "asof",
+  "global",
+  "semi",
+  "anti",
+]);
+
+function rejectReservedAlias(word: string): never {
+  throw new McpToolError(
+    `Query rejected: "${word}" is a reserved word and cannot be used as a table alias. Pick a different alias.`,
+  );
+}
+
 type TableState = "outside" | "expect_ref" | "after_ref" | "alias_next" | "join_cond";
 
 function assertNoTableFunctionInTableList(sql: string): void {
@@ -211,7 +249,8 @@ function assertNoTableFunctionInTableList(sql: string): void {
     const after = i + word[0].length;
 
     if (state[top()] === "alias_next") {
-      // Whatever follows AS is the alias, keyword-looking or not.
+      // Whatever follows AS is the alias — and must not be a reserved word.
+      if (RESERVED_ALIASES.has(lower)) rejectReservedAlias(word[0]);
       state[top()] = "after_ref";
       aliasUsed[top()] = true;
       i = after - 1;
@@ -222,7 +261,13 @@ function assertNoTableFunctionInTableList(sql: string): void {
       // ARRAY JOIN / LEFT ARRAY JOIN takes an EXPRESSION, not a table
       // reference, so `ARRAY JOIN splitByChar(...)` is ordinary ClickHouse and
       // must not be read as a table function.
-      const isArrayJoin = lower === "join" && /\barray\s*$/i.test(sql.slice(0, i));
+      // Genuine ARRAY JOIN only: `array` must be a bare keyword here, not an
+      // alias. `... AS array JOIN evil(1)` executed against ClickHouse before
+      // this check, so the alias form is refused outright above.
+      const isArrayJoin =
+        lower === "join" &&
+        /\barray\s*$/i.test(sql.slice(0, i)) &&
+        !/\bas\s+array\s*$/i.test(sql.slice(0, i));
       if (!isArrayJoin) {
         if (isCallAt(after)) reject();
         state[top()] = "expect_ref";
@@ -234,10 +279,12 @@ function assertNoTableFunctionInTableList(sql: string): void {
       if (state[top()] === "after_ref") state[top()] = "join_cond";
     } else if (
       HARD_TERMINATORS.has(lower) &&
-      // A clause keyword immediately followed by a comma is not a clause —
-      // it is a bare alias, and treating it as a terminator let
-      // `FROM events qualify, evil(1)` switch the table-list scan off.
-      !(state[top()] === "after_ref" && !aliasUsed[top()] && /^\s*,/.test(sql.slice(after)))
+      // A clause keyword immediately followed by a comma is never a clause —
+      // `LIMIT ,` is not valid SQL — so it must be an alias. Treating it as a
+      // terminator let `FROM events x limit, evil(1)` switch the scan off.
+      // Deliberately NOT conditioned on aliasUsed: the bypass above appears
+      // precisely when an alias has already been consumed.
+      !(state[top()] === "after_ref" && /^\s*,/.test(sql.slice(after)))
     ) {
       state[top()] = "outside";
       aliasUsed[top()] = false;
@@ -254,11 +301,6 @@ function assertNoTableFunctionInTableList(sql: string): void {
       );
       if (qualified) i = i + qualified[0].length - 1;
       continue;
-    } else if (state[top()] === "after_ref" && !aliasUsed[top()]) {
-      // Bare alias — including one that spells a soft clause keyword.
-      if (SOFT_TERMINATORS.has(lower) || !HARD_TERMINATORS.has(lower)) {
-        aliasUsed[top()] = true;
-      }
     }
     i = after - 1;
   }

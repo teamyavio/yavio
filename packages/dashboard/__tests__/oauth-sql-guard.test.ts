@@ -144,6 +144,25 @@ describe("run_query SQL guard — attack corpus", () => {
     rejected("SELECT joinGet('db.j','v',1) FROM events");
   });
 
+  it("rejects reserved words as table aliases (verified executable: AS array + JOIN)", () => {
+    // `FROM events AS array JOIN mergeTreeIndex(...)` EXECUTED against
+    // ClickHouse — the alias made a real JOIN look like an ARRAY JOIN and the
+    // exemption skipped the check. Aliases are attacker-chosen text, so the
+    // ambiguity is refused rather than special-cased.
+    expect(rejected("SELECT * FROM events AS array JOIN evil(1) AS m ON 1")).toContain("reserved");
+    rejected("SELECT * FROM events AS limit JOIN evil(1) AS m ON 1");
+    rejected("SELECT * FROM events AS union, evil(1)");
+  });
+
+  it("rejects a clause keyword used as an alias before a comma, even after another alias", () => {
+    // `LIMIT ,` is not valid SQL, so the keyword must be an alias. The earlier
+    // guard only applied before an alias had been consumed.
+    rejected("SELECT * FROM events x limit, evil(1)");
+    rejected("SELECT * FROM events a having, evil(1)");
+    rejected("SELECT * FROM (SELECT 1) t limit, evil(1)");
+    rejected("SELECT * FROM events e1 e2 limit, evil(1)");
+  });
+
   it("rejects table functions inside a subquery's table list", () => {
     rejected("SELECT * FROM (SELECT * FROM events, brandNewFunc(1)) AS sub");
     rejected("SELECT * FROM (SELECT * FROM brandNewFunc(1)) AS sub");

@@ -5,10 +5,16 @@
  */
 export const SCHEMA_DOC = `# Yavio analytics schema (ClickHouse SQL dialect)
 
-Every query is automatically filtered to the authorized workspace by
-database-level row policies — you can only ever see your own data. Always
-filter on project_id (get ids from list_projects) and a timestamp range.
-Events are retained for 90 days.
+Every query is hard-filtered by database row policies to the authorized
+workspace AND to the single project_id you pass to run_query. You cannot see
+another workspace, and you cannot see another project — including your own
+other projects — in the same query.
+
+That means a cross-project comparison is NOT possible in one query: to compare
+projects, call run_query once per project_id and combine the results yourself.
+A GROUP BY project_id returns exactly one group, not an error.
+
+Always also filter on a timestamp range. Events are retained for 90 days.
 
 ## events — one row per SDK event (the main table)
 Identity: event_id, workspace_id, project_id, trace_id, session_id

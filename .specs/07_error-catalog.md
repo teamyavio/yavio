@@ -320,6 +320,7 @@ Errors from the `yavio-dashboard` Next.js application. These appear in API respo
 | `YAVIO-3404` | 400 | Invalid sort parameter | Sort field is not a valid column for this endpoint. | Check the API documentation for valid sort fields. |
 | `YAVIO-3405` | 504 | Analytics query timeout | ClickHouse query exceeded timeout (30 seconds). | Narrow the time range or reduce query complexity. |
 | `YAVIO-3406` | 503 | ClickHouse unavailable | ClickHouse is unreachable from the dashboard. | Check ClickHouse health. Partial data may be rendered with an error message. |
+| `YAVIO-3407` | 400 | Analytics query rejected | ClickHouse parsed the query and refused it (unknown column, bad function, budget exceeded). Permanent — the same query will fail again. | Fix the query. Raised by the MCP `run_query` tool for model-authored SQL; dashboard-authored queries hitting this indicate schema drift. |
 
 ### Live Feed (3500&ndash;3549)
 

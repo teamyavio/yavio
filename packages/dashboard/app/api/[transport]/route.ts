@@ -314,7 +314,7 @@ const handler = createMcpHandler(
           if (rows.length === 0) {
             return toolText({
               rows: [],
-              note: "Empty result. Row policies only return data of the authorized workspace; also check project_id and time filters.",
+              note: "Empty result. Row policies restrict every query to the authorized workspace AND to the project_id you passed; also check the time filter.",
             });
           }
           // Second cap, on what we serialise: the model has to read this, and

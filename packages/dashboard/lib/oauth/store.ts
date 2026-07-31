@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { getDb } from "@/lib/db";
-import { oauthCodes, oauthTokens } from "@yavio/db/schema";
+import { oauthClients, oauthCodes, oauthTokens } from "@yavio/db/schema";
 import { and, eq, gt, isNull, or, sql } from "drizzle-orm";
 import {
   ACCESS_TOKEN_TTL_MS,
@@ -222,21 +222,26 @@ export async function rotateRefreshToken(
       throw new OAuthError("invalid_grant", "refresh token has been revoked", 400);
     }
 
-    // One replacement per rotation. A legitimate parallel refresh is two
-    // requests, i.e. one replay; anything beyond that is a token being used
-    // by more than one holder.
-    const claimed = await db
+    // Replays INSIDE the window are allowed without limit. Capping them at one
+    // looked stricter but broke the case this exists for: a client firing
+    // three parallel refreshes (or retrying a timed-out one) had its grant
+    // revoked and the user thrown back into the browser consent flow. Since
+    // every replay returns the winner's identical pair and creates no new
+    // chain, a second replay grants an attacker nothing they did not already
+    // have — the detection that matters is use of a token AFTER the window,
+    // which still revokes the family.
+    //
+    // graceUsedAt records the first replay so concurrent-refresh behaviour is
+    // visible in the data rather than only in logs.
+    await db
       .update(oauthTokens)
-      .set({ graceUsedAt: new Date(), lastUsedAt: new Date() })
+      .set({ lastUsedAt: new Date() })
       .where(and(eq(oauthTokens.id, row.id), isNull(oauthTokens.graceUsedAt)))
       .returning({ id: oauthTokens.id });
-    if (claimed.length === 0) {
-      console.warn(
-        `[oauth] second replay of an already-replayed refresh token on grant ${row.grantId} — revoking`,
-      );
-      await revokeGrantFamily(row.grantId);
-      throw new OAuthError("invalid_grant", "refresh token has been revoked", 400);
-    }
+    await db
+      .update(oauthTokens)
+      .set({ graceUsedAt: new Date() })
+      .where(and(eq(oauthTokens.id, row.id), isNull(oauthTokens.graceUsedAt)));
 
     const remainingMs = successorRow.expiresAt.getTime() - Date.now();
     return {
@@ -248,11 +253,7 @@ export async function rotateRefreshToken(
 
   if (row.rotatedAt !== null) {
     const sinceRotation = Date.now() - row.rotatedAt.getTime();
-    if (
-      sinceRotation > REFRESH_ROTATION_GRACE_MS ||
-      row.rotationNonce === null ||
-      row.graceUsedAt !== null
-    ) {
+    if (sinceRotation > REFRESH_ROTATION_GRACE_MS || row.rotationNonce === null) {
       await revokeGrantFamily(row.grantId);
       throw new OAuthError("invalid_grant", "refresh token has been revoked", 400);
     }
@@ -386,4 +387,13 @@ export async function pruneExpired(): Promise<void> {
     .where(
       sql`access_token_expires_at < now() - interval '35 days' AND (refresh_token_expires_at IS NULL OR refresh_token_expires_at < now() - interval '5 days')`,
     );
+  // DCR registration is unauthenticated by design, so oauth_clients grows one
+  // row per call and nothing reclaimed it. Drop registrations that never led
+  // to a grant and are older than a refresh lifetime; CIMD clients re-register
+  // themselves from their metadata document on next use.
+  await db.delete(oauthClients).where(
+    sql`created_at < now() - interval '35 days'
+        AND NOT EXISTS (SELECT 1 FROM oauth_tokens t WHERE t.client_id = oauth_clients.client_id)
+        AND NOT EXISTS (SELECT 1 FROM oauth_codes c WHERE c.client_id = oauth_clients.client_id)`,
+  );
 }

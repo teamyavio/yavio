@@ -118,7 +118,10 @@ export async function queryAnalytics<T>(options: AnalyticsQueryOptions<T>): Prom
 
     if (rejectedByServer) {
       throw new AnalyticsQueryError(
-        ErrorCode.DASHBOARD.CLICKHOUSE_UNAVAILABLE,
+        // Its own code: 3406 is catalogued as 503 "ClickHouse unreachable",
+        // which is the opposite condition, and reusing it would have made the
+        // dashboard's alerting unable to tell an outage from a bad query.
+        ErrorCode.DASHBOARD.ANALYTICS_QUERY_REJECTED,
         "The database rejected this query. Retrying unchanged will fail the same way.",
         400,
         detail,

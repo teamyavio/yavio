@@ -135,7 +135,7 @@ export default async function AuthorizePage({
           <p className="text-muted-foreground">
             Sends data to {isLoopback ? "an app on this device" : redirectHost}
           </p>
-          {identityHost !== null && identityHost !== redirectHost && (
+          {identityHost !== null && (
             <p className="text-muted-foreground">Identity published by {identityHost}</p>
           )}
         </div>

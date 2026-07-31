@@ -91,6 +91,21 @@ async function handleAuthorizationCode(params: URLSearchParams): Promise<Respons
   if (!verifyPkceS256(codeVerifier, grant.codeChallenge)) {
     throw new OAuthError("invalid_grant", "PKCE verification failed", 400);
   }
+  // RFC 8707 §2.2: the token request's resource must be one that was
+  // authorized. oauth_codes.resource was written and never read, so this was
+  // a check the schema implied but nothing performed.
+  const requestedResource = params.get("resource");
+  if (
+    requestedResource !== null &&
+    grant.resource !== null &&
+    requestedResource !== grant.resource
+  ) {
+    throw new OAuthError(
+      "invalid_target",
+      "resource does not match the one authorized for this code",
+      400,
+    );
+  }
 
   const scopes = grant.scope.split(" ");
   const issued = await issueTokens({

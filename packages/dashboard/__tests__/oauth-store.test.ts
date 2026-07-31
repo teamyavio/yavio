@@ -294,7 +294,7 @@ describe("oauth token store", () => {
   });
 });
 
-describe("rotation grace window is single-use", () => {
+describe("rotation grace window tolerates concurrency", () => {
   beforeEach(() => {
     vi.stubEnv("API_KEY_HASH_SECRET", "unit-secret");
     insertedValues = [];
@@ -303,35 +303,38 @@ describe("rotation grace window is single-use", () => {
     chainInsert();
   });
 
-  it("a SECOND replay of an already-replayed token revokes the family", async () => {
+  it("a THIRD concurrent refresh still gets the winner's pair, not a revoked grant", async () => {
+    // Capping the window at one replay revoked the grant on ordinary 3-way
+    // client concurrency and threw the user back into the consent flow.
     const nonce = "n";
-    chainSelectQueue([
-      [{ ...baseTokenRow, rotatedAt: new Date(Date.now() - 5_000), rotationNonce: nonce }],
-      [{ expiresAt: new Date(Date.now() + 3_500_000), revokedAt: null }],
-    ]);
-    // the graceUsedAt claim wins nothing => this row was already replayed
-    chainUpdate([]);
-    await expect(rotateRefreshToken("yvo_rt_x", "yvc_client")).rejects.toMatchObject({
-      error: "invalid_grant",
-    });
-    expect(updateSets.some((s) => s.revokedAt instanceof Date)).toBe(true);
-  });
-
-  it("a row already marked graceUsedAt is replay on sight", async () => {
+    const winner = deriveSuccessorTokens("yvo_rt_x", nonce);
     chainSelectQueue([
       [
         {
           ...baseTokenRow,
           rotatedAt: new Date(Date.now() - 5_000),
-          rotationNonce: "n",
-          graceUsedAt: new Date(),
+          rotationNonce: nonce,
+          graceUsedAt: new Date(Date.now() - 4_000), // an earlier replay already happened
         },
       ],
+      [{ expiresAt: new Date(Date.now() + 3_500_000), revokedAt: null }],
+    ]);
+    chainUpdate([{ id: "row-1" }]);
+
+    const result = await rotateRefreshToken("yvo_rt_x", "yvc_client");
+    expect(result.refreshToken).toBe(winner.refreshToken);
+    expect(insertedValues).toHaveLength(0);
+    expect(updateSets.some((entry) => entry.revokedAt instanceof Date)).toBe(false);
+  });
+
+  it("but use AFTER the window still revokes the family", async () => {
+    chainSelectQueue([
+      [{ ...baseTokenRow, rotatedAt: new Date(Date.now() - 120_000), rotationNonce: "n" }],
     ]);
     chainUpdate([]);
     await expect(rotateRefreshToken("yvo_rt_x", "yvc_client")).rejects.toMatchObject({
       error: "invalid_grant",
     });
-    expect(updateSets.some((s) => s.revokedAt instanceof Date)).toBe(true);
+    expect(updateSets.some((entry) => entry.revokedAt instanceof Date)).toBe(true);
   });
 });

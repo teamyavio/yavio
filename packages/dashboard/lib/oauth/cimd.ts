@@ -97,8 +97,18 @@ function guardedLookup(
       callback(null, list);
       return;
     }
-    const preferred = options.family === 6 ? list.find((a) => a.family === 6) : undefined;
-    const chosen = preferred ?? list[0];
+    // Honour the family the socket asked for; returning the other family made
+    // dual-stack fetches fail non-deterministically, and every failure maps to
+    // invalid_client, pushing a working CIMD client back to DCR.
+    const wanted = options.family === 4 || options.family === 6 ? options.family : undefined;
+    const chosen = wanted ? list.find((a) => a.family === wanted) : list[0];
+    if (!chosen) {
+      callback(
+        Object.assign(new Error("no address of the requested family"), { code: "ENOTFOUND" }),
+        "",
+      );
+      return;
+    }
     callback(null, chosen.address, chosen.family);
   });
 }

@@ -10,6 +10,7 @@ import { authorizationServerMetadata, protectedResourceMetadata } from "../lib/o
  */
 describe("authorization server metadata", () => {
   beforeEach(() => {
+    vi.stubEnv("NEXTAUTH_URL", "https://dashboard.apps.yavio.ai");
     vi.stubEnv("APP_URL", "https://dashboard.apps.yavio.ai");
   });
   afterEach(() => {
@@ -50,6 +51,7 @@ describe("authorization server metadata", () => {
 
 describe("protected resource metadata", () => {
   beforeEach(() => {
+    vi.stubEnv("NEXTAUTH_URL", "https://dashboard.apps.yavio.ai");
     vi.stubEnv("APP_URL", "https://dashboard.apps.yavio.ai");
   });
   afterEach(() => {

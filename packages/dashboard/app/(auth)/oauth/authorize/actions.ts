@@ -52,7 +52,17 @@ export async function approveConsent(formData: FormData): Promise<void> {
     request = await validateAuthorizeRequest(authorizeParams(formData));
   } catch (err) {
     if (err instanceof RedirectAuthorizeError) redirect(err.redirectTo);
-    if (err instanceof RenderAuthorizeError) redirect("/oauth/authorize?error=invalid_request");
+    if (err instanceof RenderAuthorizeError) {
+      // Re-run the authorize page WITH the original parameters so it renders
+      // the real reason. Redirecting to a bare /oauth/authorize?error=... put
+      // the user on a page that reported "Missing client_id" and offered no
+      // way back, while the client was left waiting.
+      const query = new URLSearchParams();
+      for (const [key, value] of Object.entries(authorizeParams(formData))) {
+        if (value !== undefined) query.set(key, value);
+      }
+      redirect(`/oauth/authorize?${query.toString()}`);
+    }
     throw err;
   }
 

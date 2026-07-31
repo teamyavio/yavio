@@ -274,9 +274,11 @@ export const oauthTokens = pgTable(
     // token arriving within the grace window is a benign client race; after
     // the window it is treated as replay and revokes the whole family.
     rotatedAt: timestamp("rotated_at", { withTimezone: true }),
-    // Set when the grace window was already spent on this row. The window is
-    // good for exactly one replacement — a second reuse is replay, even
-    // inside the window, and revokes the whole family.
+    // Stamped the first time this row's rotation was replayed by a concurrent
+    // refresh. Observability only: replays inside the grace window are allowed
+    // without limit (they all return the same successor and create no new
+    // chain), because capping them revoked grants on ordinary 3-way client
+    // concurrency. Use after the window is what counts as replay.
     graceUsedAt: timestamp("grace_used_at", { withTimezone: true }),
     // Server-chosen randomness recorded when this row is rotated. The
     // successor pair is derived from (presented refresh token, this nonce),

@@ -26,6 +26,7 @@ const VALID_TOKEN = {
 
 describe("verifyMcpBearerToken", () => {
   beforeEach(() => {
+    vi.stubEnv("NEXTAUTH_URL", "https://dashboard.test");
     vi.stubEnv("APP_URL", "https://dashboard.test");
     vi.clearAllMocks();
   });
