@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import * as schema from "../schema.js";
 
 describe("schema tables", () => {
-  it("exports all 11 tables", () => {
+  it("exports all 14 tables", () => {
     const tables = [
       schema.users,
       schema.oauthAccounts,
@@ -14,14 +14,58 @@ describe("schema tables", () => {
       schema.invitations,
       schema.projects,
       schema.apiKeys,
+      schema.oauthClients,
+      schema.oauthCodes,
+      schema.oauthTokens,
       schema.verificationTokens,
       schema.loginAttempts,
       schema.stripeWebhookEvents,
     ];
-    expect(tables).toHaveLength(11);
+    expect(tables).toHaveLength(14);
     for (const table of tables) {
       expect(getTableName(table)).toBeTruthy();
     }
+  });
+
+  it("oauth_clients table stores registration metadata", () => {
+    expect(getTableName(schema.oauthClients)).toBe("oauth_clients");
+    const config = getTableConfig(schema.oauthClients);
+    const colNames = config.columns.map((c) => c.name);
+    expect(colNames).toContain("client_id");
+    expect(colNames).toContain("registration_type");
+    expect(colNames).toContain("redirect_uris");
+    expect(colNames).toContain("token_endpoint_auth_method");
+    expect(colNames).toContain("metadata_refreshed_at");
+  });
+
+  it("oauth_codes table is hashed, single-use and workspace-scoped", () => {
+    expect(getTableName(schema.oauthCodes)).toBe("oauth_codes");
+    const config = getTableConfig(schema.oauthCodes);
+    const colNames = config.columns.map((c) => c.name);
+    expect(colNames).toContain("code_hash");
+    expect(colNames).not.toContain("code");
+    expect(colNames).toContain("code_challenge");
+    expect(colNames).toContain("workspace_id");
+    expect(colNames).toContain("used_at");
+    expect(colNames).toContain("expires_at");
+    const fkTargets = config.foreignKeys.map((fk) => getTableName(fk.reference().foreignTable));
+    expect(fkTargets.sort()).toEqual(["oauth_clients", "users", "workspaces"]);
+  });
+
+  it("oauth_tokens table stores hashes with grant-family rotation fields", () => {
+    expect(getTableName(schema.oauthTokens)).toBe("oauth_tokens");
+    const config = getTableConfig(schema.oauthTokens);
+    const colNames = config.columns.map((c) => c.name);
+    expect(colNames).toContain("grant_id");
+    expect(colNames).toContain("access_token_hash");
+    expect(colNames).toContain("refresh_token_hash");
+    expect(colNames).not.toContain("access_token");
+    expect(colNames).toContain("audience");
+    expect(colNames).toContain("rotated_at");
+    expect(colNames).toContain("revoked_at");
+    const fkTargets = config.foreignKeys.map((fk) => getTableName(fk.reference().foreignTable));
+    expect(fkTargets.sort()).toEqual(["oauth_clients", "users", "workspaces"]);
+    expect(config.indexes.map((i) => i.config.name)).toContain("idx_oauth_tokens_grant");
   });
 
   it("users table has correct SQL name and columns", () => {

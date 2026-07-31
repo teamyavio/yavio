@@ -11,7 +11,7 @@ describe("PostgreSQL migrations", () => {
   });
 
   describe("fresh migration — all tables created", () => {
-    it("creates all 11 application tables", async () => {
+    it("creates all 14 application tables", async () => {
       const { sql } = getServiceDb();
       const tables = await sql`
         SELECT table_name FROM information_schema.tables
@@ -20,13 +20,16 @@ describe("PostgreSQL migrations", () => {
       `;
       const names = tables.map((r) => r.table_name);
       const appTables = names.filter((n: string) => !n.startsWith("__"));
-      expect(appTables).toHaveLength(11);
+      expect(appTables).toHaveLength(14);
       expect(names).toEqual(
         expect.arrayContaining([
           "api_keys",
           "invitations",
           "login_attempts",
           "oauth_accounts",
+          "oauth_clients",
+          "oauth_codes",
+          "oauth_tokens",
           "projects",
           "sessions",
           "stripe_webhook_events",
@@ -100,19 +103,24 @@ describe("PostgreSQL migrations", () => {
         WHERE relrowsecurity = true AND relnamespace = 'public'::regnamespace
         ORDER BY relname
       `;
-      const names = rlsTables.map((r) => r.relname);
-      expect(names).toEqual(
-        expect.arrayContaining([
-          "api_keys",
-          "invitations",
-          "oauth_accounts",
-          "projects",
-          "sessions",
-          "users",
-          "workspace_members",
-          "workspaces",
-        ]),
-      );
+      const names = (rlsTables.map((r) => r.relname) as string[]).sort();
+      // EXACT set on purpose: an arrayContaining assertion let the three OAuth
+      // tables ship with no policy at all and stay green.
+      // (verification_tokens, login_attempts and stripe_webhook_events are
+      // deliberately unfenced by 0001 — pre-existing, not changed here.)
+      expect(names).toEqual([
+        "api_keys",
+        "invitations",
+        "oauth_accounts",
+        "oauth_clients",
+        "oauth_codes",
+        "oauth_tokens",
+        "projects",
+        "sessions",
+        "users",
+        "workspace_members",
+        "workspaces",
+      ]);
     });
 
     it("user_workspace_ids() function exists", async () => {

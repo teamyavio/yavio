@@ -34,6 +34,12 @@ export interface AnalyticsQueryOptions<T> {
   query: string;
   params?: Record<string, unknown>;
   format?: string;
+  /**
+   * Extra per-query ClickHouse settings (e.g. execution/row caps for
+   * free-form MCP queries). Merged BEFORE the tenant-isolation settings so
+   * they can never override SQL_workspace_id / SQL_project_id.
+   */
+  settings?: Record<string, string | number>;
 }
 
 /**
@@ -52,6 +58,7 @@ export async function queryAnalytics<T>(options: AnalyticsQueryOptions<T>): Prom
       query_params: params,
       format: "JSONEachRow",
       clickhouse_settings: {
+        ...options.settings,
         SQL_workspace_id: workspaceId,
         SQL_project_id: projectId,
       },
@@ -61,12 +68,63 @@ export async function queryAnalytics<T>(options: AnalyticsQueryOptions<T>): Prom
   } catch (err) {
     console.error("[ClickHouse] Query failed:", err);
     const message = err instanceof Error ? err.message : "Unknown ClickHouse error";
+    // Raw ClickHouse error text: never sent to browsers (toResponse omits
+    // it), but the MCP run_query tool surfaces it — it is the model's only
+    // way to correct a bad column name instead of retrying forever.
+    const detail = message.slice(0, 600);
 
     if (message.includes("TIMEOUT") || message.includes("timeout")) {
       throw new AnalyticsQueryError(
         ErrorCode.DASHBOARD.ANALYTICS_QUERY_TIMEOUT,
         "Analytics query timed out. Please try a smaller date range.",
         504,
+        detail,
+      );
+    }
+
+    // Did ClickHouse parse the request and reject it (unknown column, bad
+    // function, budget overrun)? That is permanent — telling the caller to
+    // "try again later" sends a model into a retry loop on a query that can
+    // never succeed. @clickhouse/client lifts the `Code: NNN` prefix into a
+    // numeric `code` field, so the message alone does not always carry it;
+    // network failures use non-numeric codes like ECONNREFUSED.
+    const clientCode = (err as { code?: unknown })?.code;
+    const numericCode =
+      typeof clientCode === "number"
+        ? clientCode
+        : typeof clientCode === "string" && /^\d+$/.test(clientCode)
+          ? Number(clientCode)
+          : Number(/Code:\s*(\d+)/.exec(message)?.[1] ?? Number.NaN);
+
+    // Server-side codes that ARE worth retrying: overload and resource
+    // pressure, not a malformed query. Misclassifying these would tell the
+    // dashboard's own analytics routes that a transient spike is permanent.
+    const TRANSIENT_SERVER_CODES = new Set([
+      159, // TIMEOUT_EXCEEDED
+      164, // READONLY
+      201, // QUOTA_EXCEEDED
+      202, // TOO_MANY_SIMULTANEOUS_QUERIES
+      203, // NO_FREE_CONNECTION
+      209, // SOCKET_TIMEOUT
+      210, // NETWORK_ERROR
+      241, // MEMORY_LIMIT_EXCEEDED
+      252, // TOO_MANY_PARTS
+      373, // SESSION_IS_LOCKED
+      425, // SYSTEM_ERROR
+    ]);
+
+    const rejectedByServer =
+      Number.isFinite(numericCode) && !TRANSIENT_SERVER_CODES.has(numericCode);
+
+    if (rejectedByServer) {
+      throw new AnalyticsQueryError(
+        // Its own code: 3406 is catalogued as 503 "ClickHouse unreachable",
+        // which is the opposite condition, and reusing it would have made the
+        // dashboard's alerting unable to tell an outage from a bad query.
+        ErrorCode.DASHBOARD.ANALYTICS_QUERY_REJECTED,
+        "The database rejected this query. Retrying unchanged will fail the same way.",
+        400,
+        detail,
       );
     }
 
@@ -74,6 +132,7 @@ export async function queryAnalytics<T>(options: AnalyticsQueryOptions<T>): Prom
       ErrorCode.DASHBOARD.CLICKHOUSE_UNAVAILABLE,
       "Analytics query failed. Please try again later.",
       502,
+      detail,
     );
   }
 }
@@ -83,6 +142,7 @@ export class AnalyticsQueryError extends Error {
     public readonly code: string,
     message: string,
     public readonly status: number,
+    public readonly detail?: string,
   ) {
     super(message);
     this.name = "AnalyticsQueryError";
