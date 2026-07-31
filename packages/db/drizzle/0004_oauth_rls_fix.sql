@@ -29,9 +29,9 @@ REVOKE ALL ON oauth_tokens FROM yavio_app;
 REVOKE ALL ON oauth_codes FROM yavio_app;
 --> statement-breakpoint
 REVOKE ALL ON oauth_clients FROM yavio_app;
---> statement-breakpoint
 
--- Future tables created by yavio_service must not hand yavio_app blanket DML
--- either; 0001's ALTER DEFAULT PRIVILEGES is what let these three slip in.
-ALTER DEFAULT PRIVILEGES FOR ROLE yavio_service IN SCHEMA public
-  REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM yavio_app;
+-- NOTE: deliberately NOT touching 0001's ALTER DEFAULT PRIVILEGES. Revoking
+-- the default would silently deny yavio_app access to every FUTURE table too,
+-- changing platform-wide behaviour far beyond these three and breaking the
+-- next user-facing table someone adds under the existing RLS pattern. The
+-- targeted revokes above are what this finding actually calls for.
