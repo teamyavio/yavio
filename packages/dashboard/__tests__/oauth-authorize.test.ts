@@ -47,7 +47,7 @@ describe("authorization request validation", () => {
     mockResolveClient.mockResolvedValue(CLAUDE_CLIENT);
   });
   afterEach(() => {
-    process.env.APP_URL = undefined;
+    delete process.env.APP_URL;
     vi.clearAllMocks();
   });
 

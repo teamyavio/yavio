@@ -11,6 +11,7 @@ import {
 import { sanitizeClientName } from "@/lib/oauth/display";
 import { rateLimitConfigs } from "@/lib/rate-limit/config";
 import { RateLimiter } from "@/lib/rate-limit/rate-limiter";
+import { clientIp } from "@/lib/security/client-ip";
 import { workspaceMembers, workspaces } from "@yavio/db/schema";
 import { eq } from "drizzle-orm";
 import { headers } from "next/headers";
@@ -68,8 +69,7 @@ export default async function AuthorizePage({
   const params = authorizeValues(await searchParams);
 
   const requestHeaders = await headers();
-  const clientIp = requestHeaders.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
-  if (!limiter.consume(clientIp).allowed) {
+  if (!limiter.consume(clientIp({ headers: requestHeaders })).allowed) {
     return <ErrorCard message="Too many authorization requests. Wait a moment and try again." />;
   }
 

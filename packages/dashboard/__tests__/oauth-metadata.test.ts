@@ -13,7 +13,7 @@ describe("authorization server metadata", () => {
     process.env.APP_URL = "https://dashboard.apps.yavio.ai";
   });
   afterEach(() => {
-    process.env.APP_URL = undefined;
+    delete process.env.APP_URL;
   });
 
   it("satisfies Claude's two-condition CIMD gate", () => {
@@ -53,7 +53,7 @@ describe("protected resource metadata", () => {
     process.env.APP_URL = "https://dashboard.apps.yavio.ai";
   });
   afterEach(() => {
-    process.env.APP_URL = undefined;
+    delete process.env.APP_URL;
   });
 
   it("identifies the canonical MCP resource and a single AS", () => {

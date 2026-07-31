@@ -197,16 +197,48 @@ export async function rotateRefreshToken(
    */
   const replayWinningRotation = async (nonce: string): Promise<IssuedTokens> => {
     const successor = deriveSuccessorTokens(rawRefreshToken, nonce);
-    const rows = await db
-      .select({ expiresAt: oauthTokens.accessTokenExpiresAt, revokedAt: oauthTokens.revokedAt })
-      .from(oauthTokens)
-      .where(eq(oauthTokens.accessTokenHash, hashToken(successor.accessToken)))
-      .limit(1);
-    if (rows.length === 0 || rows[0].revokedAt !== null) {
+    const successorHash = hashToken(successor.accessToken);
+
+    // The winner marks the row rotated and THEN inserts the successor, so a
+    // truly concurrent loser can arrive in between and find nothing. Treating
+    // that as replay would revoke the grant in exactly the case this design
+    // exists to serve, so wait briefly for the insert to land.
+    let successorRow: { expiresAt: Date; revokedAt: Date | null } | undefined;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const rows = await db
+        .select({ expiresAt: oauthTokens.accessTokenExpiresAt, revokedAt: oauthTokens.revokedAt })
+        .from(oauthTokens)
+        .where(eq(oauthTokens.accessTokenHash, successorHash))
+        .limit(1);
+      if (rows.length > 0) {
+        successorRow = rows[0];
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    if (!successorRow || successorRow.revokedAt !== null) {
       await revokeGrantFamily(row.grantId);
       throw new OAuthError("invalid_grant", "refresh token has been revoked", 400);
     }
-    const remainingMs = rows[0].expiresAt.getTime() - Date.now();
+
+    // One replacement per rotation. A legitimate parallel refresh is two
+    // requests, i.e. one replay; anything beyond that is a token being used
+    // by more than one holder.
+    const claimed = await db
+      .update(oauthTokens)
+      .set({ graceUsedAt: new Date(), lastUsedAt: new Date() })
+      .where(and(eq(oauthTokens.id, row.id), isNull(oauthTokens.graceUsedAt)))
+      .returning({ id: oauthTokens.id });
+    if (claimed.length === 0) {
+      console.warn(
+        `[oauth] second replay of an already-replayed refresh token on grant ${row.grantId} — revoking`,
+      );
+      await revokeGrantFamily(row.grantId);
+      throw new OAuthError("invalid_grant", "refresh token has been revoked", 400);
+    }
+
+    const remainingMs = successorRow.expiresAt.getTime() - Date.now();
     return {
       accessToken: successor.accessToken,
       accessTokenExpiresInSeconds: Math.max(1, Math.floor(remainingMs / 1000)),
@@ -216,7 +248,11 @@ export async function rotateRefreshToken(
 
   if (row.rotatedAt !== null) {
     const sinceRotation = Date.now() - row.rotatedAt.getTime();
-    if (sinceRotation > REFRESH_ROTATION_GRACE_MS || row.rotationNonce === null) {
+    if (
+      sinceRotation > REFRESH_ROTATION_GRACE_MS ||
+      row.rotationNonce === null ||
+      row.graceUsedAt !== null
+    ) {
       await revokeGrantFamily(row.grantId);
       throw new OAuthError("invalid_grant", "refresh token has been revoked", 400);
     }

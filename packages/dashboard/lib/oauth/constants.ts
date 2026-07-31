@@ -36,7 +36,11 @@ export const CIMD_STALE_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
  * mint tokens with a localhost issuer/audience.
  */
 export function canonicalOrigin(): string {
-  const url = process.env.APP_URL ?? process.env.NEXTAUTH_URL ?? "http://localhost:3000";
+  // Same precedence as lib/security/origin.ts. They previously disagreed
+  // (APP_URL first here, NEXTAUTH_URL first there), so a deployment setting
+  // both to different hosts would mint tokens for an audience its own CSRF
+  // check rejects.
+  const url = process.env.NEXTAUTH_URL ?? process.env.APP_URL ?? "http://localhost:3000";
   return url.replace(/\/+$/, "");
 }
 

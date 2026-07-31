@@ -2,6 +2,7 @@ import { OAuthError } from "@/lib/oauth/errors";
 import { revokeToken } from "@/lib/oauth/store";
 import { rateLimitConfigs } from "@/lib/rate-limit/config";
 import { RateLimiter } from "@/lib/rate-limit/rate-limiter";
+import { clientIp } from "@/lib/security/client-ip";
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -17,8 +18,8 @@ limiter.start();
  * unknown tokens — revocation must not be a probing oracle.
  */
 export async function POST(request: Request): Promise<Response> {
-  const clientIp = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
-  const limit = limiter.consume(clientIp);
+  const ip = clientIp(request);
+  const limit = limiter.consume(ip);
   if (!limit.allowed) {
     return Response.json(
       { error: "slow_down", error_description: "too many requests" },

@@ -30,7 +30,7 @@ describe("verifyMcpBearerToken", () => {
     vi.clearAllMocks();
   });
   afterEach(() => {
-    process.env.APP_URL = undefined;
+    delete process.env.APP_URL;
   });
 
   it("rejects missing/unknown tokens", async () => {

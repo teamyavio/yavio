@@ -29,6 +29,20 @@
       "when": 1785454654957,
       "tag": "0003_oauth_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785454655957,
+      "tag": "0004_oauth_rls_fix",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1785454656957,
+      "tag": "0005_oauth_token_expiry_index",
+      "breakpoints": true
     }
   ]
 }

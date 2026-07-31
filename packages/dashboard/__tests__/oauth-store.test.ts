@@ -52,6 +52,20 @@ function chainUpdate(returningRows: unknown[]) {
     },
   }));
 }
+/** Successive UPDATEs return successive entries (last one repeats). */
+function chainUpdateQueue(queue: unknown[][]) {
+  let i = 0;
+  db.update.mockImplementation(() => ({
+    set: (setValues: Record<string, unknown>) => {
+      updateSets.push(setValues);
+      const rows = queue[Math.min(i++, queue.length - 1)];
+      return {
+        where: () =>
+          Object.assign(Promise.resolve(rows), { returning: () => Promise.resolve(rows) }),
+      };
+    },
+  }));
+}
 function chainSelect(rows: unknown[]) {
   db.select.mockImplementation(() => ({
     from: () => ({ where: () => ({ limit: () => Promise.resolve(rows) }) }),
@@ -96,7 +110,7 @@ describe("oauth token store", () => {
     chainInsert();
   });
   afterEach(() => {
-    process.env.API_KEY_HASH_SECRET = undefined;
+    delete process.env.API_KEY_HASH_SECRET;
   });
 
   it("stores authorization codes hashed, never raw", async () => {
@@ -229,7 +243,8 @@ describe("oauth token store", () => {
       [{ rotationNonce: nonce }], // re-read after losing the claim
       [{ expiresAt: new Date(Date.now() + 3_500_000), revokedAt: null }],
     ]);
-    chainUpdate([]); // our conditional UPDATE won nothing
+    // 1st UPDATE = the rotation claim we lose; 2nd = the grace claim we win
+    chainUpdateQueue([[], [{ id: "row-1" }]]);
     const result = await rotateRefreshToken("yvo_rt_x", "yvc_client");
     expect(result.refreshToken).toBe(winner.refreshToken);
     expect(insertedValues).toHaveLength(0);
@@ -276,5 +291,47 @@ describe("oauth token store", () => {
       scope: "analytics:read offline_access",
       audience: "https://dashboard.test/api/mcp",
     });
+  });
+});
+
+describe("rotation grace window is single-use", () => {
+  beforeEach(() => {
+    process.env.API_KEY_HASH_SECRET = "unit-secret";
+    insertedValues = [];
+    updateSets = [];
+    vi.clearAllMocks();
+    chainInsert();
+  });
+
+  it("a SECOND replay of an already-replayed token revokes the family", async () => {
+    const nonce = "n";
+    chainSelectQueue([
+      [{ ...baseTokenRow, rotatedAt: new Date(Date.now() - 5_000), rotationNonce: nonce }],
+      [{ expiresAt: new Date(Date.now() + 3_500_000), revokedAt: null }],
+    ]);
+    // the graceUsedAt claim wins nothing => this row was already replayed
+    chainUpdate([]);
+    await expect(rotateRefreshToken("yvo_rt_x", "yvc_client")).rejects.toMatchObject({
+      error: "invalid_grant",
+    });
+    expect(updateSets.some((s) => s.revokedAt instanceof Date)).toBe(true);
+  });
+
+  it("a row already marked graceUsedAt is replay on sight", async () => {
+    chainSelectQueue([
+      [
+        {
+          ...baseTokenRow,
+          rotatedAt: new Date(Date.now() - 5_000),
+          rotationNonce: "n",
+          graceUsedAt: new Date(),
+        },
+      ],
+    ]);
+    chainUpdate([]);
+    await expect(rotateRefreshToken("yvo_rt_x", "yvc_client")).rejects.toMatchObject({
+      error: "invalid_grant",
+    });
+    expect(updateSets.some((s) => s.revokedAt instanceof Date)).toBe(true);
   });
 });

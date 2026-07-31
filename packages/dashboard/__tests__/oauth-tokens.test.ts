@@ -6,7 +6,7 @@ describe("token generation and hashing", () => {
     process.env.API_KEY_HASH_SECRET = "test-secret";
   });
   afterEach(() => {
-    process.env.API_KEY_HASH_SECRET = undefined;
+    delete process.env.API_KEY_HASH_SECRET;
   });
 
   it("generates prefixed 256-bit tokens", () => {

@@ -89,11 +89,32 @@ export async function queryAnalytics<T>(options: AnalyticsQueryOptions<T>): Prom
     // numeric `code` field, so the message alone does not always carry it;
     // network failures use non-numeric codes like ECONNREFUSED.
     const clientCode = (err as { code?: unknown })?.code;
+    const numericCode =
+      typeof clientCode === "number"
+        ? clientCode
+        : typeof clientCode === "string" && /^\d+$/.test(clientCode)
+          ? Number(clientCode)
+          : Number(/Code:\s*(\d+)/.exec(message)?.[1] ?? Number.NaN);
+
+    // Server-side codes that ARE worth retrying: overload and resource
+    // pressure, not a malformed query. Misclassifying these would tell the
+    // dashboard's own analytics routes that a transient spike is permanent.
+    const TRANSIENT_SERVER_CODES = new Set([
+      159, // TIMEOUT_EXCEEDED
+      164, // READONLY
+      201, // QUOTA_EXCEEDED
+      202, // TOO_MANY_SIMULTANEOUS_QUERIES
+      203, // NO_FREE_CONNECTION
+      209, // SOCKET_TIMEOUT
+      210, // NETWORK_ERROR
+      241, // MEMORY_LIMIT_EXCEEDED
+      252, // TOO_MANY_PARTS
+      373, // SESSION_IS_LOCKED
+      425, // SYSTEM_ERROR
+    ]);
+
     const rejectedByServer =
-      /Code:\s*\d+/.test(message) ||
-      message.includes("DB::Exception") ||
-      typeof clientCode === "number" ||
-      (typeof clientCode === "string" && /^\d+$/.test(clientCode));
+      Number.isFinite(numericCode) && !TRANSIENT_SERVER_CODES.has(numericCode);
 
     if (rejectedByServer) {
       throw new AnalyticsQueryError(

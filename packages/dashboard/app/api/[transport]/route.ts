@@ -4,6 +4,7 @@ import {
   type McpAuthContext,
   McpUnavailableError,
   mcpAuthContext,
+  preflightMcpAuth,
   verifyMcpBearerToken,
 } from "@/lib/mcp/auth";
 import { runTool, toolText } from "@/lib/mcp/errors";
@@ -18,6 +19,7 @@ import { requireProjectInWorkspace } from "@/lib/mcp/project-access";
 import { SCHEMA_DOC } from "@/lib/mcp/schema-doc";
 import { validateFreeQuery } from "@/lib/mcp/sql-guard";
 import { ANALYTICS_SCOPE, canonicalOrigin } from "@/lib/oauth/constants";
+import { hashToken } from "@/lib/oauth/tokens";
 import { queryErrorList } from "@/lib/queries/errors";
 import { queryIntentFeed, queryIntentKPIs } from "@/lib/queries/intents";
 import {
@@ -33,6 +35,7 @@ import {
 import { queryToolList } from "@/lib/queries/tools";
 import { rateLimitConfigs } from "@/lib/rate-limit/config";
 import { RateLimiter } from "@/lib/rate-limit/rate-limiter";
+import { clientIp } from "@/lib/security/client-ip";
 import { projects, workspaces } from "@yavio/db/schema";
 import { eq } from "drizzle-orm";
 import { createMcpHandler, withMcpAuth } from "mcp-handler";
@@ -317,24 +320,29 @@ const handler = createMcpHandler(
           // Second cap, on what we serialise: the model has to read this, and
           // the process has to hold it. Truncate loudly rather than build a
           // huge string.
+          // Measure while accumulating — stringifying the whole set just to
+          // check its length would build the very multi-megabyte string this
+          // cap exists to avoid.
           const MAX_RESPONSE_CHARS = 200_000;
-          let payload = { rowCount: rows.length, rows } as Record<string, unknown>;
-          if (JSON.stringify(payload).length > MAX_RESPONSE_CHARS) {
-            const kept: Record<string, unknown>[] = [];
-            let size = 0;
-            for (const row of rows) {
-              size += JSON.stringify(row).length + 1;
-              if (size > MAX_RESPONSE_CHARS) break;
-              kept.push(row);
-            }
-            payload = {
-              rowCount: rows.length,
-              truncated: true,
-              note: `Result too large to return in full; showing the first ${kept.length} of ${rows.length} rows. Aggregate or select fewer columns.`,
-              rows: kept,
-            };
+          const kept: Record<string, unknown>[] = [];
+          let size = 0;
+          for (const row of rows) {
+            size += JSON.stringify(row).length + 1;
+            if (size > MAX_RESPONSE_CHARS && kept.length > 0) break;
+            kept.push(row);
+            // A single row over the cap is kept so the caller sees its shape
+            // rather than an empty result they cannot diagnose.
+            if (size > MAX_RESPONSE_CHARS) break;
           }
-          return toolText(payload);
+          if (kept.length === rows.length) {
+            return toolText({ rowCount: rows.length, rows });
+          }
+          return toolText({
+            rowCount: rows.length,
+            truncated: true,
+            note: `Result too large to return in full; showing the first ${kept.length} of ${rows.length} rows. Aggregate or select fewer columns.`,
+            rows: kept,
+          });
         });
       },
     );
@@ -382,13 +390,18 @@ async function route(
     return new Response("Not found", { status: 404 });
   }
 
-  // Keyed by client IP, BEFORE authentication and without touching the token:
-  // keying on the raw bearer let an attacker rotate a random value per request
-  // (fresh full bucket every time), pinned a Map entry per value, and kept
-  // live plaintext tokens in the heap — the one limiter in the repo that
-  // stored a secret unhashed.
-  const clientIp = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
-  const limit = limiter.consume(clientIp);
+  // Keyed by the HASH of the presented bearer, falling back to the client IP
+  // when there is none. Hosted clients reach us from a handful of vendor
+  // egress IPs, so an IP key would put every customer in one bucket and let a
+  // single runaway agent throttle everyone; the raw bearer would keep live
+  // secrets in the heap and let an attacker mint a fresh bucket per request.
+  // The hash is bounded, unguessable and per-connector.
+  const presented = request.headers
+    .get("authorization")
+    ?.replace(/^Bearer\s+/i, "")
+    .trim();
+  const limiterKey = presented ? `t:${hashToken(presented)}` : `ip:${clientIp(request)}`;
+  const limit = limiter.consume(limiterKey);
   if (!limit.allowed) {
     return Response.json(
       {
@@ -401,6 +414,9 @@ async function route(
   }
 
   try {
+    // Verify BEFORE mcp-handler: it converts every throw from its verifyToken
+    // hook into 401 invalid_token, which clients read as "grant is dead".
+    await preflightMcpAuth(request);
     return await authHandler(request);
   } catch (err) {
     if (err instanceof McpUnavailableError) {

@@ -10,6 +10,7 @@ import {
 import { verifyPkceS256 } from "@/lib/oauth/tokens";
 import { rateLimitConfigs } from "@/lib/rate-limit/config";
 import { RateLimiter } from "@/lib/rate-limit/rate-limiter";
+import { clientIp } from "@/lib/security/client-ip";
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -148,8 +149,8 @@ export async function POST(request: Request): Promise<Response> {
   try {
     const params = await parseBody(request);
 
-    const clientIp = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
-    const limit = limiter.consume(clientIp);
+    const ip = clientIp(request);
+    const limit = limiter.consume(ip);
     if (!limit.allowed) {
       return Response.json(
         { error: "slow_down", error_description: "too many token requests" },

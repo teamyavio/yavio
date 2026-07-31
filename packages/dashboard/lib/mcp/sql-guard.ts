@@ -44,13 +44,62 @@ const BANNED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   // phantom literal that hides the rest of the query from the scanner below.
   // Analytics SQL has no need for them.
   { pattern: /\$\w*\$/, reason: "dollar-quoted strings are not allowed" },
-  // Name rule, prefix-matched: `merge` also bans mergeTreeIndex(,
-  // `cluster` also bans clusterAllReplicas(, `url` also bans urlCluster(.
-  // A leading `\w*\.` catches the dotted form (default.mergeTreeIndex(...)),
-  // which ClickHouse rejects today but which must not depend on that.
+  // Name rule. Deliberately NOT open-ended prefix matching: `null*` swallowed
+  // nullIf( — the canonical safe-division idiom for error rates, and the most
+  // likely thing a model writes against this schema — and `hive*`/`url*` ate
+  // hiveHash( and URLHash(. Each family lists its real variants instead, and
+  // the structural table-position rule below is what covers names nobody has
+  // heard of yet.
   {
-    pattern:
-      /\b(url|remote|file|s3|oss|cosn|azureBlobStorage|gcs|hdfs|hive|iceberg|deltaLake|hudi|mysql|postgresql|sqlite|mongodb|redis|jdbc|odbc|cluster|dictionary|dictGet|joinGet|executable|input|merge|view|loop|fuzz|generateRandom|generateSeries|generate_series|numbers|zeros|values|timeSeries|null)[A-Za-z0-9_]*\s*\(/i,
+    pattern: new RegExp(
+      String.raw`\b(?:${[
+        // network / storage readers, with their Cluster and cloud variants
+        "url(?:Cluster)?",
+        "remote(?:Secure)?",
+        "file(?:Cluster)?",
+        "s3(?:Cluster)?",
+        "oss",
+        "cosn",
+        "azureBlobStorage(?:Cluster)?",
+        "gcs",
+        "hdfs(?:Cluster)?",
+        "hive",
+        "iceberg(?:S3|Azure|HDFS|Cluster)?",
+        "deltaLake(?:Cluster|S3|Azure)?",
+        "hudi(?:Cluster)?",
+        // external databases
+        "mysql",
+        "postgresql",
+        "sqlite",
+        "mongodb",
+        "redis",
+        "jdbc",
+        "odbc",
+        // cluster / dictionary / execution
+        "cluster(?:AllReplicas)?",
+        "dictionary",
+        "dictGet\\w*",
+        "joinGet(?:OrNull)?",
+        "executable(?:Pool)?",
+        "input",
+        // introspection that reads past row policies
+        "merge",
+        "mergeTree\\w*",
+        "view(?:IfPermitted)?",
+        "loop",
+        "fuzz\\w*",
+        // generators
+        "generateRandom(?:Structure)?",
+        "generateSeries",
+        "generate_series",
+        "numbers(?:_mt)?",
+        "zeros(?:_mt)?",
+        "values",
+        "timeSeries\\w*",
+        "null",
+      ].join("|")})\s*\(`,
+      "i",
+    ),
     reason: "table functions are not allowed",
   },
 ];
@@ -170,16 +219,31 @@ function assertNoTableFunctionInTableList(sql: string): void {
     }
 
     if (lower === "from" || lower === "join") {
-      if (isCallAt(after)) reject();
-      state[top()] = "expect_ref";
-      aliasUsed[top()] = false;
+      // ARRAY JOIN / LEFT ARRAY JOIN takes an EXPRESSION, not a table
+      // reference, so `ARRAY JOIN splitByChar(...)` is ordinary ClickHouse and
+      // must not be read as a table function.
+      const isArrayJoin = lower === "join" && /\barray\s*$/i.test(sql.slice(0, i));
+      if (!isArrayJoin) {
+        if (isCallAt(after)) reject();
+        state[top()] = "expect_ref";
+        aliasUsed[top()] = false;
+      }
     } else if (lower === "as" && state[top()] === "after_ref") {
       state[top()] = "alias_next";
     } else if (lower === "on" || lower === "using") {
       if (state[top()] === "after_ref") state[top()] = "join_cond";
-    } else if (HARD_TERMINATORS.has(lower)) {
+    } else if (
+      HARD_TERMINATORS.has(lower) &&
+      // A clause keyword immediately followed by a comma is not a clause —
+      // it is a bare alias, and treating it as a terminator let
+      // `FROM events qualify, evil(1)` switch the table-list scan off.
+      !(state[top()] === "after_ref" && !aliasUsed[top()] && /^\s*,/.test(sql.slice(after)))
+    ) {
       state[top()] = "outside";
       aliasUsed[top()] = false;
+    } else if (state[top()] === "after_ref" && !aliasUsed[top()]) {
+      // bare alias (including one spelling a clause keyword, handled above)
+      aliasUsed[top()] = true;
     } else if (state[top()] === "expect_ref") {
       // The table reference itself; a call here was already rejected above.
       if (isCallAt(i)) reject();
