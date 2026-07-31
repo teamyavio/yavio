@@ -288,7 +288,15 @@ export const oauthTokens = pgTable(
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   },
-  (table) => [index("idx_oauth_tokens_grant").on(table.grantId)],
+  (table) => [
+    index("idx_oauth_tokens_grant").on(table.grantId),
+    // pruneExpired sweeps by expiry; without these it sequentially scans a
+    // table that grows one row per rotation per grant.
+    index("idx_oauth_tokens_access_expiry").on(table.accessTokenExpiresAt),
+    index("idx_oauth_tokens_refresh_expiry")
+      .on(table.refreshTokenExpiresAt)
+      .where(sql`refresh_token_expires_at IS NOT NULL`),
+  ],
 );
 
 // =============================================================================

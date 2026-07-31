@@ -1,5 +1,5 @@
 {
-  "id": "173a690c-fd8e-4db9-9ea3-87524bc5955d",
+  "id": "8c29e99d-f338-42d2-9bef-8697272b2d39",
   "prevId": "3dc48d5c-2eab-435c-9041-741b638ce80b",
   "version": "7",
   "dialect": "postgresql",
@@ -823,6 +823,37 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_oauth_tokens_access_expiry": {
+          "name": "idx_oauth_tokens_access_expiry",
+          "columns": [
+            {
+              "expression": "access_token_expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_oauth_tokens_refresh_expiry": {
+          "name": "idx_oauth_tokens_refresh_expiry",
+          "columns": [
+            {
+              "expression": "refresh_token_expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "refresh_token_expires_at IS NOT NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}

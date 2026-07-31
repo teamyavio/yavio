@@ -57,4 +57,31 @@ ALTER TABLE "oauth_tokens" ADD CONSTRAINT "oauth_tokens_client_id_oauth_clients_
 ALTER TABLE "oauth_tokens" ADD CONSTRAINT "oauth_tokens_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "oauth_tokens" ADD CONSTRAINT "oauth_tokens_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "idx_oauth_codes_expiry" ON "oauth_codes" USING btree ("expires_at");--> statement-breakpoint
-CREATE INDEX "idx_oauth_tokens_grant" ON "oauth_tokens" USING btree ("grant_id");
+CREATE INDEX "idx_oauth_tokens_grant" ON "oauth_tokens" USING btree ("grant_id");--> statement-breakpoint
+CREATE INDEX "idx_oauth_tokens_access_expiry" ON "oauth_tokens" USING btree ("access_token_expires_at");--> statement-breakpoint
+CREATE INDEX "idx_oauth_tokens_refresh_expiry" ON "oauth_tokens" USING btree ("refresh_token_expires_at") WHERE refresh_token_expires_at IS NOT NULL;--> statement-breakpoint
+
+-- These three tables hold credential material and are read BY HASH before any
+-- user context exists — a bearer token is presented before we know who the
+-- user is — so a policy keyed on app.current_user_id can never match them.
+-- The protection that fits is denial: RLS on with no permissive policy, so the
+-- RLS-enforced role cannot touch them, while yavio_service (the owner, and the
+-- role the server connects as) bypasses RLS and works normally.
+--
+-- 0001's ALTER DEFAULT PRIVILEGES otherwise hands yavio_app full DML on every
+-- table created after it, which is how these would have arrived unprotected.
+-- That default is deliberately left intact for future tables; only these three
+-- are revoked.
+
+ALTER TABLE oauth_clients ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE oauth_codes ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE oauth_tokens ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+
+REVOKE ALL ON oauth_clients FROM yavio_app;
+--> statement-breakpoint
+REVOKE ALL ON oauth_codes FROM yavio_app;
+--> statement-breakpoint
+REVOKE ALL ON oauth_tokens FROM yavio_app;

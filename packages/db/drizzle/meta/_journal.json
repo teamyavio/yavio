@@ -19,29 +19,8 @@
     {
       "idx": 2,
       "version": "7",
-      "when": 1785454653957,
-      "tag": "0002_flawless_iron_fist",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "7",
-      "when": 1785454654957,
-      "tag": "0003_oauth_rls",
-      "breakpoints": true
-    },
-    {
-      "idx": 4,
-      "version": "7",
-      "when": 1785454655957,
-      "tag": "0004_oauth_rls_fix",
-      "breakpoints": true
-    },
-    {
-      "idx": 5,
-      "version": "7",
-      "when": 1785454656957,
-      "tag": "0005_oauth_token_expiry_index",
+      "when": 1785506729925,
+      "tag": "0002_woozy_jocasta",
       "breakpoints": true
     }
   ]
