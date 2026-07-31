@@ -163,6 +163,51 @@ describe("run_query SQL guard — attack corpus", () => {
     rejected("SELECT * FROM events e1 e2 limit, evil(1)");
   });
 
+  it("rejects `array` as an identifier, which disarmed the ARRAY JOIN carve-out", () => {
+    // Reported by the security review and confirmed both ways: this string was
+    // ACCEPTED by the guard and parsed by ClickHouse as a real join against a
+    // table function. A CTE named `array` puts the token immediately before a
+    // genuine JOIN, which is exactly what the carve-out tested for.
+    expect(
+      rejected(
+        "WITH array AS (SELECT 1 AS n) SELECT count() FROM events e1 JOIN events e2 ON e1.session_id = e2.session_id AND 1 IN array JOIN icebergLocal('/x') AS z ON 1 = 1",
+      ),
+    ).toContain("array");
+    rejected("WITH array AS (SELECT 1) SELECT * FROM array");
+    // the same trick with a name the denylist has never heard of
+    rejected(
+      "WITH array AS (SELECT 1 AS n) SELECT * FROM events e ON 1 IN array JOIN brandNewFunc(1) AS z ON 1 = 1",
+    );
+  });
+
+  it("rejects a table function after `array` ends a join condition", () => {
+    // Second, independent leg of the same fix. Here `array` IS followed by
+    // JOIN, so the identifier rule above permits this occurrence and only the
+    // state test can catch it: ARRAY JOIN is grammatical after a table
+    // reference, never in the middle of an ON condition. Verified rejected by
+    // the table-function rule rather than the reserved-word one.
+    expect(
+      rejected(
+        "SELECT * FROM events e1 JOIN events e2 ON e1.session_id = array JOIN brandNewFunc(1) AS z ON 1 = 1",
+      ),
+    ).toContain("table functions");
+  });
+
+  it("still accepts genuine ARRAY JOIN and the Array(...) type", () => {
+    // The carve-out exists because ARRAY JOIN takes an EXPRESSION; breaking it
+    // would reject ordinary ClickHouse.
+    // verified to execute against ClickHouse 24.3, so the carve-out is load-bearing
+    validateFreeQuery("SELECT count() FROM events ARRAY JOIN [1, 2, 3] AS n");
+    validateFreeQuery("SELECT * FROM events ARRAY JOIN splitByChar(',', event_name) AS part");
+    validateFreeQuery("SELECT * FROM events e ARRAY JOIN splitByChar(',', e.event_name) AS part");
+    validateFreeQuery("SELECT * FROM events LEFT ARRAY JOIN splitByChar(',', event_name) AS part");
+    validateFreeQuery("SELECT CAST(event_name AS Array(String)) FROM events LIMIT 1");
+    validateFreeQuery("SELECT array(1, 2, 3) FROM events LIMIT 1");
+    // names merely starting with `array` are untouched
+    validateFreeQuery("SELECT arrayJoin([1, 2, 3]) FROM events LIMIT 3");
+    validateFreeQuery("SELECT arrayStringConcat(groupArray(event_name), ',') FROM events");
+  });
+
   it("rejects table functions inside a subquery's table list", () => {
     rejected("SELECT * FROM (SELECT * FROM events, brandNewFunc(1)) AS sub");
     rejected("SELECT * FROM (SELECT * FROM brandNewFunc(1)) AS sub");

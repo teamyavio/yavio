@@ -257,17 +257,34 @@ function assertNoTableFunctionInTableList(sql: string): void {
       continue;
     }
 
+    // `array` reaches this scanner only as the ARRAY JOIN keyword or the
+    // Array(...) type constructor. As a plain identifier it is ambiguous with
+    // that keyword, and the ARRAY JOIN carve-out below reads exactly that
+    // ambiguity: a CTE named `array` (`WITH array AS (...)`) puts the token
+    // directly in front of a real JOIN. Refuse the identifier rather than add
+    // another special case to the carve-out.
+    if (lower === "array" && !/^\s*(?:join\b|\()/i.test(sql.slice(after))) {
+      throw new McpToolError(
+        'Query rejected: "array" is reserved here (ARRAY JOIN, Array(...)) and cannot be used as an identifier. Pick a different name.',
+      );
+    }
+
     if (lower === "from" || lower === "join") {
       // ARRAY JOIN / LEFT ARRAY JOIN takes an EXPRESSION, not a table
       // reference, so `ARRAY JOIN splitByChar(...)` is ordinary ClickHouse and
       // must not be read as a table function.
-      // Genuine ARRAY JOIN only: `array` must be a bare keyword here, not an
-      // alias. `... AS array JOIN evil(1)` executed against ClickHouse before
-      // this check, so the alias form is refused outright above.
+      //
+      // Genuine ARRAY JOIN needs BOTH conditions, because each alone was
+      // defeated. `array` must be the bare keyword immediately before JOIN
+      // (aliases spelling it are refused via RESERVED_ALIASES), AND the scan
+      // must sit directly after a table reference, which is the only position
+      // where ARRAY JOIN is grammatical. Without the state test,
+      // `... ON a = b AND 1 IN array JOIN evil(1)` — `array` being a CTE name
+      // that happens to end the join condition — disarmed the check on a
+      // genuine following JOIN. That string was accepted by this guard and
+      // parsed by ClickHouse as a real join against a table function.
       const isArrayJoin =
-        lower === "join" &&
-        /\barray\s*$/i.test(sql.slice(0, i)) &&
-        !/\bas\s+array\s*$/i.test(sql.slice(0, i));
+        lower === "join" && state[top()] === "after_ref" && /\barray\s*$/i.test(sql.slice(0, i));
       if (!isArrayJoin) {
         if (isCallAt(after)) reject();
         state[top()] = "expect_ref";
