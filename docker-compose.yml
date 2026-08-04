@@ -54,7 +54,7 @@ services:
       DATABASE_URL: postgres://yavio_service:${POSTGRES_SERVICE_PASSWORD:-yavio_dev}@postgres:5432/yavio
       CLICKHOUSE_URL: http://default:${CLICKHOUSE_PASSWORD:-yavio_dev}@clickhouse:8123
       # Applied to the yavio_api role by migrate.ts after migrations run.
-      POSTGRES_API_PASSWORD: ${POSTGRES_API_PASSWORD:-yavio_dev}
+      POSTGRES_API_PASSWORD: ${POSTGRES_API_PASSWORD:?POSTGRES_API_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default.}
     networks:
       - backend
     depends_on:
@@ -69,7 +69,7 @@ services:
       dockerfile: packages/ingest/Dockerfile
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://yavio_api:${POSTGRES_API_PASSWORD:-yavio_dev}@postgres:5432/yavio
+      DATABASE_URL: postgres://yavio_api:${POSTGRES_API_PASSWORD:?POSTGRES_API_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default.}@postgres:5432/yavio
       CLICKHOUSE_URL: http://default:${CLICKHOUSE_PASSWORD:-yavio_dev}@clickhouse:8123
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET}
       JWT_SECRET: ${JWT_SECRET}
@@ -94,7 +94,7 @@ services:
       dockerfile: packages/dashboard/Dockerfile
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://yavio_api:${POSTGRES_API_PASSWORD:-yavio_dev}@postgres:5432/yavio
+      DATABASE_URL: postgres://yavio_api:${POSTGRES_API_PASSWORD:?POSTGRES_API_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default.}@postgres:5432/yavio
       CLICKHOUSE_URL: http://default:${CLICKHOUSE_PASSWORD:-yavio_dev}@clickhouse:8123
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
