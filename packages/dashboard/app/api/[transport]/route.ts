@@ -37,6 +37,7 @@ import { rateLimitConfigs } from "@/lib/rate-limit/config";
 import { RateLimiter } from "@/lib/rate-limit/rate-limiter";
 import { clientIp } from "@/lib/security/client-ip";
 import { projects, workspaces } from "@yavio/db/schema";
+import { withYavio } from "@yavio/sdk";
 import { eq } from "drizzle-orm";
 import { createMcpHandler, withMcpAuth } from "mcp-handler";
 import { z } from "zod";
@@ -84,7 +85,24 @@ async function projectContext(
 const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
 
 const handler = createMcpHandler(
-  (server) => {
+  (rawServer) => {
+    // Dogfooding: this server reports its OWN usage to Yavio. Events land in the
+    // "Yavio Analytics MCP" project of Marcels Workspace, keyed by YAVIO_API_KEY.
+    // Without that env var the SDK is a transparent no-op, so local dev and
+    // self-hosters are unaffected.
+    //
+    // Input and output capture are deliberately OFF. This server is
+    // multi-tenant: tool arguments carry customer project ids and, for
+    // run_query, the customer's raw SQL — which reveals what questions they ask
+    // of their own data — and results carry their analytics figures. None of
+    // that belongs in our telemetry. Tool name, latency, errors, platform and
+    // session shape are enough to answer "is the MCP server being used".
+    const server = withYavio(rawServer, {
+      endpoint: process.env.YAVIO_ENDPOINT,
+      serverOnly: true,
+      capture: { inputValues: false, outputValues: false },
+    });
+
     server.registerTool(
       "list_projects",
       {

@@ -21,6 +21,7 @@
     "@react-email/components": "^1.0.8",
     "@react-email/render": "^2.0.4",
     "@yavio/db": "workspace:*",
+    "@yavio/sdk": "^0.3.0",
     "@yavio/shared": "workspace:*",
     "bcryptjs": "^3.0.3",
     "class-variance-authority": "^0.7.1",
