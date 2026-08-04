@@ -29,6 +29,13 @@
       "when": 1785506729926,
       "tag": "0003_app_role_not_superuser",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785506729927,
+      "tag": "0004_grant_connect_yavio_api",
+      "breakpoints": true
     }
   ]
 }
