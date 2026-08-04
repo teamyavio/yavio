@@ -102,6 +102,9 @@ importers:
       '@yavio/db':
         specifier: workspace:*
         version: link:../db
+      '@yavio/sdk':
+        specifier: ^0.3.0
+        version: 0.3.0(@modelcontextprotocol/sdk@1.26.0(zod@3.25.76))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@yavio/shared':
         specifier: workspace:*
         version: link:../shared
@@ -2853,6 +2856,19 @@ packages:
 
   '@vitest/utils@3.2.7':
     resolution: {integrity: sha512-x6BDOd7dyo3PFLY3I9/HJ25X/6OurhGXk2/B9gOZNPF7XDVjeBK4k01lQE5uvDpbuheErh91qYuE1E2OEjK3Rw==}
+
+  '@yavio/sdk@0.3.0':
+    resolution: {integrity: sha512-F6iQQSsl0chB0U3vh5qF112CGOCqpbL8/3frzO/u/yhZdw4wDObgeFnlzP9p0+L4vxHvsWBXpZJG46bzD9vbEg==}
+    engines: {node: '>=20.0.0'}
+    peerDependencies:
+      '@modelcontextprotocol/sdk': '>=1.12.0'
+      react: '>=18.0.0'
+      react-dom: '>=18.0.0'
+    peerDependenciesMeta:
+      react:
+        optional: true
+      react-dom:
+        optional: true
 
   abstract-logging@2.0.1:
     resolution: {integrity: sha512-2BjRTZxTPvheOvGbBslFSYOUkr+SjPtOnrLP33f+VIWLzezQpZcqVg7ja3L4dBXmzzgwT+a029jRx5PCi3JuiA==}
@@ -7875,6 +7891,14 @@ snapshots:
       '@vitest/pretty-format': 3.2.7
       loupe: 3.2.1
       tinyrainbow: 2.0.0
+
+  '@yavio/sdk@0.3.0(@modelcontextprotocol/sdk@1.26.0(zod@3.25.76))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)':
+    dependencies:
+      '@modelcontextprotocol/sdk': 1.26.0(zod@3.25.76)
+      nanoid: 5.1.6
+    optionalDependencies:
+      react: 19.2.4
+      react-dom: 19.2.4(react@19.2.4)
 
   abstract-logging@2.0.1: {}
 

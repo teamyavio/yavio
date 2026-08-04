@@ -104,6 +104,11 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-noreply@yavio.dev}
+      # Dogfooding: the MCP server at /api/mcp reports its own usage to Yavio.
+      # Unset by default — the SDK is a transparent no-op without a key, so
+      # self-hosters get no outbound telemetry unless they opt in.
+      YAVIO_API_KEY: ${YAVIO_API_KEY:-}
+      YAVIO_ENDPOINT: ${YAVIO_ENDPOINT:-}
     ports:
       - "${DASHBOARD_PORT:-3000}:3000"
     networks:
