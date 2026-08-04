@@ -29,26 +29,49 @@ generate_secret() {
   openssl rand -base64 32
 }
 
+# Database passwords use a URL-safe alphabet: these end up inside a
+# postgres://user:pass@host connection string, where base64's "+" and "/"
+# would need percent-encoding.
+generate_db_password() {
+  openssl rand -hex 24
+}
+
 NEXTAUTH_SECRET=$(generate_secret)
 JWT_SECRET=$(generate_secret)
 API_KEY_HASH_SECRET=$(generate_secret)
 ENCRYPTION_KEY=$(generate_secret)
 
-# Replace empty secret values in .env
-if [[ "$OSTYPE" == "darwin"* ]]; then
-  # macOS sed requires -i ''
-  sed -i '' "s|^NEXTAUTH_SECRET=.*|NEXTAUTH_SECRET=$NEXTAUTH_SECRET|" "$ENV_FILE"
-  sed -i '' "s|^JWT_SECRET=.*|JWT_SECRET=$JWT_SECRET|" "$ENV_FILE"
-  sed -i '' "s|^API_KEY_HASH_SECRET=.*|API_KEY_HASH_SECRET=$API_KEY_HASH_SECRET|" "$ENV_FILE"
-  sed -i '' "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=$ENCRYPTION_KEY|" "$ENV_FILE"
-else
-  sed -i "s|^NEXTAUTH_SECRET=.*|NEXTAUTH_SECRET=$NEXTAUTH_SECRET|" "$ENV_FILE"
-  sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$JWT_SECRET|" "$ENV_FILE"
-  sed -i "s|^API_KEY_HASH_SECRET=.*|API_KEY_HASH_SECRET=$API_KEY_HASH_SECRET|" "$ENV_FILE"
-  sed -i "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=$ENCRYPTION_KEY|" "$ENV_FILE"
-fi
+# Datastore credentials are generated too. They previously kept the
+# .env.example placeholder `yavio_dev`, which is published in a public repo —
+# so every deployment that followed this script shared one well-known password
+# for a Postgres superuser and for the ClickHouse default user.
+POSTGRES_SERVICE_PASSWORD=$(generate_db_password)
+POSTGRES_APP_PASSWORD=$(generate_db_password)
+CLICKHOUSE_PASSWORD=$(generate_db_password)
+CLICKHOUSE_INGEST_PASSWORD=$(generate_db_password)
 
-echo "Created $ENV_FILE with generated secrets."
+# Replace values in .env. The trailing-comment form in .env.example
+# (`KEY=value  # note`) is intentionally dropped for the secrets: a comment
+# after a value is fragile to parse and has already caused one outage.
+set_var() {
+  local key="$1" value="$2"
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    sed -i '' "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+  else
+    sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+  fi
+}
+
+set_var NEXTAUTH_SECRET "$NEXTAUTH_SECRET"
+set_var JWT_SECRET "$JWT_SECRET"
+set_var API_KEY_HASH_SECRET "$API_KEY_HASH_SECRET"
+set_var ENCRYPTION_KEY "$ENCRYPTION_KEY"
+set_var POSTGRES_SERVICE_PASSWORD "$POSTGRES_SERVICE_PASSWORD"
+set_var POSTGRES_APP_PASSWORD "$POSTGRES_APP_PASSWORD"
+set_var CLICKHOUSE_PASSWORD "$CLICKHOUSE_PASSWORD"
+set_var CLICKHOUSE_INGEST_PASSWORD "$CLICKHOUSE_INGEST_PASSWORD"
+
+echo "Created $ENV_FILE with generated secrets and datastore passwords."
 echo ""
 echo "Next steps:"
 echo "  docker compose up -d          # start databases"
