@@ -241,8 +241,4 @@ docker compose logs -f ingest
 docker compose logs -f dashboard
 ```
 
-## Questions?
-
-- Join our [Discord](https://discord.gg/BprRh2fr)
-
 Thank you for contributing!

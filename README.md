@@ -12,7 +12,6 @@
   <a href="https://docs.yavio.ai/docs"><img src="https://img.shields.io/badge/docs-docs.yavio.ai-blue" alt="Documentation"></a>
   <a href="https://github.com/teamyavio/yavio/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/status-v0.1_alpha-orange" alt="v0.1 Alpha">
-  <a href="https://discord.gg/BprRh2fr"><img src="https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 ---
@@ -253,8 +252,6 @@ packages/
 ## Contributing
 
 We welcome contributions! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a PR.
-
-Join our [Discord](https://discord.gg/BprRh2fr) to discuss ideas and get help.
 
 ## Security
 
