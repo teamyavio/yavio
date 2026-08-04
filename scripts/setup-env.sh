@@ -46,6 +46,7 @@ ENCRYPTION_KEY=$(generate_secret)
 # so every deployment that followed this script shared one well-known password
 # for a Postgres superuser and for the ClickHouse default user.
 POSTGRES_SERVICE_PASSWORD=$(generate_db_password)
+POSTGRES_API_PASSWORD=$(generate_db_password)
 POSTGRES_APP_PASSWORD=$(generate_db_password)
 CLICKHOUSE_PASSWORD=$(generate_db_password)
 CLICKHOUSE_INGEST_PASSWORD=$(generate_db_password)
@@ -67,6 +68,7 @@ set_var JWT_SECRET "$JWT_SECRET"
 set_var API_KEY_HASH_SECRET "$API_KEY_HASH_SECRET"
 set_var ENCRYPTION_KEY "$ENCRYPTION_KEY"
 set_var POSTGRES_SERVICE_PASSWORD "$POSTGRES_SERVICE_PASSWORD"
+set_var POSTGRES_API_PASSWORD "$POSTGRES_API_PASSWORD"
 set_var POSTGRES_APP_PASSWORD "$POSTGRES_APP_PASSWORD"
 set_var CLICKHOUSE_PASSWORD "$CLICKHOUSE_PASSWORD"
 set_var CLICKHOUSE_INGEST_PASSWORD "$CLICKHOUSE_INGEST_PASSWORD"
