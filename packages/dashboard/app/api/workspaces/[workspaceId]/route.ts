@@ -91,15 +91,19 @@ export const DELETE = withRole("owner")(async (_request: Request, ctx: AuthConte
 
   // Clean up ClickHouse data asynchronously
   try {
-    const { getClickHouseClient } = await import("@/lib/clickhouse");
-    const ch = getClickHouseClient();
+    const { getMutatingClickHouseClient } = await import("@/lib/clickhouse");
+    const ch = getMutatingClickHouseClient();
     await ch.command({
       query: "ALTER TABLE events DELETE WHERE workspace_id = {id:String}",
       query_params: { id: ctx.workspaceId },
     });
-  } catch {
-    // Non-fatal: ClickHouse cleanup can fail
-    console.error(`Failed to clean ClickHouse data for workspace ${ctx.workspaceId}`);
+  } catch (err) {
+    // A failed erasure must never be invisible: the Postgres rows are already
+    // gone, so nothing else will ever point at these events again.
+    console.error(
+      `[erasure] ClickHouse cleanup FAILED for workspace ${ctx.workspaceId} — events retained`,
+      err,
+    );
   }
 
   return NextResponse.json({ message: "Workspace deleted" });
