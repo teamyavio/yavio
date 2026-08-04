@@ -2,6 +2,9 @@ import { readFileSync } from "node:fs";
 import { dirname, join, parse } from "node:path";
 import type { CaptureConfig, IntentConfig, WithYavioOptions, YavioConfig } from "./types.js";
 
+// This hostname MUST resolve. The SDK swallows transport errors by design, so a
+// dead default does not surface as an error to the integrator — it silently
+// drops every event. It pointed at an unregistered host until 2026-08-04.
 const DEFAULT_ENDPOINT = "https://ingest.yavio.ai/v1/events";
 
 const DEFAULT_CAPTURE: CaptureConfig = {
