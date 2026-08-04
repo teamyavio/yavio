@@ -144,15 +144,19 @@ export async function DELETE(_request: Request, routeContext: RouteContext) {
 
   // Clean up ClickHouse data asynchronously
   try {
-    const { getClickHouseClient } = await import("@/lib/clickhouse");
-    const ch = getClickHouseClient();
+    const { getMutatingClickHouseClient } = await import("@/lib/clickhouse");
+    const ch = getMutatingClickHouseClient();
     await ch.command({
       query: "ALTER TABLE events DELETE WHERE project_id = {id:String}",
       query_params: { id: auth.projectId },
     });
-  } catch {
-    // Non-fatal: ClickHouse cleanup can fail
-    console.error(`Failed to clean ClickHouse data for project ${auth.projectId}`);
+  } catch (err) {
+    // A failed erasure must never be invisible: the Postgres rows are already
+    // gone, so nothing else will ever point at these events again.
+    console.error(
+      `[erasure] ClickHouse cleanup FAILED for project ${auth.projectId} — events retained`,
+      err,
+    );
   }
 
   return NextResponse.json({ message: "Project deleted" });
