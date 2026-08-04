@@ -24,11 +24,13 @@ Code options → Environment variables → .yaviorc.json → Defaults → No-op
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `YAVIO_API_KEY` | Project API key | `yav_abc123...` |
-| `YAVIO_ENDPOINT` | Ingestion API URL | `http://localhost:3001/v1/events` |
+| `YAVIO_ENDPOINT` | Ingestion API URL. Defaults to `https://ingest.yavio.ai/v1/events`; only set it to point at a self-hosted ingest. | `https://ingest.yavio.ai/v1/events` |
 
 ```bash title=".env"
 YAVIO_API_KEY=yav_abc123...
-YAVIO_ENDPOINT=http://localhost:3001/v1/events
+# Optional — omit to use the hosted endpoint. Point it at your own ingest when
+# self-hosting, or at http://localhost:3001/v1/events when running the stack locally.
+YAVIO_ENDPOINT=https://ingest.yavio.ai/v1/events
 ```
 
 ## Config file
