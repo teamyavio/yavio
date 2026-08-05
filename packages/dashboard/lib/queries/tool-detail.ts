@@ -3,6 +3,7 @@ import { granularityToFunction } from "@/lib/analytics/format";
 import type { Granularity } from "@/lib/analytics/validation";
 import { queryAnalytics } from "@/lib/clickhouse/analytics-client";
 import type {
+  CustomEventEntry,
   ErrorCategoryCount,
   IntentStatus,
   KPIResult,
@@ -260,7 +261,7 @@ export async function queryToolRecentInvocations(
   const pf = platformFilter(ctx.platform);
   const offset = (page - 1) * pageSize;
 
-  const invocations = await queryAnalytics<ToolInvocation>({
+  const rows = await queryAnalytics<Omit<ToolInvocation, "customEvents">>({
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
@@ -277,7 +278,8 @@ export async function queryToolRecentInvocations(
         error_message AS errorMessage,
         is_retry AS isRetry,
         input_values AS inputValues,
-        output_content AS outputContent
+        output_content AS outputContent,
+        metadata
       FROM events
       WHERE project_id = {projectId:String}
         AND event_type = 'tool_call'
@@ -297,6 +299,15 @@ export async function queryToolRecentInvocations(
       ...platformParams(ctx.platform),
     },
   });
+
+  const customEventsByTrace = await queryCustomEventsByTrace(
+    ctx,
+    rows.map((r) => r.traceId),
+  );
+  const invocations: ToolInvocation[] = rows.map((r) => ({
+    ...r,
+    customEvents: customEventsByTrace.get(r.traceId) ?? [],
+  }));
 
   const countRows = await queryAnalytics<{ total: number }>({
     workspaceId: ctx.workspaceId,
@@ -320,6 +331,55 @@ export async function queryToolRecentInvocations(
   });
 
   return { invocations, total: countRows[0]?.total ?? 0 };
+}
+
+/**
+ * Custom `yavio.track()` events that ran inside the listed traces, keyed by
+ * trace id. Integrators with input/output capture disabled report their
+ * curated fields this way (same trace, separate event), so the invocation
+ * detail joins them back in. Reuses the invocation time window: a track event
+ * is emitted during its tool call, so it shares the call's timestamp to
+ * within the handler's runtime.
+ */
+async function queryCustomEventsByTrace(
+  ctx: QueryContext,
+  traceIds: string[],
+): Promise<Map<string, CustomEventEntry[]>> {
+  const byTrace = new Map<string, CustomEventEntry[]>();
+  const ids = [...new Set(traceIds.filter((id) => id !== ""))];
+  if (ids.length === 0) return byTrace;
+
+  const rows = await queryAnalytics<CustomEventEntry & { traceId: string }>({
+    workspaceId: ctx.workspaceId,
+    projectId: ctx.projectId,
+    query: `
+      SELECT
+        trace_id AS traceId,
+        event_name AS eventName,
+        metadata,
+        timestamp
+      FROM events
+      WHERE project_id = {projectId:String}
+        AND event_type = 'track'
+        AND trace_id IN ({traceIds:Array(String)})
+        AND metadata != '{}'
+        AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}
+      ORDER BY timestamp
+    `,
+    params: {
+      projectId: ctx.projectId,
+      traceIds: ids,
+      from: ctx.from,
+      to: ctx.to,
+    },
+  });
+
+  for (const { traceId, ...entry } of rows) {
+    const list = byTrace.get(traceId);
+    if (list) list.push(entry);
+    else byTrace.set(traceId, [entry]);
+  }
+  return byTrace;
 }
 
 export async function queryToolRecentIntents(

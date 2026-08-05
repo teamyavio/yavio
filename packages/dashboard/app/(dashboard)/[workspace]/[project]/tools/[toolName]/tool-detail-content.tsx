@@ -61,7 +61,7 @@ import type {
 import type { Platform } from "@yavio/shared/platform";
 import { Code } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useState } from "react";
+import { Fragment, useCallback, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -497,8 +497,10 @@ function hasContent(value: string | null): boolean {
 function renderInvocationDetail(row: ToolInvocation) {
   const hasInput = hasContent(row.inputValues);
   const hasOutput = hasContent(row.outputContent);
+  const hasProperties = hasContent(row.metadata);
+  const customEvents = row.customEvents ?? [];
 
-  if (!hasInput && !hasOutput) {
+  if (!hasInput && !hasOutput && !hasProperties && customEvents.length === 0) {
     return (
       <p className="text-sm text-muted-foreground">
         No input/output data captured for this invocation.
@@ -507,33 +509,111 @@ function renderInvocationDetail(row: ToolInvocation) {
   }
 
   return (
-    <div className="grid gap-4 md:grid-cols-2">
-      <div>
-        <h4 className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-          Input
-        </h4>
-        {hasInput ? (
-          <pre className="max-h-60 overflow-auto rounded bg-muted p-3 text-xs">
-            {tryFormatJson(row.inputValues as string)}
-          </pre>
-        ) : (
-          <p className="text-sm text-muted-foreground">No input captured</p>
-        )}
-      </div>
-      <div>
-        <h4 className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-          Output
-        </h4>
-        {hasOutput ? (
-          <pre className="max-h-60 overflow-auto rounded bg-muted p-3 text-xs">
-            {tryFormatJson(row.outputContent as string)}
-          </pre>
-        ) : (
-          <p className="text-sm text-muted-foreground">No output captured</p>
-        )}
-      </div>
+    <div className="space-y-4">
+      {hasInput || hasOutput ? (
+        <div className="grid gap-4 md:grid-cols-2">
+          <div>
+            <h4 className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              Input
+            </h4>
+            {hasInput ? (
+              <pre className="max-h-60 overflow-auto rounded bg-muted p-3 text-xs">
+                {tryFormatJson(row.inputValues as string)}
+              </pre>
+            ) : (
+              <p className="text-sm text-muted-foreground">No input captured</p>
+            )}
+          </div>
+          <div>
+            <h4 className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              Output
+            </h4>
+            {hasOutput ? (
+              <pre className="max-h-60 overflow-auto rounded bg-muted p-3 text-xs">
+                {tryFormatJson(row.outputContent as string)}
+              </pre>
+            ) : (
+              <p className="text-sm text-muted-foreground">No output captured</p>
+            )}
+          </div>
+        </div>
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          No input/output data captured for this invocation.
+        </p>
+      )}
+      {hasProperties && (
+        <div>
+          <h4 className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            Properties
+          </h4>
+          <MetadataGrid raw={row.metadata as string} />
+        </div>
+      )}
+      {customEvents.length > 0 && (
+        <div>
+          <h4 className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            Custom Events
+          </h4>
+          <div className="space-y-3">
+            {customEvents.map((ev, i) => (
+              <div key={`${ev.eventName}-${i}`} className="rounded border p-3">
+                <Badge variant="outline" className="mb-2 text-xs">
+                  {ev.eventName}
+                </Badge>
+                <MetadataGrid raw={ev.metadata} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+/**
+ * Key-value view of an event's metadata JSON. Values are integrator-supplied
+ * content — rendered as plain text only. Falls back to the raw payload when
+ * the metadata is not a JSON object.
+ */
+function MetadataGrid({ raw }: { raw: string }) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = undefined;
+  }
+  if (
+    parsed === undefined ||
+    parsed === null ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed)
+  ) {
+    return (
+      <pre className="max-h-60 overflow-auto rounded bg-muted p-3 text-xs">
+        {tryFormatJson(raw)}
+      </pre>
+    );
+  }
+
+  return (
+    <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+      {Object.entries(parsed as Record<string, unknown>).map(([key, value]) => (
+        <Fragment key={key}>
+          <dt className="whitespace-nowrap font-mono text-xs leading-6 text-muted-foreground">
+            {key}
+          </dt>
+          <dd className="min-w-0 break-words">{formatMetadataValue(value)}</dd>
+        </Fragment>
+      ))}
+    </dl>
+  );
+}
+
+function formatMetadataValue(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
 }
 
 function tryFormatJson(raw: string): string {
