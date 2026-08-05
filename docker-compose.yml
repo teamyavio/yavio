@@ -41,7 +41,18 @@ services:
     networks:
       - backend
     healthcheck:
-      test: ["CMD", "clickhouse-client", "--password", "${CLICKHOUSE_PASSWORD:-yavio_dev}", "--query", "SELECT 1"]
+      # Read the password from the container's own environment at run time
+      # rather than interpolating it here. Compose bakes an interpolated value
+      # into the container config, where `docker inspect` prints it in full —
+      # a live password was exposed that way on 2026-08-04 and had to be
+      # rotated. `$$` escapes to a literal `$`, so the shell inside the
+      # container expands it instead of compose.
+      #
+      # This does NOT hide the password from `docker inspect` entirely: the
+      # ClickHouse image needs CLICKHOUSE_PASSWORD in its environment to set
+      # the default user, so it remains visible under .Config.Env. What it
+      # removes is the second, easily-overlooked copy in the health command.
+      test: ["CMD-SHELL", "clickhouse-client --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1'"]
       interval: 5s
       timeout: 5s
       retries: 5
