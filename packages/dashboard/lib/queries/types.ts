@@ -206,6 +206,20 @@ export interface ToolInvocation {
   isRetry: number;
   inputValues: string | null;
   outputContent: string | null;
+  metadata: string | null;
+  customEvents: CustomEventEntry[];
+}
+
+/**
+ * A custom `yavio.track()` event emitted inside the invocation's trace.
+ * Integrators that disable input/output capture (privacy policies, app-store
+ * requirements) report curated fields this way instead — without surfacing
+ * these, their invocations look like no data was collected at all.
+ */
+export interface CustomEventEntry {
+  eventName: string;
+  metadata: string;
+  timestamp: string;
 }
 
 /** Tool metadata from tool_registry. */

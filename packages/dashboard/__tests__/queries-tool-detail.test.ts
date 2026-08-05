@@ -189,11 +189,58 @@ describe("tool detail queries", () => {
             isRetry: 0,
           },
         ])
+        .mockResolvedValueOnce([]) // no custom track events in the traces
         .mockResolvedValueOnce([{ total: 100 }]);
 
       const result = await queryToolRecentInvocations(baseCtx, "search", 1, 25);
       expect(result.invocations).toHaveLength(1);
+      expect(result.invocations[0].customEvents).toEqual([]);
       expect(result.total).toBe(100);
+    });
+
+    it("joins custom track events onto invocations by trace id", async () => {
+      mockQueryAnalytics
+        .mockResolvedValueOnce([
+          { eventId: "ev_1", traceId: "tr_1" },
+          { eventId: "ev_2", traceId: "tr_2" },
+          { eventId: "ev_3", traceId: "tr_1" },
+        ])
+        .mockResolvedValueOnce([
+          {
+            traceId: "tr_1",
+            eventName: "tool_call",
+            metadata: '{"carrier":"dhl","user_intent":"check_eta"}',
+            timestamp: "2025-01-07 12:00:00.100",
+          },
+        ])
+        .mockResolvedValueOnce([{ total: 3 }]);
+
+      const result = await queryToolRecentInvocations(baseCtx, "search", 1, 25);
+
+      const trackCall = mockQueryAnalytics.mock.calls[1][0];
+      expect(trackCall.query).toContain("event_type = 'track'");
+      expect(trackCall.params.traceIds).toEqual(["tr_1", "tr_2"]);
+
+      expect(result.invocations[0].customEvents).toEqual([
+        {
+          eventName: "tool_call",
+          metadata: '{"carrier":"dhl","user_intent":"check_eta"}',
+          timestamp: "2025-01-07 12:00:00.100",
+        },
+      ]);
+      expect(result.invocations[1].customEvents).toEqual([]);
+      expect(result.invocations[2].customEvents).toEqual(result.invocations[0].customEvents);
+    });
+
+    it("skips the custom-event query when no invocation has a trace id", async () => {
+      mockQueryAnalytics
+        .mockResolvedValueOnce([{ eventId: "ev_1", traceId: "" }])
+        .mockResolvedValueOnce([{ total: 1 }]);
+
+      const result = await queryToolRecentInvocations(baseCtx, "search", 1, 25);
+      expect(result.invocations[0].customEvents).toEqual([]);
+      expect(result.total).toBe(1);
+      expect(mockQueryAnalytics).toHaveBeenCalledTimes(2);
     });
 
     it("applies pagination offset", async () => {
