@@ -27,6 +27,19 @@ try {
   //
   // Skipped silently when unset: existing deployments predate this variable and
   // still connect as yavio_service, and their next migration run must not fail.
+  // yavio_app has the same problem 0003/migrate.ts solved for yavio_api:
+  // 0001_row_level_security.sql creates it with the literal 'yavio_dev' under an
+  // IF NOT EXISTS guard, so re-running never repairs it, and nothing consumed
+  // POSTGRES_APP_PASSWORD. It is a LOGIN role holding DML on every public table.
+  const appPassword = process.env.POSTGRES_APP_PASSWORD;
+  if (appPassword && appPassword !== "yavio_dev") {
+    const [appRole] = await sql`SELECT 1 FROM pg_roles WHERE rolname = 'yavio_app'`;
+    if (appRole) {
+      await sql.unsafe(`ALTER ROLE yavio_app WITH PASSWORD '${appPassword.replace(/'/g, "''")}'`);
+      console.log("[migrate:postgres] Applied POSTGRES_APP_PASSWORD to role yavio_app.");
+    }
+  }
+
   const apiPassword = process.env.POSTGRES_API_PASSWORD;
   if (apiPassword) {
     const [role] = await sql`SELECT 1 FROM pg_roles WHERE rolname = 'yavio_api'`;

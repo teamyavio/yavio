@@ -73,12 +73,45 @@ async function applyUserPasswords(): Promise<void> {
   for (const [user, envVar] of users) {
     const password = process.env[envVar];
     if (!password) continue;
-    // ClickHouse takes a literal here, not a bind parameter. The value comes
-    // from our own environment, never from user input; single quotes are
-    // doubled so a quote in the password cannot terminate the literal.
-    const escaped = password.replace(/'/g, "''");
+
+    // Refuse the placeholder outright. .env.example ships blank now, but an
+    // operator upgrading from an older copy may still carry the literal — and
+    // unlike before, this code APPLIES what it is given, so a stale value would
+    // actively reset a working user back to a password published in a public
+    // repository.
+    if (password === "yavio_dev") {
+      throw new YavioError(
+        ErrorCode.DB.CH_MIGRATION_FAILED,
+        `${envVar} is set to the published placeholder 'yavio_dev'. Set a real value (scripts/setup-env.sh generates one) or unset it to leave ${user} unchanged.`,
+        500,
+        { variable: envVar, user },
+      );
+    }
+
+    // ClickHouse string literals honour C-style backslash escapes, so doubling
+    // quotes alone is NOT sufficient here: a password ending in a backslash
+    // would escape the closing quote and run the literal on. Escape the
+    // backslash first, then the quote. (The Postgres sibling in migrate.ts does
+    // not need this — standard_conforming_strings makes backslash literal.)
+    const escaped = password.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+
+    // ALTER USER IF EXISTS is a silent no-op when the user is missing, so
+    // checking first is what stops the log claiming success for nothing —
+    // exactly the manufactured-confidence pattern this codebase keeps hitting.
+    const existing = await client.query({
+      query: "SELECT name FROM system.users WHERE name = {user:String}",
+      query_params: { user },
+      format: "JSONEachRow",
+    });
+    if ((await existing.json<{ name: string }>()).length === 0) {
+      console.warn(
+        `[migrate:clickhouse] ${envVar} is set but user ${user} does not exist — NOT applied.`,
+      );
+      continue;
+    }
+
     await client.command({
-      query: `ALTER USER IF EXISTS ${user} IDENTIFIED WITH sha256_password BY '${escaped}'`,
+      query: `ALTER USER ${user} IDENTIFIED WITH sha256_password BY '${escaped}'`,
     });
     console.log(`[migrate:clickhouse] Applied ${envVar} to user ${user}.`);
   }
