@@ -8,17 +8,24 @@ type ClickHouseClient = ReturnType<typeof createClickHouseClient>;
  */
 const DASHBOARD_CH_USER = "yavio_dashboard";
 
+/** Holds only ALTER DELETE on default.events — see CH migration 0012. */
+const ERASER_CH_USER = "yavio_eraser";
+
 let readOnlyClient: ClickHouseClient | null = null;
 let mutatingClient: ClickHouseClient | null = null;
 
-function narrowedUrl(baseUrl: string | undefined, user: string): string | undefined {
+function narrowedUrl(
+  baseUrl: string | undefined,
+  user: string,
+  password?: string,
+): string | undefined {
   if (!baseUrl) return baseUrl;
   try {
     const parsed = new URL(baseUrl);
     parsed.username = user;
-    // Prefer this user's OWN password when configured; fall back to the URL's
-    // so deployments still sharing one secret across users keep working.
-    const own = process.env.CLICKHOUSE_DASHBOARD_PASSWORD;
+    // Prefer the caller-supplied password, then this user's own, then the
+    // URL's — so deployments still sharing one secret keep working.
+    const own = password ?? process.env.CLICKHOUSE_DASHBOARD_PASSWORD;
     if (own) parsed.password = own;
     return parsed.toString();
   } catch {
@@ -74,7 +81,20 @@ export function getClickHouseClient(): ClickHouseClient {
  */
 export function getMutatingClickHouseClient(): ClickHouseClient {
   if (!mutatingClient) {
-    mutatingClient = createClickHouseClient(process.env.CLICKHOUSE_URL);
+    // Narrow to yavio_eraser when it is configured. That user holds exactly
+    // ALTER DELETE on default.events (CH migration 0012) — enough to erase,
+    // not enough to read what it erases, and nothing at all elsewhere.
+    //
+    // Falls back to the CLICKHOUSE_URL user when unset, so a deployment that
+    // has not yet run 0012 or set the password keeps erasing rather than
+    // silently failing — which is the failure mode this whole file exists to
+    // prevent.
+    const eraserPassword = process.env.CLICKHOUSE_ERASER_PASSWORD;
+    mutatingClient = createClickHouseClient(
+      eraserPassword
+        ? narrowedUrl(process.env.CLICKHOUSE_URL, ERASER_CH_USER, eraserPassword)
+        : process.env.CLICKHOUSE_URL,
+    );
   }
   return mutatingClient;
 }

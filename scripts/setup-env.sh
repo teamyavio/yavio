@@ -57,6 +57,7 @@ POSTGRES_APP_PASSWORD=$(generate_db_password)
 CLICKHOUSE_PASSWORD=$(generate_db_password)
 CLICKHOUSE_INGEST_PASSWORD=$(generate_db_password)
 CLICKHOUSE_DASHBOARD_PASSWORD=$(generate_db_password)
+CLICKHOUSE_ERASER_PASSWORD=$(generate_db_password)
 
 # Replace values in .env. The trailing-comment form in .env.example
 # (`KEY=value  # note`) is intentionally dropped for the secrets: a comment
@@ -80,6 +81,7 @@ set_var POSTGRES_APP_PASSWORD "$POSTGRES_APP_PASSWORD"
 set_var CLICKHOUSE_PASSWORD "$CLICKHOUSE_PASSWORD"
 set_var CLICKHOUSE_INGEST_PASSWORD "$CLICKHOUSE_INGEST_PASSWORD"
 set_var CLICKHOUSE_DASHBOARD_PASSWORD "$CLICKHOUSE_DASHBOARD_PASSWORD"
+set_var CLICKHOUSE_ERASER_PASSWORD "$CLICKHOUSE_ERASER_PASSWORD"
 
 # These two are host-side URLs used by scripts run OUTSIDE Docker (pnpm migrate
 # reads them via --env-file). They embed a password, so randomising the password

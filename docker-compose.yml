@@ -68,6 +68,7 @@ services:
       # migrations run — migration 0007 creates them with a published literal.
       CLICKHOUSE_INGEST_PASSWORD: ${CLICKHOUSE_INGEST_PASSWORD:-}
       CLICKHOUSE_DASHBOARD_PASSWORD: ${CLICKHOUSE_DASHBOARD_PASSWORD:-}
+      CLICKHOUSE_ERASER_PASSWORD: ${CLICKHOUSE_ERASER_PASSWORD:-}
       # Applied to the yavio_api role by migrate.ts after migrations run.
       POSTGRES_API_PASSWORD: ${POSTGRES_API_PASSWORD:?POSTGRES_API_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default.}
     networks:
@@ -117,6 +118,8 @@ services:
       # This service narrows the ClickHouse username; when set it uses that
       # user's own password instead of the default user's.
       CLICKHOUSE_DASHBOARD_PASSWORD: ${CLICKHOUSE_DASHBOARD_PASSWORD:-}
+      # Erasure only: ALTER DELETE on default.events and nothing else.
+      CLICKHOUSE_ERASER_PASSWORD: ${CLICKHOUSE_ERASER_PASSWORD:-}
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET}

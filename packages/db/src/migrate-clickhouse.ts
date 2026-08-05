@@ -68,6 +68,7 @@ async function applyUserPasswords(): Promise<void> {
   const users: Array<[user: string, envVar: string]> = [
     ["yavio_ingest", "CLICKHOUSE_INGEST_PASSWORD"],
     ["yavio_dashboard", "CLICKHOUSE_DASHBOARD_PASSWORD"],
+    ["yavio_eraser", "CLICKHOUSE_ERASER_PASSWORD"],
   ];
 
   for (const [user, envVar] of users) {
