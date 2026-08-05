@@ -50,6 +50,7 @@ POSTGRES_API_PASSWORD=$(generate_db_password)
 POSTGRES_APP_PASSWORD=$(generate_db_password)
 CLICKHOUSE_PASSWORD=$(generate_db_password)
 CLICKHOUSE_INGEST_PASSWORD=$(generate_db_password)
+CLICKHOUSE_DASHBOARD_PASSWORD=$(generate_db_password)
 
 # Replace values in .env. The trailing-comment form in .env.example
 # (`KEY=value  # note`) is intentionally dropped for the secrets: a comment
@@ -72,6 +73,13 @@ set_var POSTGRES_API_PASSWORD "$POSTGRES_API_PASSWORD"
 set_var POSTGRES_APP_PASSWORD "$POSTGRES_APP_PASSWORD"
 set_var CLICKHOUSE_PASSWORD "$CLICKHOUSE_PASSWORD"
 set_var CLICKHOUSE_INGEST_PASSWORD "$CLICKHOUSE_INGEST_PASSWORD"
+set_var CLICKHOUSE_DASHBOARD_PASSWORD "$CLICKHOUSE_DASHBOARD_PASSWORD"
+
+# These two are host-side URLs used by scripts run OUTSIDE Docker (pnpm migrate
+# reads them via --env-file). They embed a password, so randomising the password
+# without rewriting them leaves the script's own "Next steps" unable to connect.
+set_var DATABASE_URL "postgres://yavio_service:$POSTGRES_SERVICE_PASSWORD@localhost:5432/yavio"
+set_var CLICKHOUSE_URL "http://default:$CLICKHOUSE_PASSWORD@localhost:8123"
 
 echo "Created $ENV_FILE with generated secrets and datastore passwords."
 echo ""

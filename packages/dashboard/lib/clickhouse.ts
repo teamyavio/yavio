@@ -16,6 +16,10 @@ function narrowedUrl(baseUrl: string | undefined, user: string): string | undefi
   try {
     const parsed = new URL(baseUrl);
     parsed.username = user;
+    // Prefer this user's OWN password when configured; fall back to the URL's
+    // so deployments still sharing one secret across users keep working.
+    const own = process.env.CLICKHOUSE_DASHBOARD_PASSWORD;
+    if (own) parsed.password = own;
     return parsed.toString();
   } catch {
     // Leave malformed values alone so createClickHouseClient reports the real

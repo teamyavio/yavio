@@ -19,6 +19,10 @@ function getDashboardClient(): ClickHouseClient {
 
     const parsed = new URL(baseUrl);
     parsed.username = "yavio_dashboard";
+    // Prefer this user's OWN password when configured; fall back to the URL's
+    // so deployments still sharing one secret across users keep working.
+    const ownPassword = process.env.CLICKHOUSE_DASHBOARD_PASSWORD;
+    if (ownPassword) parsed.password = ownPassword;
 
     dashboardClient = createClient({
       url: parsed.toString(),
