@@ -51,3 +51,6 @@ biome-socket-*
 # claude
 .claude/
 
+
+# Claude Code personal settings
+.claude/settings.local.json
