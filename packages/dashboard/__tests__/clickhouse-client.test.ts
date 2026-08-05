@@ -11,17 +11,28 @@ vi.mock("@yavio/db/clickhouse", () => ({
   },
 }));
 
-let saved: string | undefined;
+const ENV_KEYS = [
+  "CLICKHOUSE_URL",
+  "CLICKHOUSE_DASHBOARD_PASSWORD",
+  "CLICKHOUSE_ERASER_PASSWORD",
+] as const;
+let saved: Record<string, string | undefined>;
 
 beforeEach(() => {
-  saved = process.env.CLICKHOUSE_URL;
+  // Save ALL of them: a repo .env sets these, which previously turned a real
+  // assertion into an environment-dependent flake.
+  saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+  for (const k of ENV_KEYS) Reflect.deleteProperty(process.env, k);
   created.length = 0;
   vi.resetModules();
 });
 
 afterEach(() => {
-  if (saved === undefined) Reflect.deleteProperty(process.env, "CLICKHOUSE_URL");
-  else process.env.CLICKHOUSE_URL = saved;
+  for (const k of ENV_KEYS) {
+    const v = saved[k];
+    if (v === undefined) Reflect.deleteProperty(process.env, k);
+    else process.env[k] = v;
+  }
 });
 
 async function urlFor(which: "read" | "mutate") {
@@ -62,6 +73,24 @@ describe("mutating client — must retain ALTER DELETE rights", () => {
     const url = new URL((await urlFor("mutate")) as string);
     expect(url.username).toBe("default");
     expect(url.username).not.toBe("yavio_dashboard");
+  });
+
+  it("narrows to yavio_eraser when its password is configured", async () => {
+    // yavio_eraser holds ALTER DELETE on default.events and nothing else
+    // (CH migration 0012), so erasure no longer needs the superuser.
+    process.env.CLICKHOUSE_URL = "http://default:pw@clickhouse:8123";
+    process.env.CLICKHOUSE_ERASER_PASSWORD = "eraser-secret";
+    const url = new URL((await urlFor("mutate")) as string);
+    expect(url.username).toBe("yavio_eraser");
+    expect(url.password).toBe("eraser-secret");
+  });
+
+  it("falls back to the URL user when no eraser password is set", async () => {
+    // A deployment that has not yet run 0012 must keep erasing rather than
+    // silently failing — the exact failure this file exists to prevent.
+    process.env.CLICKHOUSE_URL = "http://default:pw@clickhouse:8123";
+    const url = new URL((await urlFor("mutate")) as string);
+    expect(url.username).toBe("default");
   });
 
   it("is a different identity from the read-only client", async () => {
