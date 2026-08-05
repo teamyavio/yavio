@@ -51,6 +51,26 @@ describe("loadConfig — ClickHouse least privilege", () => {
     expect(new URL(loadConfig().clickhouseUrl).username).toBe("yavio_ingest");
   });
 
+  it("uses the ingest user's OWN password when one is configured", () => {
+    // Migration 0007 creates yavio_ingest with a literal published in the repo.
+    // Once that user has its own secret, reusing the default user's password
+    // (which setup-env.sh randomises) authenticates as the wrong identity.
+    process.env.CLICKHOUSE_INGEST_PASSWORD = "ingest-only-secret";
+    const url = new URL(loadConfig().clickhouseUrl);
+    expect(url.username).toBe("yavio_ingest");
+    expect(url.password).toBe("ingest-only-secret");
+    Reflect.deleteProperty(process.env, "CLICKHOUSE_INGEST_PASSWORD");
+  });
+
+  it("falls back to the URL password when no per-user secret is set", () => {
+    // Deployments where every ClickHouse user still shares one password must
+    // keep working untouched.
+    Reflect.deleteProperty(process.env, "CLICKHOUSE_INGEST_PASSWORD");
+    const url = new URL(loadConfig().clickhouseUrl);
+    expect(url.username).toBe("yavio_ingest");
+    expect(url.password).toBe("pw");
+  });
+
   it("leaves DATABASE_URL untouched", () => {
     expect(loadConfig().databaseUrl).toBe(REQUIRED.DATABASE_URL);
   });

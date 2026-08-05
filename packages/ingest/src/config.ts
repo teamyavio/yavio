@@ -29,6 +29,12 @@ function withIngestUser(url: string): string {
   try {
     const parsed = new URL(url);
     parsed.username = INGEST_CH_USER;
+    // Prefer this user's OWN password when one is configured. Falling back to
+    // the URL's password preserves deployments where every ClickHouse user
+    // still shares one secret; without the fallback, randomising
+    // CLICKHOUSE_PASSWORD alone would break them.
+    const own = process.env.CLICKHOUSE_INGEST_PASSWORD;
+    if (own) parsed.password = own;
     return parsed.toString();
   } catch {
     return url;

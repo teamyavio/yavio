@@ -46,6 +46,44 @@ async function recordMigration(version: string): Promise<void> {
   });
 }
 
+/**
+ * Apply per-user ClickHouse passwords from the environment.
+ *
+ * Migration 0007 creates yavio_ingest and yavio_dashboard with the literal
+ * 'yavio_dev', which is published in a public repository, and its `IF NOT
+ * EXISTS` guard means re-running never repairs that. Nothing else in the
+ * codebase ever set them — so as soon as CLICKHOUSE_PASSWORD was randomised
+ * (which scripts/setup-env.sh now does), a fresh install had the `default` user
+ * on a strong password while these two stayed on the published one, and every
+ * connection that narrows the username authenticated with the wrong secret.
+ *
+ * This mirrors what migrate.ts already does for the Postgres yavio_api role:
+ * the value lives in the environment, never in a migration file or the
+ * migration history.
+ *
+ * Each is skipped when unset, so deployments that still share one password
+ * across users keep working untouched.
+ */
+async function applyUserPasswords(): Promise<void> {
+  const users: Array<[user: string, envVar: string]> = [
+    ["yavio_ingest", "CLICKHOUSE_INGEST_PASSWORD"],
+    ["yavio_dashboard", "CLICKHOUSE_DASHBOARD_PASSWORD"],
+  ];
+
+  for (const [user, envVar] of users) {
+    const password = process.env[envVar];
+    if (!password) continue;
+    // ClickHouse takes a literal here, not a bind parameter. The value comes
+    // from our own environment, never from user input; single quotes are
+    // doubled so a quote in the password cannot terminate the literal.
+    const escaped = password.replace(/'/g, "''");
+    await client.command({
+      query: `ALTER USER IF EXISTS ${user} IDENTIFIED WITH sha256_password BY '${escaped}'`,
+    });
+    console.log(`[migrate:clickhouse] Applied ${envVar} to user ${user}.`);
+  }
+}
+
 async function main() {
   console.log("[migrate:clickhouse] Connecting to ClickHouse…");
 
@@ -94,6 +132,8 @@ async function main() {
     } else {
       console.log(`[migrate:clickhouse] Done — ${appliedCount} migration(s) applied.`);
     }
+
+    await applyUserPasswords();
   } finally {
     await client.close();
   }
