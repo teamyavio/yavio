@@ -17,7 +17,16 @@ function getDashboardClient(): ClickHouseClient {
       throw new Error("CLICKHOUSE_URL is not set");
     }
 
-    const parsed = new URL(baseUrl);
+    // Guarded like the sibling rewrites in ingest/config.ts and lib/clickhouse.ts:
+    // a malformed CLICKHOUSE_URL must surface as the existing configuration
+    // error, not as an opaque TypeError [ERR_INVALID_URL] on every query route.
+    let parsed: URL;
+    try {
+      parsed = new URL(baseUrl);
+    } catch {
+      dashboardClient = createClient({ url: baseUrl, request_timeout: 30_000 });
+      return dashboardClient;
+    }
     parsed.username = "yavio_dashboard";
     // Prefer this user's OWN password when configured; fall back to the URL's
     // so deployments still sharing one secret across users keep working.

@@ -23,6 +23,12 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 cp "$EXAMPLE_FILE" "$ENV_FILE"
+# .env now concentrates the Postgres superuser password, the yavio_api and
+# yavio_app passwords, and three ClickHouse credentials — plus two of them
+# again inside DATABASE_URL / CLICKHOUSE_URL. It inherits .env.example's
+# 0644 by default, which would let any local user read the entire datastore
+# credential set and walk straight past the loopback port binding.
+chmod 600 "$ENV_FILE"
 
 # Generate random secrets
 generate_secret() {
