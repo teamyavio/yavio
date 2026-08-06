@@ -2,7 +2,11 @@ import { readFile, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ClickHouseClient, createClient } from "@clickhouse/client";
-import { splitStatements, versionFromFilename } from "../../migrate-clickhouse-helpers.js";
+import {
+  MANAGED_USER_NAMES,
+  splitStatements,
+  versionFromFilename,
+} from "../../migrate-clickhouse-helpers.js";
 
 const CLICKHOUSE_URL = process.env.CLICKHOUSE_URL ?? "http://localhost:8123";
 const CLICKHOUSE_PASSWORD = process.env.CLICKHOUSE_PASSWORD ?? "test";
@@ -77,7 +81,17 @@ export async function runMigrations() {
   }
 }
 
-/** Drop all ClickHouse tables and views to reset state. */
+/**
+ * Drop all ClickHouse tables, views AND managed users to reset state.
+ *
+ * The users matter as much as the tables. They are server-level objects that
+ * outlive a table drop, and `CREATE USER IF NOT EXISTS` in the migrations is a
+ * no-op once they exist — so against a persistent ClickHouse (a developer
+ * pointing the suite at the dev container, which is what CLICKHOUSE_URL
+ * defaults to) the credential tests would assert against accounts created weeks
+ * ago with unknown authentication, and could not tell "the migrations did this"
+ * from "something did this once".
+ */
 export async function dropAll() {
   const ch = getClient();
   for (const obj of [
@@ -88,6 +102,9 @@ export async function dropAll() {
     "TABLE IF EXISTS schema_migrations",
   ]) {
     await ch.command({ query: `DROP ${obj}` });
+  }
+  for (const user of MANAGED_USER_NAMES) {
+    await ch.command({ query: `DROP USER IF EXISTS ${user}` });
   }
 }
 
