@@ -88,7 +88,10 @@ export function getMutatingClickHouseClient(): ClickHouseClient {
     // Falls back to the CLICKHOUSE_URL user when unset, so a deployment that
     // has not yet run 0012 or set the password keeps erasing rather than
     // silently failing — which is the failure mode this whole file exists to
-    // prevent.
+    // prevent. That fallback is the superuser, so leaving the variable unset
+    // keeps the very credential 0012 set out to retire: migration 0013 leaves
+    // yavio_eraser unauthenticatable until a password is supplied, and
+    // migrate-clickhouse.ts warns when it takes that branch.
     const eraserPassword = process.env.CLICKHOUSE_ERASER_PASSWORD;
     mutatingClient = createClickHouseClient(
       eraserPassword

@@ -73,7 +73,19 @@ async function applyUserPasswords(): Promise<void> {
 
   for (const [user, envVar] of users) {
     const password = process.env[envVar];
-    if (!password) continue;
+    if (!password) {
+      // Worth saying out loud only for the eraser: 0013 has just reset it to an
+      // unauthenticatable credential, so leaving this unset means the dashboard
+      // keeps erasing as the CLICKHOUSE_URL superuser — the exact arrangement
+      // 0012 set out to end. The other two are commonly left unset by
+      // deployments that share one password, so warning on those is noise.
+      if (user === "yavio_eraser") {
+        console.warn(
+          `[migrate:clickhouse] ${envVar} is not set — ${user} is left unauthenticatable and the dashboard will erase as the CLICKHOUSE_URL superuser. Set it to close that path.`,
+        );
+      }
+      continue;
+    }
 
     // Refuse the placeholder outright. .env.example ships blank now, but an
     // operator upgrading from an older copy may still carry the literal — and
@@ -115,6 +127,51 @@ async function applyUserPasswords(): Promise<void> {
       query: `ALTER USER ${user} IDENTIFIED WITH sha256_password BY '${escaped}'`,
     });
     console.log(`[migrate:clickhouse] Applied ${envVar} to user ${user}.`);
+  }
+}
+
+/** The users this migrator owns the credentials for. */
+const MANAGED_USERS = ["yavio_ingest", "yavio_dashboard", "yavio_eraser"] as const;
+
+/**
+ * Refuse to finish while any managed user can be authenticated into without a
+ * credential.
+ *
+ * This is the check that would have caught the 0012 defect: it created
+ * yavio_eraser with `IDENTIFIED WITH no_password`, believing that could not
+ * authenticate. In ClickHouse it authenticates with anything at all, so the
+ * account sat on the analytics store holding ALTER DELETE, reachable by any
+ * process that could open a socket to it.
+ *
+ * Note why the rollout check written for 0012 could not have caught this: it
+ * verified that yavio_eraser CAN authenticate, and a no_password account
+ * authenticates with whatever credential you present — including the one you
+ * believe you just set. A test that cannot fail proves nothing. Asserting the
+ * auth_type is the version of that check with a failure mode.
+ */
+async function assertNoPasswordlessUsers(): Promise<void> {
+  const result = await client.query({
+    query: "SELECT name, auth_type FROM system.users WHERE name IN {users:Array(String)}",
+    query_params: { users: [...MANAGED_USERS] },
+    format: "JSONEachRow",
+  });
+  const rows = await result.json<{ name: string; auth_type: string | string[] }>();
+
+  // auth_type is a single Enum on ClickHouse 24.3 and an Array once multiple
+  // authentication methods per user landed. Accept both rather than pinning.
+  const passwordless = rows
+    .filter(({ auth_type }) =>
+      (Array.isArray(auth_type) ? auth_type : [auth_type]).includes("no_password"),
+    )
+    .map(({ name }) => name);
+
+  if (passwordless.length > 0) {
+    throw new YavioError(
+      ErrorCode.DB.CH_MIGRATION_FAILED,
+      `ClickHouse user(s) ${passwordless.join(", ")} authenticate with NO credential. In ClickHouse \`no_password\` means no credential is required — any password is accepted, including a wrong one. Set the matching CLICKHOUSE_*_PASSWORD (scripts/setup-env.sh generates them) and re-run this migration.`,
+      500,
+      { users: passwordless },
+    );
   }
 }
 
@@ -168,6 +225,7 @@ async function main() {
     }
 
     await applyUserPasswords();
+    await assertNoPasswordlessUsers();
   } finally {
     await client.close();
   }
