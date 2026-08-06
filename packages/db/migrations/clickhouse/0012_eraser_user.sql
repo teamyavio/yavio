@@ -27,8 +27,14 @@
 -- credential is REQUIRED — the check succeeds for any password, including a
 -- wrong one — so the original form failed open, not closed. sha256_hash takes a
 -- digest whose preimage was never generated, which is the state the comment
--- above always intended. Deployments that already applied the original 0012 are
--- not re-run by the migrator and are repaired by 0013 instead.
+-- above always intended.
+--
+-- Deployments that already applied the original 0012 are not re-run by the
+-- migrator, so this amendment does not reach them. repairPasswordlessUsers() in
+-- src/clickhouse-credentials.ts repairs those instead, and does so ONLY when the
+-- account is actually passwordless — a second migration ALTERing every
+-- deployment unconditionally would reset working credentials, and a broken
+-- eraser fails silently (the deletion routes log and still return 200).
 
 CREATE USER IF NOT EXISTS yavio_eraser
   IDENTIFIED WITH sha256_hash BY '322464e430fa3579779f1c4b82b59b559c50126dccad25f347635cc480d07a33';
