@@ -14,7 +14,7 @@ services:
     environment:
       POSTGRES_DB: yavio
       POSTGRES_USER: yavio_service
-      POSTGRES_PASSWORD: ${POSTGRES_SERVICE_PASSWORD:-yavio_dev}
+      POSTGRES_PASSWORD: ${POSTGRES_SERVICE_PASSWORD:?POSTGRES_SERVICE_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default. This role is the Postgres superuser.}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -31,7 +31,7 @@ services:
     image: clickhouse/clickhouse-server:24.3
     restart: unless-stopped
     environment:
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-yavio_dev}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default. This user is unrestricted and can manage access.}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
       - clickhouse_data:/var/lib/clickhouse
@@ -62,13 +62,19 @@ services:
       context: .
       dockerfile: packages/db/Dockerfile
     environment:
-      DATABASE_URL: postgres://yavio_service:${POSTGRES_SERVICE_PASSWORD:-yavio_dev}@postgres:5432/yavio
-      CLICKHOUSE_URL: http://default:${CLICKHOUSE_PASSWORD:-yavio_dev}@clickhouse:8123
+      DATABASE_URL: postgres://yavio_service:${POSTGRES_SERVICE_PASSWORD:?POSTGRES_SERVICE_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default. This role is the Postgres superuser.}@postgres:5432/yavio
+      CLICKHOUSE_URL: http://default:${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default. This user is unrestricted and can manage access.}@clickhouse:8123
       # Applied to their ClickHouse users by migrate-clickhouse.ts after
       # migrations run — migration 0007 creates them with a published literal.
       CLICKHOUSE_INGEST_PASSWORD: ${CLICKHOUSE_INGEST_PASSWORD:-}
       CLICKHOUSE_DASHBOARD_PASSWORD: ${CLICKHOUSE_DASHBOARD_PASSWORD:-}
       CLICKHOUSE_ERASER_PASSWORD: ${CLICKHOUSE_ERASER_PASSWORD:-}
+      # Applied to the yavio_app role by migrate.ts after migrations run.
+      # Compose-injected environment is NOT inherited from .env, so omitting this
+      # left yavio_app on the published 'yavio_dev' from 0001 even for operators
+      # who ran setup-env.sh and followed every documented step — the host-side
+      # `pnpm migrate` reads .env directly and repaired it, this path did not.
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-}
       # Applied to the yavio_api role by migrate.ts after migrations run.
       POSTGRES_API_PASSWORD: ${POSTGRES_API_PASSWORD:?POSTGRES_API_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default.}
     networks:
@@ -86,7 +92,7 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgres://yavio_api:${POSTGRES_API_PASSWORD:?POSTGRES_API_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default.}@postgres:5432/yavio
-      CLICKHOUSE_URL: http://default:${CLICKHOUSE_PASSWORD:-yavio_dev}@clickhouse:8123
+      CLICKHOUSE_URL: http://default:${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default. This user is unrestricted and can manage access.}@clickhouse:8123
       # This service narrows the ClickHouse username; when set it uses that
       # user's own password instead of the default user's.
       CLICKHOUSE_INGEST_PASSWORD: ${CLICKHOUSE_INGEST_PASSWORD:-}
@@ -114,7 +120,7 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgres://yavio_api:${POSTGRES_API_PASSWORD:?POSTGRES_API_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default.}@postgres:5432/yavio
-      CLICKHOUSE_URL: http://default:${CLICKHOUSE_PASSWORD:-yavio_dev}@clickhouse:8123
+      CLICKHOUSE_URL: http://default:${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default. This user is unrestricted and can manage access.}@clickhouse:8123
       # This service narrows the ClickHouse username; when set it uses that
       # user's own password instead of the default user's.
       CLICKHOUSE_DASHBOARD_PASSWORD: ${CLICKHOUSE_DASHBOARD_PASSWORD:-}

@@ -38,24 +38,32 @@ These must be set before starting the platform. Each should be a unique random s
 
 ## Database Passwords
 
-| Variable | Default | Description |
+**None of these have a default.** They used to fall back to `yavio_dev`, which is published in the public repository. `./scripts/setup-env.sh` generates all seven; if you fill them in by hand, use `openssl rand -hex 24`.
+
+| Variable | Applied by | Role |
 | --- | --- | --- |
-| `POSTGRES_SERVICE_PASSWORD` | `yavio_dev` | PostgreSQL `yavio_service` role (table owner, bypasses RLS) |
-| `POSTGRES_APP_PASSWORD` | `yavio_dev` | PostgreSQL `yavio_app` role (RLS enforced) |
-| `CLICKHOUSE_PASSWORD` | `yavio_dev` | ClickHouse `default` user (runs migrations) |
-| `CLICKHOUSE_INGEST_PASSWORD` | `yavio_dev` | ClickHouse `yavio_ingest` user (INSERT only) |
-| `CLICKHOUSE_DASHBOARD_PASSWORD` | `yavio_dev` | ClickHouse `yavio_dashboard` user (SELECT only, row policies) |
+| `POSTGRES_SERVICE_PASSWORD` | Compose | PostgreSQL `yavio_service` — the **superuser**: owns the tables, bypasses RLS |
+| `POSTGRES_API_PASSWORD` | `pnpm migrate` | PostgreSQL `yavio_api` — what the application actually connects as (not a superuser) |
+| `POSTGRES_APP_PASSWORD` | `pnpm migrate` | PostgreSQL `yavio_app` — RLS enforced |
+| `CLICKHOUSE_PASSWORD` | Compose | ClickHouse `default` — unrestricted; runs migrations and manages access |
+| `CLICKHOUSE_INGEST_PASSWORD` | `pnpm migrate:clickhouse` | ClickHouse `yavio_ingest` — INSERT only |
+| `CLICKHOUSE_DASHBOARD_PASSWORD` | `pnpm migrate:clickhouse` | ClickHouse `yavio_dashboard` — SELECT only, row policies |
+| `CLICKHOUSE_ERASER_PASSWORD` | `pnpm migrate:clickhouse` | ClickHouse `yavio_eraser` — `ALTER DELETE` on the events table only; cannot read what it erases |
 
 <Callout type="warn">
-  Change all default passwords before exposing the platform to a network. The defaults are only safe for local development.
+  Compose refuses to start when `POSTGRES_SERVICE_PASSWORD`, `POSTGRES_API_PASSWORD` or `CLICKHOUSE_PASSWORD` is missing, rather than substituting a value. That is deliberate: a startup error takes a minute to fix, a published default is a credential anyone can read on GitHub.
+
+  The four applied by a migration are skipped when unset, so a deployment that shares one password across users keeps working — but each one left unset means that account keeps whatever it was created with.
 </Callout>
 
 ## Database Connection URLs
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DATABASE_URL` | `postgres://yavio_service:yavio_dev@localhost:5432/yavio` | PostgreSQL connection string |
-| `CLICKHOUSE_URL` | `http://default:yavio_dev@localhost:8123` | ClickHouse HTTP endpoint |
+| `DATABASE_URL` | `postgres://yavio_service:<POSTGRES_SERVICE_PASSWORD>@localhost:5432/yavio` | PostgreSQL connection string |
+| `CLICKHOUSE_URL` | `http://default:<CLICKHOUSE_PASSWORD>@localhost:8123` | ClickHouse HTTP endpoint |
+
+These embed a password, so `setup-env.sh` rewrites them whenever it generates one. Editing a password by hand means editing these too.
 
 In Docker Compose, these are overridden with container hostnames (`postgres`, `clickhouse`).
 

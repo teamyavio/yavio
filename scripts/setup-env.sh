@@ -62,13 +62,32 @@ CLICKHOUSE_ERASER_PASSWORD=$(generate_db_password)
 # Replace values in .env. The trailing-comment form in .env.example
 # (`KEY=value  # note`) is intentionally dropped for the secrets: a comment
 # after a value is fragile to parse and has already caused one outage.
+#
+# The value travels through the ENVIRONMENT, never through argv. This used to be
+# `sed -i "s|^${key}=.*|${key}=${value}|"`, which puts every secret on a command
+# line — and a command line is world-readable through `ps` and
+# /proc/<pid>/cmdline, while /proc/<pid>/environ is readable only by the owner.
+# Passing them on argv handed any local user the entire datastore credential set
+# and made the chmod 600 above pointless (CWE-214).
+#
+# Using awk instead of sed also removes the BSD/GNU `sed -i` split and the
+# escaping question entirely: awk prints the value literally, so a `|`, `&` or
+# backslash from some future generator cannot break the substitution or inject a
+# second line. Today's values are base64/hex and cannot contain those — this is
+# about not depending on that.
 set_var() {
-  local key="$1" value="$2"
-  if [[ "$OSTYPE" == "darwin"* ]]; then
-    sed -i '' "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
-  else
-    sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
-  fi
+  local key="$1"
+  # umask, because `mv` keeps the temp file's mode: created under the default
+  # umask it would be world-readable and would silently widen .env.
+  (
+    umask 077
+    SET_VAR_KEY="$key" SET_VAR_VALUE="$2" awk '
+      BEGIN { key = ENVIRON["SET_VAR_KEY"]; value = ENVIRON["SET_VAR_VALUE"] }
+      index($0, key "=") == 1 { print key "=" value; next }
+      { print }
+    ' "$ENV_FILE" > "$ENV_FILE.tmp"
+  )
+  mv "$ENV_FILE.tmp" "$ENV_FILE"
 }
 
 set_var NEXTAUTH_SECRET "$NEXTAUTH_SECRET"
