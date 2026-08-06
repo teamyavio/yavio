@@ -3,7 +3,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ErrorCode, YavioError } from "@yavio/shared/errors";
 import { createClickHouseClient } from "./clickhouse-client.js";
-import { splitStatements, versionFromFilename } from "./migrate-clickhouse-helpers.js";
+import { assertNoPasswordlessUsers, repairPasswordlessUsers } from "./clickhouse-credentials.js";
+import {
+  MANAGED_USERS,
+  splitStatements,
+  versionFromFilename,
+} from "./migrate-clickhouse-helpers.js";
 
 const client = createClickHouseClient();
 
@@ -65,15 +70,23 @@ async function recordMigration(version: string): Promise<void> {
  * across users keep working untouched.
  */
 async function applyUserPasswords(): Promise<void> {
-  const users: Array<[user: string, envVar: string]> = [
-    ["yavio_ingest", "CLICKHOUSE_INGEST_PASSWORD"],
-    ["yavio_dashboard", "CLICKHOUSE_DASHBOARD_PASSWORD"],
-    ["yavio_eraser", "CLICKHOUSE_ERASER_PASSWORD"],
-  ];
-
-  for (const [user, envVar] of users) {
+  for (const { user, envVar, warnWhenUnset } of MANAGED_USERS) {
     const password = process.env[envVar];
-    if (!password) continue;
+    if (!password) {
+      // Say only what is known from here. The dashboard's fallback to the
+      // CLICKHOUSE_URL superuser keys off this same variable being unset
+      // (dashboard/lib/clickhouse.ts), so that consequence is certain. The
+      // account's own state is not: a deployment that applied a real password
+      // on an earlier run and later dropped the variable still has a working
+      // user, and claiming otherwise would be exactly the manufactured
+      // confidence this file keeps having to guard against.
+      if (warnWhenUnset) {
+        console.warn(
+          `[migrate:clickhouse] ${envVar} is not set — the dashboard will erase as the CLICKHOUSE_URL superuser rather than as ${user}. Set it to close that path.`,
+        );
+      }
+      continue;
+    }
 
     // Refuse the placeholder outright. .env.example ships blank now, but an
     // operator upgrading from an older copy may still carry the literal — and
@@ -167,7 +180,24 @@ async function main() {
       console.log(`[migrate:clickhouse] Done — ${appliedCount} migration(s) applied.`);
     }
 
+    // Repair BEFORE applying passwords, and conditionally: migration 0012
+    // originally created yavio_eraser with `no_password`, which in ClickHouse
+    // accepts any credential. This puts such an account back into a state that
+    // accepts none, then applyUserPasswords replaces that with the operator's
+    // real password if one is configured. Doing the repair unconditionally in a
+    // migration would reset WORKING credentials on every existing deployment.
+    const repaired = await repairPasswordlessUsers(client);
+    for (const user of repaired) {
+      console.warn(
+        `[migrate:clickhouse] ${user} authenticated with NO credential (ClickHouse \`no_password\` accepts any password, including a wrong one) — reset to an unusable credential.`,
+      );
+    }
+
     await applyUserPasswords();
+    // Migrations above create every managed user, so they must all be visible
+    // now; passing true makes the check fail rather than pass vacuously if
+    // system.users turns out to be invisible to the migrating user.
+    await assertNoPasswordlessUsers(client, true);
   } finally {
     await client.close();
   }

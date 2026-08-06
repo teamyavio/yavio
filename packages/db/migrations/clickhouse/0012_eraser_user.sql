@@ -14,15 +14,30 @@
 -- No SELECT, no INSERT, no DDL, nothing on any other table. It cannot read the
 -- data it is allowed to erase.
 --
--- NO PASSWORD IS SET HERE, deliberately. Migration 0007 created its siblings
--- with the literal 'yavio_dev', which is published in this public repository and
--- is exactly the defect the 2026-08-05 work had to unwind. A user with no
--- password cannot authenticate, so this fails closed: the operator sets
--- CLICKHOUSE_ERASER_PASSWORD (scripts/setup-env.sh generates it) and
--- migrate-clickhouse.ts applies it after migrations run, the same way
+-- NO USABLE PASSWORD IS SET HERE, deliberately. Migration 0007 created its
+-- siblings with the literal 'yavio_dev', which is published in this public
+-- repository and is exactly the defect the 2026-08-05 work had to unwind. The
+-- operator sets CLICKHOUSE_ERASER_PASSWORD (scripts/setup-env.sh generates it)
+-- and migrate-clickhouse.ts applies it after migrations run, the same way
 -- CLICKHOUSE_INGEST_PASSWORD and CLICKHOUSE_DASHBOARD_PASSWORD are applied.
+--
+-- AMENDED 2026-08-06. This statement originally read `IDENTIFIED WITH
+-- no_password`, on the belief that an account with no password cannot
+-- authenticate. That is Postgres behaviour. In ClickHouse `no_password` means no
+-- credential is REQUIRED — the check succeeds for any password, including a
+-- wrong one — so the original form failed open, not closed. sha256_hash takes a
+-- digest whose preimage was never generated, which is the state the comment
+-- above always intended.
+--
+-- Deployments that already applied the original 0012 are not re-run by the
+-- migrator, so this amendment does not reach them. repairPasswordlessUsers() in
+-- src/clickhouse-credentials.ts repairs those instead, and does so ONLY when the
+-- account is actually passwordless — a second migration ALTERing every
+-- deployment unconditionally would reset working credentials, and a broken
+-- eraser fails silently (the deletion routes log and still return 200).
 
-CREATE USER IF NOT EXISTS yavio_eraser IDENTIFIED WITH no_password;
+CREATE USER IF NOT EXISTS yavio_eraser
+  IDENTIFIED WITH sha256_hash BY '322464e430fa3579779f1c4b82b59b559c50126dccad25f347635cc480d07a33';
 
 -- ALTER DELETE is the privilege ClickHouse checks for `ALTER TABLE ... DELETE`
 -- (a lightweight mutation). Granting it alone means this identity can remove
