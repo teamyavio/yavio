@@ -33,12 +33,19 @@ const DEFAULT_CAPTURE: CaptureConfig = {
  *
  * Note what is deliberately NOT here: the old "Never include credentials or
  * personal data" clause. It was not doing the job — captured intents contained
- * "€2,500 monthly income" and "€10,000 investment" with that sentence in
- * place — and a description the model reinterprets is the wrong layer for a
- * privacy guarantee. The real guarantees are downstream and unconditional:
- * stripPii() over intent_signals in buildToolCallEvent, and the 500-character
- * clamp in MAX_INTENT_LENGTH. Do not re-add a privacy sentence here expecting
- * it to enforce anything.
+ * "€2,500 monthly income" and "€10,000 investment" with that sentence in place.
+ *
+ * Be clear about what that does and does not imply. It says the model-level
+ * deterrent was ineffective; it does NOT say the downstream layer covers the
+ * gap. stripPii() matches four shapes (email, Luhn-valid card, US SSN, US-format
+ * phone) and the clamp only bounds length, so the very examples above pass
+ * through both untouched. Removing this clause traded a weak control for none,
+ * and that is a real trade rather than a free one.
+ *
+ * So: a sentence here is welcome if it demonstrably improves what models write
+ * — it is just not a control, and must not be described as one. The honest
+ * answer for data that must not be stored is `intent: false`, which is what the
+ * docs now tell customers.
  */
 export const DEFAULT_INTENT_DESCRIPTION =
   "Why are you calling this tool? Briefly describe the user's goal.";

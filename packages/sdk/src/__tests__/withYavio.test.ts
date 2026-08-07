@@ -57,16 +57,14 @@ describe("withYavio", () => {
     expect(SDK_VERSION).toBe(pkg.version);
   });
 
-  // The version is hardcoded in TWO places — the server entrypoint and the
-  // React bundle, which cannot import the server one. Only the server copy was
-  // covered, so a release could ship widget events stamped with the previous
-  // version and nothing would say so. Both are checked against package.json
-  // now, because "remember to edit both" is not a control.
-  it("keeps the React bundle's SDK_VERSION in step with package.json", () => {
-    const pkg = JSON.parse(
-      readFileSync(new URL("../../package.json", import.meta.url), "utf-8"),
-    ) as { version: string };
-    expect(REACT_SDK_VERSION).toBe(pkg.version);
+  // The version used to be two independent literals, one per entrypoint, and
+  // only the server copy was checked — so a release could ship widget events
+  // stamped with the previous version and nothing would say so. Both now
+  // re-export core/version.ts. This guards the arrangement rather than the
+  // value: it fails the moment someone reintroduces a literal in the React
+  // bundle, which is what made the drift possible in the first place.
+  it("serves the React bundle the same SDK_VERSION as the server entrypoint", () => {
+    expect(REACT_SDK_VERSION).toBe(SDK_VERSION);
   });
 });
 

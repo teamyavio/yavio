@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { stripPii } from "../core/pii.js";
 import type { IntentConfig } from "../core/types.js";
 
 /**
@@ -37,12 +38,38 @@ export function getCapturedIntent(): CapturedIntent | null {
   return intentStore.getStore()?.captured ?? null;
 }
 
-/** Trim, drop empty, clamp. Returns null for anything unusable. */
+/**
+ * Bounds the regex work before redaction. The intent arrives from a model and
+ * is otherwise unbounded, so redacting an arbitrarily long string first would
+ * be an open-ended cost. Set far above MAX_INTENT_LENGTH so the cut is very
+ * unlikely to land inside a real identifier — see normalizeIntent.
+ */
+const SAFETY_CEILING = MAX_INTENT_LENGTH * 8;
+
+/**
+ * Trim, drop empty, redact, clamp. Returns null for anything unusable.
+ *
+ * ORDER MATTERS, and it was wrong until 2026-08-07: this used to clamp to
+ * MAX_INTENT_LENGTH and leave redaction to buildToolCallEvent, which produced
+ * two distinct defects.
+ *
+ * 1. Clamping first cut PII in half at the boundary. An email truncated to
+ *    "alice@corp." no longer matches the email pattern, so a partially
+ *    redacted — still linkable — value shipped and looked scrubbed on
+ *    inspection.
+ * 2. Redaction tokens are LONGER than what they replace ("a@b.co" is 6 chars,
+ *    "[EMAIL_REDACTED]" is 16), so redacting after the clamp pushed the stored
+ *    value back over the 500 characters the docs promise.
+ *
+ * Redacting before the clamp fixes both: nothing is cut mid-identifier, and
+ * the returned string is genuinely <= MAX_INTENT_LENGTH.
+ */
 function normalizeIntent(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
-  return trimmed.slice(0, MAX_INTENT_LENGTH);
+  const redacted = stripPii(trimmed.slice(0, SAFETY_CEILING));
+  return redacted.slice(0, MAX_INTENT_LENGTH) || null;
 }
 
 /**

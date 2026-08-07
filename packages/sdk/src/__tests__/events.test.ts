@@ -90,6 +90,42 @@ describe("Event factories", () => {
       expect(ToolCallEvent.safeParse(event).success).toBe(true);
     });
 
+    // intent_signals is free text written by a model from an end user's
+    // conversation, and the docs cite this redaction as one of the two things
+    // that hold unconditionally. It had no test at all: deleting the stripPii
+    // call on this field left the whole suite green.
+    it("redacts PII in the captured intent", () => {
+      const event = buildToolCallEvent(ctx, {
+        toolName: "search_orders",
+        latencyMs: 10,
+        status: "success",
+        intentSignals: {
+          intent: "Looking up orders for alice@example.com before calling 555-123-4567",
+          source: "context_parameter",
+        },
+      });
+      const intent = (event.intent_signals as { intent: string }).intent;
+      expect(intent).toContain("[EMAIL_REDACTED]");
+      expect(intent).toContain("[PHONE_REDACTED]");
+      expect(intent).not.toContain("alice@example.com");
+      expect(intent).not.toContain("555-123-4567");
+    });
+
+    it("redacts the intent source field too, not just the intent text", () => {
+      // source is a fixed enum today, so this is about the shape of the call:
+      // the whole object goes through stripPii, not a hand-picked field.
+      const event = buildToolCallEvent(ctx, {
+        toolName: "search_orders",
+        latencyMs: 10,
+        status: "success",
+        intentSignals: { intent: "no pii here", source: "context_parameter" },
+      });
+      expect(event.intent_signals).toEqual({
+        intent: "no pii here",
+        source: "context_parameter",
+      });
+    });
+
     it("includes error fields on failure", () => {
       const event = buildToolCallEvent(ctx, {
         toolName: "book_room",

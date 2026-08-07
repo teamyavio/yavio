@@ -2,12 +2,15 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ErrorCode } from "@yavio/shared/error-codes";
 import { resolveConfig } from "../core/config.js";
 import type { WithYavioOptions, YavioContext } from "../core/types.js";
+import { SDK_VERSION } from "../core/version.js";
 import { HttpTransport } from "../transport/http.js";
 import { createYavioContext } from "./context.js";
 import { createProxy } from "./proxy.js";
 
-// Keep in sync with package.json "version" — sent on every event batch.
-export const SDK_VERSION = "0.3.1";
+// Sent on every event batch. Defined in core/version.ts so the server and React
+// bundles cannot drift apart at release time. Imported as well as re-exported
+// because this module uses the value itself.
+export { SDK_VERSION };
 
 /**
  * Wrap an MCP server with Yavio instrumentation.
