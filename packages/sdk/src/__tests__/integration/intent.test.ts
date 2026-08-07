@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -289,6 +290,47 @@ describe("intent capture — enabled", () => {
       arguments: { query: "boots", context: "x".repeat(MAX_INTENT_LENGTH + 100) },
     });
     expect(toolCallEvents(h.events)[0]?.intent_signals?.intent).toHaveLength(MAX_INTENT_LENGTH);
+  });
+
+  // The clamp above uses "x".repeat(), which redaction never touches, so it
+  // could not catch either half of the ordering bug this pair covers.
+  it("stays within the cap even when redaction expands the text", async () => {
+    const h = await setup(INTENT_ON, (proxy) => {
+      proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"));
+    });
+    await h.client.listTools();
+
+    // Every address is 6 chars and redacts to a 16-char token, so clamping
+    // before redacting would push the stored value far past the cap.
+    await h.client.callTool({
+      name: "search",
+      arguments: { query: "boots", context: "a@b.co ".repeat(200) },
+    });
+
+    const intent = String(toolCallEvents(h.events)[0]?.intent_signals?.intent ?? "");
+    expect(intent.length).toBeLessThanOrEqual(MAX_INTENT_LENGTH);
+    expect(intent).toContain("[EMAIL_REDACTED]");
+    expect(intent).not.toContain("a@b.co");
+  });
+
+  it("does not truncate an identifier into an unmatchable fragment", async () => {
+    const h = await setup(INTENT_ON, (proxy) => {
+      proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"));
+    });
+    await h.client.listTools();
+
+    // Position an email so the old clamp-then-redact order would slice it at
+    // the boundary, leaving "alice@corp." — which matches no pattern and used
+    // to ship looking scrubbed while still being linkable.
+    const filler = "y".repeat(MAX_INTENT_LENGTH - 8);
+    await h.client.callTool({
+      name: "search",
+      arguments: { query: "boots", context: `${filler}alice@corporate-domain.com tail` },
+    });
+
+    const intent = String(toolCallEvents(h.events)[0]?.intent_signals?.intent ?? "");
+    expect(intent).not.toContain("alice@");
+    expect(intent.length).toBeLessThanOrEqual(MAX_INTENT_LENGTH);
   });
 
   it("attaches intent to error events too", async () => {
@@ -721,5 +763,22 @@ describe("intent config resolution", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+});
+
+describe("documentation stays in step with the shipped default", () => {
+  // The docs quote DEFAULT_INTENT_DESCRIPTION verbatim so readers can see what
+  // their models are actually told. That is a second copy of a string, i.e. the
+  // same "remember to edit both" drift this SDK just removed for the version
+  // constant — so it gets a guard rather than a good intention. Without this, a
+  // future wording change silently leaves the published docs quoting a sentence
+  // the SDK no longer sends, and a customer greping their tool schemas for it
+  // concludes intent capture is broken.
+  it("the intent-capture page quotes the current default description", () => {
+    const page = readFileSync(
+      new URL("../../../../docs/content/docs/02-sdk/07-intent-capture.mdx", import.meta.url),
+      "utf-8",
+    );
+    expect(page).toContain(DEFAULT_INTENT_DESCRIPTION);
   });
 });

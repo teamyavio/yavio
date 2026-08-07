@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SDK_VERSION as REACT_SDK_VERSION } from "../react/constants.js";
 import { SDK_VERSION, withYavio, yavio } from "../server/index.js";
 
 describe("withYavio", () => {
@@ -54,6 +55,16 @@ describe("withYavio", () => {
       readFileSync(new URL("../../package.json", import.meta.url), "utf-8"),
     ) as { version: string };
     expect(SDK_VERSION).toBe(pkg.version);
+  });
+
+  // The version used to be two independent literals, one per entrypoint, and
+  // only the server copy was checked — so a release could ship widget events
+  // stamped with the previous version and nothing would say so. Both now
+  // re-export core/version.ts. This guards the arrangement rather than the
+  // value: it fails the moment someone reintroduces a literal in the React
+  // bundle, which is what made the drift possible in the first place.
+  it("serves the React bundle the same SDK_VERSION as the server entrypoint", () => {
+    expect(REACT_SDK_VERSION).toBe(SDK_VERSION);
   });
 });
 
