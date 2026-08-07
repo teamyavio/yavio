@@ -38,7 +38,7 @@ export function withYavio<T extends McpServer>(server: T, options?: WithYavioOpt
 
   if (config.intent.enabled) {
     console.info(
-      "[yavio] Intent capture enabled: tools advertise a required 'context' parameter (pass intent: false to disable).",
+      "[yavio] Intent capture enabled: tools advertise a 'context' parameter — required on model-facing tools, optional on widget-invoked ones (pass intent: false to disable).",
     );
   }
 

@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { DEFAULT_INTENT_DESCRIPTION, resolveConfig } from "../../core/config.js";
 import type { IntentConfig, YavioConfig } from "../../core/types.js";
-import { MAX_INTENT_LENGTH } from "../../server/intent.js";
+import { MAX_INTENT_LENGTH, createIntentController } from "../../server/intent.js";
 import { _resetGlobalState, createProxy } from "../../server/proxy.js";
 import type { Transport } from "../../transport/types.js";
 
@@ -794,21 +794,45 @@ describe("intent capture — widget-invoked tools", () => {
   // advertised as optional, while capture still applies when a model fills it.
   beforeEach(() => _resetGlobalState());
 
-  const registerPair = (proxy: McpServer, meta: Record<string, unknown>) => {
-    proxy.registerTool(
-      "widget-refresh",
-      { inputSchema: { search_id: z.string() }, _meta: meta },
-      async () => ok("refreshed"),
-    );
-    proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"));
-  };
+  const WIDGET_METAS: Array<[string, Record<string, unknown>]> = [
+    ["openai/widgetAccessible", { "openai/widgetAccessible": true }],
+    ["nested ui.visibility array", { ui: { visibility: ["app"] } }],
+    ["flat ui/visibility array", { "ui/visibility": ["app"] }],
+    ["bare-string visibility (off-spec authoring slip)", { ui: { visibility: "app" } }],
+    [
+      "nested resourceUri with omitted visibility (spec default [model, app])",
+      { ui: { resourceUri: "ui://views/x.html" } },
+    ],
+    ["flat ui/resourceUri with omitted visibility", { "ui/resourceUri": "ui://views/x.html" }],
+    [
+      "nested ui object beside a flat ui/visibility key (shadowing regression)",
+      { ui: { resourceUri: "ui://views/x.html" }, "ui/visibility": ["app"] },
+    ],
+  ];
 
-  it("advertises context as optional on openai/widgetAccessible tools", async () => {
-    const h = await setup(INTENT_ON, (proxy) => {
-      registerPair(proxy, { "openai/widgetAccessible": true });
+  /** One registration shape for every widget test, plus a model-tool control. */
+  function setupWidget(
+    meta: Record<string, unknown>,
+    intent: IntentConfig = INTENT_ON,
+    onCall?: (args: unknown) => void,
+  ): Promise<Harness> {
+    return setup(intent, (proxy) => {
+      proxy.registerTool(
+        "widget-refresh",
+        { inputSchema: { search_id: z.string() }, _meta: meta },
+        async (args: { search_id: string }) => {
+          onCall?.(args);
+          return ok("refreshed");
+        },
+      );
+      proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"));
     });
+  }
 
+  it.each(WIDGET_METAS)("advertises context as optional: %s", async (_label, meta) => {
+    const h = await setupWidget(meta);
     const list = await h.client.listTools();
+
     const widgetTool = listedTool(list, "widget-refresh");
     expect(widgetTool.inputSchema.properties).toHaveProperty("context");
     expect(widgetTool.inputSchema.required ?? []).not.toContain("context");
@@ -817,51 +841,55 @@ describe("intent capture — widget-invoked tools", () => {
     expect(listedTool(list, "search").inputSchema.required).toContain("context");
   });
 
-  it("advertises context as optional on MCP Apps ui.visibility app tools", async () => {
-    const h = await setup(INTENT_ON, (proxy) => {
-      registerPair(proxy, { ui: { visibility: ["app"] } });
+  it("an explicit visibility of ['model'] keeps context required despite a resourceUri", async () => {
+    // The documented escape hatch: an app whose widget never calls its
+    // view-owning tool declares model-only visibility and keeps required
+    // context (maximum capture) on it.
+    const h = await setupWidget({
+      ui: { resourceUri: "ui://views/x.html", visibility: ["model"] },
     });
-
-    const widgetTool = listedTool(await h.client.listTools(), "widget-refresh");
-    expect(widgetTool.inputSchema.properties).toHaveProperty("context");
-    expect(widgetTool.inputSchema.required ?? []).not.toContain("context");
+    const tool = listedTool(await h.client.listTools(), "widget-refresh");
+    expect(tool.inputSchema.required).toContain("context");
   });
 
-  it("accepts a context-less widget call and records no intent", async () => {
+  it("accepts a context-less widget call, records no intent, and skips the fallback", async () => {
+    // The fallback exists to approximate intents for model calls that omit
+    // context. Widget traffic (a 3s auto-refresh) is context-less by nature —
+    // running the fallback there would record machine-generated "inferred"
+    // intents at machine frequency.
+    const fallback = vi.fn(() => "machine noise");
     let seenArgs: unknown;
-    const h = await setup(INTENT_ON, (proxy) => {
-      proxy.registerTool(
-        "widget-refresh",
-        { inputSchema: { search_id: z.string() }, _meta: { "openai/widgetAccessible": true } },
-        async (args: { search_id: string }) => {
-          seenArgs = args;
-          return ok("refreshed");
-        },
-      );
-    });
+    const h = await setupWidget(
+      { "openai/widgetAccessible": true },
+      { ...INTENT_ON, fallback },
+      (args) => {
+        seenArgs = args;
+      },
+    );
     await h.client.listTools();
 
     const result = await h.client.callTool({
       name: "widget-refresh",
       arguments: { search_id: "abc123" },
     });
-
     expect(result.isError).toBeFalsy();
     expect(seenArgs).toEqual({ search_id: "abc123" });
     expect(toolCallEvents(h.events)[0]?.intent_signals).toBeUndefined();
+    expect(fallback).not.toHaveBeenCalled();
+
+    // The fallback still serves ordinary tools on the same server.
+    await h.client.callTool({ name: "search", arguments: { query: "boots" } });
+    expect(fallback).toHaveBeenCalledTimes(1);
+    expect(toolCallEvents(h.events)[1]?.intent_signals).toEqual({
+      intent: "machine noise",
+      source: "inferred",
+    });
   });
 
   it("still captures and strips context when a model call supplies it", async () => {
     let seenArgs: unknown;
-    const h = await setup(INTENT_ON, (proxy) => {
-      proxy.registerTool(
-        "widget-refresh",
-        { inputSchema: { search_id: z.string() }, _meta: { "openai/widgetAccessible": true } },
-        async (args: { search_id: string }) => {
-          seenArgs = args;
-          return ok("refreshed");
-        },
-      );
+    const h = await setupWidget({ "openai/widgetAccessible": true }, INTENT_ON, (args) => {
+      seenArgs = args;
     });
     await h.client.listTools();
 
@@ -877,5 +905,74 @@ describe("intent capture — widget-invoked tools", () => {
       intent: "Fetching offer details the user asked about.",
       source: "context_parameter",
     });
+    // The stripped context must not leak into input capture — the widget
+    // branch must assert no less than the model-tool test above.
+    expect(event?.input_values).not.toHaveProperty("context");
+    expect(event?.input_keys).not.toHaveProperty("context");
+  });
+});
+
+describe("intent capture — widget classification without listed _meta", () => {
+  // MCP SDK versions before 1.18.0 accept `_meta` in registerTool but drop
+  // it: it reaches neither the registry nor the tools/list entries. The
+  // registration-time record (noteToolRegistration's meta argument, fed by
+  // the proxy's registerTool interceptor) is then the only signal, so the
+  // wrapped list handler must classify from it even when the listed entry
+  // carries no _meta. Exercised against a stub low-level server because the
+  // MCP SDK installed in this repo always forwards _meta.
+  beforeEach(() => _resetGlobalState());
+
+  function installOnStub(intent: IntentConfig, listedTools: Array<Record<string, unknown>>) {
+    const handlers = new Map<string, (req: unknown, extra: unknown) => Promise<unknown>>();
+    handlers.set("tools/list", async () => ({ tools: listedTools }));
+    const controller = createIntentController(intent);
+    controller.install({
+      server: { setRequestHandler: () => {}, _requestHandlers: handlers },
+      _registeredTools: {},
+    } as unknown as McpServer);
+    return { controller, callList: () => handlers.get("tools/list")?.({}, {}) };
+  }
+
+  it("classifies from the registration-time _meta when the listed entry carries none", async () => {
+    const { controller, callList } = installOnStub(INTENT_ON, [
+      {
+        name: "widget-refresh",
+        inputSchema: { type: "object", properties: { search_id: { type: "string" } } },
+      },
+      {
+        name: "search",
+        inputSchema: { type: "object", properties: { query: { type: "string" } } },
+      },
+    ]);
+    controller.noteToolRegistration("widget-refresh", [], { "openai/widgetAccessible": true });
+    controller.noteToolRegistration("search", []);
+
+    const result = (await callList()) as {
+      tools: Array<{ name: string; inputSchema: { properties: object; required?: string[] } }>;
+    };
+    const widget = result.tools.find((t) => t.name === "widget-refresh");
+    const search = result.tools.find((t) => t.name === "search");
+    expect(widget?.inputSchema.properties).toHaveProperty("context");
+    expect(widget?.inputSchema.required ?? []).not.toContain("context");
+    expect(search?.inputSchema.required).toContain("context");
+  });
+
+  it("removes a pre-existing 'context' entry from a widget tool's required array", async () => {
+    const { callList } = installOnStub(INTENT_ON, [
+      {
+        name: "widget-refresh",
+        _meta: { "openai/widgetAccessible": true },
+        inputSchema: {
+          type: "object",
+          properties: { search_id: { type: "string" } },
+          // Legal JSON Schema: required may name keys that properties omits —
+          // e.g. a stale leftover after the property itself was removed. Kept
+          // as-is it would defeat the widget exemption silently.
+          required: ["search_id", "context"],
+        },
+      },
+    ]);
+    const result = (await callList()) as { tools: Array<{ inputSchema: { required?: string[] } }> };
+    expect(result.tools[0]?.inputSchema.required).toEqual(["search_id"]);
   });
 });

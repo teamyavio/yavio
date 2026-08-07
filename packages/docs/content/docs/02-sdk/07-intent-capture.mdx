@@ -57,7 +57,7 @@ withYavio(server, {
 
 ## Dashboard status
 
-The SDK reports its intent setting with the first tool call of each session, so the dashboard's **User Intents** panel always shows an honest state: *enabled*, *disabled*, or *SDK too old* (intent capture requires `@yavio/sdk` 0.2.0+). If capture is enabled but no intents arrive, the panel says so — some MCP clients do not fill unknown parameters.
+The SDK reports its intent setting with the first tool call of each session, so the dashboard's **User Intents** panel always shows an honest state: *enabled*, *disabled*, or *SDK too old* (intent capture requires `@yavio/sdk` 0.2.0+). If capture is enabled but no intents arrive, check two causes before suspecting a bug: some MCP clients do not fill unknown parameters, and on **widget-invoked tools** `context` is optional by design (see above) — a tool that is mostly called by the app's own widget will naturally show few or no intents, because widget calls carry no conversation to describe. The SDK logs one `[yavio]` line per tool it downgrades, so the server log tells you which tools are affected.
 
 ## Privacy and app-store review
 
