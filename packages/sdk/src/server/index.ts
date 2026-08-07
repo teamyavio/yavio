@@ -37,8 +37,12 @@ export function withYavio<T extends McpServer>(server: T, options?: WithYavioOpt
   }
 
   if (config.intent.enabled) {
+    // `required` is independently configurable; the log must not claim
+    // "required" for a server that was explicitly configured optional.
     console.info(
-      "[yavio] Intent capture enabled: tools advertise a required 'context' parameter (pass intent: false to disable).",
+      config.intent.required
+        ? "[yavio] Intent capture enabled: tools advertise a 'context' parameter — required on model-facing tools, optional on widget-invoked ones (pass intent: false to disable)."
+        : "[yavio] Intent capture enabled: tools advertise an optional 'context' parameter on every tool (pass intent: false to disable).",
     );
   }
 

@@ -14,6 +14,12 @@ import type { IntentConfig } from "../core/types.js";
  * handler never sees it. Captured intents reach the tool_call event through
  * AsyncLocalStorage.
  *
+ * Exception: on widget-invoked tools (`openai/widgetAccessible`, MCP Apps
+ * `ui.visibility: ["app"]`) `context` is advertised as OPTIONAL — the widget
+ * iframe calls those tools without it, and a required parameter would make
+ * the host refuse every such call once it refreshes cached schemas. Capture
+ * still applies when the value is present. See metaIndicatesWidget.
+ *
  * Registered tool schemas are never modified: mixing our Zod instance into a
  * customer shape can throw ("Mixed Zod versions detected") and strict schemas
  * would reject the extra key. Everything happens at the protocol layer.
@@ -182,9 +188,12 @@ export interface IntentController {
   /**
    * Record a tool registration seen by the proxy. `schemas` are the candidate
    * schema-shaped arguments; the tool is eligible for capture only when none
-   * of them defines its own `context` key.
+   * of them defines its own `context` key. `meta` is the registration
+   * config's `_meta`, when the call form carries one — the only reliable
+   * widget-invokability source on MCP SDKs older than 1.18.0, which drop
+   * `_meta` before it reaches the registry or tools/list.
    */
-  noteToolRegistration(toolName: string, schemas: unknown[]): void;
+  noteToolRegistration(toolName: string, schemas: unknown[], meta?: unknown): void;
   /** Patch the underlying low-level server. Idempotent per server. */
   install(server: McpServer): void;
 }
@@ -197,6 +206,24 @@ export function createIntentController(config: IntentConfig): IntentController {
   // unknown tools are NOT captured/stripped: silently missing an intent is
   // harmless, deleting a genuine customer argument is not.
   const hasOwnContext = new Map<string, boolean>();
+
+  // toolName -> widget may invoke this tool. Fed from three places: the
+  // registration-time config's `_meta` (via noteToolRegistration), the live
+  // registry at install(), and listed entries at tools/list time. The
+  // registration-time record matters most: MCP SDK versions before 1.18.0
+  // accept `_meta` in registerTool but drop it — it never reaches the
+  // registry or tools/list — so without this record the widget exemption
+  // would be silently inert on every supported version below 1.18 while the
+  // proxy's registerTool interceptor saw the truth all along.
+  const widgetInvoked = new Map<string, boolean>();
+
+  const isWidgetTool = (toolName: unknown): boolean =>
+    typeof toolName === "string" && widgetInvoked.get(toolName) === true;
+
+  // Once per tool: config demanded required context, the widget exemption
+  // overrode it. Without this line the override is indistinguishable from a
+  // client that stopped filling the parameter.
+  const loggedWidgetOverride = new Set<string>();
 
   // The McpServer this controller is installed on — used to consult the LIVE
   // registered schema at call time, so RegisteredTool.update() and tools
@@ -245,7 +272,12 @@ export function createIntentController(config: IntentConfig): IntentController {
             downstream = { ...req, params: { ...req.params, arguments: rest } };
           }
         }
-        if (!captured && config.fallback) {
+        // No fallback for context-less calls on widget-invoked tools: those
+        // are presumptively the widget's own machine traffic (a 3s auto-
+        // refresh, a filter-bar click), and inferring an intent for each would
+        // record boilerplate "inferred" entries at machine frequency,
+        // drowning the real intents the fallback exists to approximate.
+        if (!captured && config.fallback && !isWidgetTool(toolName)) {
           try {
             const inferred = normalizeIntent(await config.fallback(toolName, args));
             if (inferred) captured = { intent: inferred, source: "inferred" };
@@ -264,11 +296,57 @@ export function createIntentController(config: IntentConfig): IntentController {
   interface ToolEntry {
     name?: unknown;
     inputSchema?: Record<string, unknown>;
+    _meta?: unknown;
     [key: string]: unknown;
   }
 
   const isPlainObject = (value: unknown): value is Record<string, unknown> =>
     typeof value === "object" && value !== null && !Array.isArray(value);
+
+  /**
+   * Does this `_meta` mark a tool the app's own widget (iframe) may invoke,
+   * rather than only the model? Signals, in order of authority:
+   *
+   * 1. `openai/widgetAccessible: true` (OpenAI Apps SDK).
+   * 2. An explicit MCP Apps visibility — nested `ui.visibility` wins over the
+   *    flat `ui/visibility` key (both exist in the wild; the fallthrough must
+   *    be `??`, not a ternary, or a nested `ui` object shadows the flat key).
+   *    A bare string `"app"` is accepted alongside the spec's array form: the
+   *    off-spec authoring slip is cheap to tolerate and misreading it would
+   *    recreate exactly the failure this code exists to prevent.
+   * 3. No visibility at all but a `resourceUri` (nested or flat): MCP Apps
+   *    defaults omitted visibility to ["model", "app"], so a tool that
+   *    participates in UI is app-callable unless it says otherwise. Skybridge
+   *    emits precisely this shape for every view-owning tool. An app whose
+   *    widget never calls its view tool can keep required `context` there by
+   *    declaring `ui.visibility: ["model"]` explicitly.
+   *
+   * Why this matters: widget calls carry only the tool's real arguments — an
+   * iframe cannot know to send `context` — so advertising `context` as
+   * REQUIRED on such a tool makes the host refuse every widget call as
+   * schema-invalid. The failure is delayed (hosts cache connector schemas
+   * until a refresh) and invisible server-side (the calls never arrive).
+   * Observed in production on 2026-08-07: a widget's 3s auto-refresh went
+   * from 83 calls/day to zero the moment the connector re-fetched schemas.
+   *
+   * There is no valid use of a required `context` on a widget-invoked tool,
+   * so this is enforced automatically rather than left to configuration.
+   */
+  function metaIndicatesWidget(meta: unknown): boolean {
+    if (!isPlainObject(meta)) return false;
+    if (meta["openai/widgetAccessible"] === true) return true;
+
+    const ui = isPlainObject(meta.ui) ? meta.ui : undefined;
+    const visibility = (ui ? ui.visibility : undefined) ?? meta["ui/visibility"];
+    if (visibility !== undefined) {
+      if (visibility === "app") return true;
+      return Array.isArray(visibility) && visibility.includes("app");
+    }
+
+    if (ui && typeof ui.resourceUri === "string") return true;
+    if (typeof meta["ui/resourceUri"] === "string") return true;
+    return false;
+  }
 
   function injectIntoListedTool(tool: ToolEntry): ToolEntry {
     const name = typeof tool?.name === "string" ? tool.name : undefined;
@@ -307,10 +385,39 @@ export function createIntentController(config: IntentConfig): IntentController {
     const properties = isPlainObject(copy.properties) ? copy.properties : {};
     properties.context = { type: "string", description: config.description };
     copy.properties = properties;
-    if (config.required) {
+
+    // Classify from the listed `_meta` when the MCP SDK forwarded one;
+    // otherwise fall back to what the registration-time config declared
+    // (pre-1.18 MCP SDKs drop `_meta` before it reaches tools/list).
+    const widget =
+      tool._meta !== undefined
+        ? metaIndicatesWidget(tool._meta)
+        : name !== undefined && widgetInvoked.get(name) === true;
+    if (name) widgetInvoked.set(name, widget);
+
+    // From here on the SDK owns the `context` key. A customer schema may
+    // already name "context" in `required` without declaring the property
+    // (legal JSON Schema, e.g. a stale leftover) — kept as-is it would ship
+    // `context` as required against the policy below, on widget tools AND
+    // under `required: false`. Strip it first; the policy branch is then the
+    // only thing that can add it back.
+    if (Array.isArray(copy.required)) {
+      copy.required = (copy.required as unknown[]).filter((k) => k !== "context");
+    }
+
+    // Widget-invoked tools get `context` as optional regardless of config:
+    // capture still works when a model call fills it, while the widget's own
+    // context-less calls stay schema-valid. See metaIndicatesWidget.
+    if (config.required && !widget) {
       const required = Array.isArray(copy.required) ? (copy.required as unknown[]) : [];
       if (!required.includes("context")) required.push("context");
       copy.required = required;
+    }
+    if (widget && config.required && name && !loggedWidgetOverride.has(name)) {
+      loggedWidgetOverride.add(name);
+      console.info(
+        `[yavio] Intent context advertised as OPTIONAL on widget-invoked tool "${name}" (a required parameter would make the host refuse the widget's own calls). Model calls that fill it are still captured.`,
+      );
     }
     return { ...tool, inputSchema: copy };
   }
@@ -339,12 +446,16 @@ export function createIntentController(config: IntentConfig): IntentController {
   }
 
   return {
-    noteToolRegistration(toolName, schemas) {
+    noteToolRegistration(toolName, schemas, meta) {
       // Only positive determination enables capture. Any schema-ish argument
       // carrying a `context` key (including annotations — false positives are
       // safe) marks the tool as owning the parameter.
       const owns = schemas.some((s) => shapeHasContext(s));
       hasOwnContext.set(toolName, owns);
+      // Record widget-invokability from the registration config. Only when a
+      // `_meta` was actually supplied: absence here must not erase a value a
+      // more informed source recorded.
+      if (meta !== undefined) widgetInvoked.set(toolName, metaIndicatesWidget(meta));
     },
 
     install(server) {
@@ -362,6 +473,11 @@ export function createIntentController(config: IntentConfig): IntentController {
         try {
           for (const [name, tool] of Object.entries(toolsHost._registeredTools ?? {})) {
             hasOwnContext.set(name, shapeHasContext(tool?.inputSchema));
+            // Same guard as noteToolRegistration: only a present `_meta` may
+            // write — old MCP SDKs never store one, and undefined must not
+            // erase a registration-time record.
+            const meta = (tool as { _meta?: unknown } | undefined)?._meta;
+            if (meta !== undefined) widgetInvoked.set(name, metaIndicatesWidget(meta));
           }
         } catch {
           // Registry unreadable — classification falls back to tools/list time
