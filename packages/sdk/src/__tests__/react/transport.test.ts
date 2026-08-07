@@ -1,5 +1,6 @@
 import type { BaseEvent } from "@yavio/shared/events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SDK_VERSION } from "../../react/constants.js";
 import { WidgetTransport } from "../../react/transport.js";
 import type { WidgetConfig } from "../../react/types.js";
 
@@ -228,7 +229,7 @@ describe("WidgetTransport", () => {
     };
 
     expect(body.events).toHaveLength(1);
-    expect(body.sdk_version).toBe("0.3.0");
+    expect(body.sdk_version).toBe(SDK_VERSION);
     expect(body.sent_at).toBeDefined();
     expect(body.events[0].event_name).toBe("test_event");
   });

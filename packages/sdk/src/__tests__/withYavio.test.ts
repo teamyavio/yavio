@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SDK_VERSION as REACT_SDK_VERSION } from "../react/constants.js";
 import { SDK_VERSION, withYavio, yavio } from "../server/index.js";
 
 describe("withYavio", () => {
@@ -54,6 +55,18 @@ describe("withYavio", () => {
       readFileSync(new URL("../../package.json", import.meta.url), "utf-8"),
     ) as { version: string };
     expect(SDK_VERSION).toBe(pkg.version);
+  });
+
+  // The version is hardcoded in TWO places — the server entrypoint and the
+  // React bundle, which cannot import the server one. Only the server copy was
+  // covered, so a release could ship widget events stamped with the previous
+  // version and nothing would say so. Both are checked against package.json
+  // now, because "remember to edit both" is not a control.
+  it("keeps the React bundle's SDK_VERSION in step with package.json", () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../../package.json", import.meta.url), "utf-8"),
+    ) as { version: string };
+    expect(REACT_SDK_VERSION).toBe(pkg.version);
   });
 });
 

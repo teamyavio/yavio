@@ -19,11 +19,29 @@ const DEFAULT_CAPTURE: CaptureConfig = {
  * Model-facing description of the injected `context` parameter. Kept short:
  * this text lands in every tool's schema and therefore in the model's context
  * window once per advertised tool.
+ *
+ * CHANGED 2026-08-07 to PostHog's phrasing, verbatim
+ * (https://posthog.com/docs/mcp-analytics/intent), after reading what the
+ * previous wording actually produced.
+ *
+ * That wording prescribed a word count, third person AND a worked example — so
+ * the model copied the example's shape. Of 59 intents captured on a live
+ * comparison-shopping server, the ChatGPT ones averaged 122 characters and
+ * nearly every one opened "Comparing X to help the user Y": informative, but
+ * interchangeable, which defeats the point of a free-text field. One
+ * unconstrained question leaves room for the model to say something specific.
+ *
+ * Note what is deliberately NOT here: the old "Never include credentials or
+ * personal data" clause. It was not doing the job — captured intents contained
+ * "€2,500 monthly income" and "€10,000 investment" with that sentence in
+ * place — and a description the model reinterprets is the wrong layer for a
+ * privacy guarantee. The real guarantees are downstream and unconditional:
+ * stripPii() over intent_signals in buildToolCallEvent, and the 500-character
+ * clamp in MAX_INTENT_LENGTH. Do not re-add a privacy sentence here expecting
+ * it to enforce anything.
  */
 export const DEFAULT_INTENT_DESCRIPTION =
-  "State in 15-25 words, third person, why this tool is being called and how it serves " +
-  "the user's current goal. Never include credentials or personal data. " +
-  'Example: "Searching order history for recent shipments to help the user track a delayed package."';
+  "Why are you calling this tool? Briefly describe the user's goal.";
 
 const CONFIG_FILENAME = ".yaviorc.json";
 

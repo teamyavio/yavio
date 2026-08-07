@@ -1,6 +1,7 @@
 import { renderHook } from "@testing-library/react";
 import type { BaseEvent } from "@yavio/shared/events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SDK_VERSION } from "../../react/constants.js";
 import { _resetWidgetInstance, useYavio } from "../../react/hook.js";
 
 const FULL_CONFIG = {
@@ -119,8 +120,8 @@ describe("React Widget SDK Integration", () => {
 
     await vi.advanceTimersByTimeAsync(5_000);
 
-    expect(sentBatches[0].sdk_version).toBe("0.3.0");
+    expect(sentBatches[0].sdk_version).toBe(SDK_VERSION);
     const trackEvent = sentBatches[0].events.find((e) => e.event_type === "track");
-    expect(trackEvent?.sdk_version).toBe("0.3.0");
+    expect(trackEvent?.sdk_version).toBe(SDK_VERSION);
   });
 });
