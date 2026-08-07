@@ -18,7 +18,7 @@ import type { IntentConfig } from "../core/types.js";
  * `ui.visibility: ["app"]`) `context` is advertised as OPTIONAL — the widget
  * iframe calls those tools without it, and a required parameter would make
  * the host refuse every such call once it refreshes cached schemas. Capture
- * still applies when the value is present. See isWidgetInvoked.
+ * still applies when the value is present. See metaIndicatesWidget.
  *
  * Registered tool schemas are never modified: mixing our Zod instance into a
  * customer shape can throw ("Mixed Zod versions detected") and strict schemas
@@ -395,6 +395,16 @@ export function createIntentController(config: IntentConfig): IntentController {
         : name !== undefined && widgetInvoked.get(name) === true;
     if (name) widgetInvoked.set(name, widget);
 
+    // From here on the SDK owns the `context` key. A customer schema may
+    // already name "context" in `required` without declaring the property
+    // (legal JSON Schema, e.g. a stale leftover) — kept as-is it would ship
+    // `context` as required against the policy below, on widget tools AND
+    // under `required: false`. Strip it first; the policy branch is then the
+    // only thing that can add it back.
+    if (Array.isArray(copy.required)) {
+      copy.required = (copy.required as unknown[]).filter((k) => k !== "context");
+    }
+
     // Widget-invoked tools get `context` as optional regardless of config:
     // capture still works when a model call fills it, while the widget's own
     // context-less calls stay schema-valid. See metaIndicatesWidget.
@@ -403,19 +413,11 @@ export function createIntentController(config: IntentConfig): IntentController {
       if (!required.includes("context")) required.push("context");
       copy.required = required;
     }
-    if (widget) {
-      // A customer schema may already name "context" in `required` without
-      // declaring the property (legal JSON Schema, e.g. a stale leftover) —
-      // that would silently defeat the exemption, so drop it here.
-      if (Array.isArray(copy.required)) {
-        copy.required = (copy.required as unknown[]).filter((k) => k !== "context");
-      }
-      if (config.required && name && !loggedWidgetOverride.has(name)) {
-        loggedWidgetOverride.add(name);
-        console.info(
-          `[yavio] Intent context advertised as OPTIONAL on widget-invoked tool "${name}" (a required parameter would make the host refuse the widget's own calls). Model calls that fill it are still captured.`,
-        );
-      }
+    if (widget && config.required && name && !loggedWidgetOverride.has(name)) {
+      loggedWidgetOverride.add(name);
+      console.info(
+        `[yavio] Intent context advertised as OPTIONAL on widget-invoked tool "${name}" (a required parameter would make the host refuse the widget's own calls). Model calls that fill it are still captured.`,
+      );
     }
     return { ...tool, inputSchema: copy };
   }

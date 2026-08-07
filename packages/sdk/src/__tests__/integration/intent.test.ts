@@ -841,6 +841,15 @@ describe("intent capture — widget-invoked tools", () => {
     expect(listedTool(list, "search").inputSchema.required).toContain("context");
   });
 
+  it("openai/widgetAccessible: false does not downgrade the tool", async () => {
+    // Pins the deliberate strict `=== true` check: an explicit false (or any
+    // non-true value) must not count as widget-invoked, and a later cleanup
+    // "simplifying" the comparison to truthiness has a failing test to answer.
+    const h = await setupWidget({ "openai/widgetAccessible": false });
+    const tool = listedTool(await h.client.listTools(), "widget-refresh");
+    expect(tool.inputSchema.required).toContain("context");
+  });
+
   it("an explicit visibility of ['model'] keeps context required despite a resourceUri", async () => {
     // The documented escape hatch: an app whose widget never calls its
     // view-owning tool declares model-only visibility and keeps required
@@ -974,5 +983,25 @@ describe("intent capture — widget classification without listed _meta", () => 
     ]);
     const result = (await callList()) as { tools: Array<{ inputSchema: { required?: string[] } }> };
     expect(result.tools[0]?.inputSchema.required).toEqual(["search_id"]);
+  });
+
+  it("strips a stale required 'context' on ordinary tools under required: false", async () => {
+    // The stale-required cleanup is not widget-specific: with intent
+    // configured optional, a leftover required: ["context"] in a customer
+    // schema would otherwise ship `context` as required against the
+    // operator's explicit configuration — the hard-validating-client
+    // breakage `required: false` exists to avoid.
+    const { callList } = installOnStub({ ...INTENT_ON, required: false }, [
+      {
+        name: "search",
+        inputSchema: {
+          type: "object",
+          properties: { query: { type: "string" } },
+          required: ["query", "context"],
+        },
+      },
+    ]);
+    const result = (await callList()) as { tools: Array<{ inputSchema: { required?: string[] } }> };
+    expect(result.tools[0]?.inputSchema.required).toEqual(["query"]);
   });
 });
