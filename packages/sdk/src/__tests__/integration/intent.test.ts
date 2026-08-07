@@ -782,3 +782,100 @@ describe("documentation stays in step with the shipped default", () => {
     expect(page).toContain(DEFAULT_INTENT_DESCRIPTION);
   });
 });
+
+describe("intent capture — widget-invoked tools", () => {
+  // A widget iframe calls its tools with only their real arguments; it cannot
+  // know to send `context`. Advertising `context` as REQUIRED on such a tool
+  // makes the host refuse every widget call as schema-invalid — and only after
+  // it refreshes cached schemas, so the widget breaks silently days later with
+  // no server-side trace. Incident: billiger-mietwagen, 2026-08-07 — the
+  // widget's 3s auto-refresh dropped from 83 calls/day to zero the moment the
+  // connector re-fetched schemas. Hence: on widget-invoked tools `context` is
+  // advertised as optional, while capture still applies when a model fills it.
+  beforeEach(() => _resetGlobalState());
+
+  const registerPair = (proxy: McpServer, meta: Record<string, unknown>) => {
+    proxy.registerTool(
+      "widget-refresh",
+      { inputSchema: { search_id: z.string() }, _meta: meta },
+      async () => ok("refreshed"),
+    );
+    proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"));
+  };
+
+  it("advertises context as optional on openai/widgetAccessible tools", async () => {
+    const h = await setup(INTENT_ON, (proxy) => {
+      registerPair(proxy, { "openai/widgetAccessible": true });
+    });
+
+    const list = await h.client.listTools();
+    const widgetTool = listedTool(list, "widget-refresh");
+    expect(widgetTool.inputSchema.properties).toHaveProperty("context");
+    expect(widgetTool.inputSchema.required ?? []).not.toContain("context");
+
+    // Control on the same server: ordinary tools keep the required parameter.
+    expect(listedTool(list, "search").inputSchema.required).toContain("context");
+  });
+
+  it("advertises context as optional on MCP Apps ui.visibility app tools", async () => {
+    const h = await setup(INTENT_ON, (proxy) => {
+      registerPair(proxy, { ui: { visibility: ["app"] } });
+    });
+
+    const widgetTool = listedTool(await h.client.listTools(), "widget-refresh");
+    expect(widgetTool.inputSchema.properties).toHaveProperty("context");
+    expect(widgetTool.inputSchema.required ?? []).not.toContain("context");
+  });
+
+  it("accepts a context-less widget call and records no intent", async () => {
+    let seenArgs: unknown;
+    const h = await setup(INTENT_ON, (proxy) => {
+      proxy.registerTool(
+        "widget-refresh",
+        { inputSchema: { search_id: z.string() }, _meta: { "openai/widgetAccessible": true } },
+        async (args: { search_id: string }) => {
+          seenArgs = args;
+          return ok("refreshed");
+        },
+      );
+    });
+    await h.client.listTools();
+
+    const result = await h.client.callTool({
+      name: "widget-refresh",
+      arguments: { search_id: "abc123" },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(seenArgs).toEqual({ search_id: "abc123" });
+    expect(toolCallEvents(h.events)[0]?.intent_signals).toBeUndefined();
+  });
+
+  it("still captures and strips context when a model call supplies it", async () => {
+    let seenArgs: unknown;
+    const h = await setup(INTENT_ON, (proxy) => {
+      proxy.registerTool(
+        "widget-refresh",
+        { inputSchema: { search_id: z.string() }, _meta: { "openai/widgetAccessible": true } },
+        async (args: { search_id: string }) => {
+          seenArgs = args;
+          return ok("refreshed");
+        },
+      );
+    });
+    await h.client.listTools();
+
+    const result = await h.client.callTool({
+      name: "widget-refresh",
+      arguments: { search_id: "abc123", context: "Fetching offer details the user asked about." },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(seenArgs).toEqual({ search_id: "abc123" });
+    const event = toolCallEvents(h.events)[0];
+    expect(event?.intent_signals).toEqual({
+      intent: "Fetching offer details the user asked about.",
+      source: "context_parameter",
+    });
+  });
+});

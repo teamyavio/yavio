@@ -29,6 +29,7 @@ The SDK reads and removes the `context` value at the protocol layer **before** y
 - **Your handler never sees it.** Tool code and input schemas stay untouched — strict schemas included.
 - **A call without `context` never fails.** The parameter is required only in the advertised schema; the server tolerates its absence.
 - **Tools that define their own `context` parameter are left completely alone** — no injection, no capture, no stripping.
+- **Widget-invoked tools get `context` as optional, automatically.** A tool marked as callable from an app widget (`_meta["openai/widgetAccessible"]: true`, or MCP Apps `ui.visibility` containing `"app"`) is invoked by the widget iframe with only its real arguments — an iframe cannot know to send `context`. Hosts validate widget calls against the advertised schema, so a required `context` would make them refuse every such call — and only once the host refreshes its cached schemas, i.e. the widget breaks silently some time *after* you enable intent capture. The SDK therefore never marks `context` as required on these tools. Capture still works whenever a model call fills the optional field.
 
 Captured intents are stored on the `tool_call` event (`intent_signals`), passed through the SDK's PII stripper, and capped at 500 characters. Read [what that does not cover](#what-intent-capture-does-not-protect-you-from) before enabling this on a server that handles sensitive data.
 

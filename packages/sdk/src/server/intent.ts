@@ -14,6 +14,12 @@ import type { IntentConfig } from "../core/types.js";
  * handler never sees it. Captured intents reach the tool_call event through
  * AsyncLocalStorage.
  *
+ * Exception: on widget-invoked tools (`openai/widgetAccessible`, MCP Apps
+ * `ui.visibility: ["app"]`) `context` is advertised as OPTIONAL — the widget
+ * iframe calls those tools without it, and a required parameter would make
+ * the host refuse every such call once it refreshes cached schemas. Capture
+ * still applies when the value is present. See isWidgetInvoked.
+ *
  * Registered tool schemas are never modified: mixing our Zod instance into a
  * customer shape can throw ("Mixed Zod versions detected") and strict schemas
  * would reject the extra key. Everything happens at the protocol layer.
@@ -264,11 +270,40 @@ export function createIntentController(config: IntentConfig): IntentController {
   interface ToolEntry {
     name?: unknown;
     inputSchema?: Record<string, unknown>;
+    _meta?: unknown;
     [key: string]: unknown;
   }
 
   const isPlainObject = (value: unknown): value is Record<string, unknown> =>
     typeof value === "object" && value !== null && !Array.isArray(value);
+
+  /**
+   * Is this tool invoked by the app's own widget (iframe), not only by the
+   * model? Detected from the tool's `_meta`, which the MCP SDK forwards into
+   * tools/list entries: `openai/widgetAccessible` (OpenAI Apps SDK) marks a
+   * tool the widget may call, MCP Apps `ui.visibility` containing "app" marks
+   * a widget-internal tool.
+   *
+   * Widget calls carry only the tool's real arguments — an iframe cannot know
+   * to send `context` — so advertising `context` as REQUIRED on such a tool
+   * makes the ChatGPT host refuse every widget call as schema-invalid. Worse,
+   * the failure is delayed: hosts cache connector schemas, so the widget keeps
+   * working until the next schema refresh and then breaks with no server-side
+   * trace (the calls never arrive). Observed in production on 2026-08-07:
+   * a widget's 3s auto-refresh went from 83 calls/day to zero the moment the
+   * connector re-fetched schemas.
+   *
+   * There is no valid use of a required `context` on a widget-invoked tool, so
+   * this is enforced automatically rather than left to configuration.
+   */
+  function isWidgetInvoked(tool: ToolEntry): boolean {
+    const meta = tool._meta;
+    if (!isPlainObject(meta)) return false;
+    if (meta["openai/widgetAccessible"] === true) return true;
+    const ui = meta.ui;
+    const visibility = isPlainObject(ui) ? ui.visibility : meta["ui/visibility"];
+    return Array.isArray(visibility) && visibility.includes("app");
+  }
 
   function injectIntoListedTool(tool: ToolEntry): ToolEntry {
     const name = typeof tool?.name === "string" ? tool.name : undefined;
@@ -307,7 +342,10 @@ export function createIntentController(config: IntentConfig): IntentController {
     const properties = isPlainObject(copy.properties) ? copy.properties : {};
     properties.context = { type: "string", description: config.description };
     copy.properties = properties;
-    if (config.required) {
+    // Widget-invoked tools get `context` as optional regardless of config:
+    // capture still works when a model call fills it, while the widget's own
+    // context-less calls stay schema-valid. See isWidgetInvoked.
+    if (config.required && !isWidgetInvoked(tool)) {
       const required = Array.isArray(copy.required) ? (copy.required as unknown[]) : [];
       if (!required.includes("context")) required.push("context");
       copy.required = required;
