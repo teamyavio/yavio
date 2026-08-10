@@ -431,9 +431,14 @@ export function createProxy<T extends McpServer>(
               : typeof configArg?.name === "string"
                 ? configArg.name
                 : "unknown";
+          // Pass the config's `_meta` too: MCP SDK versions before 1.18.0
+          // accept it here but drop it before the registry and tools/list, so
+          // this interceptor is the only place the widget-invokability signal
+          // is guaranteed to be visible on every supported version.
           intent?.noteToolRegistration(
             toolName,
             configArg?.inputSchema ? [configArg.inputSchema] : [],
+            configArg?._meta,
           );
           if (cbIndex !== -1) {
             const originalCb = args[cbIndex] as (...cbArgs: unknown[]) => unknown;
