@@ -11,6 +11,37 @@ export interface YavioConfig {
    */
   serverOnly: boolean;
   intent: IntentConfig;
+  /** Per-tool overrides of the capture flags, keyed by tool name. Empty when none. */
+  tools: Record<string, ToolCaptureOverride>;
+}
+
+/**
+ * Per-tool overrides of the capture flags. A key that is omitted inherits the
+ * global `capture` value. Lets a tool with sensitive input (an IBAN, a message
+ * body) stay on the instrumented server — keeping latency, status, intent and
+ * the `yavio.*` tracking context — while the SDK guarantees what is not
+ * captured for it.
+ */
+export interface ToolCaptureOverride {
+  /**
+   * `false`: no `input_keys`, `input_types`, `input_values` and no client
+   * metadata (`locale`, `country_code`, `end_user_agent`, `subject_id`) for
+   * this tool, on success and on error. Same semantics as the global flag.
+   */
+  inputValues?: boolean;
+  /**
+   * `false`: no `output_content` for this tool, and no `error_message` taken
+   * from an `isError` result (that text is output). `status` and
+   * `error_category` are still recorded; a thrown error's message still is.
+   */
+  outputValues?: boolean;
+  /**
+   * `false`: the `context` parameter is neither advertised nor captured for
+   * this tool. A `context` a client still sends (cached schema) is stripped
+   * before validation, so strict schemas keep accepting the call. Has no
+   * effect while intent capture is off globally.
+   */
+  intent?: boolean;
 }
 
 /** Resolved user-intent capture configuration. */
@@ -78,6 +109,20 @@ export interface WithYavioOptions {
    * disabled.
    */
   intent?: boolean | IntentOptions;
+  /**
+   * Per-tool overrides of the `capture` flags, keyed by tool name:
+   *
+   * ```ts
+   * tools: { "book-contract": { inputValues: false, outputValues: false, intent: false } }
+   * ```
+   *
+   * Prefer this over registering a sensitive tool on the unwrapped server —
+   * that loses the `tool_call` event and turns `yavio.conversion()` and
+   * friends into no-ops for the tool. Names are not validated (tools register
+   * after `withYavio()` runs); an override for a tool that never registers is
+   * simply unused. Also readable from `.yaviorc.json` as `"tools"`.
+   */
+  tools?: Record<string, ToolCaptureOverride>;
 }
 
 /** The tracking context available via the `yavio` singleton. */

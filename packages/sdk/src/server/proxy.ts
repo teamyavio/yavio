@@ -6,7 +6,7 @@ import {
 } from "../core/events.js";
 import { deriveSessionId, generateSessionId, generateTraceId } from "../core/ids.js";
 import { detectPlatform } from "../core/platform.js";
-import type { SessionState, YavioConfig } from "../core/types.js";
+import type { CaptureConfig, SessionState, YavioConfig } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
 import { type RequestStore, runInContext } from "./context.js";
 import { type IntentController, createIntentController, getCapturedIntent } from "./intent.js";
@@ -60,10 +60,29 @@ async function getWidgetToken(
 }
 
 /**
+ * The capture flags in force for one tool: the global `capture` config with
+ * the tool's own `tools` override on top. `intent` is not part of it — the
+ * intent controller resolves that flag itself.
+ */
+function resolveToolCapture(config: YavioConfig, toolName: string): CaptureConfig {
+  const override = config.tools[toolName];
+  if (!override) return config.capture;
+  return {
+    ...config.capture,
+    ...(override.inputValues !== undefined ? { inputValues: override.inputValues } : {}),
+    ...(override.outputValues !== undefined ? { outputValues: override.outputValues } : {}),
+  };
+}
+
+/**
  * Wrap a tool callback with Yavio instrumentation.
  *
  * Handles lazy platform detection, trace/session context,
  * latency measurement, and tool_call event emission.
+ *
+ * `capture` is the tool's resolved capture config (see resolveToolCapture);
+ * nothing in here reads `config.capture` directly, so a per-tool override is
+ * honoured on every path.
  */
 function wrapToolCallback(
   originalCb: (...cbArgs: unknown[]) => unknown,
@@ -71,6 +90,7 @@ function wrapToolCallback(
   resolveSession: (sessionKey?: string) => SessionState,
   server: McpServer,
   config: YavioConfig,
+  capture: CaptureConfig,
   transport: Transport,
   sdkVersion: string,
   tokenCache: { current: CachedWidgetToken | null },
@@ -178,7 +198,7 @@ function wrapToolCallback(
       // correct error rate.
       const resultError = toolResultError(result);
 
-      const captureInput = config.capture.inputValues && cbArgs[0] !== extra;
+      const captureInput = capture.inputValues && cbArgs[0] !== extra;
       const toolCallEvent = buildToolCallEvent(
         {
           traceId,
@@ -195,14 +215,13 @@ function wrapToolCallback(
           // The message is the result's own text — output. With output capture
           // off it stays out too: a handler echoing "no tariff for customer
           // number …" would otherwise leak the very input the flag hides.
-          errorMessage:
-            resultError && config.capture.outputValues ? resultError.message : undefined,
+          errorMessage: resultError && capture.outputValues ? resultError.message : undefined,
           inputKeys: captureInput ? extractInputKeys(cbArgs[0]) : undefined,
           inputTypes: captureInput ? extractInputTypes(cbArgs[0]) : undefined,
           inputValues: captureInput ? extractInputValues(cbArgs[0], extra) : undefined,
-          outputContent: config.capture.outputValues ? extractOutputContent(result) : undefined,
+          outputContent: capture.outputValues ? extractOutputContent(result) : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
-          clientMeta: captureInput ? extractClientMeta(extra, config.capture.geo) : undefined,
+          clientMeta: captureInput ? extractClientMeta(extra, capture.geo) : undefined,
         },
       );
       transport.send([toolCallEvent]);
@@ -238,7 +257,7 @@ function wrapToolCallback(
     } catch (error) {
       const latencyMs = Math.round(performance.now() - startTime);
 
-      const captureInputOnError = config.capture.inputValues && cbArgs[0] !== extra;
+      const captureInputOnError = capture.inputValues && cbArgs[0] !== extra;
       const toolCallEvent = buildToolCallEvent(
         {
           traceId,
@@ -252,12 +271,12 @@ function wrapToolCallback(
           latencyMs,
           status: "error",
           errorCategory: "unknown",
+          // Developer-written, so it is kept even with output capture off
+          // (unlike the text of an isError result, see the success path).
           errorMessage: error instanceof Error ? error.message : String(error),
           inputValues: captureInputOnError ? extractInputValues(cbArgs[0], extra) : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
-          clientMeta: captureInputOnError
-            ? extractClientMeta(extra, config.capture.geo)
-            : undefined,
+          clientMeta: captureInputOnError ? extractClientMeta(extra, capture.geo) : undefined,
         },
       );
       transport.send([toolCallEvent]);
@@ -303,9 +322,15 @@ export function createProxy<T extends McpServer>(
 
   // Intent capture operates at the protocol layer (wrapped tools/list and
   // tools/call handlers on the low-level server) — registered tool schemas
-  // are never modified.
+  // are never modified. Tools with a per-tool `intent: false` override are
+  // never advertised or captured (still stripped, see intent.ts).
+  const intentDisabledTools = new Set(
+    Object.entries(config.tools)
+      .filter(([, override]) => override.intent === false)
+      .map(([name]) => name),
+  );
   const intent: IntentController | null = config.intent.enabled
-    ? createIntentController(config.intent)
+    ? createIntentController(config.intent, intentDisabledTools)
     : null;
   intent?.install(server);
 
@@ -391,6 +416,7 @@ export function createProxy<T extends McpServer>(
             resolveSession,
             server,
             config,
+            resolveToolCapture(config, toolName),
             transport,
             sdkVersion,
             tokenCache,
@@ -461,6 +487,7 @@ export function createProxy<T extends McpServer>(
               resolveSession,
               server,
               config,
+              resolveToolCapture(config, toolName),
               transport,
               sdkVersion,
               tokenCache,

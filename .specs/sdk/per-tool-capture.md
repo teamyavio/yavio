@@ -1,6 +1,6 @@
 # Per-Tool Capture Overrides
 
-**Status:** Proposed (2026-08-26), reviewed 2026-08-26 (#74, corrections folded in) · **Packages:** sdk, shared (error catalog text), docs · **Version:** @yavio/sdk 0.4.0 (additive)
+**Status:** Implemented 2026-09-03 (#74; proposed 2026-08-26, reviewed 2026-08-26 with corrections folded in) · **Packages:** sdk, shared (error catalog text), docs · **Version:** @yavio/sdk 0.4.0 (additive)
 
 ## Problem
 

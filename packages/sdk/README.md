@@ -51,20 +51,42 @@ withYavio(server, {
   serverOnly: false,     // skip _meta.yavio injection + widget token mint (default: false)
   intent: false,         // capture the agent's stated intent per tool call (default: false)
   capture: {
-    inputValues: true,   // capture tool input values (default: true)
+    inputValues: true,   // capture tool input values + client metadata (default: true)
     outputValues: true,  // capture tool output values (default: true)
-    geo: true,           // capture geo data (default: true)
-    tokens: true,        // capture token counts (default: true)
-    retries: true,       // capture retry attempts (default: true)
+    geo: true,           // capture the country code (default: true)
+    tokens: true,        // reserved — no effect today
+    retries: true,       // reserved — no effect today (is_retry is never set)
+  },
+  tools: {               // per-tool overrides of the capture flags (default: none)
+    "book-contract": { inputValues: false, outputValues: false, intent: false },
   },
 });
 ```
 
-With `inputValues` on, each event also carries a small `_requestInfo` block: the
-calling request's `user-agent` and `accept-language` headers, plus its URL
-without the query string. Every other header is dropped — `Authorization`,
-`Cookie`, `X-Api-Key` and the like never reach analytics, and no
-`X-Forwarded-For` means an event stays free of end-user IPs.
+`capture` and `tools` can also be set in `.yaviorc.json`. What each flag controls is listed under [Captured data](#captured-data).
+
+### Per-tool overrides
+
+Some tools take data that must never reach analytics — a booking tool with an IBAN, a support tool with a message body. Turning `capture.inputValues` off globally would lose input capture for every tool, and registering the tool on the unwrapped server loses more than that: no `tool_call` event (latency, status, intent) **and** `yavio.conversion()` / `track()` / `step()` / `identify()` become no-ops for it, because they only have a session and trace to attach to inside a wrapped call.
+
+`tools` keeps such a tool on the instrumented server while the SDK guarantees what is not captured for it:
+
+```typescript
+withYavio(server, {
+  capture: { inputValues: true, outputValues: true },
+  tools: {
+    "book-contract": { inputValues: false, outputValues: false, intent: false },
+  },
+});
+```
+
+| Override | `false` means |
+|----------|---------------|
+| `inputValues` | No `input_keys`, `input_types`, `input_values` and no client metadata (`locale`, `country_code`, `end_user_agent`, `subject_id`) for this tool, on success and on error |
+| `outputValues` | No `output_content`, and no `error_message` taken from an `isError` result (that text is output). `status` and `error_category` are still recorded; a thrown error's message still is |
+| `intent` | The `context` parameter is neither advertised nor captured for this tool. A `context` a client still sends from a cached schema is stripped before validation, so strict schemas keep accepting the call. No effect while intent capture is off globally |
+
+A key that is omitted inherits the global value, so an override can also switch a flag *on* for one tool. Names are not validated — tools register after `withYavio()` runs — so an override for a tool that never registers is simply unused. The tool still emits `tool_discovery` (description and schema, no user data) and `tool_call` with latency and status, and tracking calls from inside its handler carry the full session context.
 
 ### Intent capture
 
@@ -111,7 +133,7 @@ Before 0.4.0 only a throw counted, so **error rates rise on upgrade** — a corr
 
 ## Tracking API
 
-Import `yavio` and call methods inside tool handlers — context is propagated automatically:
+Import `yavio` and call methods inside tool handlers — context is propagated automatically. A call from outside a wrapped tool call has no session or trace to attach to: the event is dropped and the SDK warns once per process (`YAVIO-1105`). If that warning shows up, the tool is registered on the unwrapped server — move it onto the wrapped one and use `tools` overrides to limit what is captured for it.
 
 ```typescript
 import { yavio } from "@yavio/sdk";

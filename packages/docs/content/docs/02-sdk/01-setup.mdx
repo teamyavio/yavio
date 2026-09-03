@@ -41,7 +41,10 @@ const instrumented = withYavio(server, {
 |--------|------|---------|-------------|
 | `apiKey` | `string` | — | Project API key. Falls back to `YAVIO_API_KEY` env var, then `.yaviorc.json`. |
 | `endpoint` | `string` | `https://ingest.yavio.ai/v1/events` | Ingestion API URL. Falls back to `YAVIO_ENDPOINT` env var. |
-| `capture.inputValues` | `boolean` | `true` | Capture tool input key names and types |
+| `capture.inputValues` | `boolean` | `true` | Capture tool input values, key names and types, plus client metadata |
+| `capture.outputValues` | `boolean` | `true` | Capture tool results |
+| `capture.geo` | `boolean` | `true` | Capture the end user's country code |
+| `tools` | `Record<string, ToolCaptureOverride>` | — | Per-tool overrides of the capture flags (`inputValues`, `outputValues`, `intent`) |
 
 See [Configuration](/docs/02-sdk/03-configuration) for the full precedence chain.
 

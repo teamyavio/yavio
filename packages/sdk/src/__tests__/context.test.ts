@@ -1,10 +1,12 @@
 import type { BaseEvent } from "@yavio/shared/events";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionState } from "../core/types.js";
 import {
   type RequestStore,
+  _resetContextWarnings,
   createYavioContext,
   getStore,
+  markSdkActive,
   runInContext,
 } from "../server/context.js";
 import type { Transport } from "../transport/types.js";
@@ -183,5 +185,50 @@ describe("AsyncLocalStorage context", () => {
         ctx.conversion("sale", { value: 10, currency: "USD" });
       });
     });
+  });
+});
+
+describe("tracking calls outside a wrapped tool call", () => {
+  beforeEach(() => _resetContextWarnings());
+  afterEach(() => _resetContextWarnings());
+
+  it("stays silent while the SDK is not active (no-op mode)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const ctx = createYavioContext();
+    ctx.track("orphan");
+    ctx.conversion("sale", { value: 10, currency: "USD" });
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it("drops the event and warns once per process with YAVIO-1105 once active", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    markSdkActive();
+    const ctx = createYavioContext();
+    ctx.conversion("booking_received", { value: 99, currency: "EUR" });
+    ctx.track("orphan");
+    ctx.step("s");
+    ctx.identify("u");
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const message = String(warnSpy.mock.calls[0]?.[0]);
+    expect(message).toContain("[YAVIO-1105]");
+    expect(message).toContain("yavio.conversion()");
+    expect(message).toContain("event dropped");
+    expect(message).toContain("withYavio()");
+    warnSpy.mockRestore();
+  });
+
+  it("does not warn when a store is active", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    markSdkActive();
+    const transport = createMockTransport();
+    const ctx = createYavioContext();
+    runInContext(createStore({ transport }), () => {
+      ctx.conversion("booking_received", { value: 99, currency: "EUR" });
+    });
+    expect(transport.sent).toHaveLength(1);
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 });
