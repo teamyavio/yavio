@@ -75,6 +75,8 @@ Not configurable. A flag to keep the old behaviour would only preserve a wrong n
 
 `McpServer` runs `validateToolInput()` **before** `executeToolHandler()` and turns every failure — argument validation, disabled tool, unknown tool — into an `isError` result via `createToolError()` (`mcp.js` ~125–142 in SDK 1.30). The proxy wraps the *callback*, which never runs in those cases, so **no `tool_call` event exists at all** for them, before or after this change. PostHog counts them because it wraps the low-level `tools/call` handler; Yavio has such a wrapper (`intent.ts` `wrapCallHandler`) but installs it only when intent capture is on. Follow-up: **#77** — move status detection to the protocol layer so pre-handler failures are counted.
 
+**Closed 2026-09-03 by [protocol-layer-status.md](./protocol-layer-status.md) (#77):** pre-handler failures are `validation`, a post-handler output-validation failure is `server`, one event per call.
+
 ## Compatibility note on pins
 
 Every consumer pins `^0.3.0` / `^0.2.0`; on 0.x the 0.4.0 error-rate change is therefore opt-in per app — no dashboard jumps without an explicit bump. Say so in the release notes.
