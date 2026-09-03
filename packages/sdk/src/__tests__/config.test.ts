@@ -175,3 +175,86 @@ describe("resolveConfig", () => {
     });
   });
 });
+
+describe("per-tool capture overrides (tools)", () => {
+  const originalEnv = process.env;
+  let tempDir: string;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    process.env.YAVIO_API_KEY = undefined;
+    tempDir = mkdtempSync(join(tmpdir(), "yavio-tools-test-"));
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  function withCwd<T>(dir: string, fn: () => T): T {
+    const originalCwd = process.cwd;
+    process.cwd = () => dir;
+    try {
+      return fn();
+    } finally {
+      process.cwd = originalCwd;
+    }
+  }
+
+  it("defaults to no overrides", () => {
+    expect(resolveConfig({ apiKey: "test" })?.tools).toEqual({});
+  });
+
+  it("passes code-option overrides through, leaving the global capture untouched", () => {
+    const config = resolveConfig({
+      apiKey: "test",
+      tools: { book: { inputValues: false, outputValues: false, intent: false } },
+    });
+    expect(config?.tools).toEqual({
+      book: { inputValues: false, outputValues: false, intent: false },
+    });
+    expect(config?.capture.inputValues).toBe(true);
+  });
+
+  it("reads tools from .yaviorc.json", () => {
+    writeFileSync(
+      join(tempDir, ".yaviorc.json"),
+      JSON.stringify({ apiKey: "file_key", tools: { book: { inputValues: false } } }),
+    );
+    const config = withCwd(tempDir, () => resolveConfig());
+    expect(config?.tools).toEqual({ book: { inputValues: false } });
+  });
+
+  it("merges file and code overrides per tool, field by field, code winning", () => {
+    writeFileSync(
+      join(tempDir, ".yaviorc.json"),
+      JSON.stringify({
+        apiKey: "file_key",
+        tools: { book: { inputValues: false, outputValues: false }, other: { intent: false } },
+      }),
+    );
+    const config = withCwd(tempDir, () =>
+      resolveConfig({ tools: { book: { outputValues: true, intent: false } } }),
+    );
+    expect(config?.tools).toEqual({
+      book: { inputValues: false, outputValues: true, intent: false },
+      other: { intent: false },
+    });
+  });
+
+  it("ignores unknown keys and non-boolean values from the config file", () => {
+    writeFileSync(
+      join(tempDir, ".yaviorc.json"),
+      JSON.stringify({
+        apiKey: "file_key",
+        tools: {
+          book: { inputValues: "false", geo: false, intent: false },
+          bogus: "not an object",
+          empty: { unknownKey: true },
+        },
+      }),
+    );
+    const config = withCwd(tempDir, () => resolveConfig());
+    expect(config?.tools).toEqual({ book: { intent: false } });
+  });
+});

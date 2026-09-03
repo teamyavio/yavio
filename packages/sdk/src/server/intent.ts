@@ -20,6 +20,13 @@ import type { IntentConfig } from "../core/types.js";
  * the host refuse every such call once it refreshes cached schemas. Capture
  * still applies when the value is present. See metaIndicatesWidget.
  *
+ * Per-tool `intent: false` (the `tools` override) is a THIRD state next to
+ * eligible and opted-out: `context` is never advertised for the tool and never
+ * captured, but a value a client still sends — hosts cache connector schemas,
+ * so a `context` keeps arriving for a while after the override lands — is
+ * stripped like on any eligible tool. Leaving it in would make a strict schema
+ * reject the whole call.
+ *
  * Registered tool schemas are never modified: mixing our Zod instance into a
  * customer shape can throw ("Mixed Zod versions detected") and strict schemas
  * would reject the extra key. Everything happens at the protocol layer.
@@ -201,7 +208,14 @@ export interface IntentController {
 const installedServers = new WeakSet<object>();
 const wrappedHandlers = new WeakSet<RequestHandler>();
 
-export function createIntentController(config: IntentConfig): IntentController {
+/**
+ * @param disabledTools tool names with a per-tool `intent: false` override:
+ * never advertised, never captured, still stripped.
+ */
+export function createIntentController(
+  config: IntentConfig,
+  disabledTools: ReadonlySet<string> = new Set(),
+): IntentController {
   // toolName -> tool defines its own `context` param. Absent = unknown, and
   // unknown tools are NOT captured/stripped: silently missing an intent is
   // harmless, deleting a genuine customer argument is not.
@@ -263,10 +277,14 @@ export function createIntentController(config: IntentConfig): IntentController {
       const toolName = req?.params?.name;
 
       if (isEligible(toolName)) {
+        // Per-tool intent: false — strip, but never read what was sent.
+        const disabled = disabledTools.has(toolName);
         const args = req.params?.arguments;
         if (args && typeof args === "object") {
-          const intent = normalizeIntent(args.context);
-          if (intent) captured = { intent, source: "context_parameter" };
+          if (!disabled) {
+            const intent = normalizeIntent(args.context);
+            if (intent) captured = { intent, source: "context_parameter" };
+          }
           if ("context" in args) {
             const { context: _context, ...rest } = args;
             downstream = { ...req, params: { ...req.params, arguments: rest } };
@@ -277,7 +295,7 @@ export function createIntentController(config: IntentConfig): IntentController {
         // refresh, a filter-bar click), and inferring an intent for each would
         // record boilerplate "inferred" entries at machine frequency,
         // drowning the real intents the fallback exists to approximate.
-        if (!captured && config.fallback && !isWidgetTool(toolName)) {
+        if (!captured && !disabled && config.fallback && !isWidgetTool(toolName)) {
           try {
             const inferred = normalizeIntent(await config.fallback(toolName, args));
             if (inferred) captured = { intent: inferred, source: "inferred" };
@@ -375,6 +393,11 @@ export function createIntentController(config: IntentConfig): IntentController {
       }
     }
     if (name) hasOwnContext.set(name, false);
+
+    // Classified as eligible (so a sent `context` is still stripped at call
+    // time), but never advertised: the per-tool `intent: false` third state.
+    // Deliberately after the schema checks above so their vetoes still apply.
+    if (name && disabledTools.has(name)) return tool;
 
     const copy: Record<string, unknown> = schema
       ? (JSON.parse(JSON.stringify(schema)) as Record<string, unknown>)

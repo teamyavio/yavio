@@ -1,6 +1,12 @@
 import { readFileSync } from "node:fs";
 import { dirname, join, parse } from "node:path";
-import type { CaptureConfig, IntentConfig, WithYavioOptions, YavioConfig } from "./types.js";
+import type {
+  CaptureConfig,
+  IntentConfig,
+  ToolCaptureOverride,
+  WithYavioOptions,
+  YavioConfig,
+} from "./types.js";
 
 // This hostname MUST resolve. The SDK swallows transport errors by design, so a
 // dead default does not surface as an error to the integrator — it silently
@@ -58,6 +64,34 @@ interface ConfigFile {
   capture?: Partial<CaptureConfig>;
   serverOnly?: boolean;
   intent?: boolean;
+  tools?: Record<string, ToolCaptureOverride>;
+}
+
+const TOOL_OVERRIDE_KEYS = ["inputValues", "outputValues", "intent"] as const;
+
+/**
+ * Merge per-tool overrides from the config file and the code options, field
+ * by field per tool (code wins), the same way `capture` merges. Only the known
+ * keys with boolean values survive: the file is hand-written JSON, and an
+ * unknown key or a `"false"` string must not become a silent override.
+ */
+function resolveTools(
+  ...sources: Array<Record<string, ToolCaptureOverride> | undefined>
+): Record<string, ToolCaptureOverride> {
+  const tools: Record<string, ToolCaptureOverride> = {};
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    for (const [name, override] of Object.entries(source)) {
+      if (!override || typeof override !== "object") continue;
+      const merged: ToolCaptureOverride = { ...tools[name] };
+      for (const key of TOOL_OVERRIDE_KEYS) {
+        const value = (override as Record<string, unknown>)[key];
+        if (typeof value === "boolean") merged[key] = value;
+      }
+      if (Object.keys(merged).length > 0) tools[name] = merged;
+    }
+  }
+  return tools;
 }
 
 /**
@@ -128,7 +162,10 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
     options?.intent ?? parseBoolEnv(process.env.YAVIO_INTENT) ?? fileConfig?.intent ?? false,
   );
 
-  return { apiKey, endpoint, capture, serverOnly, intent };
+  // No env-var form: the shape is nested. File first, code options win.
+  const tools = resolveTools(fileConfig?.tools, options?.tools);
+
+  return { apiKey, endpoint, capture, serverOnly, intent, tools };
 }
 
 function resolveIntent(option: NonNullable<WithYavioOptions["intent"]>): IntentConfig {

@@ -4,7 +4,7 @@ import { resolveConfig } from "../core/config.js";
 import type { WithYavioOptions, YavioContext } from "../core/types.js";
 import { SDK_VERSION } from "../core/version.js";
 import { HttpTransport } from "../transport/http.js";
-import { createYavioContext } from "./context.js";
+import { createYavioContext, markSdkActive } from "./context.js";
 import { createProxy } from "./proxy.js";
 
 // Sent on every event batch. Defined in core/version.ts so the server and React
@@ -29,6 +29,10 @@ export function withYavio<T extends McpServer>(server: T, options?: WithYavioOpt
     );
     return server;
   }
+
+  // From here on a `yavio.*` call outside a wrapped tool call is a dropped
+  // event worth a warning (it is expected, and silent, in no-op mode).
+  markSdkActive();
 
   if (config.serverOnly) {
     console.info(
@@ -70,13 +74,17 @@ export function withYavio<T extends McpServer>(server: T, options?: WithYavioOpt
  * any tool handler wrapped by `withYavio()`. Uses `AsyncLocalStorage` to
  * associate events with the current trace and session automatically.
  *
- * Calls outside a tool handler context are silently ignored (no-ops).
+ * A call outside a wrapped tool call has no trace or session to attach to and
+ * is dropped, with a single `YAVIO-1105` warning per process (none in no-op
+ * mode). To keep a tool with sensitive input on the wrapped server, use the
+ * `tools` overrides instead of registering it on the unwrapped one.
  */
 export const yavio: YavioContext = createYavioContext();
 
 export type {
   CaptureConfig,
   IntentOptions,
+  ToolCaptureOverride,
   WithYavioOptions,
   YavioContext,
 } from "../core/types.js";

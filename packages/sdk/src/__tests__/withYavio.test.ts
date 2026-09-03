@@ -69,12 +69,17 @@ describe("withYavio", () => {
 });
 
 describe("yavio singleton", () => {
-  it("is a no-op when called outside context", () => {
-    // Should not throw
+  it("drops calls outside context with a single YAVIO-1105 warning", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // withYavio() resolved a config earlier in this file, so the SDK is active
+    // and the drop is worth a warning — one, however many calls follow.
     yavio.track("orphan_event");
     yavio.identify("user-1");
     yavio.step("step-1");
     yavio.conversion("sale", { value: 10, currency: "USD" });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("YAVIO-1105"));
+    warnSpy.mockRestore();
   });
 
   it("has all expected methods", () => {
