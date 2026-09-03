@@ -14,6 +14,7 @@ import { DateRangePicker } from "@/components/analytics/date-range-picker";
 import { DonutWithLegend } from "@/components/analytics/donut-with-legend";
 import { EmptyState } from "@/components/analytics/empty-state";
 import { ErrorAlert } from "@/components/analytics/error-alert";
+import { errorCategoryTitle } from "@/components/analytics/error-category-meta";
 import { KPICard } from "@/components/analytics/kpi-card";
 import { PageHeader } from "@/components/analytics/page-header";
 import { PlatformFilter } from "@/components/analytics/platform-filter";
@@ -136,7 +137,12 @@ const invocationColumns: Column<ToolInvocation>[] = [
   {
     key: "errorCategory",
     label: "Error",
-    render: (row: ToolInvocation) => row.errorCategory ?? "-",
+    render: (row: ToolInvocation) =>
+      row.errorCategory ? (
+        <span title={errorCategoryTitle(row.errorCategory)}>{row.errorCategory}</span>
+      ) : (
+        "-"
+      ),
   },
   {
     key: "traceId",

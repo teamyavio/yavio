@@ -8,6 +8,7 @@ import {
 import { describe, expect, it } from "vitest";
 import {
   type EventContext,
+  MAX_ERROR_MESSAGE_LENGTH,
   buildConversionEvent,
   buildIdentifyEvent,
   buildStepEvent,
@@ -136,6 +137,63 @@ describe("Event factories", () => {
       expect(event.status).toBe("error");
       expect(event.error_category).toBe("validation");
       expect(event.error_message).toBe("Invalid room ID");
+    });
+
+    it("emits tool_error as a category the shared schema accepts", () => {
+      const event = buildToolCallEvent(ctx, {
+        toolName: "book_room",
+        status: "error",
+        errorCategory: "tool_error",
+        errorMessage: "This offer reference has expired",
+      });
+      expect(event.error_category).toBe("tool_error");
+      expect(ToolCallEvent.safeParse(event).success).toBe(true);
+    });
+
+    // Regression: error_message used to be the one free-text field that bypassed
+    // stripPii, so a thrown `Error("customer max@example.com not found")` shipped
+    // verbatim.
+    it("redacts PII in error_message", () => {
+      const event = buildToolCallEvent(ctx, {
+        toolName: "lookup",
+        status: "error",
+        errorCategory: "unknown",
+        errorMessage: "customer max@example.com not found",
+      });
+      expect(event.error_message).toBe("customer [EMAIL_REDACTED] not found");
+    });
+
+    it("clamps error_message to MAX_ERROR_MESSAGE_LENGTH after redaction", () => {
+      const event = buildToolCallEvent(ctx, {
+        toolName: "lookup",
+        status: "error",
+        errorCategory: "tool_error",
+        errorMessage: "x".repeat(MAX_ERROR_MESSAGE_LENGTH + 200),
+      });
+      expect(event.error_message).toHaveLength(MAX_ERROR_MESSAGE_LENGTH);
+    });
+
+    it("stays within the cap even when redaction expands the text", () => {
+      // 25 short emails (6 chars each) right at the cap; each becomes a 16-char
+      // token. Clamping before redaction would return 750 characters here.
+      const emails = Array.from({ length: 25 }, () => "a@b.co").join(" ");
+      const padding = "p".repeat(MAX_ERROR_MESSAGE_LENGTH - emails.length);
+      const event = buildToolCallEvent(ctx, {
+        toolName: "lookup",
+        status: "error",
+        errorMessage: padding + emails,
+      });
+      expect(event.error_message?.length).toBeLessThanOrEqual(MAX_ERROR_MESSAGE_LENGTH);
+      expect(event.error_message).not.toContain("a@b.co");
+    });
+
+    it("drops an empty or whitespace-only error_message", () => {
+      const event = buildToolCallEvent(ctx, {
+        toolName: "lookup",
+        status: "error",
+        errorMessage: "   ",
+      });
+      expect(event.error_message).toBeUndefined();
     });
 
     it("strips PII from input_keys", () => {

@@ -171,6 +171,13 @@ function wrapToolCallback(
       const result = await runInContext(store, () => originalCb(...cbArgs));
       const latencyMs = Math.round(performance.now() - startTime);
 
+      // A result with `isError: true` is an error — that flag is how MCP
+      // reports tool failures in-band (the model sees them; a throw would
+      // reach it in the same shape). Derived from the result regardless of
+      // output capture, so integrators with outputValues off still get a
+      // correct error rate.
+      const resultError = toolResultError(result);
+
       const captureInput = config.capture.inputValues && cbArgs[0] !== extra;
       const toolCallEvent = buildToolCallEvent(
         {
@@ -183,7 +190,13 @@ function wrapToolCallback(
         {
           toolName,
           latencyMs,
-          status: "success",
+          status: resultError ? "error" : "success",
+          errorCategory: resultError ? "tool_error" : undefined,
+          // The message is the result's own text — output. With output capture
+          // off it stays out too: a handler echoing "no tariff for customer
+          // number …" would otherwise leak the very input the flag hides.
+          errorMessage:
+            resultError && config.capture.outputValues ? resultError.message : undefined,
           inputKeys: captureInput ? extractInputKeys(cbArgs[0]) : undefined,
           inputTypes: captureInput ? extractInputTypes(cbArgs[0]) : undefined,
           inputValues: captureInput ? extractInputValues(cbArgs[0], extra) : undefined,
@@ -685,6 +698,31 @@ function sanitizeRequestInfo(requestInfo: unknown): Record<string, unknown> | un
   }
 
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Is this CallToolResult a tool-reported failure? Only the literal boolean
+ * `true` counts — MCP types `isError` as boolean, and PostHog's
+ * `isToolResultError()` applies the same rule. `"true"`, `1` or a missing flag
+ * are not errors.
+ *
+ * Returns the first text content item as the message (the text is what the
+ * handler told the model went wrong), or no message when there is none.
+ * Redaction and the length clamp happen in buildToolCallEvent.
+ */
+function toolResultError(result: unknown): { message?: string } | null {
+  if (!result || typeof result !== "object") return null;
+  const res = result as Record<string, unknown>;
+  if (res.isError !== true) return null;
+  if (!Array.isArray(res.content)) return {};
+  for (const item of res.content) {
+    if (!item || typeof item !== "object") continue;
+    const entry = item as Record<string, unknown>;
+    if (entry.type === "text" && typeof entry.text === "string") {
+      return { message: entry.text };
+    }
+  }
+  return {};
 }
 
 /**

@@ -1,6 +1,6 @@
 # Tool-Result Errors Count as Errors
 
-**Status:** Proposed (2026-08-26), reviewed 2026-08-26 (#75, corrections folded in) · **Packages:** sdk, shared, ingest, docs · **Version:** @yavio/sdk 0.4.0 (behavioural change in metrics)
+**Status:** Implemented 2026-09-03 (#75; proposed 2026-08-26, reviewed 2026-08-26 with corrections folded in) · **Packages:** sdk, shared, ingest, docs · **Version:** @yavio/sdk 0.4.0 (behavioural change in metrics)
 
 ## Problem
 

@@ -89,6 +89,26 @@ In this mode the SDK:
 
 The React widget (`useYavio()`) auto-configures from `_meta.yavio`, so it will not connect on its own in server-only mode — pass config to the hook explicitly if you still want client-side tracking.
 
+## Captured data
+
+Every call to a tool registered through the wrapped server produces one `tool_call` event with the tool name, latency, status and — subject to the `capture` flags — the inputs and the output.
+
+### Status and errors
+
+A call is an error when the handler **throws** or when it **returns a result with `isError: true`** — the flag MCP uses to report tool failures to the model. Both count toward the dashboard's error rate; the `error_category` tells them apart:
+
+| `status` | `error_category` | Meaning |
+|----------|------------------|---------|
+| `success` | — | The handler returned a result without `isError: true` |
+| `error` | `tool_error` | The handler returned a result with `isError: true` (an expired reference, an invalid postal code, a missing field) |
+| `error` | `unknown` | The handler threw |
+
+Only the literal boolean `true` counts as `isError`. The client sees the same shape either way (the MCP SDK converts a throw into an `isError` result), so the distinction is server-side only.
+
+`error_message` is the exception's message, or for an `isError` result the first `text` content item. Both are PII-stripped and clamped to 500 characters. The result text is output, so it is stored only while `outputValues` is on; `status` and `error_category` are derived from the result regardless of output capture.
+
+Before 0.4.0 only a throw counted, so **error rates rise on upgrade** — a correction of an under-count, not a regression.
+
 ## Tracking API
 
 Import `yavio` and call methods inside tool handlers — context is propagated automatically:

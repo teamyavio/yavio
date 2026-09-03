@@ -25,7 +25,9 @@ Classification:
 User: user_id (Nullable), subject_id (Nullable — stable pseudonymous per-user id
 from the platform), locale (Nullable, BCP-47 e.g. 'de-DE'), end_user_agent (Nullable)
 Tool-call outcome: latency_ms (Nullable Float64), status ('success'/'error'),
-error_category, error_message, is_retry (UInt8)
+error_category ('tool_error' = the handler returned isError: true, 'unknown' = the
+handler threw; also 'auth'/'validation'/'timeout'/'rate_limit'/'server'),
+error_message (PII-stripped, <= 500 chars), is_retry (UInt8, always 0 today)
 Captured input/output (PII-stripped JSON strings): input_values, output_content,
 input_keys, input_types, intent_signals (JSON with 'intent' and 'source' keys)
 Tokens: tokens_in, tokens_out. Conversions: conversion_value, conversion_currency.
