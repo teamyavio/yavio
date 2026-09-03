@@ -10,4 +10,4 @@
  *
  * Keep this in step with packages/sdk/package.json — a test asserts they match.
  */
-export const SDK_VERSION = "0.3.2";
+export const SDK_VERSION = "0.4.0";
