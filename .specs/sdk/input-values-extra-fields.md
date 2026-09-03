@@ -26,15 +26,22 @@ Live counts, tool_call events, 2026-08-26: `_requestId` on 497/497 (Commerce for
 3. **Keep** `_taskId` (never seen, harmless, task flows) and `_requestInfo`. Keep the flat `_` prefix — nothing in dashboard or ingest reads these keys, and a nested `_extra` object would be a change without a consumer.
 4. **Document all of them** in one place (README "Captured data" + `.specs/metrics/events.md` `input_values` row), including the header allow-list as implemented.
 
-## Proposed, pending decision (reviewer: yes; author: yes)
+## Decided: gate `openai/userLocation` behind `capture.geo`
 
-`capture.geo` currently governs only the first-class `country_code`. A customer who sets `geo: false` still ships `_meta["openai/userLocation"]` — city, region, timezone **and coordinates** — inside `input_values`. `extractClientMeta()`'s own doc comment says "city and coordinates never leave the process", which the verbatim clone contradicts on every ChatGPT web call, and the README sells `geo` as "capture geo data". With `geo: false`, delete the **whole** `openai/userLocation` object from the `_meta` clone. Five lines in `extractInputValues()`, one test. Default behaviour unchanged. Marcel to confirm.
+`capture.geo` currently governs only the first-class `country_code`. A customer who sets `geo: false` still ships `_meta["openai/userLocation"]` — city, region, timezone **and coordinates** — inside `input_values`. `extractClientMeta()`'s own doc comment says "city and coordinates never leave the process", which the verbatim clone contradicts on every ChatGPT web call, and the README sells `geo` as "capture geo data". With `geo: false`, delete the **whole** `openai/userLocation` object from the `_meta` clone. Five lines in `extractInputValues()`, one test. Default behaviour unchanged (`geo` defaults to `true`).
+
+**Decided yes — Marcel, 2026-09-03.** Breakage analysis done before deciding:
+
+- `extractInputValues()` deep-clones `_meta` (`clone._meta = JSON.parse(JSON.stringify(ex._meta))`, `proxy.ts:574`), so deleting the key from the clone cannot affect the `_meta` the tool handler receives. This was the only real risk.
+- Nothing in dashboard, ingest or db reads `_meta["openai/userLocation"]` out of `input_values`; the only functional reader of `userLocation` anywhere is `extractClientMeta()` (`proxy.ts:639`), which is **already** gated on `geoEnabled` and only derives `country_code`.
+- Affects only integrators who explicitly set `geo: false`, and only by removing data they asked not to collect. Rows already in ClickHouse are untouched.
+- Existing coverage to extend: `proxy.test.ts` "omits the country when capture.geo is off, keeps the rest".
 
 ## Changes
 
 | Package | Change |
 |---------|--------|
-| sdk | `extractInputValues()`: remove `_requestId`, `_taskRequestedTtl`, `_sessionId`; geo-gated `userLocation` removal (pending confirmation); README section listing every `_` field, the disclosure note and the intentional duplication. |
+| sdk | `extractInputValues()`: remove `_requestId`, `_taskRequestedTtl`, `_sessionId`; geo-gated `userLocation` removal (decided, in scope); README section listing every `_` field, the disclosure note and the intentional duplication. |
 | specs / docs | `.specs/metrics/events.md`: `input_values` row → "tool arguments plus `_meta`, `_taskId`, `_requestInfo` (see server-sdk.md)"; docs site captured-data page. |
 
 ## Tests
