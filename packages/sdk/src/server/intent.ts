@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { stripPii } from "../core/pii.js";
 import type { IntentConfig } from "../core/types.js";
+import type { HandlerWrapper, RequestHandler } from "./protocol.js";
 
 /**
  * User intent capture.
@@ -156,35 +157,11 @@ function shapeHasContext(schema: unknown): boolean {
   }
 }
 
-/** Extract the literal `method` value from a Zod request schema (v3 or v4). */
-function requestMethod(schema: unknown): string | undefined {
-  try {
-    const shape = (schema as { shape?: Record<string, unknown> } | undefined)?.shape;
-    const field = shape?.method;
-    if (!field || typeof field !== "object") return undefined;
-    const direct = (field as { value?: unknown }).value;
-    if (typeof direct === "string") return direct;
-    const def = (field as { _def?: { value?: unknown; values?: unknown[] } })._def;
-    if (typeof def?.value === "string") return def.value;
-    if (Array.isArray(def?.values) && typeof def.values[0] === "string") return def.values[0];
-    return undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-type RequestHandler = (request: unknown, extra: unknown) => Promise<unknown>;
-
 interface RequestLike {
   params?: {
     name?: unknown;
     arguments?: Record<string, unknown>;
   };
-}
-
-interface LowLevelServerLike {
-  setRequestHandler?: (schema: unknown, handler: RequestHandler) => unknown;
-  _requestHandlers?: Map<string, RequestHandler>;
 }
 
 interface RegisteredToolsHost {
@@ -201,12 +178,19 @@ export interface IntentController {
    * `_meta` before it reaches the registry or tools/list.
    */
   noteToolRegistration(toolName: string, schemas: unknown[], meta?: unknown): void;
-  /** Patch the underlying low-level server. Idempotent per server. */
-  install(server: McpServer): void;
+  /**
+   * Bind the controller to the McpServer it serves: consult its live registry
+   * at call time and seed the classification for tools registered before
+   * withYavio(). Does not patch anything — the proxy installs `wrapCall` and
+   * `wrapList` through the protocol layer (protocol.ts), which fixes their
+   * order relative to the status wrapper.
+   */
+  attach(server: McpServer): void;
+  /** tools/call wrapper: capture and strip `context`. */
+  wrapCall: HandlerWrapper;
+  /** tools/list wrapper: advertise `context`. */
+  wrapList: HandlerWrapper;
 }
-
-const installedServers = new WeakSet<object>();
-const wrappedHandlers = new WeakSet<RequestHandler>();
 
 /**
  * @param disabledTools tool names with a per-tool `intent: false` override:
@@ -269,8 +253,7 @@ export function createIntentController(
   };
 
   function wrapCallHandler(handler: RequestHandler): RequestHandler {
-    if (wrappedHandlers.has(handler)) return handler;
-    const wrapped: RequestHandler = async (request, extra) => {
+    return async (request, extra) => {
       let captured: CapturedIntent | null = null;
       let downstream = request;
       const req = request as RequestLike;
@@ -307,8 +290,6 @@ export function createIntentController(
 
       return intentStore.run({ captured }, () => handler(downstream, extra));
     };
-    wrappedHandlers.add(wrapped);
-    return wrapped;
   }
 
   interface ToolEntry {
@@ -446,8 +427,7 @@ export function createIntentController(
   }
 
   function wrapListHandler(handler: RequestHandler): RequestHandler {
-    if (wrappedHandlers.has(handler)) return handler;
-    const wrapped: RequestHandler = async (request, extra) => {
+    return async (request, extra) => {
       const result = (await handler(request, extra)) as { tools?: ToolEntry[] } | undefined;
       if (result && Array.isArray(result.tools)) {
         return {
@@ -464,8 +444,6 @@ export function createIntentController(
       }
       return result;
     };
-    wrappedHandlers.add(wrapped);
-    return wrapped;
   }
 
   return {
@@ -481,54 +459,26 @@ export function createIntentController(
       if (meta !== undefined) widgetInvoked.set(toolName, metaIndicatesWidget(meta));
     },
 
-    install(server) {
+    attach(server) {
+      toolsHost = server as unknown as RegisteredToolsHost;
+      // Seed classification for tools registered before withYavio(), so a
+      // fresh instance strips correctly even when tools/call arrives before
+      // it ever served a tools/list (stateless per-request deployments).
       try {
-        const low = (server as unknown as { server?: LowLevelServerLike }).server;
-        if (!low || typeof low.setRequestHandler !== "function" || installedServers.has(low)) {
-          return;
-        }
-        installedServers.add(low);
-        toolsHost = server as unknown as RegisteredToolsHost;
-
-        // Seed classification for tools registered before withYavio(), so a
-        // fresh instance strips correctly even when tools/call arrives before
-        // it ever served a tools/list (stateless per-request deployments).
-        try {
-          for (const [name, tool] of Object.entries(toolsHost._registeredTools ?? {})) {
-            hasOwnContext.set(name, shapeHasContext(tool?.inputSchema));
-            // Same guard as noteToolRegistration: only a present `_meta` may
-            // write — old MCP SDKs never store one, and undefined must not
-            // erase a registration-time record.
-            const meta = (tool as { _meta?: unknown } | undefined)?._meta;
-            if (meta !== undefined) widgetInvoked.set(name, metaIndicatesWidget(meta));
-          }
-        } catch {
-          // Registry unreadable — classification falls back to tools/list time
-        }
-
-        // McpServer registers its tools/list + tools/call handlers lazily on
-        // the first tool registration — usually AFTER withYavio() runs, so the
-        // patch below sees them. Handlers registered before us are wrapped
-        // in place via the handler map.
-        const originalSet = low.setRequestHandler.bind(low);
-        low.setRequestHandler = (schema: unknown, handler: RequestHandler) => {
-          const method = requestMethod(schema);
-          if (method === "tools/call") return originalSet(schema, wrapCallHandler(handler));
-          if (method === "tools/list") return originalSet(schema, wrapListHandler(handler));
-          return originalSet(schema, handler);
-        };
-
-        const handlers = low._requestHandlers;
-        if (handlers instanceof Map) {
-          const existingCall = handlers.get("tools/call");
-          if (existingCall) handlers.set("tools/call", wrapCallHandler(existingCall));
-          const existingList = handlers.get("tools/list");
-          if (existingList) handlers.set("tools/list", wrapListHandler(existingList));
+        for (const [name, tool] of Object.entries(toolsHost._registeredTools ?? {})) {
+          hasOwnContext.set(name, shapeHasContext(tool?.inputSchema));
+          // Same guard as noteToolRegistration: only a present `_meta` may
+          // write — old MCP SDKs never store one, and undefined must not
+          // erase a registration-time record.
+          const meta = (tool as { _meta?: unknown } | undefined)?._meta;
+          if (meta !== undefined) widgetInvoked.set(name, metaIndicatesWidget(meta));
         }
       } catch {
-        // Private API drift on an unexpected MCP SDK version: intent capture
-        // silently stays off rather than breaking the customer's server.
+        // Registry unreadable — classification falls back to tools/list time
       }
     },
+
+    wrapCall: wrapCallHandler,
+    wrapList: wrapListHandler,
   };
 }

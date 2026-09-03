@@ -59,7 +59,7 @@ Every `server.tool()` and `server.registerTool()` invocation is tracked with:
 - **Event type:** `tool_call`
 - **Tool name** and input key metadata
 - **Latency** (milliseconds, via `performance.now()`)
-- **Status:** `success` or `error` — an error when the handler throws (`error_category: unknown`) or returns a result with `isError: true` (`error_category: tool_error`)
+- **Status:** `success` or `error` — an error when the handler throws (`error_category: unknown`), returns a result with `isError: true` (`tool_error`), when the call fails before the handler runs because the tool is unknown, disabled or the arguments do not match its schema (`validation`, no latency), or when the result fails the tool's own `outputSchema` (`server`)
 - **Error message** — the exception message or the `isError` result's text, PII-stripped and clamped to 500 characters
 - **Platform** (auto-detected from the connecting client)
 - **Inputs** (with `capture.inputValues`, the default) — the arguments, plus the request `_meta` verbatim (`_meta`), the MCP task id (`_taskId`) and five allow-listed request headers with the URL sans query (`_requestInfo`); and the client metadata as first-class fields: `locale`, `end_user_agent`, `subject_id`, `country_code`

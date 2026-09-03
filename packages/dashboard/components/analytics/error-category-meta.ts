@@ -10,11 +10,12 @@
 const ERROR_CATEGORY_TITLES: Record<string, string> = {
   tool_error: "The handler returned a result with isError: true (a tool-reported failure).",
   unknown: "The handler threw an exception.",
-  validation: "The request failed validation before or inside the handler.",
+  validation:
+    "The call failed before the handler ran: unknown or disabled tool, or arguments the tool's schema rejected. No latency is recorded.",
+  server: "The handler returned, but its result failed the tool's own output schema.",
   auth: "Authentication or authorization failed.",
   timeout: "The call timed out.",
   rate_limit: "The call was rate-limited.",
-  server: "A server-side failure.",
 };
 
 /** Tooltip text for a category, or undefined for a value the SDK does not emit. */
