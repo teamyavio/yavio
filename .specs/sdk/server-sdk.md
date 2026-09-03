@@ -21,10 +21,17 @@ const instrumented = withYavio(server, {
 
   // Optional: disable specific auto-capture features
   capture: {
-    inputValues: true,  // full input values (PII-stripped server-side)
-    geo: true,         // geographic distribution
-    tokens: true,      // token estimation
-    retries: true,     // retry detection
+    inputValues: true,  // full input values + client metadata (PII-stripped)
+    outputValues: true, // full tool results
+    geo: true,         // country code
+    tokens: true,      // reserved — no effect today
+    retries: true,     // reserved — no effect today (is_retry is never set)
+  },
+
+  // Optional: per-tool overrides of the capture flags, merged over `capture`.
+  // See per-tool-capture.md. Also readable from .yaviorc.json as "tools".
+  tools: {
+    "book-contract": { inputValues: false, outputValues: false, intent: false },
   },
 });
 ```
@@ -115,9 +122,11 @@ function processPayment(userId: string, amount: number) {
   yavio.conversion("payment", { value: amount, currency: "EUR" });
 }
 
-// Outside any request context: events are captured but lack
-// request-specific fields (traceId, platform, toolName)
-yavio.track("server_started", { version: "1.0.0" });
+// Outside any request context the call has no session or trace to attach to:
+// the event is DROPPED and the SDK warns once per process (YAVIO-1105).
+// Register the tool through withYavio() — with a `tools` override if its
+// input must not be captured — rather than on the unwrapped server.
+yavio.track("server_started", { version: "1.0.0" }); // dropped
 ```
 
 ### 3.2.3 Method Signatures

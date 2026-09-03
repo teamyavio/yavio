@@ -1,6 +1,6 @@
 # `input_values` Extra Fields (`_`-prefixed)
 
-**Status:** Proposed (2026-08-26), reviewed 2026-08-26 (#76, corrections folded in) · **Packages:** sdk, docs · **Version:** patch
+**Status:** Implemented 2026-09-03 (#76; proposed 2026-08-26, reviewed 2026-08-26 with corrections folded in, geo gating decided 2026-09-03) · **Packages:** sdk, docs · **Version:** patch
 
 ## Current Behaviour
 

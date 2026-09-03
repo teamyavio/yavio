@@ -56,18 +56,61 @@ Place it in your project root or any parent directory. The nearest file wins.
 |---------|---------|
 | `endpoint` | `https://ingest.yavio.ai/v1/events` |
 | `capture.inputValues` | `true` |
+| `capture.outputValues` | `true` |
+| `capture.geo` | `true` |
+| `tools` | none |
 
 ## Capture options
 
-The `capture` object controls which data is collected.
+The `capture` object controls which data is collected on every `tool_call` event.
 
 ```ts
 withYavio(server, {
   capture: {
-    inputValues: false, // Don't capture tool input key names/types
+    inputValues: false,  // no input_keys, input_types, input_values, no client metadata
+    outputValues: false, // no output_content, no error_message from isError results
+    geo: false,          // no country_code, no openai/userLocation in input_values
   },
 });
 ```
+
+| Flag | Off means |
+|------|-----------|
+| `inputValues` | No `input_keys`, `input_types`, `input_values`, and no client metadata (`locale`, `country_code`, `end_user_agent`, `subject_id`) |
+| `outputValues` | No `output_content`. An `isError` result still sets `status` and `error_category`, but its text is not stored as `error_message` (it is output). A thrown error's message is still stored |
+| `geo` | No `country_code`, and no `openai/userLocation` inside the captured `_meta` |
+
+`tokens` and `retries` are accepted but reserved — they have no effect today.
+
+## Per-tool overrides
+
+`tools` overrides the capture flags for individual tools, keyed by tool name. A key that is omitted inherits the global value.
+
+```ts
+withYavio(server, {
+  capture: { inputValues: true, outputValues: true },
+  tools: {
+    "book-contract": { inputValues: false, outputValues: false, intent: false },
+  },
+});
+```
+
+```json title=".yaviorc.json"
+{
+  "apiKey": "yav_abc123...",
+  "tools": { "book-contract": { "inputValues": false, "outputValues": false } }
+}
+```
+
+Use this for a tool whose input must never reach analytics — an IBAN, a message body, a birth date. The tool stays on the wrapped server, so it still produces `tool_call` events with latency and status, and `yavio.conversion()` and friends still work from inside its handler. Registering the tool on the unwrapped server instead loses all of that: no `tool_call` event, and tracking calls from the handler are dropped (see [Tracking API](/docs/02-sdk/02-tracking-api#outside-tool-handlers)).
+
+`intent: false` additionally keeps the tool out of [intent capture](/docs/02-sdk/07-intent-capture): the `context` parameter is neither advertised nor captured for it, and a `context` a client still sends from a cached schema is stripped before validation.
+
+Tool names are not validated — tools register after `withYavio()` runs — so an override for a name that never registers is simply unused. There is no environment-variable form.
+
+<Callout type="info">
+  The SDK's PII stripper only matches emails, Luhn-valid card numbers, US Social Security numbers and US-format phone numbers. It is not a substitute for an override on a tool that takes names, addresses, IBANs or dates of birth.
+</Callout>
 
 ## Example configurations
 

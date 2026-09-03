@@ -3,6 +3,7 @@ import type { BaseEvent } from "@yavio/shared/events";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { CaptureConfig, YavioConfig } from "../core/types.js";
+import { createYavioContext } from "../server/context.js";
 import { _resetGlobalState, createProxy } from "../server/proxy.js";
 import { mintWidgetToken } from "../server/token.js";
 import type { Transport } from "../transport/types.js";
@@ -37,6 +38,7 @@ const testConfig: YavioConfig = {
   } satisfies CaptureConfig,
   serverOnly: false,
   intent: { enabled: false, required: true, description: "test" },
+  tools: {},
 };
 
 describe("createProxy", () => {
@@ -1363,6 +1365,54 @@ describe("client metadata capture", () => {
     expect(event.country_code).toBeUndefined();
     expect(event.locale).toBe("de-DE");
     expect(event.subject_id).toBe("v1/2vDU0AOje8kKSAasHqXU4Y");
+    // The verbatim _meta clone in input_values loses the WHOLE userLocation
+    // object — city, region, timezone and coordinates, not only the country —
+    // while everything else in _meta stays.
+    const meta = (event.input_values as Record<string, unknown>)._meta as Record<string, unknown>;
+    expect(meta).not.toHaveProperty("openai/userLocation");
+    expect(meta["openai/locale"]).toBe("de-DE");
+    expect(meta["openai/subject"]).toBe("v1/2vDU0AOje8kKSAasHqXU4Y");
+    const serialized = JSON.stringify(event);
+    for (const leak of ["Duisburg", "North Rhine-Westphalia", "Europe/Berlin", "51.43247"]) {
+      expect(serialized, leak).not.toContain(leak);
+    }
+  });
+
+  it("keeps the full userLocation in _meta while capture.geo is on (default)", async () => {
+    const event = await callWithMeta(testConfig, CHATGPT_META);
+    const meta = (event.input_values as Record<string, unknown>)._meta as Record<string, unknown>;
+    expect(meta["openai/userLocation"]).toEqual(CHATGPT_META["openai/userLocation"]);
+  });
+
+  it("never mutates the _meta the handler receives when gating geo", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server,
+      { ...testConfig, capture: { ...testConfig.capture, geo: false } },
+      transport,
+      "0.0.1",
+    );
+    let seenMeta: unknown;
+    proxy.tool("meta_tool", { q: z.string() }, (_args, extra) => {
+      seenMeta = extra._meta;
+      return { content: [{ type: "text", text: "ok" }] };
+    });
+    const _meta = JSON.parse(JSON.stringify(CHATGPT_META));
+    await getRegisteredTool(server, "meta_tool")?.handler(
+      { q: "hello" },
+      {
+        signal: new AbortController().signal,
+        requestId: "req-cm-2",
+        sendNotification: async () => {},
+        sendRequest: async () => ({}),
+        _meta,
+      },
+    );
+    expect(seenMeta).toBe(_meta);
+    expect((seenMeta as Record<string, unknown>)["openai/userLocation"]).toEqual(
+      CHATGPT_META["openai/userLocation"],
+    );
   });
 
   it("captures nothing when inputValues capture is off", async () => {
@@ -1388,5 +1438,458 @@ describe("client metadata capture", () => {
       "openai/userLocation": { country: "Germany" },
     });
     expect(event.country_code).toBeUndefined();
+  });
+});
+
+describe("tool-result errors (isError: true)", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue(null);
+    _resetGlobalState();
+  });
+
+  const extra = () => ({
+    signal: new AbortController().signal,
+    requestId: "req-te-1",
+    sendNotification: async () => {},
+    sendRequest: async () => ({}),
+  });
+
+  /** Register a tool returning `result`, invoke it once, return the tool_call event and the result. */
+  async function callReturning(result: Record<string, unknown>, config: YavioConfig = testConfig) {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, config, transport, "0.0.1");
+    // The handler deliberately returns shapes the CallToolResult type rejects
+    // (a string isError, no content) — the proxy must classify them anyway.
+    proxy.tool("te_tool", { q: z.string() }, () => result as never);
+    const tool = getRegisteredTool(server, "te_tool");
+    const returned = await tool?.handler({ q: "hello" }, extra());
+    const event = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+      string,
+      unknown
+    >;
+    return { event, returned };
+  }
+
+  it("records an isError result as status error, category tool_error, with the text as message", async () => {
+    const { event, returned } = await callReturning({
+      isError: true,
+      content: [{ type: "text", text: "This offer reference has expired" }],
+    });
+    expect(event.status).toBe("error");
+    expect(event.error_category).toBe("tool_error");
+    expect(event.error_message).toBe("This offer reference has expired");
+    // Inputs and output are captured as on the success path: the model saw
+    // this result, and its text explains the error.
+    expect(event.input_keys).toEqual({ q: true });
+    expect(event.input_values).toMatchObject({ q: "hello" });
+    expect((event.output_content as Record<string, unknown>).isError).toBe(true);
+    expect(typeof event.latency_ms).toBe("number");
+    // The result goes back to the client untouched
+    expect((returned as Record<string, unknown>).isError).toBe(true);
+  });
+
+  it("uses the first text item as the message, skipping non-text content", async () => {
+    const { event } = await callReturning({
+      isError: true,
+      content: [
+        { type: "image", data: "AAAA", mimeType: "image/png" },
+        { type: "text", text: "  first text  " },
+        { type: "text", text: "second text" },
+      ],
+    });
+    expect(event.error_message).toBe("first text");
+  });
+
+  it("records an isError result without text as an error without a message", async () => {
+    const { event } = await callReturning({
+      isError: true,
+      content: [{ type: "image", data: "AAAA", mimeType: "image/png" }],
+    });
+    expect(event.status).toBe("error");
+    expect(event.error_category).toBe("tool_error");
+    expect(event.error_message).toBeUndefined();
+  });
+
+  it("treats only the literal boolean true as an error", async () => {
+    for (const isError of [false, "true", 1, undefined]) {
+      const { event } = await callReturning({
+        ...(isError === undefined ? {} : { isError }),
+        content: [{ type: "text", text: "fine" }],
+      });
+      expect(event.status, `isError=${JSON.stringify(isError)}`).toBe("success");
+      expect(event.error_category).toBeUndefined();
+      expect(event.error_message).toBeUndefined();
+    }
+  });
+
+  it("redacts PII in the result text and clamps it to 500 characters", async () => {
+    const { event } = await callReturning({
+      isError: true,
+      content: [{ type: "text", text: `customer max@example.com not found ${"x".repeat(600)}` }],
+    });
+    const message = event.error_message as string;
+    expect(message).toContain("[EMAIL_REDACTED]");
+    expect(message).not.toContain("max@example.com");
+    expect(message).toHaveLength(500);
+  });
+
+  // Regression: the thrown-path message bypassed stripPii until 0.4.0.
+  it("redacts PII in a thrown error's message too", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("throwing", () => {
+      throw new Error("customer max@example.com not found");
+    });
+    const tool = getRegisteredTool(server, "throwing");
+    await expect(tool?.handler(extra())).rejects.toThrow();
+    const event = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+      string,
+      unknown
+    >;
+    expect(event.status).toBe("error");
+    expect(event.error_category).toBe("unknown");
+    expect(event.error_message).toBe("customer [EMAIL_REDACTED] not found");
+  });
+
+  it("keeps status and category but drops the result-derived message when output capture is off", async () => {
+    const { event } = await callReturning(
+      {
+        isError: true,
+        content: [{ type: "text", text: "no tariff for customer number 4711" }],
+      },
+      { ...testConfig, capture: { ...testConfig.capture, outputValues: false } },
+    );
+    expect(event.status).toBe("error");
+    expect(event.error_category).toBe("tool_error");
+    // The text is output: with outputValues off it must not leak through
+    // error_message either.
+    expect(event.error_message).toBeUndefined();
+    expect(event.output_content).toBeUndefined();
+  });
+
+  it("still injects the widget token into an isError result", async () => {
+    mockedMint.mockResolvedValue({ token: "jwt_widget_err", expiresAt: "2099-01-01T00:00:00Z" });
+    const { event, returned } = await callReturning({
+      isError: true,
+      content: [{ type: "text", text: "boom" }],
+    });
+    expect(event.status).toBe("error");
+    const meta = (returned as Record<string, unknown>)._meta as Record<string, unknown>;
+    expect((meta.yavio as Record<string, unknown>).token).toBe("jwt_widget_err");
+    // Captured before injection: the event's output must not carry our token
+    expect(JSON.stringify(event.output_content)).not.toContain("jwt_widget_err");
+  });
+});
+
+describe("per-tool capture overrides", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue(null);
+    _resetGlobalState();
+  });
+
+  const CHATGPT_META = {
+    "openai/locale": "de-DE",
+    "openai/userAgent": "ChatGPT/1.2026.195",
+    "openai/subject": "v1/2vDU0AOje8kKSAasHqXU4Y",
+    "openai/userLocation": { country: "DE", city: "Duisburg" },
+  };
+
+  const extra = () => ({
+    signal: new AbortController().signal,
+    requestId: "req-pt-1",
+    sendNotification: async () => {},
+    sendRequest: async () => ({}),
+    _meta: CHATGPT_META,
+  });
+
+  const configWith = (tools: YavioConfig["tools"]): YavioConfig => ({ ...testConfig, tools });
+
+  const toolCallFor = (transport: ReturnType<typeof createMockTransport>, name: string) =>
+    transport.sent
+      .flat()
+      .find(
+        (e) => e.event_type === "tool_call" && (e as { event_name?: string }).event_name === name,
+      ) as Record<string, unknown> | undefined;
+
+  const INPUT_FIELDS = [
+    "input_keys",
+    "input_types",
+    "input_values",
+    "locale",
+    "country_code",
+    "end_user_agent",
+    "subject_id",
+  ] as const;
+
+  function expectNoInputs(event: Record<string, unknown> | undefined) {
+    expect(event).toBeDefined();
+    for (const field of INPUT_FIELDS) {
+      expect(event?.[field], field).toBeUndefined();
+    }
+  }
+
+  function expectInputs(event: Record<string, unknown> | undefined) {
+    expect(event).toBeDefined();
+    expect(event?.input_keys).toEqual({ q: true });
+    expect(event?.input_values).toMatchObject({ q: "hello" });
+    expect(event?.locale).toBe("de-DE");
+    expect(event?.subject_id).toBe("v1/2vDU0AOje8kKSAasHqXU4Y");
+    expect(event?.country_code).toBe("DE");
+  }
+
+  it("applies the override via server.tool() and leaves other tools in the same server untouched", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server,
+      configWith({ book: { inputValues: false, outputValues: false } }),
+      transport,
+      "0.0.1",
+    );
+    const result = { content: [{ type: "text" as const, text: "ok" }] };
+    proxy.tool("book", { q: z.string() }, () => result);
+    proxy.tool("search", { q: z.string() }, () => result);
+
+    await getRegisteredTool(server, "book")?.handler({ q: "hello" }, extra());
+    await getRegisteredTool(server, "search")?.handler({ q: "hello" }, extra());
+
+    const book = toolCallFor(transport, "book");
+    expectNoInputs(book);
+    expect(book?.output_content).toBeUndefined();
+    expect(book?.status).toBe("success");
+    expect(typeof book?.latency_ms).toBe("number");
+    expect(JSON.stringify(book)).not.toContain("Duisburg");
+
+    const search = toolCallFor(transport, "search");
+    expectInputs(search);
+    expect(search?.output_content).toBeDefined();
+  });
+
+  it("applies the override via server.registerTool(name, config, cb)", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server,
+      configWith({ book: { inputValues: false } }),
+      transport,
+      "0.0.1",
+    );
+    proxy.registerTool("book", { inputSchema: { q: z.string() } }, () => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+    await getRegisteredTool(server, "book")?.handler({ q: "hello" }, extra());
+    const book = toolCallFor(transport, "book");
+    expectNoInputs(book);
+    // Only inputValues was overridden: output capture follows the global flag.
+    expect(book?.output_content).toBeDefined();
+  });
+
+  it("applies the override via Skybridge-style registerTool(config, cb)", async () => {
+    const handlers = new Map<string, (...cbArgs: unknown[]) => unknown>();
+    const server = {
+      server: {},
+      connect: async () => {},
+      tool() {
+        return this;
+      },
+      registerTool(config: { name: string }, cb: (...cbArgs: unknown[]) => unknown) {
+        handlers.set(config.name, cb);
+        return this;
+      },
+    };
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server as unknown as McpServer,
+      configWith({ book: { inputValues: false, outputValues: false } }),
+      transport,
+      "0.0.1",
+    ) as unknown as {
+      registerTool(config: Record<string, unknown>, cb: (...cbArgs: unknown[]) => unknown): unknown;
+    };
+    proxy.registerTool({ name: "book" }, () => ({ content: [{ type: "text", text: "ok" }] }));
+
+    await handlers.get("book")?.({ q: "hello" }, extra());
+    const book = toolCallFor(transport, "book");
+    expectNoInputs(book);
+    expect(book?.output_content).toBeUndefined();
+  });
+
+  it("drops inputs and client meta on the throw path too, keeping the developer's message", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server,
+      configWith({ book: { inputValues: false, outputValues: false } }),
+      transport,
+      "0.0.1",
+    );
+    proxy.tool("book", { q: z.string() }, () => {
+      throw new Error("upstream unavailable");
+    });
+    await expect(
+      getRegisteredTool(server, "book")?.handler({ q: "hello" }, extra()),
+    ).rejects.toThrow();
+    const book = toolCallFor(transport, "book");
+    expectNoInputs(book);
+    expect(book?.status).toBe("error");
+    expect(book?.error_category).toBe("unknown");
+    expect(book?.error_message).toBe("upstream unavailable");
+  });
+
+  it("keeps status and category for an isError result but drops its text under outputValues: false", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server,
+      configWith({ book: { outputValues: false } }),
+      transport,
+      "0.0.1",
+    );
+    proxy.tool("book", { q: z.string() }, () => ({
+      isError: true,
+      content: [{ type: "text", text: "postal code 12345 invalid" }],
+    }));
+    await getRegisteredTool(server, "book")?.handler({ q: "hello" }, extra());
+    const book = toolCallFor(transport, "book");
+    expect(book?.status).toBe("error");
+    expect(book?.error_category).toBe("tool_error");
+    expect(book?.error_message).toBeUndefined();
+    expect(book?.output_content).toBeUndefined();
+    expect(JSON.stringify(book)).not.toContain("12345");
+  });
+
+  it("lets a tool with an override re-enable a globally disabled flag", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server,
+      {
+        ...testConfig,
+        capture: { ...testConfig.capture, inputValues: false },
+        tools: { search: { inputValues: true } },
+      },
+      transport,
+      "0.0.1",
+    );
+    const result = { content: [{ type: "text" as const, text: "ok" }] };
+    proxy.tool("search", { q: z.string() }, () => result);
+    proxy.tool("other", { q: z.string() }, () => result);
+    await getRegisteredTool(server, "search")?.handler({ q: "hello" }, extra());
+    await getRegisteredTool(server, "other")?.handler({ q: "hello" }, extra());
+    expectInputs(toolCallFor(transport, "search"));
+    expectNoInputs(toolCallFor(transport, "other"));
+  });
+
+  it("keeps the tracking context inside an overridden tool: a conversion carries the call's ids", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server,
+      configWith({ book: { inputValues: false, outputValues: false, intent: false } }),
+      transport,
+      "0.0.1",
+    );
+    const yavio = createYavioContext();
+    proxy.tool("book", { q: z.string() }, () => {
+      yavio.conversion("booking_received", { value: 99, currency: "EUR" });
+      return { content: [{ type: "text", text: "booked" }] };
+    });
+    await getRegisteredTool(server, "book")?.handler({ q: "hello" }, extra());
+
+    const events = transport.sent.flat();
+    const conversion = events.find((e) => e.event_type === "conversion");
+    const toolCall = events.find((e) => e.event_type === "tool_call");
+    expect(conversion).toBeDefined();
+    expect(conversion?.trace_id).toBe(toolCall?.trace_id);
+    expect(conversion?.session_id).toBe(toolCall?.session_id);
+  });
+});
+
+describe("input_values extra fields (_-prefixed)", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue(null);
+    _resetGlobalState();
+  });
+
+  async function inputValuesFor(extraOverrides: Record<string, unknown>) {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("ef_tool", { q: z.string() }, () => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+    await getRegisteredTool(server, "ef_tool")?.handler(
+      { q: "hello" },
+      {
+        signal: new AbortController().signal,
+        sendNotification: async () => {},
+        sendRequest: async () => ({}),
+        ...extraOverrides,
+      },
+    );
+    const toolCall = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+      string,
+      unknown
+    >;
+    return (toolCall.input_values ?? {}) as Record<string, unknown>;
+  }
+
+  it("keeps _meta, _taskId and _requestInfo", async () => {
+    const inputValues = await inputValuesFor({
+      _meta: { "openai/locale": "de-DE" },
+      taskId: "task-42",
+      requestInfo: { headers: { "user-agent": "ChatGPT/1.2" } },
+    });
+    expect(inputValues._meta).toEqual({ "openai/locale": "de-DE" });
+    expect(inputValues._taskId).toBe("task-42");
+    expect(inputValues._requestInfo).toEqual({ headers: { "user-agent": "ChatGPT/1.2" } });
+    expect(inputValues.q).toBe("hello");
+  });
+
+  // Dropped after the 2026-08-26 inventory: a per-connection counter, a TTL
+  // nobody sends, and the RAW Mcp-Session-Id (the session_id column is hashed
+  // on purpose; a raw session identifier is what an app-store review flags).
+  it("drops _requestId, _taskRequestedTtl and _sessionId", async () => {
+    const inputValues = await inputValuesFor({
+      requestId: 7,
+      taskRequestedTtl: 60_000,
+      sessionId: "mcp-session-raw-8d2f",
+    });
+    expect(inputValues).not.toHaveProperty("_requestId");
+    expect(inputValues).not.toHaveProperty("_taskRequestedTtl");
+    expect(inputValues).not.toHaveProperty("_sessionId");
+    expect(JSON.stringify(inputValues)).not.toContain("mcp-session-raw-8d2f");
+    expect(Object.keys(inputValues)).toEqual(["q"]);
+  });
+
+  it("keeps exactly the five allow-listed headers", async () => {
+    const inputValues = await inputValuesFor({
+      requestInfo: {
+        headers: {
+          "user-agent": "ChatGPT/1.2",
+          "accept-language": "de-DE",
+          "x-anthropic-client": "ClaudeAI",
+          "mcp-protocol-version": "2025-06-18",
+          traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+          authorization: "Bearer nope",
+          cookie: "session=abc",
+          "x-forwarded-for": "203.0.113.7",
+          host: "example.test",
+        },
+      },
+    });
+    const headers = (inputValues._requestInfo as { headers: Record<string, string> }).headers;
+    expect(Object.keys(headers).sort()).toEqual([
+      "accept-language",
+      "mcp-protocol-version",
+      "traceparent",
+      "user-agent",
+      "x-anthropic-client",
+    ]);
   });
 });

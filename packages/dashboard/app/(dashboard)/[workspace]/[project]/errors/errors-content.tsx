@@ -13,6 +13,7 @@ import { DateRangePicker } from "@/components/analytics/date-range-picker";
 import { DonutWithLegend } from "@/components/analytics/donut-with-legend";
 import { EmptyState } from "@/components/analytics/empty-state";
 import { ErrorAlert } from "@/components/analytics/error-alert";
+import { errorCategoryTitle } from "@/components/analytics/error-category-meta";
 import { PageHeader } from "@/components/analytics/page-header";
 import { PlatformFilter } from "@/components/analytics/platform-filter";
 import { platformLabel } from "@/components/analytics/platform-meta";
@@ -50,7 +51,13 @@ const columns: Column<ErrorListItem>[] = [
     render: (row: ErrorListItem) => formatRelativeTime(row.timestamp),
   },
   { key: "toolName", label: "Tool" },
-  { key: "errorCategory", label: "Category" },
+  {
+    key: "errorCategory",
+    label: "Category",
+    render: (row: ErrorListItem) => (
+      <span title={errorCategoryTitle(row.errorCategory)}>{row.errorCategory}</span>
+    ),
+  },
   {
     key: "errorMessage",
     label: "Message",

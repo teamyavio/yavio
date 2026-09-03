@@ -50,7 +50,7 @@ function processResults(results: Result[]) {
 ```
 
 <Callout type="warn">
-  The `yavio` singleton relies on `AsyncLocalStorage`. It only works within the async context of a tool handler invocation. Calls outside that context are silently ignored.
+  The `yavio` singleton relies on `AsyncLocalStorage`. It only works within the async context of a tool handler invocation on the wrapped server. A call outside that context has no session or trace to attach to: the event is **dropped**, and the SDK warns once per process with `YAVIO-1105`. The usual cause is a tool registered on the original, unwrapped server — for example to keep its input out of analytics. Register it on the wrapped server instead and use a [per-tool override](/docs/02-sdk/03-configuration#per-tool-overrides) to limit what is captured.
 </Callout>
 
 ## .identify()

@@ -31,7 +31,7 @@ const INTENT_ON: IntentConfig = {
   description: "why this tool is called",
 };
 
-function makeConfig(intent: IntentConfig): YavioConfig {
+function makeConfig(intent: IntentConfig, tools: YavioConfig["tools"] = {}): YavioConfig {
   return {
     apiKey: "yav_test",
     endpoint: "http://localhost:9/v1/events",
@@ -39,6 +39,7 @@ function makeConfig(intent: IntentConfig): YavioConfig {
     // serverOnly skips widget-token minting so no network calls happen
     serverOnly: true,
     intent,
+    tools,
   };
 }
 
@@ -56,10 +57,14 @@ async function connect(proxy: McpServer, events: BaseEvent[][]): Promise<Harness
   return { client, events, proxy };
 }
 
-async function setup(intent: IntentConfig, register: (proxy: McpServer) => void): Promise<Harness> {
+async function setup(
+  intent: IntentConfig,
+  register: (proxy: McpServer) => void,
+  tools: YavioConfig["tools"] = {},
+): Promise<Harness> {
   const server = new McpServerCtor({ name: "intent-test", version: "1.0" });
   const transport = createMockTransport();
-  const proxy = createProxy(server, makeConfig(intent), transport, "0.2.0");
+  const proxy = createProxy(server, makeConfig(intent, tools), transport, "0.2.0");
   register(proxy);
   return connect(proxy, transport.sent);
 }
@@ -1003,5 +1008,114 @@ describe("intent capture — widget classification without listed _meta", () => 
     ]);
     const result = (await callList()) as { tools: Array<{ inputSchema: { required?: string[] } }> };
     expect(result.tools[0]?.inputSchema.required).toEqual(["query"]);
+  });
+});
+
+describe("intent capture — per-tool intent: false (third state)", () => {
+  beforeEach(() => _resetGlobalState());
+
+  const DISABLED = { book: { intent: false } };
+
+  it("never advertises context on the disabled tool while other tools still get it", async () => {
+    const h = await setup(
+      INTENT_ON,
+      (proxy) => {
+        proxy.registerTool("book", { inputSchema: { iban: z.string() } }, async () => ok("x"));
+        proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"));
+      },
+      DISABLED,
+    );
+
+    const list = await h.client.listTools();
+    const book = listedTool(list, "book");
+    expect(book.inputSchema.properties).not.toHaveProperty("context");
+    expect(book.inputSchema.required ?? []).not.toContain("context");
+    expect(listedTool(list, "search").inputSchema.properties).toHaveProperty("context");
+  });
+
+  // A host with a cached schema keeps sending `context` after the override
+  // lands. On a strict schema the SDK must still remove it — or the whole
+  // call is rejected — while capturing nothing.
+  it("strips a context the client still sends, without capturing it, on a strict schema", async () => {
+    let seenArgs: unknown;
+    const h = await setup(
+      INTENT_ON,
+      (proxy) => {
+        proxy.registerTool(
+          "book",
+          { inputSchema: z.strictObject({ iban: z.string() }) as unknown as { iban: z.ZodString } },
+          async (args: { iban: string }) => {
+            seenArgs = args;
+            return ok("booked");
+          },
+        );
+      },
+      DISABLED,
+    );
+    await h.client.listTools();
+
+    const result = await h.client.callTool({
+      name: "book",
+      arguments: { iban: "DE00", context: "Booking a contract for Max Mustermann." },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(seenArgs).toEqual({ iban: "DE00" });
+    const events = toolCallEvents(h.events);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.status).toBe("success");
+    expect(events[0]?.intent_signals).toBeUndefined();
+    expect(JSON.stringify(h.events)).not.toContain("Mustermann");
+  });
+
+  it("skips the fallback for the disabled tool but still uses it elsewhere", async () => {
+    const fallback = vi.fn((toolName: string) => `Inferred for ${toolName}`);
+    const h = await setup(
+      { ...INTENT_ON, fallback },
+      (proxy) => {
+        proxy.registerTool("book", { inputSchema: { iban: z.string() } }, async () => ok("x"));
+        proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"));
+      },
+      DISABLED,
+    );
+    await h.client.listTools();
+
+    await h.client.callTool({ name: "book", arguments: { iban: "DE00" } });
+    await h.client.callTool({ name: "search", arguments: { query: "boots" } });
+
+    expect(fallback).toHaveBeenCalledTimes(1);
+    expect(fallback).toHaveBeenCalledWith("search", { query: "boots" });
+    const byName = Object.fromEntries(toolCallEvents(h.events).map((e) => [e.event_name, e]));
+    expect(byName.book?.intent_signals).toBeUndefined();
+    expect(byName.search?.intent_signals).toEqual({
+      intent: "Inferred for search",
+      source: "inferred",
+    });
+  });
+
+  it("leaves a disabled tool that owns its own context parameter untouched", async () => {
+    let seenArgs: unknown;
+    const h = await setup(
+      INTENT_ON,
+      (proxy) => {
+        proxy.registerTool(
+          "book",
+          { inputSchema: { iban: z.string(), context: z.string() } },
+          async (args: { iban: string; context: string }) => {
+            seenArgs = args;
+            return ok("x");
+          },
+        );
+      },
+      DISABLED,
+    );
+    await h.client.listTools();
+    await h.client.callTool({
+      name: "book",
+      arguments: { iban: "DE00", context: "customer note" },
+    });
+    // The customer's own argument reaches the handler; nothing is captured.
+    expect(seenArgs).toEqual({ iban: "DE00", context: "customer note" });
+    expect(toolCallEvents(h.events)[0]?.intent_signals).toBeUndefined();
   });
 });

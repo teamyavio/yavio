@@ -16,16 +16,19 @@ Fires on every tool invocation. The core event.
 |-------|------|-------------|
 | event_name | TEXT | Tool name |
 | latency_ms | REAL | Execution time |
-| status | TEXT | `success` or `error` |
-| error_category | TEXT | `auth` / `validation` / `timeout` / `rate_limit` / `server` / `unknown` |
-| error_message | TEXT | Sanitized, PII-stripped |
-| is_retry | INTEGER | `1` if the immediately preceding event in the session was a `tool_call` with the same `event_name` |
+| status | TEXT | `success` or `error`. `error` when the handler threw **or** returned a result with `isError: true` (SDK ≥ 0.4.0; earlier SDKs only report throws) |
+| error_category | TEXT | `tool_error` (handler returned `isError: true`) / `unknown` (handler threw) / `auth` / `validation` / `timeout` / `rate_limit` / `server`. See [sdk/tool-result-errors.md](../sdk/tool-result-errors.md) |
+| error_message | TEXT | The exception message, or the first `text` content item of an `isError` result. PII-stripped, ≤ 500 chars. The result text is output and is only stored with `capture.outputValues` on |
+| is_retry | INTEGER | Intended: `1` if the immediately preceding event in the session was a `tool_call` with the same `event_name`. **Not implemented** — the SDK never sets it and ingest does not derive it, so the column is always `0` |
 | input_keys | TEXT (JSON) | Parameter key names |
 | input_types | TEXT (JSON) | Key-to-type mapping |
-| intent_signals | TEXT (JSON) | Derived intent hints (e.g., `"intent:budget"`) |
-| tokens_in | INTEGER | Estimated prompt tokens |
-| tokens_out | INTEGER | Estimated completion tokens |
-| country_code | TEXT | ISO 3166-1 alpha-2 from CDN headers |
+| input_values | TEXT (JSON) | Tool arguments plus, under `_`-prefixed keys, `_meta` (the request `_meta` verbatim; `openai/userLocation` removed when `capture.geo` is off), `_taskId` and `_requestInfo` (five allow-listed headers + URL sans query). PII-stripped. See [sdk/input-values-extra-fields.md](../sdk/input-values-extra-fields.md) |
+| output_content | TEXT (JSON) | The CallToolResult (content with binary placeholders, structuredContent, isError, _meta before widget injection). PII-stripped |
+| intent_signals | TEXT (JSON) | `{ intent, source }` — the model's stated intent (see sdk/intent capture) |
+| tokens_in | INTEGER | Reserved — not set by the SDK today |
+| tokens_out | INTEGER | Reserved — not set by the SDK today |
+| country_code | TEXT | ISO 3166-1 alpha-2 from the platform's request `_meta` (`openai/userLocation.country`); omitted with `capture.geo: false` |
+| locale / end_user_agent / subject_id | TEXT | Client metadata from the request `_meta` (`openai/locale`, `openai/userAgent`, `openai/subject`); captured only with `capture.inputValues` on. Intentionally duplicated inside `input_values._meta` |
 
 ### connection
 
