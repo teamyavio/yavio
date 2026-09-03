@@ -22,10 +22,13 @@ Fires on every tool invocation. The core event.
 | is_retry | INTEGER | Intended: `1` if the immediately preceding event in the session was a `tool_call` with the same `event_name`. **Not implemented** — the SDK never sets it and ingest does not derive it, so the column is always `0` |
 | input_keys | TEXT (JSON) | Parameter key names |
 | input_types | TEXT (JSON) | Key-to-type mapping |
-| intent_signals | TEXT (JSON) | Derived intent hints (e.g., `"intent:budget"`) |
-| tokens_in | INTEGER | Estimated prompt tokens |
-| tokens_out | INTEGER | Estimated completion tokens |
-| country_code | TEXT | ISO 3166-1 alpha-2 from CDN headers |
+| input_values | TEXT (JSON) | Tool arguments plus, under `_`-prefixed keys, `_meta` (the request `_meta` verbatim; `openai/userLocation` removed when `capture.geo` is off), `_taskId` and `_requestInfo` (five allow-listed headers + URL sans query). PII-stripped. See [sdk/input-values-extra-fields.md](../sdk/input-values-extra-fields.md) |
+| output_content | TEXT (JSON) | The CallToolResult (content with binary placeholders, structuredContent, isError, _meta before widget injection). PII-stripped |
+| intent_signals | TEXT (JSON) | `{ intent, source }` — the model's stated intent (see sdk/intent capture) |
+| tokens_in | INTEGER | Reserved — not set by the SDK today |
+| tokens_out | INTEGER | Reserved — not set by the SDK today |
+| country_code | TEXT | ISO 3166-1 alpha-2 from the platform's request `_meta` (`openai/userLocation.country`); omitted with `capture.geo: false` |
+| locale / end_user_agent / subject_id | TEXT | Client metadata from the request `_meta` (`openai/locale`, `openai/userAgent`, `openai/subject`); captured only with `capture.inputValues` on. Intentionally duplicated inside `input_values._meta` |
 
 ### connection
 

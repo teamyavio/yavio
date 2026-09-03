@@ -131,6 +131,20 @@ Only the literal boolean `true` counts as `isError`. The client sees the same sh
 
 Before 0.4.0 only a throw counted, so **error rates rise on upgrade** — a correction of an under-count, not a regression.
 
+### Inputs
+
+With `inputValues` on, `input_values` holds the tool's arguments plus a few fields from the MCP request context under `_`-prefixed keys (so they cannot collide with an argument), and the event carries the client metadata the platform relays in the request `_meta` as first-class fields: `locale`, `end_user_agent`, `subject_id` and — with `geo` on — `country_code`.
+
+| Key | Content |
+|-----|---------|
+| `_meta` | The request `_meta` verbatim. On ChatGPT that is `openai/userAgent`, `openai/locale`, `openai/userLocation` (city, region, country, timezone, **latitude and longitude**), `openai/subject` (the platform's stable pseudonymous user id), `openai/session` and the client's capabilities. It intentionally duplicates the first-class `locale` / `end_user_agent` / `subject_id` / `country_code` fields. With `geo: false` the whole `openai/userLocation` object is removed |
+| `_taskId` | The MCP task id, for task-based flows |
+| `_requestInfo` | The calling request's `user-agent`, `accept-language`, `x-anthropic-client`, `mcp-protocol-version` and `traceparent` headers, plus its URL without the query string. Every other header is dropped — `Authorization`, `Cookie`, `X-Api-Key` and the like never reach analytics, and no `X-Forwarded-For` means an event stays free of end-user IPs |
+
+**Disclose this.** With the defaults, every tool call from ChatGPT stores the user's approximate position including coordinates and the platform's stable user id. Name that collection in your privacy policy, or set `geo: false` (drops the location) or `inputValues: false` (drops all of it) — per tool if that is enough, see above.
+
+All captured input and output is PII-stripped before it leaves the process, but the stripper only matches emails, Luhn-valid card numbers, US Social Security numbers and US-format phone numbers.
+
 ## Tracking API
 
 Import `yavio` and call methods inside tool handlers — context is propagated automatically. A call from outside a wrapped tool call has no session or trace to attach to: the event is dropped and the SDK warns once per process (`YAVIO-1105`). If that warning shows up, the tool is registered on the unwrapped server — move it onto the wrapped one and use `tools` overrides to limit what is captured for it.

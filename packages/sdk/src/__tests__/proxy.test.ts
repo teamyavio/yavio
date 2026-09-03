@@ -1365,6 +1365,54 @@ describe("client metadata capture", () => {
     expect(event.country_code).toBeUndefined();
     expect(event.locale).toBe("de-DE");
     expect(event.subject_id).toBe("v1/2vDU0AOje8kKSAasHqXU4Y");
+    // The verbatim _meta clone in input_values loses the WHOLE userLocation
+    // object — city, region, timezone and coordinates, not only the country —
+    // while everything else in _meta stays.
+    const meta = (event.input_values as Record<string, unknown>)._meta as Record<string, unknown>;
+    expect(meta).not.toHaveProperty("openai/userLocation");
+    expect(meta["openai/locale"]).toBe("de-DE");
+    expect(meta["openai/subject"]).toBe("v1/2vDU0AOje8kKSAasHqXU4Y");
+    const serialized = JSON.stringify(event);
+    for (const leak of ["Duisburg", "North Rhine-Westphalia", "Europe/Berlin", "51.43247"]) {
+      expect(serialized, leak).not.toContain(leak);
+    }
+  });
+
+  it("keeps the full userLocation in _meta while capture.geo is on (default)", async () => {
+    const event = await callWithMeta(testConfig, CHATGPT_META);
+    const meta = (event.input_values as Record<string, unknown>)._meta as Record<string, unknown>;
+    expect(meta["openai/userLocation"]).toEqual(CHATGPT_META["openai/userLocation"]);
+  });
+
+  it("never mutates the _meta the handler receives when gating geo", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server,
+      { ...testConfig, capture: { ...testConfig.capture, geo: false } },
+      transport,
+      "0.0.1",
+    );
+    let seenMeta: unknown;
+    proxy.tool("meta_tool", { q: z.string() }, (_args, extra) => {
+      seenMeta = extra._meta;
+      return { content: [{ type: "text", text: "ok" }] };
+    });
+    const _meta = JSON.parse(JSON.stringify(CHATGPT_META));
+    await getRegisteredTool(server, "meta_tool")?.handler(
+      { q: "hello" },
+      {
+        signal: new AbortController().signal,
+        requestId: "req-cm-2",
+        sendNotification: async () => {},
+        sendRequest: async () => ({}),
+        _meta,
+      },
+    );
+    expect(seenMeta).toBe(_meta);
+    expect((seenMeta as Record<string, unknown>)["openai/userLocation"]).toEqual(
+      CHATGPT_META["openai/userLocation"],
+    );
   });
 
   it("captures nothing when inputValues capture is off", async () => {
@@ -1758,5 +1806,90 @@ describe("per-tool capture overrides", () => {
     expect(conversion).toBeDefined();
     expect(conversion?.trace_id).toBe(toolCall?.trace_id);
     expect(conversion?.session_id).toBe(toolCall?.session_id);
+  });
+});
+
+describe("input_values extra fields (_-prefixed)", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue(null);
+    _resetGlobalState();
+  });
+
+  async function inputValuesFor(extraOverrides: Record<string, unknown>) {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("ef_tool", { q: z.string() }, () => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+    await getRegisteredTool(server, "ef_tool")?.handler(
+      { q: "hello" },
+      {
+        signal: new AbortController().signal,
+        sendNotification: async () => {},
+        sendRequest: async () => ({}),
+        ...extraOverrides,
+      },
+    );
+    const toolCall = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+      string,
+      unknown
+    >;
+    return (toolCall.input_values ?? {}) as Record<string, unknown>;
+  }
+
+  it("keeps _meta, _taskId and _requestInfo", async () => {
+    const inputValues = await inputValuesFor({
+      _meta: { "openai/locale": "de-DE" },
+      taskId: "task-42",
+      requestInfo: { headers: { "user-agent": "ChatGPT/1.2" } },
+    });
+    expect(inputValues._meta).toEqual({ "openai/locale": "de-DE" });
+    expect(inputValues._taskId).toBe("task-42");
+    expect(inputValues._requestInfo).toEqual({ headers: { "user-agent": "ChatGPT/1.2" } });
+    expect(inputValues.q).toBe("hello");
+  });
+
+  // Dropped after the 2026-08-26 inventory: a per-connection counter, a TTL
+  // nobody sends, and the RAW Mcp-Session-Id (the session_id column is hashed
+  // on purpose; a raw session identifier is what an app-store review flags).
+  it("drops _requestId, _taskRequestedTtl and _sessionId", async () => {
+    const inputValues = await inputValuesFor({
+      requestId: 7,
+      taskRequestedTtl: 60_000,
+      sessionId: "mcp-session-raw-8d2f",
+    });
+    expect(inputValues).not.toHaveProperty("_requestId");
+    expect(inputValues).not.toHaveProperty("_taskRequestedTtl");
+    expect(inputValues).not.toHaveProperty("_sessionId");
+    expect(JSON.stringify(inputValues)).not.toContain("mcp-session-raw-8d2f");
+    expect(Object.keys(inputValues)).toEqual(["q"]);
+  });
+
+  it("keeps exactly the five allow-listed headers", async () => {
+    const inputValues = await inputValuesFor({
+      requestInfo: {
+        headers: {
+          "user-agent": "ChatGPT/1.2",
+          "accept-language": "de-DE",
+          "x-anthropic-client": "ClaudeAI",
+          "mcp-protocol-version": "2025-06-18",
+          traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+          authorization: "Bearer nope",
+          cookie: "session=abc",
+          "x-forwarded-for": "203.0.113.7",
+          host: "example.test",
+        },
+      },
+    });
+    const headers = (inputValues._requestInfo as { headers: Record<string, string> }).headers;
+    expect(Object.keys(headers).sort()).toEqual([
+      "accept-language",
+      "mcp-protocol-version",
+      "traceparent",
+      "user-agent",
+      "x-anthropic-client",
+    ]);
   });
 });
