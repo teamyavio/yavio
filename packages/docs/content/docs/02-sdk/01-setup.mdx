@@ -56,8 +56,8 @@ Every `server.tool()` and `server.registerTool()` invocation is tracked with:
 - **Event type:** `tool_call`
 - **Tool name** and input key metadata
 - **Latency** (milliseconds, via `performance.now()`)
-- **Status:** `success` or `error`
-- **Error message** (if the handler throws)
+- **Status:** `success` or `error` — an error when the handler throws (`error_category: unknown`) or returns a result with `isError: true` (`error_category: tool_error`)
+- **Error message** — the exception message or the `isError` result's text, PII-stripped and clamped to 500 characters
 - **Platform** (auto-detected from the connecting client)
 
 ### Connections

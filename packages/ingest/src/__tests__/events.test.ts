@@ -69,6 +69,33 @@ describe("POST /v1/events", () => {
     expect(body.rejected).toBe(0);
   });
 
+  // @yavio/sdk 0.4.0 reports handler-side failures (`isError: true` results)
+  // as `error_category: tool_error`. The validator rejects unknown categories
+  // per event, so this is the check that a deployed ingest accepts them —
+  // the SDK must not be released before an ingest that passes it.
+  it("accepts a tool_call with error_category tool_error", async () => {
+    await buildApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/events",
+      headers: { authorization: `Bearer ${TEST_KEY}` },
+      payload: {
+        events: [
+          makeEvent({
+            event_type: "tool_call",
+            event_name: "book",
+            status: "error",
+            error_category: "tool_error",
+            error_message: "This offer reference has expired",
+          }),
+        ],
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().accepted).toBe(1);
+    expect(response.json().rejected).toBe(0);
+  });
+
   it("returns 401 without auth", async () => {
     await buildApp();
     const response = await app.inject({

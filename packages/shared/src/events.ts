@@ -74,8 +74,12 @@ export const ToolCallEvent = BaseEvent.extend({
   event_type: z.literal("tool_call"),
   latency_ms: z.number().optional(),
   status: z.enum(["success", "error"]).optional(),
+  // `tool_error`: the handler returned a result with `isError: true` (MCP's
+  // in-band tool failure). `unknown`: the handler threw. The client sees the
+  // same shape either way — the MCP SDK converts a throw into an isError
+  // result — so the distinction is server-side only.
   error_category: z
-    .enum(["auth", "validation", "timeout", "rate_limit", "server", "unknown"])
+    .enum(["auth", "validation", "timeout", "rate_limit", "server", "tool_error", "unknown"])
     .optional(),
   error_message: z.string().optional(),
   is_retry: z.number().int().min(0).max(1).optional(),

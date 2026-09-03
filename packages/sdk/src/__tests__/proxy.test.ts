@@ -1390,3 +1390,146 @@ describe("client metadata capture", () => {
     expect(event.country_code).toBeUndefined();
   });
 });
+
+describe("tool-result errors (isError: true)", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue(null);
+    _resetGlobalState();
+  });
+
+  const extra = () => ({
+    signal: new AbortController().signal,
+    requestId: "req-te-1",
+    sendNotification: async () => {},
+    sendRequest: async () => ({}),
+  });
+
+  /** Register a tool returning `result`, invoke it once, return the tool_call event and the result. */
+  async function callReturning(result: Record<string, unknown>, config: YavioConfig = testConfig) {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, config, transport, "0.0.1");
+    // The handler deliberately returns shapes the CallToolResult type rejects
+    // (a string isError, no content) — the proxy must classify them anyway.
+    proxy.tool("te_tool", { q: z.string() }, () => result as never);
+    const tool = getRegisteredTool(server, "te_tool");
+    const returned = await tool?.handler({ q: "hello" }, extra());
+    const event = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+      string,
+      unknown
+    >;
+    return { event, returned };
+  }
+
+  it("records an isError result as status error, category tool_error, with the text as message", async () => {
+    const { event, returned } = await callReturning({
+      isError: true,
+      content: [{ type: "text", text: "This offer reference has expired" }],
+    });
+    expect(event.status).toBe("error");
+    expect(event.error_category).toBe("tool_error");
+    expect(event.error_message).toBe("This offer reference has expired");
+    // Inputs and output are captured as on the success path: the model saw
+    // this result, and its text explains the error.
+    expect(event.input_keys).toEqual({ q: true });
+    expect(event.input_values).toMatchObject({ q: "hello" });
+    expect((event.output_content as Record<string, unknown>).isError).toBe(true);
+    expect(typeof event.latency_ms).toBe("number");
+    // The result goes back to the client untouched
+    expect((returned as Record<string, unknown>).isError).toBe(true);
+  });
+
+  it("uses the first text item as the message, skipping non-text content", async () => {
+    const { event } = await callReturning({
+      isError: true,
+      content: [
+        { type: "image", data: "AAAA", mimeType: "image/png" },
+        { type: "text", text: "  first text  " },
+        { type: "text", text: "second text" },
+      ],
+    });
+    expect(event.error_message).toBe("first text");
+  });
+
+  it("records an isError result without text as an error without a message", async () => {
+    const { event } = await callReturning({
+      isError: true,
+      content: [{ type: "image", data: "AAAA", mimeType: "image/png" }],
+    });
+    expect(event.status).toBe("error");
+    expect(event.error_category).toBe("tool_error");
+    expect(event.error_message).toBeUndefined();
+  });
+
+  it("treats only the literal boolean true as an error", async () => {
+    for (const isError of [false, "true", 1, undefined]) {
+      const { event } = await callReturning({
+        ...(isError === undefined ? {} : { isError }),
+        content: [{ type: "text", text: "fine" }],
+      });
+      expect(event.status, `isError=${JSON.stringify(isError)}`).toBe("success");
+      expect(event.error_category).toBeUndefined();
+      expect(event.error_message).toBeUndefined();
+    }
+  });
+
+  it("redacts PII in the result text and clamps it to 500 characters", async () => {
+    const { event } = await callReturning({
+      isError: true,
+      content: [{ type: "text", text: `customer max@example.com not found ${"x".repeat(600)}` }],
+    });
+    const message = event.error_message as string;
+    expect(message).toContain("[EMAIL_REDACTED]");
+    expect(message).not.toContain("max@example.com");
+    expect(message).toHaveLength(500);
+  });
+
+  // Regression: the thrown-path message bypassed stripPii until 0.4.0.
+  it("redacts PII in a thrown error's message too", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("throwing", () => {
+      throw new Error("customer max@example.com not found");
+    });
+    const tool = getRegisteredTool(server, "throwing");
+    await expect(tool?.handler(extra())).rejects.toThrow();
+    const event = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+      string,
+      unknown
+    >;
+    expect(event.status).toBe("error");
+    expect(event.error_category).toBe("unknown");
+    expect(event.error_message).toBe("customer [EMAIL_REDACTED] not found");
+  });
+
+  it("keeps status and category but drops the result-derived message when output capture is off", async () => {
+    const { event } = await callReturning(
+      {
+        isError: true,
+        content: [{ type: "text", text: "no tariff for customer number 4711" }],
+      },
+      { ...testConfig, capture: { ...testConfig.capture, outputValues: false } },
+    );
+    expect(event.status).toBe("error");
+    expect(event.error_category).toBe("tool_error");
+    // The text is output: with outputValues off it must not leak through
+    // error_message either.
+    expect(event.error_message).toBeUndefined();
+    expect(event.output_content).toBeUndefined();
+  });
+
+  it("still injects the widget token into an isError result", async () => {
+    mockedMint.mockResolvedValue({ token: "jwt_widget_err", expiresAt: "2099-01-01T00:00:00Z" });
+    const { event, returned } = await callReturning({
+      isError: true,
+      content: [{ type: "text", text: "boom" }],
+    });
+    expect(event.status).toBe("error");
+    const meta = (returned as Record<string, unknown>)._meta as Record<string, unknown>;
+    expect((meta.yavio as Record<string, unknown>).token).toBe("jwt_widget_err");
+    // Captured before injection: the event's output must not carry our token
+    expect(JSON.stringify(event.output_content)).not.toContain("jwt_widget_err");
+  });
+});

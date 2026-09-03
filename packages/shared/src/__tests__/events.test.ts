@@ -176,6 +176,21 @@ describe("ToolCallEvent", () => {
     ).toThrow();
   });
 
+  // The ingest validator is the only gate on this value: an SDK that emits a
+  // category the shared enum lacks loses every such event (YAVIO-2100).
+  it("accepts tool_error — the handler returned isError: true", () => {
+    const result = ToolCallEvent.parse(
+      base({
+        event_type: "tool_call",
+        event_name: "book",
+        status: "error",
+        error_category: "tool_error",
+        error_message: "This offer reference has expired",
+      }),
+    );
+    expect(result.error_category).toBe("tool_error");
+  });
+
   it("rejects invalid error_category", () => {
     expect(() =>
       ToolCallEvent.parse(

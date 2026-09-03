@@ -16,10 +16,10 @@ Fires on every tool invocation. The core event.
 |-------|------|-------------|
 | event_name | TEXT | Tool name |
 | latency_ms | REAL | Execution time |
-| status | TEXT | `success` or `error` |
-| error_category | TEXT | `auth` / `validation` / `timeout` / `rate_limit` / `server` / `unknown` |
-| error_message | TEXT | Sanitized, PII-stripped |
-| is_retry | INTEGER | `1` if the immediately preceding event in the session was a `tool_call` with the same `event_name` |
+| status | TEXT | `success` or `error`. `error` when the handler threw **or** returned a result with `isError: true` (SDK ≥ 0.4.0; earlier SDKs only report throws) |
+| error_category | TEXT | `tool_error` (handler returned `isError: true`) / `unknown` (handler threw) / `auth` / `validation` / `timeout` / `rate_limit` / `server`. See [sdk/tool-result-errors.md](../sdk/tool-result-errors.md) |
+| error_message | TEXT | The exception message, or the first `text` content item of an `isError` result. PII-stripped, ≤ 500 chars. The result text is output and is only stored with `capture.outputValues` on |
+| is_retry | INTEGER | Intended: `1` if the immediately preceding event in the session was a `tool_call` with the same `event_name`. **Not implemented** — the SDK never sets it and ingest does not derive it, so the column is always `0` |
 | input_keys | TEXT (JSON) | Parameter key names |
 | input_types | TEXT (JSON) | Key-to-type mapping |
 | intent_signals | TEXT (JSON) | Derived intent hints (e.g., `"intent:budget"`) |
