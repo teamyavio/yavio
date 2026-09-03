@@ -41,8 +41,11 @@ Fires on every tool invocation. This is the core event that powers most analytic
 | `is_retry` | Reserved. Not set by the SDK today — always `0` |
 | `input_keys` | Parameter key names (JSON) |
 | `input_types` | Key-to-type mapping (JSON) |
-| `tokens_in` / `tokens_out` | Estimated prompt and completion tokens |
-| `country_code` | ISO 3166-1 alpha-2 from CDN headers |
+| `input_values` | The tool's arguments plus, under `_`-prefixed keys, the request `_meta` verbatim (`_meta`), the MCP task id (`_taskId`) and five allow-listed request headers with the URL sans query (`_requestInfo`). PII-stripped. See the [SDK README](https://github.com/teamyavio/yavio/tree/main/packages/sdk#captured-data) for the full list and the disclosure note |
+| `output_content` | The tool result, with binary content replaced by size placeholders. PII-stripped |
+| `tokens_in` / `tokens_out` | Reserved. Not set by the SDK today |
+| `country_code` | ISO 3166-1 alpha-2 from the platform's request `_meta` (`openai/userLocation.country`); omitted with `capture.geo: false`, which also removes the location object from `input_values._meta` |
+| `locale` / `end_user_agent` / `subject_id` | Client metadata from the request `_meta`, captured with `capture.inputValues` |
 
 ### connection
 

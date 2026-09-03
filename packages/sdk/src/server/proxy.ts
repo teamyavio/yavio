@@ -218,7 +218,7 @@ function wrapToolCallback(
           errorMessage: resultError && capture.outputValues ? resultError.message : undefined,
           inputKeys: captureInput ? extractInputKeys(cbArgs[0]) : undefined,
           inputTypes: captureInput ? extractInputTypes(cbArgs[0]) : undefined,
-          inputValues: captureInput ? extractInputValues(cbArgs[0], extra) : undefined,
+          inputValues: captureInput ? extractInputValues(cbArgs[0], extra, capture.geo) : undefined,
           outputContent: capture.outputValues ? extractOutputContent(result) : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
           clientMeta: captureInput ? extractClientMeta(extra, capture.geo) : undefined,
@@ -274,7 +274,9 @@ function wrapToolCallback(
           // Developer-written, so it is kept even with output capture off
           // (unlike the text of an isError result, see the success path).
           errorMessage: error instanceof Error ? error.message : String(error),
-          inputValues: captureInputOnError ? extractInputValues(cbArgs[0], extra) : undefined,
+          inputValues: captureInputOnError
+            ? extractInputValues(cbArgs[0], extra, capture.geo)
+            : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
           clientMeta: captureInputOnError ? extractClientMeta(extra, capture.geo) : undefined,
         },
@@ -601,21 +603,49 @@ function extractInputTypes(args: unknown): Record<string, unknown> | undefined {
 }
 
 /**
- * Deep-clone tool arguments and merge serializable fields from RequestHandlerExtra.
- * Extra fields are prefixed with `_` to avoid collisions with tool arguments.
+ * Deep-clone tool arguments and merge the parts of RequestHandlerExtra worth
+ * keeping, under `_`-prefixed keys so they cannot collide with arguments:
+ *
+ * - `_meta`: the request `_meta` verbatim. On ChatGPT that is the richest
+ *   client context there is (user agent, locale, location, subject, session,
+ *   capabilities) and it is wanted as such — a product decision, 2026-08-26.
+ *   It deliberately DUPLICATES what extractClientMeta lifts into the
+ *   first-class `subject_id` / `locale` / `end_user_agent` / `country_code`
+ *   columns; do not "deduplicate" either side away. With `capture.geo` off
+ *   the `openai/userLocation` object (city, region, timezone, coordinates)
+ *   is removed from the clone — a flag named geo must not leave coordinates
+ *   in. The clone is what makes this safe: the handler's own `_meta` is
+ *   never touched.
+ * - `_taskId`: MCP task id, for correlating task-based flows.
+ * - `_requestInfo`: allow-listed headers and the URL sans query, see
+ *   sanitizeRequestInfo.
+ *
+ * Dropped in 0.4.0 after an inventory (input-values-extra-fields.md):
+ * `_requestId` (a per-connection counter, on ~every call, says nothing),
+ * `_taskRequestedTtl` (never seen), and `_sessionId` — the RAW Mcp-Session-Id
+ * while the `session_id` column is hashed on purpose, empirically absent
+ * fleet-wide (stateless transports), and exactly the kind of identifier an
+ * app-store review flags.
  */
-function extractInputValues(args: unknown, extra: unknown): Record<string, unknown> | undefined {
+function extractInputValues(
+  args: unknown,
+  extra: unknown,
+  geoEnabled: boolean,
+): Record<string, unknown> | undefined {
   if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
   try {
     const clone = JSON.parse(JSON.stringify(args)) as Record<string, unknown>;
     if (extra && typeof extra === "object") {
       const ex = extra as Record<string, unknown>;
-      // Serializable extra fields (skip signal, functions, taskStore)
-      if (ex._meta != null) clone._meta = JSON.parse(JSON.stringify(ex._meta));
-      if (typeof ex.sessionId === "string") clone._sessionId = ex.sessionId;
-      if (ex.requestId != null) clone._requestId = ex.requestId;
+      if (ex._meta != null) {
+        let meta = JSON.parse(JSON.stringify(ex._meta)) as unknown;
+        if (!geoEnabled && meta && typeof meta === "object" && !Array.isArray(meta)) {
+          const { "openai/userLocation": _location, ...rest } = meta as Record<string, unknown>;
+          meta = rest;
+        }
+        clone._meta = meta;
+      }
       if (typeof ex.taskId === "string") clone._taskId = ex.taskId;
-      if (ex.taskRequestedTtl !== undefined) clone._taskRequestedTtl = ex.taskRequestedTtl;
       if (ex.requestInfo != null) {
         const requestInfo = sanitizeRequestInfo(ex.requestInfo);
         if (requestInfo) clone._requestInfo = requestInfo;
@@ -636,9 +666,10 @@ function extractInputValues(args: unknown, extra: unknown): Record<string, unkno
  * reach analytics, and `X-Forwarded-For` would put an end-user IP on an event
  * that is otherwise anonymous.
  *
- * These two survive because they answer questions the dashboard actually asks —
- * which client called (beyond the coarse `platform` field) and in which
- * language — and neither identifies a person.
+ * The first two survive because they answer questions the dashboard actually
+ * asks — which client called (beyond the coarse `platform` field) and in which
+ * language — and neither identifies a person. The README lists all five; keep
+ * it in step.
  */
 const CAPTURED_HEADERS = new Set([
   "user-agent",
@@ -659,8 +690,10 @@ const CAPTURED_HEADERS = new Set([
  * sends all of these; platforms that send none produce undefined.
  *
  * The location part is gated behind `capture.geo` and reduced to the
- * 2-letter country code — city and coordinates never leave the process
- * as structured fields.
+ * 2-letter country code — city and coordinates are never lifted into a
+ * first-class column. (They do travel inside the verbatim `_meta` clone in
+ * `input_values` while `geo` is on; with `geo` off extractInputValues drops
+ * the whole `openai/userLocation` object from that clone as well.)
  */
 function extractClientMeta(
   extra: unknown,
