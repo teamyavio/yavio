@@ -361,3 +361,9 @@ Session (ses_xxx) ← one MCP connection, shared by server + widget events
   │   └── step: "availability_checked"
   └── Trace 3 (tr_ccc) ← tool_call "cancel_booking"
 ```
+
+## Related specs (proposed 2026-08-26)
+
+- [Tool-result errors count as errors](./tool-result-errors.md) — `isError: true` results become `status: error` / `error_category: tool_error`.
+- [Per-tool capture overrides](./per-tool-capture.md) — `tools: { "<name>": { inputValues, outputValues, intent } }`, plus a warn-once for tracking calls outside a wrapped tool.
+- [`input_values` extra fields](./input-values-extra-fields.md) — what the `_`-prefixed fields are, which stay, which go.
