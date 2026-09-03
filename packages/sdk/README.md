@@ -124,8 +124,12 @@ A call is an error when the handler **throws** or when it **returns a result wit
 | `success` | — | The handler returned a result without `isError: true` |
 | `error` | `tool_error` | The handler returned a result with `isError: true` (an expired reference, an invalid postal code, a missing field) |
 | `error` | `unknown` | The handler threw |
+| `error` | `validation` | The call failed **before** the handler ran: unknown or disabled tool, or arguments the tool's schema rejected. No `latency_ms` (nothing executed); `input_values` holds the raw arguments the model sent |
+| `error` | `server` | The handler returned, but its result failed the tool's own `outputSchema` |
 
-Only the literal boolean `true` counts as `isError`. The client sees the same shape either way (the MCP SDK converts a throw into an `isError` result), so the distinction is server-side only.
+Only the literal boolean `true` counts as `isError`. The client sees the same shape in all four error cases (the MCP SDK converts throws and pre-handler failures into `isError` results), so the distinction is server-side only.
+
+Every `tools/call` request the wrapped server receives is counted, including the ones the MCP SDK rejects before your handler runs — a call to a tool name that does not exist shows up as that name with a 100 % error rate, which is the honest signal. A tool registered on the original, unwrapped server stays untracked either way.
 
 `error_message` is the exception's message, or for an `isError` result the first `text` content item. Both are PII-stripped and clamped to 500 characters. The result text is output, so it is stored only while `outputValues` is on; `status` and `error_category` are derived from the result regardless of output capture.
 

@@ -1,8 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { ToolCallEvent } from "@yavio/shared/events";
 import {
   buildConnectionEvent,
   buildToolCallEvent,
   buildToolDiscoveryEvent,
+  normalizeErrorMessage,
 } from "../core/events.js";
 import { deriveSessionId, generateSessionId, generateTraceId } from "../core/ids.js";
 import { detectPlatform } from "../core/platform.js";
@@ -10,6 +12,14 @@ import type { CaptureConfig, SessionState, YavioConfig } from "../core/types.js"
 import type { Transport } from "../transport/types.js";
 import { type RequestStore, runInContext } from "./context.js";
 import { type IntentController, createIntentController, getCapturedIntent } from "./intent.js";
+import {
+  type CallContext,
+  type CallFrame,
+  type HandlerWrapper,
+  currentCallFrame,
+  installProtocolWrappers,
+  runInCallFrame,
+} from "./protocol.js";
 import { type MintResult, mintWidgetToken } from "./token.js";
 
 /** Cached widget token with parsed expiry for reuse across tool calls. */
@@ -75,6 +85,103 @@ function resolveToolCapture(config: YavioConfig, toolName: string): CaptureConfi
 }
 
 /**
+ * Resolve everything a tool_call needs to know about its request before the
+ * handler runs: the session (from the MCP session id, OpenAI's conversation
+ * session, or the transport), lazy platform detection, the once-per-session
+ * connection event, and a fresh trace id. Called once per tools/call by the
+ * status wrapper, or by the callback wrapper when no frame is open.
+ */
+function openCallContext(
+  extra: unknown,
+  resolveSession: (sessionKey?: string) => SessionState,
+  server: McpServer,
+  config: YavioConfig,
+  transport: Transport,
+  sdkVersion: string,
+): CallContext {
+  // Extract MCP session ID from the extra parameter (RequestHandlerExtra.sessionId)
+  // This is the most reliable correlation signal — set from the Mcp-Session-Id header
+  const mcpSessionId =
+    extra && typeof extra === "object" ? (extra as Record<string, unknown>).sessionId : undefined;
+
+  // Fall back to OpenAI's conversation-scoped session from _meta
+  // OpenAI re-initializes MCP per tool call but sends a stable "openai/session" in _meta
+  const extraMeta =
+    extra && typeof extra === "object" ? (extra as Record<string, unknown>)._meta : undefined;
+  const openaiSessionId =
+    extraMeta && typeof extraMeta === "object"
+      ? (extraMeta as Record<string, unknown>)["openai/session"]
+      : undefined;
+
+  const sessionKey =
+    typeof mcpSessionId === "string"
+      ? mcpSessionId
+      : typeof openaiSessionId === "string"
+        ? openaiSessionId
+        : undefined;
+  const session = resolveSession(sessionKey);
+
+  // Client identity from the MCP initialize handshake — available by the
+  // time the first tool call arrives. Only fetched while still needed:
+  // for the once-per-session connection event and unresolved platforms.
+  let clientInfo: { name?: string; version?: string } | undefined;
+  if (session.platform === "unknown" || !emittedConnections.has(session.sessionId)) {
+    try {
+      clientInfo = (
+        server.server as unknown as {
+          getClientVersion?: () => { name?: string; version?: string } | undefined;
+        }
+      ).getClientVersion?.();
+    } catch {
+      clientInfo = undefined;
+    }
+  }
+
+  // Lazy platform detection — must run before the connection event is
+  // built so the event carries the resolved platform, not "unknown".
+  // HTTP transports also expose request headers via extra.requestInfo,
+  // which cover clients whose handshake identity is unrecognised.
+  if (session.platform === "unknown") {
+    const requestInfo =
+      extra && typeof extra === "object"
+        ? (extra as Record<string, unknown>).requestInfo
+        : undefined;
+    const httpHeaders =
+      requestInfo && typeof requestInfo === "object"
+        ? ((requestInfo as Record<string, unknown>).headers as Record<string, unknown> | undefined)
+        : undefined;
+    const userAgent = headerValue(httpHeaders, "user-agent");
+    const origin = headerValue(httpHeaders, "origin");
+    if (clientInfo?.name || userAgent || origin) {
+      session.platform = detectPlatform({ clientName: clientInfo?.name, userAgent, origin });
+    }
+  }
+
+  // Emit deferred connection event on the first tool call for this session.
+  // Deferred from connect() so that OpenAI's per-tool-call reconnects don't
+  // spam a connection event for every tool call in the same conversation.
+  if (!emittedConnections.has(session.sessionId)) {
+    emittedConnections.add(session.sessionId);
+    const connectionEvent = buildConnectionEvent(
+      {
+        traceId: generateTraceId(),
+        sessionId: session.sessionId,
+        platform: session.platform,
+        sdkVersion,
+      },
+      {
+        clientName: clientInfo?.name,
+        clientVersion: clientInfo?.version,
+        intentEnabled: config.intent.enabled,
+      },
+    );
+    transport.send([connectionEvent]);
+  }
+
+  return { traceId: generateTraceId(), session };
+}
+
+/**
  * Wrap a tool callback with Yavio instrumentation.
  *
  * Handles lazy platform detection, trace/session context,
@@ -96,89 +203,24 @@ function wrapToolCallback(
   tokenCache: { current: CachedWidgetToken | null },
 ): (...cbArgs: unknown[]) => Promise<unknown> {
   return async (...cbArgs: unknown[]) => {
-    // Extract MCP session ID from the extra parameter (RequestHandlerExtra.sessionId)
-    // This is the most reliable correlation signal — set from the Mcp-Session-Id header
     const extra = cbArgs[cbArgs.length - 1];
-    const mcpSessionId =
-      extra && typeof extra === "object" ? (extra as Record<string, unknown>).sessionId : undefined;
 
-    // Fall back to OpenAI's conversation-scoped session from _meta
-    // OpenAI re-initializes MCP per tool call but sends a stable "openai/session" in _meta
-    const extraMeta =
-      extra && typeof extra === "object" ? (extra as Record<string, unknown>)._meta : undefined;
-    const openaiSessionId =
-      extraMeta && typeof extraMeta === "object"
-        ? (extraMeta as Record<string, unknown>)["openai/session"]
-        : undefined;
-
-    const sessionKey =
-      typeof mcpSessionId === "string"
-        ? mcpSessionId
-        : typeof openaiSessionId === "string"
-          ? openaiSessionId
-          : undefined;
-    const session = resolveSession(sessionKey);
-
-    // Client identity from the MCP initialize handshake — available by the
-    // time the first tool call arrives. Only fetched while still needed:
-    // for the once-per-session connection event and unresolved platforms.
-    let clientInfo: { name?: string; version?: string } | undefined;
-    if (session.platform === "unknown" || !emittedConnections.has(session.sessionId)) {
-      try {
-        clientInfo = (
-          server.server as unknown as {
-            getClientVersion?: () => { name?: string; version?: string } | undefined;
-          }
-        ).getClientVersion?.();
-      } catch {
-        clientInfo = undefined;
-      }
-    }
-
-    // Lazy platform detection — must run before the connection event is
-    // built so the event carries the resolved platform, not "unknown".
-    // HTTP transports also expose request headers via extra.requestInfo,
-    // which cover clients whose handshake identity is unrecognised.
-    if (session.platform === "unknown") {
-      const requestInfo =
-        extra && typeof extra === "object"
-          ? (extra as Record<string, unknown>).requestInfo
-          : undefined;
-      const httpHeaders =
-        requestInfo && typeof requestInfo === "object"
-          ? ((requestInfo as Record<string, unknown>).headers as
-              | Record<string, unknown>
-              | undefined)
-          : undefined;
-      const userAgent = headerValue(httpHeaders, "user-agent");
-      const origin = headerValue(httpHeaders, "origin");
-      if (clientInfo?.name || userAgent || origin) {
-        session.platform = detectPlatform({ clientName: clientInfo?.name, userAgent, origin });
-      }
-    }
-
-    // Emit deferred connection event on the first tool call for this session.
-    // Deferred from connect() so that OpenAI's per-tool-call reconnects don't
-    // spam a connection event for every tool call in the same conversation.
-    if (!emittedConnections.has(session.sessionId)) {
-      emittedConnections.add(session.sessionId);
-      const connectionEvent = buildConnectionEvent(
-        {
-          traceId: generateTraceId(),
-          sessionId: session.sessionId,
-          platform: session.platform,
-          sdkVersion,
-        },
-        {
-          clientName: clientInfo?.name,
-          clientVersion: clientInfo?.version,
-          intentEnabled: config.intent.enabled,
-        },
-      );
-      transport.send([connectionEvent]);
-    }
-
-    const traceId = generateTraceId();
+    // Inside a tools/call frame the status wrapper (protocol.ts) already
+    // resolved the session and trace for this request — reuse them so both
+    // layers agree, and hand the finished event to the frame instead of
+    // sending it: the frame owner sends exactly one event per call once the
+    // downstream handler is done. Without a frame (the handler invoked
+    // directly, private API unavailable) behave as before: resolve here,
+    // send here.
+    const activeFrame = currentCallFrame();
+    const frame = activeFrame && activeFrame.toolName === toolName ? activeFrame : undefined;
+    const { traceId, session } =
+      frame?.context ??
+      openCallContext(extra, resolveSession, server, config, transport, sdkVersion);
+    const emit = (event: ToolCallEvent): void => {
+      if (frame && frame.event === null) frame.event = event;
+      else transport.send([event]);
+    };
     const store: RequestStore = {
       traceId,
       session,
@@ -224,7 +266,7 @@ function wrapToolCallback(
           clientMeta: captureInput ? extractClientMeta(extra, capture.geo) : undefined,
         },
       );
-      transport.send([toolCallEvent]);
+      emit(toolCallEvent);
 
       // Server-only mode skips widget token minting and _meta.yavio injection
       // so the tool result is forwarded to the MCP client byte-for-byte.
@@ -281,7 +323,7 @@ function wrapToolCallback(
           clientMeta: captureInputOnError ? extractClientMeta(extra, capture.geo) : undefined,
         },
       );
-      transport.send([toolCallEvent]);
+      emit(toolCallEvent);
 
       throw error;
     }
@@ -334,7 +376,131 @@ export function createProxy<T extends McpServer>(
   const intent: IntentController | null = config.intent.enabled
     ? createIntentController(config.intent, intentDisabledTools)
     : null;
-  intent?.install(server);
+  intent?.attach(server);
+
+  // Tools whose callback the proxy wrapped. A pre-handler failure is counted
+  // only for these (or for a name that is not registered at all): a tool
+  // deliberately registered on the unwrapped server must stay untracked.
+  const instrumentedTools = new Set<string>();
+  const isRegistered = (toolName: string): boolean => {
+    try {
+      const tools = (server as unknown as { _registeredTools?: Record<string, unknown> })
+        ._registeredTools;
+      // Registry unreadable: assume registered, i.e. never invent an event.
+      return !tools || typeof tools !== "object" || tools[toolName] !== undefined;
+    } catch {
+      return true;
+    }
+  };
+
+  /**
+   * Decide what the frame sends once McpServer's tools/call handler is done.
+   * See protocol-layer-status.md for the table this implements.
+   */
+  const finalizeCallEvent = (
+    frame: CallFrame,
+    args: unknown,
+    extra: unknown,
+    result: unknown,
+  ): ToolCallEvent | null => {
+    const { toolName, context } = frame;
+    const resultError = toolResultError(result);
+
+    if (frame.event) {
+      if (resultError && frame.event.status === "success") {
+        // The handler returned a good-looking result and McpServer's output
+        // validation rejected it afterwards (declared outputSchema, mismatching
+        // structuredContent): a server bug the model saw as an error. Keep the
+        // handler's latency and captured output; correct the verdict.
+        const capture = resolveToolCapture(config, toolName);
+        return {
+          ...frame.event,
+          status: "error",
+          error_category: "server",
+          error_message: capture.outputValues
+            ? normalizeErrorMessage(resultError.message)
+            : undefined,
+        };
+      }
+      return frame.event;
+    }
+
+    // The callback never ran. Only a failure is worth an event — a clean
+    // result here means the tool is not instrumented at the callback level
+    // (unwrapped registration, task-based tool) and stays untracked.
+    if (!resultError) return null;
+    const instrumented = instrumentedTools.has(toolName);
+    if (!instrumented && isRegistered(toolName)) return null;
+
+    // Unknown tool, disabled tool, argument validation, task misconfiguration:
+    // all InvalidParams-class failures of the request itself, handed over by
+    // McpServer as one isError text. `validation` for all four; the message
+    // says which. No latency — the handler never ran. Inputs are the RAW
+    // arguments (what did the model send?), under the tool's capture flags.
+    const capture = instrumented ? resolveToolCapture(config, toolName) : config.capture;
+    const captureInput = capture.inputValues && args !== undefined;
+    return buildToolCallEvent(
+      {
+        traceId: context.traceId,
+        sessionId: context.session.sessionId,
+        userId: context.session.userId ?? undefined,
+        platform: context.session.platform,
+        sdkVersion,
+      },
+      {
+        toolName,
+        status: "error",
+        errorCategory: "validation",
+        // Result-derived text is output (#75 rule): Zod 3 enum errors echo the
+        // received value, so it can contain input.
+        errorMessage: capture.outputValues ? resultError.message : undefined,
+        inputKeys: captureInput ? extractInputKeys(args) : undefined,
+        inputTypes: captureInput ? extractInputTypes(args) : undefined,
+        inputValues: captureInput ? extractInputValues(args, extra, capture.geo) : undefined,
+        outputContent: capture.outputValues ? extractOutputContent(result) : undefined,
+        intentSignals: getCapturedIntent() ?? undefined,
+        clientMeta: captureInput ? extractClientMeta(extra, capture.geo) : undefined,
+      },
+    );
+  };
+
+  /**
+   * Status detection at the protocol layer: one frame per tools/call, one
+   * event per frame. Inner to the intent wrapper, so it runs inside the
+   * intent store and sees arguments with `context` already removed.
+   */
+  const statusWrapper: HandlerWrapper = (handler) => async (request, extra) => {
+    const params = (request as { params?: { name?: unknown; arguments?: unknown } } | undefined)
+      ?.params;
+    const toolName = typeof params?.name === "string" ? params.name : "unknown";
+    const frame: CallFrame = {
+      toolName,
+      context: openCallContext(extra, resolveSession, server, config, transport, sdkVersion),
+      event: null,
+    };
+
+    let result: unknown;
+    try {
+      result = await runInCallFrame(frame, () => handler(request, extra));
+    } catch (error) {
+      // A JSON-RPC error the proxy has no business classifying (today only
+      // UrlElicitationRequired escapes McpServer's catch). The callback's own
+      // event, if it produced one, still goes out.
+      if (frame.event) transport.send([frame.event]);
+      throw error;
+    }
+    const event = finalizeCallEvent(frame, params?.arguments, extra, result);
+    if (event) transport.send([event]);
+    return result;
+  };
+
+  // Innermost first: intent(status(mcpHandler)). Returns false when the
+  // private API is missing — then no frame is ever opened and the callback
+  // wrapper keeps sending on its own.
+  installProtocolWrappers(server, {
+    call: intent ? [statusWrapper, intent.wrapCall] : [statusWrapper],
+    list: intent ? [intent.wrapList] : [],
+  });
 
   // Reference to the current MCP transport for lazy sessionId lookup
   let currentMcpTransport: Record<string, unknown> | null = null;
@@ -412,6 +578,7 @@ export function createProxy<T extends McpServer>(
             toolName,
             args.filter((a, i) => i > 0 && i < cbIndex && typeof a === "object" && a !== null),
           );
+          instrumentedTools.add(toolName);
           args[cbIndex] = wrapToolCallback(
             originalCb,
             toolName,
@@ -483,6 +650,7 @@ export function createProxy<T extends McpServer>(
           );
           if (cbIndex !== -1) {
             const originalCb = args[cbIndex] as (...cbArgs: unknown[]) => unknown;
+            instrumentedTools.add(toolName);
             args[cbIndex] = wrapToolCallback(
               originalCb,
               toolName,
