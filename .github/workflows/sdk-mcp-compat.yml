@@ -1,0 +1,79 @@
+name: SDK × MCP SDK
+
+# @yavio/sdk patches McpServer internals that are not public API (the tool
+# registry, the low-level request handlers) and declares the MCP SDK as a peer
+# with an open upper bound. ci.yml tests only the lockfile version; this tests
+# both ends of the range: the declared floor and the current release. It runs
+# weekly too, so a breaking MCP SDK release shows up here before an app
+# upgrades into it (#84).
+#
+# Unlike ci.yml this runs for pull requests into any branch, so stacked SDK
+# PRs get tested as well.
+
+on:
+  pull_request:
+    paths:
+      - "packages/sdk/**"
+      - "packages/shared/**"
+      - ".github/workflows/sdk-mcp-compat.yml"
+  push:
+    branches: [main]
+    paths:
+      - "packages/sdk/**"
+      - "packages/shared/**"
+      - ".github/workflows/sdk-mcp-compat.yml"
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-mcp-compat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: MCP SDK ${{ matrix.mcp-sdk }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mcp-sdk: [floor, latest]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup
+
+      - name: Resolve the version
+        id: mcp
+        run: |
+          if [ "${{ matrix.mcp-sdk }}" = floor ]; then
+            # Single source: the peer range in packages/sdk/package.json.
+            range=$(node -p "require('./packages/sdk/package.json').peerDependencies['@modelcontextprotocol/sdk']")
+            if [[ ! "$range" =~ ^\>=([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+              echo "::error::expected a '>=X.Y.Z' peer range for @modelcontextprotocol/sdk, got '$range'"
+              exit 1
+            fi
+            version="${BASH_REMATCH[1]}"
+          else
+            version=$(npm view @modelcontextprotocol/sdk version)
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install @modelcontextprotocol/sdk@${{ steps.mcp.outputs.version }}
+        run: pnpm --filter @yavio/sdk add -D "@modelcontextprotocol/sdk@${{ steps.mcp.outputs.version }}"
+
+      # A matrix leg that silently tests the lockfile version would be green
+      # for the wrong reason.
+      - name: Check the installed version
+        run: |
+          installed=$(node -p "require('./packages/sdk/node_modules/@modelcontextprotocol/sdk/package.json').version")
+          echo "Testing against @modelcontextprotocol/sdk $installed"
+          if [ "$installed" != "${{ steps.mcp.outputs.version }}" ]; then
+            echo "::error::expected ${{ steps.mcp.outputs.version }}, installed $installed"
+            exit 1
+          fi
+
+      - run: pnpm turbo build --filter=@yavio/sdk...
+      - run: pnpm --filter @yavio/sdk exec vitest run
