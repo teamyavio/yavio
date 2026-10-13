@@ -8,7 +8,7 @@ Instrument [MCP](https://modelcontextprotocol.io/) servers with analytics, sessi
 npm install @yavio/sdk
 ```
 
-Requires `@modelcontextprotocol/sdk` >=1.0.0 as a peer dependency.
+Requires `@modelcontextprotocol/sdk` >=1.24.0 as a peer dependency. CI tests that floor and the latest release weekly.
 
 ## Quick Start
 
