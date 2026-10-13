@@ -119,7 +119,7 @@ describe("createProxy — registerTool", () => {
       "tool_with_config",
       {
         description: "A tool with config",
-        inputSchema: { query: { type: "string" } as never },
+        inputSchema: { query: z.string() },
       },
       (args, extra) => ({
         content: [{ type: "text", text: "ok" }],
@@ -745,7 +745,7 @@ describe("createProxy — tool_discovery emission", () => {
       "reg_tool",
       {
         description: "A registered tool",
-        inputSchema: { query: { type: "string" } as never },
+        inputSchema: { query: z.string() },
       },
       () => ({ content: [{ type: "text", text: "ok" }] }),
     );
@@ -755,7 +755,9 @@ describe("createProxy — tool_discovery emission", () => {
     expect(event.event_type).toBe("tool_discovery");
     expect(event.tool_name).toBe("reg_tool");
     expect(event.description).toBe("A registered tool");
-    expect(event.input_schema).toEqual({ query: { type: "string" } });
+    // Pins today's behaviour: the raw Zod shape is passed through instead of
+    // JSON Schema (#83). The fix has to change this assertion on purpose.
+    expect((event.input_schema as Record<string, unknown>).query).toBeInstanceOf(z.ZodString);
   });
 
   it("only emits tool_discovery once per tool name", () => {
