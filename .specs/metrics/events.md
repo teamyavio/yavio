@@ -90,11 +90,15 @@ Fires when the server-side proxy detects a widget response (via `_meta.ui.resour
 
 ### tool_discovery
 
-Fires on `tools/list` request interception. Tracks how often and when clients request the tool catalog. See [server-sdk.md §3.1.3](../sdk/server-sdk.md).
+Fires on `tools/list` request interception — once per tool name per process, for tools registered through the proxy. Feeds `tool_registry` (ReplacingMergeTree on `updated_at`, so a newer discovery replaces an older row). See [server-sdk.md §3.1.3](../sdk/server-sdk.md).
 
 | Field | Type | Description |
 |-------|------|-------------|
-| metadata | TEXT (JSON) | `tools_listed` (array of tool names returned), `tools_count` (integer), `client_name`, `client_version`, `client_capabilities` (object: supported MCP features) |
+| tool_name | TEXT | Tool name |
+| description | TEXT | Tool description as listed, clamped to 2048 characters (ingest's limit) |
+| input_schema | JSON | The tool's input JSON Schema as listed to the client (converted by the MCP SDK), without the intent `context` parameter; omitted above 16,384 characters |
+
+Not implemented (an earlier version of this spec described it): per-listing counts, `tools_listed`, client capabilities.
 
 ---
 
