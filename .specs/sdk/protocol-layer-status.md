@@ -42,6 +42,7 @@ tools/call request
 | callback ran, its event says `success`, final result has `isError: true` | yes | the callback's event with `status: error`, `error_category: server`, `error_message` from the result — output validation failed after the handler |
 | callback never ran, final result has `isError: true`, tool is instrumented or unregistered | no | a new event: `status: error`, `error_category: validation` (see below) |
 | callback never ran, result is not an error | no | nothing — the tool is not instrumented at the callback level (registered on the unwrapped server, or a task-based tool), and that must stay untracked |
+| tool is **registered but not instrumented** (unwrapped server, task tool) | — | no frame at all: the wrapper calls straight through, so not even the session's connection event or platform detection runs for it *(code review 2026-10-13)* |
 | callback never ran, downstream threw | no | nothing — a JSON-RPC error the proxy has no business classifying (today: only `UrlElicitationRequired`) |
 
 "Instrumented" = the proxy wrapped the tool's callback (`instrumentedTools`, fed by both interceptors). "Unregistered" = the name is absent from the live registry (`_registeredTools`, the same private read `intent.ts` already does; when unreadable, treat as registered).
@@ -54,12 +55,12 @@ Two events for one call are impossible by construction: the callback wrapper sen
 |-------|-------|
 | `event_name` | `request.params.name` — for an unknown tool, the name the model asked for. The dashboard then lists it as a tool with a 100 % error rate, which is the honest signal ("the model keeps calling `search_flights`, which does not exist") |
 | `status` / `error_category` | `error` / `validation` — for unknown, disabled, argument validation and task misconfiguration alike. All four are `InvalidParams`-class failures of the request itself; the MCP SDK hands them over as one text, so a finer split would mean parsing message prefixes. `error_message` carries the reason |
-| `error_message` | the `isError` result's text (`createToolError`), PII-stripped, clamped — **gated on the resolved `outputValues`** like every result-derived message (#75 rule): Zod 3 enum errors echo the received value, so the text can contain input |
+| `error_message` | the `isError` result's text (`createToolError`), PII-stripped, clamped — **gated on the resolved `outputValues` AND `inputValues`**: it is result-derived (#75 rule), and McpServer's text describes the rejected arguments while Zod 3 enum errors echo the received value, so it is input as well *(inputValues gate added 2026-10-13)* |
 | `latency_ms` | **absent**. The handler never ran; there is no execution time to report, and a wall-clock value of ~0 ms would only drag the tool's latency percentiles down |
-| `input_keys` / `input_types` / `input_values` / client meta | from the **raw** `request.params.arguments` and `extra`, under the tool's resolved capture flags (`resolveToolCapture(name)`; global flags for an unregistered name). For an argument-validation failure the raw arguments are exactly what is interesting: what did the model send? |
-| `output_content` | the error result, under `outputValues` |
+| `input_keys` / `input_types` / `input_values` / client meta | from the **raw** `request.params.arguments` and `extra`, under the tool's resolved capture flags (`resolveToolCapture(name)`, **also for a name that is not registered** — an override must hold for a tool a deployment registers conditionally while a client calls it from a cached schema; changed 2026-10-13). For an argument-validation failure the raw arguments are exactly what is interesting: what did the model send? |
+| `output_content` | the error result, under `outputValues` AND `inputValues` (same text as `error_message`) |
 | `intent_signals` | whatever the intent wrapper captured — it sits outside the status wrapper, so `getCapturedIntent()` works and the captured arguments are already free of `context` |
-| session / trace / platform | as for any call (`openCallContext`), including the deferred connection event on the first call of a session |
+| session / trace / platform | as for any call (`openCallContext`), including the deferred connection event on the first call of a session. If opening the context throws, the call runs without a frame (callback-only behaviour) — the wrapper sits outside McpServer's try/catch and must never fail the client's call |
 
 ### The post-handler case
 
@@ -99,8 +100,9 @@ Status must be the inner wrapper: it then runs inside the intent store (so a pre
 5. Handler throws → exactly one event, `unknown`. Handler returns `isError` → exactly one event, `tool_error`.
 6. Output validation failure → exactly one event, `status: error`, `server`, latency present.
 7. Intent on + validation failure with `context` sent → event has `intent_signals`, `input_values` has no `context`.
-8. Per-tool `inputValues: false` → the validation event carries no inputs or client meta; `outputValues: false` → no `error_message`, status/category kept.
-9. Tool registered on the **unwrapped** server → validation failure and success both produce **no** event.
+8. Per-tool `inputValues: false` → the validation event carries no inputs, client meta, `error_message` or `output_content`; `outputValues: false` → no `error_message`, status/category kept. The override also applies to a name this deployment never registered.
+9. Tool registered on the **unwrapped** server → validation failure and success both produce **no** event, not even a connection event.
+10. Opening the call context throws → the client's call still succeeds, and the callback sends its event on its own.
 10. Direct handler invocation without a frame → event sent immediately (the existing `proxy.test.ts` suite).
 11. Server without the private API → callback path still emits (the existing Skybridge tests).
 12. All existing intent tests pass unchanged after the install refactor.

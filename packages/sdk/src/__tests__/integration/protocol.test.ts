@@ -242,6 +242,9 @@ describe("protocol layer — failures before the handler", () => {
     expect(book.subject_id).toBeUndefined();
     expect(book.country_code).toBeUndefined();
     expect(JSON.stringify(book)).not.toContain("Duisburg");
+    // McpServer's validation text echoes the rejected arguments: input.
+    expect(book.error_message).toBeUndefined();
+    expect(book.output_content).toBeUndefined();
 
     const quote = byName.quote as ToolCallEvent;
     expect(quote.status).toBe("error");
@@ -265,7 +268,62 @@ describe("protocol layer — failures before the handler", () => {
     expect(failed.isError).toBe(true);
     expect(succeeded.isError).toBeFalsy();
     expect(toolCalls(h.events)).toHaveLength(0);
+    // Not even the session's connection event: the protocol layer does no
+    // session work for a tool it does not track.
+    expect(h.events.flat().map((e) => e.event_type)).not.toContain("connection");
     expect(JSON.stringify(h.events)).not.toContain("DE00");
+  });
+
+  it("keeps a per-tool override for a tool this deployment never registered", async () => {
+    // Conditional registration (feature flag off here), while a client still
+    // calls the tool from a schema it cached elsewhere.
+    const h = await setup(
+      (proxy) => {
+        proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"));
+      },
+      { tools: { book: { inputValues: false } } },
+    );
+
+    const result = await h.client.callTool({
+      name: "book",
+      arguments: { iban: "DE89370400440532013000" },
+      _meta: CLIENT_META,
+    });
+
+    expect(result.isError).toBe(true);
+    const [event] = toolCalls(h.events);
+    expect(event?.event_name).toBe("book");
+    expect(event?.error_category).toBe("validation");
+    expect(event?.input_values).toBeUndefined();
+    expect(event?.error_message).toBeUndefined();
+    expect(JSON.stringify(h.events)).not.toContain("DE89370400440532013000");
+  });
+
+  it("never fails the client's call when opening the call context throws", async () => {
+    const sent: BaseEvent[][] = [];
+    const transport: Transport = {
+      send(events: BaseEvent[]) {
+        // The connection event goes out while the call context is opened.
+        if (events[0]?.event_type === "connection") throw new Error("transport down");
+        sent.push(events);
+      },
+      flush: async () => {},
+      shutdown: async () => {},
+    };
+    const server = new McpServerCtor({ name: "protocol-test", version: "1.0" });
+    const proxy = createProxy(server, makeConfig(), transport, "0.4.0");
+    proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("found"));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await proxy.connect(serverTransport);
+    const client = new Client({ name: "protocol-test-client", version: "1.0" });
+    await client.connect(clientTransport);
+
+    const result = await client.callTool({ name: "search", arguments: { query: "x" } });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toEqual([{ type: "text", text: "found" }]);
+    const [event] = toolCalls(sent);
+    expect(event?.status).toBe("success");
   });
 });
 

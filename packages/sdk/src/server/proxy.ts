@@ -216,9 +216,16 @@ function wrapToolCallback(
     // send here.
     const activeFrame = currentCallFrame();
     const frame = activeFrame && activeFrame.toolName === toolName ? activeFrame : undefined;
-    const { traceId, session } =
-      frame?.context ??
-      openCallContext(extra, resolveSession, server, config, transport, sdkVersion);
+    let context: CallContext;
+    try {
+      context =
+        frame?.context ??
+        openCallContext(extra, resolveSession, server, config, transport, sdkVersion);
+    } catch {
+      // YAVIO-1100: instrumentation failed, the original call still runs.
+      return originalCb(...cbArgs);
+    }
+    const { traceId, session } = context;
     const emit = (event: ToolCallEvent): void => {
       if (frame && frame.event === null) frame.event = event;
       else transport.send([event]);
@@ -434,20 +441,24 @@ export function createProxy<T extends McpServer>(
       return frame.event;
     }
 
-    // The callback never ran. Only a failure is worth an event — a clean
-    // result here means the tool is not instrumented at the callback level
-    // (unwrapped registration, task-based tool) and stays untracked.
+    // The callback never ran. Only a failure is worth an event. (Registered
+    // but uninstrumented tools never get here, see statusWrapper.)
     if (!resultError) return null;
-    const instrumented = instrumentedTools.has(toolName);
-    if (!instrumented && isRegistered(toolName)) return null;
 
     // Unknown tool, disabled tool, argument validation, task misconfiguration:
     // all InvalidParams-class failures of the request itself, handed over by
     // McpServer as one isError text. `validation` for all four; the message
     // says which. No latency — the handler never ran. Inputs are the RAW
-    // arguments (what did the model send?), under the tool's capture flags.
-    const capture = instrumented ? resolveToolCapture(config, toolName) : config.capture;
+    // arguments (what did the model send?), under the tool's capture flags —
+    // resolved by name even when the tool is not (or no longer) registered,
+    // so an override still holds for a removed tool a client calls from a
+    // cached schema.
+    const capture = resolveToolCapture(config, toolName);
     const captureInput = capture.inputValues && args !== undefined;
+    // McpServer's text describes the arguments it rejected and Zod echoes the
+    // received values, so it is input as much as output: stored only while
+    // both are captured.
+    const captureMessage = capture.outputValues && capture.inputValues;
     return buildToolCallEvent(
       {
         traceId: context.traceId,
@@ -460,13 +471,11 @@ export function createProxy<T extends McpServer>(
         toolName,
         status: "error",
         errorCategory: "validation",
-        // Result-derived text is output (#75 rule): Zod 3 enum errors echo the
-        // received value, so it can contain input.
-        errorMessage: capture.outputValues ? resultError.message : undefined,
+        errorMessage: captureMessage ? resultError.message : undefined,
         inputKeys: captureInput ? extractInputKeys(args) : undefined,
         inputTypes: captureInput ? extractInputTypes(args) : undefined,
         inputValues: captureInput ? extractInputValues(args, extra, capture.geo) : undefined,
-        outputContent: capture.outputValues ? extractOutputContent(result) : undefined,
+        outputContent: captureMessage ? extractOutputContent(result) : undefined,
         intentSignals: getCapturedIntent() ?? undefined,
         clientMeta: captureInput ? extractClientMeta(extra, capture.geo) : undefined,
       },
@@ -482,11 +491,26 @@ export function createProxy<T extends McpServer>(
     const params = (request as { params?: { name?: unknown; arguments?: unknown } } | undefined)
       ?.params;
     const toolName = typeof params?.name === "string" ? params.name : "unknown";
-    const frame: CallFrame = {
-      toolName,
-      context: openCallContext(extra, resolveSession, server, config, transport, sdkVersion),
-      event: null,
-    };
+
+    // A registered tool the proxy did not wrap (unwrapped server, task tool)
+    // stays untracked: no frame, no session work, no connection event.
+    if (!instrumentedTools.has(toolName) && isRegistered(toolName)) {
+      return handler(request, extra);
+    }
+
+    // This runs outside McpServer's own try/catch: a failure here must never
+    // fail the customer's call. Without a frame the callback wrapper falls
+    // back to resolving and sending on its own.
+    let frame: CallFrame;
+    try {
+      frame = {
+        toolName,
+        context: openCallContext(extra, resolveSession, server, config, transport, sdkVersion),
+        event: null,
+      };
+    } catch {
+      return handler(request, extra);
+    }
 
     let result: unknown;
     try {
@@ -495,11 +519,19 @@ export function createProxy<T extends McpServer>(
       // A JSON-RPC error the proxy has no business classifying (today only
       // UrlElicitationRequired escapes McpServer's catch). The callback's own
       // event, if it produced one, still goes out.
-      if (frame.event) transport.send([frame.event]);
+      try {
+        if (frame.event) transport.send([frame.event]);
+      } catch {
+        // Analytics never changes what the client gets.
+      }
       throw error;
     }
-    const event = finalizeCallEvent(frame, params?.arguments, extra, result);
-    if (event) transport.send([event]);
+    try {
+      const event = finalizeCallEvent(frame, params?.arguments, extra, result);
+      if (event) transport.send([event]);
+    } catch {
+      // Analytics never changes what the client gets.
+    }
     return result;
   };
 
