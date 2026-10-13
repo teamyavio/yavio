@@ -271,9 +271,16 @@ function wrapToolCallback(
           latencyMs,
           status: "error",
           errorCategory: "unknown",
-          // Developer-written, so it is kept even with output capture off
-          // (unlike the text of an isError result, see the success path).
-          errorMessage: error instanceof Error ? error.message : String(error),
+          // Developer-written, so output capture does not gate it (unlike the
+          // text of an isError result, see the success path). Input capture
+          // does: messages routinely interpolate the arguments
+          // (`IBAN ${iban} rejected`, a ZodError echoing received values),
+          // and stripPii does not catch IBANs or customer numbers.
+          errorMessage: capture.inputValues
+            ? error instanceof Error
+              ? error.message
+              : String(error)
+            : undefined,
           inputValues: captureInputOnError
             ? extractInputValues(cbArgs[0], extra, capture.geo)
             : undefined,

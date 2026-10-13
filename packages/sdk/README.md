@@ -82,8 +82,8 @@ withYavio(server, {
 
 | Override | `false` means |
 |----------|---------------|
-| `inputValues` | No `input_keys`, `input_types`, `input_values` and no client metadata (`locale`, `country_code`, `end_user_agent`, `subject_id`) for this tool, on success and on error |
-| `outputValues` | No `output_content`, and no `error_message` taken from an `isError` result (that text is output). `status` and `error_category` are still recorded; a thrown error's message still is |
+| `inputValues` | No `input_keys`, `input_types`, `input_values`, no client metadata (`locale`, `country_code`, `end_user_agent`, `subject_id`) and no thrown error's message for this tool, on success and on error |
+| `outputValues` | No `output_content`, and no `error_message` taken from an `isError` result (that text is output). `status` and `error_category` are still recorded; a thrown error's message is (it is gated on `inputValues`, see below) |
 | `intent` | The `context` parameter is neither advertised nor captured for this tool. A `context` a client still sends from a cached schema is stripped before validation, so strict schemas keep accepting the call. No effect while intent capture is off globally |
 
 A key that is omitted inherits the global value, so an override can also switch a flag *on* for one tool. Names are not validated — tools register after `withYavio()` runs — so an override for a tool that never registers is simply unused. The tool still emits `tool_discovery` (description and schema, no user data) and `tool_call` with latency and status, and tracking calls from inside its handler carry the full session context.
@@ -127,7 +127,7 @@ A call is an error when the handler **throws** or when it **returns a result wit
 
 Only the literal boolean `true` counts as `isError`. The client sees the same shape either way (the MCP SDK converts a throw into an `isError` result), so the distinction is server-side only.
 
-`error_message` is the exception's message, or for an `isError` result the first `text` content item. Both are PII-stripped and clamped to 500 characters. The result text is output, so it is stored only while `outputValues` is on; `status` and `error_category` are derived from the result regardless of output capture.
+`error_message` is the exception's message, or for an `isError` result the first `text` content item. Both are PII-stripped and clamped to 500 characters. The result text is output, so it is stored only while `outputValues` is on. A thrown message is developer-written, but messages routinely interpolate the arguments (`IBAN ${iban} rejected`) and the PII stripper does not recognise IBANs or customer numbers, so it is stored only while `inputValues` is on. `status` and `error_category` are recorded regardless.
 
 Before 0.4.0 only a throw counted, so **error rates rise on upgrade** — a correction of an under-count, not a regression.
 

@@ -24,15 +24,17 @@ export interface YavioConfig {
  */
 export interface ToolCaptureOverride {
   /**
-   * `false`: no `input_keys`, `input_types`, `input_values` and no client
-   * metadata (`locale`, `country_code`, `end_user_agent`, `subject_id`) for
+   * `false`: no `input_keys`, `input_types`, `input_values`, no client
+   * metadata (`locale`, `country_code`, `end_user_agent`, `subject_id`) and no
+   * thrown error's message (messages tend to interpolate the arguments) for
    * this tool, on success and on error. Same semantics as the global flag.
    */
   inputValues?: boolean;
   /**
    * `false`: no `output_content` for this tool, and no `error_message` taken
    * from an `isError` result (that text is output). `status` and
-   * `error_category` are still recorded; a thrown error's message still is.
+   * `error_category` are still recorded; a thrown error's message still is
+   * (gated on `inputValues` instead).
    */
   outputValues?: boolean;
   /**

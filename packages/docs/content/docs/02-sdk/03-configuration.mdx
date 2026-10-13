@@ -76,8 +76,8 @@ withYavio(server, {
 
 | Flag | Off means |
 |------|-----------|
-| `inputValues` | No `input_keys`, `input_types`, `input_values`, and no client metadata (`locale`, `country_code`, `end_user_agent`, `subject_id`) |
-| `outputValues` | No `output_content`. An `isError` result still sets `status` and `error_category`, but its text is not stored as `error_message` (it is output). A thrown error's message is still stored |
+| `inputValues` | No `input_keys`, `input_types`, `input_values`, no client metadata (`locale`, `country_code`, `end_user_agent`, `subject_id`), and no `error_message` from a thrown error (messages tend to interpolate the arguments) |
+| `outputValues` | No `output_content`. An `isError` result still sets `status` and `error_category`, but its text is not stored as `error_message` (it is output). A thrown error's message is still stored unless `inputValues` is off |
 | `geo` | No `country_code`, and no `openai/userLocation` inside the captured `_meta` |
 
 `geo` also takes a third value, `"country"`: `country_code` is still set, and `openai/userLocation` in the captured `_meta` is replaced by `{ country }` — city, region, timezone, coordinates and any field the platform adds later are not stored. Use it when a privacy review asks for country-level analytics without precise location. `geo` accepts exactly `true`, `false` and `"country"`; any other value (for example the string `"false"` in `.yaviorc.json`) turns location capture **off** and logs `YAVIO-1006` once per process. `geo` has no per-tool override.

@@ -1800,12 +1800,37 @@ describe("per-tool capture overrides", () => {
     expect(book?.output_content).toBeUndefined();
   });
 
-  it("drops inputs and client meta on the throw path too, keeping the developer's message", async () => {
+  it("drops inputs, client meta and the thrown message on the throw path too", async () => {
     const server = new McpServer({ name: "test", version: "1.0" });
     const transport = createMockTransport();
     const proxy = createProxy(
       server,
       configWith({ book: { inputValues: false, outputValues: false } }),
+      transport,
+      "0.0.1",
+    );
+    proxy.tool("book", { iban: z.string() }, ({ iban }) => {
+      // Messages routinely interpolate the arguments, and stripPii does not
+      // recognise an IBAN.
+      throw new Error(`IBAN ${iban} rejected`);
+    });
+    await expect(
+      getRegisteredTool(server, "book")?.handler({ iban: "DE89370400440532013000" }, extra()),
+    ).rejects.toThrow();
+    const book = toolCallFor(transport, "book");
+    expectNoInputs(book);
+    expect(book?.status).toBe("error");
+    expect(book?.error_category).toBe("unknown");
+    expect(book?.error_message).toBeUndefined();
+    expect(JSON.stringify(book)).not.toContain("DE89370400440532013000");
+  });
+
+  it("drops the thrown message under a global inputValues: false as well", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server,
+      { ...testConfig, capture: { ...testConfig.capture, inputValues: false } },
       transport,
       "0.0.1",
     );
@@ -1816,10 +1841,26 @@ describe("per-tool capture overrides", () => {
       getRegisteredTool(server, "book")?.handler({ q: "hello" }, extra()),
     ).rejects.toThrow();
     const book = toolCallFor(transport, "book");
-    expectNoInputs(book);
     expect(book?.status).toBe("error");
-    expect(book?.error_category).toBe("unknown");
-    expect(book?.error_message).toBe("upstream unavailable");
+    expect(book?.error_message).toBeUndefined();
+  });
+
+  it("keeps the thrown message when only outputValues is off (developer-written, not output)", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server,
+      configWith({ book: { outputValues: false } }),
+      transport,
+      "0.0.1",
+    );
+    proxy.tool("book", { q: z.string() }, () => {
+      throw new Error("upstream unavailable");
+    });
+    await expect(
+      getRegisteredTool(server, "book")?.handler({ q: "hello" }, extra()),
+    ).rejects.toThrow();
+    expect(toolCallFor(transport, "book")?.error_message).toBe("upstream unavailable");
   });
 
   it("keeps status and category for an isError result but drops its text under outputValues: false", async () => {
