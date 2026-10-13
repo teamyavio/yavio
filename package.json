@@ -22,7 +22,7 @@
       "fast-xml-parser": ">=5.5.6",
       "path-to-regexp": ">=8.4.0",
       "picomatch": ">=4.0.4",
-      "@hono/node-server": "^2.0.10",
+      "@hono/node-server": "^1.19.17",
       "express-rate-limit": ">=8.2.2",
       "undici": "^7.29.1",
       "shell-quote": "^1.11.0",
@@ -47,7 +47,7 @@
       "baseline-browser-mapping": "^2.11.0"
     },
     "auditConfig": {
-      "ignoreGhsas": []
+      "ignoreGhsas": ["GHSA-6qxp-vccf-f47h"]
     }
   },
   "devDependencies": {

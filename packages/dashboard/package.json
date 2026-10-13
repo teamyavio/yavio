@@ -14,7 +14,7 @@
   "dependencies": {
     "@clickhouse/client": "^1.17.0",
     "@hookform/resolvers": "^5.2.2",
-    "@modelcontextprotocol/sdk": "1.32.1",
+    "@modelcontextprotocol/sdk": "1.26.0",
     "@nivo/core": "^0.99.0",
     "@nivo/sankey": "^0.99.0",
     "@radix-ui/react-slot": "^1.2.4",
