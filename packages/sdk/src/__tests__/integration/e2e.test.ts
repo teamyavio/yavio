@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 import type { YavioConfig } from "../../core/types.js";
 import { createYavioContext } from "../../server/context.js";
 import { _resetGlobalState, createProxy } from "../../server/proxy.js";
@@ -90,7 +91,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
 
     const yavioCtx = createYavioContext();
     let handlerExecuted = false;
-    proxy.tool("search_rooms", { query: { type: "string" } as never }, (args) => {
+    proxy.tool("search_rooms", { query: z.string() }, (args) => {
       handlerExecuted = true;
 
       yavioCtx.identify("user-42", { plan: "premium" });
@@ -228,7 +229,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
       "search_hotels",
       {
         description: "Search for hotels",
-        inputSchema: { query: { type: "string" } as never },
+        inputSchema: { query: z.string() },
       },
       (args) => {
         handlerExecuted = true;
