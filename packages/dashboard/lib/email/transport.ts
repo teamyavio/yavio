@@ -1,8 +1,8 @@
-import nodemailer from "nodemailer";
+import nodemailer, { type Transporter } from "nodemailer";
 
-let transporter: nodemailer.Transporter | null = null;
+let transporter: Transporter | null = null;
 
-export function getTransporter(): nodemailer.Transporter | null {
+export function getTransporter(): Transporter | null {
   if (!process.env.SMTP_HOST) return null;
 
   if (!transporter) {

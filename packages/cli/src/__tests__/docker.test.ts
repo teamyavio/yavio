@@ -16,6 +16,9 @@ describe("docker utilities", () => {
 
   afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
+    // Vitest 4: restoreAllMocks no longer resets module mocks like `execa`,
+    // so calls and queued once-values would leak into the next test.
+    vi.resetAllMocks();
     vi.restoreAllMocks();
   });
 
