@@ -77,7 +77,15 @@ export interface IntentOptions {
 export interface CaptureConfig {
   inputValues: boolean;
   outputValues: boolean;
-  geo: boolean;
+  /**
+   * Location the platform relays in `_meta["openai/userLocation"]`.
+   * - `true` (default): `country_code` is set and `input_values._meta` keeps
+   *   the whole object (city, region, country, timezone, coordinates).
+   * - `"country"`: `country_code` is set and `input_values._meta` keeps only
+   *   `{ country }` — nothing else, including fields added later.
+   * - `false`: no `country_code`, and the object is removed from `_meta`.
+   */
+  geo: boolean | "country";
   tokens: boolean;
   retries: boolean;
 }

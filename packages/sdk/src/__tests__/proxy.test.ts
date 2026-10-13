@@ -1380,42 +1380,122 @@ describe("client metadata capture", () => {
     }
   });
 
+  const countryOnly: YavioConfig = {
+    ...testConfig,
+    capture: { ...testConfig.capture, geo: "country" },
+  };
+
+  function expectNoLocationDetail(event: Record<string, unknown>) {
+    const serialized = JSON.stringify(event);
+    for (const leak of ["Duisburg", "North Rhine-Westphalia", "Europe/Berlin", "51.43247"]) {
+      expect(serialized, leak).not.toContain(leak);
+    }
+  }
+
+  it('keeps only the country when capture.geo is "country"', async () => {
+    const event = await callWithMeta(countryOnly, CHATGPT_META);
+    expect(event.country_code).toBe("DE");
+    expect(event.locale).toBe("de-DE");
+    expect(event.subject_id).toBe("v1/2vDU0AOje8kKSAasHqXU4Y");
+    const meta = (event.input_values as Record<string, unknown>)._meta as Record<string, unknown>;
+    expect(meta["openai/userLocation"]).toEqual({ country: "DE" });
+    const { "openai/userLocation": _location, ...rest } = CHATGPT_META;
+    expect(meta).toEqual({ ...rest, "openai/userLocation": { country: "DE" } });
+    expectNoLocationDetail(event);
+  });
+
+  it('builds the "country" location from an allow-list, so unknown fields never pass', async () => {
+    const event = await callWithMeta(countryOnly, {
+      ...CHATGPT_META,
+      "openai/userLocation": { ...CHATGPT_META["openai/userLocation"], postalCode: "47051" },
+    });
+    const meta = (event.input_values as Record<string, unknown>)._meta as Record<string, unknown>;
+    expect(meta["openai/userLocation"]).toEqual({ country: "DE" });
+    expect(JSON.stringify(event)).not.toContain("47051");
+  });
+
+  it('drops the location entirely under "country" when there is no valid country', async () => {
+    const { country: _country, ...noCountry } = CHATGPT_META["openai/userLocation"];
+    for (const location of [noCountry, { ...noCountry, country: "Germany" }]) {
+      const event = await callWithMeta(countryOnly, {
+        ...CHATGPT_META,
+        "openai/userLocation": location,
+      });
+      expect(event.country_code).toBeUndefined();
+      const meta = (event.input_values as Record<string, unknown>)._meta as Record<string, unknown>;
+      expect(meta).not.toHaveProperty("openai/userLocation");
+      expect(meta["openai/locale"]).toBe("de-DE");
+      expectNoLocationDetail(event);
+    }
+  });
+
+  it('applies "country" on the error path too', async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, countryOnly, transport, "0.0.1");
+    proxy.tool("meta_tool", { q: z.string() }, () => {
+      throw new Error("boom");
+    });
+    await expect(
+      getRegisteredTool(server, "meta_tool")?.handler(
+        { q: "hello" },
+        {
+          signal: new AbortController().signal,
+          requestId: "req-cm-3",
+          sendNotification: async () => {},
+          sendRequest: async () => ({}),
+          _meta: CHATGPT_META,
+        },
+      ),
+    ).rejects.toThrow("boom");
+    const event = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+      string,
+      unknown
+    >;
+    expect(event.status).toBe("error");
+    expect(event.country_code).toBe("DE");
+    const meta = (event.input_values as Record<string, unknown>)._meta as Record<string, unknown>;
+    expect(meta["openai/userLocation"]).toEqual({ country: "DE" });
+    expectNoLocationDetail(event);
+  });
+
   it("keeps the full userLocation in _meta while capture.geo is on (default)", async () => {
     const event = await callWithMeta(testConfig, CHATGPT_META);
     const meta = (event.input_values as Record<string, unknown>)._meta as Record<string, unknown>;
     expect(meta["openai/userLocation"]).toEqual(CHATGPT_META["openai/userLocation"]);
   });
 
-  it("never mutates the _meta the handler receives when gating geo", async () => {
-    const server = new McpServer({ name: "test", version: "1.0" });
-    const transport = createMockTransport();
-    const proxy = createProxy(
-      server,
-      { ...testConfig, capture: { ...testConfig.capture, geo: false } },
-      transport,
-      "0.0.1",
-    );
-    let seenMeta: unknown;
-    proxy.tool("meta_tool", { q: z.string() }, (_args, extra) => {
-      seenMeta = extra._meta;
-      return { content: [{ type: "text", text: "ok" }] };
-    });
-    const _meta = JSON.parse(JSON.stringify(CHATGPT_META));
-    await getRegisteredTool(server, "meta_tool")?.handler(
-      { q: "hello" },
-      {
-        signal: new AbortController().signal,
-        requestId: "req-cm-2",
-        sendNotification: async () => {},
-        sendRequest: async () => ({}),
-        _meta,
-      },
-    );
-    expect(seenMeta).toBe(_meta);
-    expect((seenMeta as Record<string, unknown>)["openai/userLocation"]).toEqual(
-      CHATGPT_META["openai/userLocation"],
-    );
-  });
+  it.each([false, "country"] as const)(
+    "never mutates the _meta the handler receives when gating geo (%s)",
+    async (geo) => {
+      const server = new McpServer({ name: "test", version: "1.0" });
+      const transport = createMockTransport();
+      const proxy = createProxy(
+        server,
+        { ...testConfig, capture: { ...testConfig.capture, geo } },
+        transport,
+        "0.0.1",
+      );
+      let seenMeta: unknown;
+      proxy.tool("meta_tool", { q: z.string() }, (_args, extra) => {
+        seenMeta = extra._meta;
+        return { content: [{ type: "text", text: "ok" }] };
+      });
+      const _meta = JSON.parse(JSON.stringify(CHATGPT_META));
+      await getRegisteredTool(server, "meta_tool")?.handler(
+        { q: "hello" },
+        {
+          signal: new AbortController().signal,
+          requestId: "req-cm-2",
+          sendNotification: async () => {},
+          sendRequest: async () => ({}),
+          _meta,
+        },
+      );
+      expect(seenMeta).toBe(_meta);
+      expect(seenMeta).toEqual(CHATGPT_META);
+    },
+  );
 
   it("captures nothing when inputValues capture is off", async () => {
     const event = await callWithMeta(

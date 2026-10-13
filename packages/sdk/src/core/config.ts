@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { dirname, join, parse } from "node:path";
+import { ErrorCode } from "@yavio/shared/error-codes";
 import type {
   CaptureConfig,
   IntentConfig,
@@ -94,6 +95,30 @@ function resolveTools(
   return tools;
 }
 
+let warnedInvalidGeo = false;
+
+/** @internal Reset the warn-once state — exposed for testing only. */
+export function _resetConfigWarnings(): void {
+  warnedInvalidGeo = false;
+}
+
+/**
+ * `capture` is spread from hand-written JSON and untyped JS, so `geo` can be
+ * anything — and `"false"` is truthy. A privacy flag must fail closed: any
+ * value other than `true`, `false` or `"country"` turns geo off. Warn once per
+ * process; stateless servers resolve the config on every request.
+ */
+function resolveGeo(value: unknown): CaptureConfig["geo"] {
+  if (value === true || value === false || value === "country") return value;
+  if (!warnedInvalidGeo) {
+    warnedInvalidGeo = true;
+    console.warn(
+      `[${ErrorCode.SDK.INVALID_CAPTURE_OPTION}] capture.geo must be true, false or "country", got ${JSON.stringify(value)} — treating it as false. Shown once per process.`,
+    );
+  }
+  return false;
+}
+
 /**
  * Parse an env var as a boolean. Accepts "1"/"true"/"yes"/"on" (and their
  * negatives), case-insensitive. An empty or unrecognised value yields
@@ -151,6 +176,7 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
     ...fileConfig?.capture,
     ...options?.capture,
   };
+  capture.geo = resolveGeo(capture.geo);
 
   const serverOnly =
     options?.serverOnly ??

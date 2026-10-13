@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveConfig } from "../core/config.js";
+import { _resetConfigWarnings, resolveConfig } from "../core/config.js";
 
 describe("resolveConfig", () => {
   const originalEnv = process.env;
@@ -256,5 +256,56 @@ describe("per-tool capture overrides (tools)", () => {
     );
     const config = withCwd(tempDir, () => resolveConfig());
     expect(config?.tools).toEqual({ book: { intent: false } });
+  });
+});
+
+describe("capture.geo validation", () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    _resetConfigWarnings();
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  it.each([true, false, "country"] as const)("passes %s through without a warning", (geo) => {
+    expect(resolveConfig({ apiKey: "test", capture: { geo } })?.capture.geo).toBe(geo);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each(["false", "Country", 1, null])("fails closed on %j with one warning", (geo) => {
+    const config = resolveConfig({ apiKey: "test", capture: { geo: geo as never } });
+    expect(config?.capture.geo).toBe(false);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0][0]).toContain("YAVIO-1006");
+  });
+
+  it("warns once per process, not once per resolution", () => {
+    for (let i = 0; i < 3; i++) {
+      expect(resolveConfig({ apiKey: "test", capture: { geo: "yes" as never } })?.capture.geo).toBe(
+        false,
+      );
+    }
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed on a hand-written "false" string in .yaviorc.json', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "yavio-geo-test-"));
+    const originalCwd = process.cwd;
+    try {
+      writeFileSync(
+        join(tempDir, ".yaviorc.json"),
+        JSON.stringify({ apiKey: "file_key", capture: { geo: "false" } }),
+      );
+      process.cwd = () => tempDir;
+      expect(resolveConfig()?.capture.geo).toBe(false);
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      process.cwd = originalCwd;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });

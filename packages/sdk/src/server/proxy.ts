@@ -614,8 +614,10 @@ function extractInputTypes(args: unknown): Record<string, unknown> | undefined {
  *   columns; do not "deduplicate" either side away. With `capture.geo` off
  *   the `openai/userLocation` object (city, region, timezone, coordinates)
  *   is removed from the clone — a flag named geo must not leave coordinates
- *   in. The clone is what makes this safe: the handler's own `_meta` is
- *   never touched.
+ *   in. With `"country"` it is replaced by a NEW `{ country }` object, built
+ *   from an allow-list so a field the platform adds later cannot leak
+ *   through, or removed when there is no valid country. The clone is what
+ *   makes this safe: the handler's own `_meta` is never touched.
  * - `_taskId`: MCP task id, for correlating task-based flows.
  * - `_requestInfo`: allow-listed headers and the URL sans query, see
  *   sanitizeRequestInfo.
@@ -630,7 +632,7 @@ function extractInputTypes(args: unknown): Record<string, unknown> | undefined {
 function extractInputValues(
   args: unknown,
   extra: unknown,
-  geoEnabled: boolean,
+  geo: CaptureConfig["geo"],
 ): Record<string, unknown> | undefined {
   if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
   try {
@@ -639,9 +641,10 @@ function extractInputValues(
       const ex = extra as Record<string, unknown>;
       if (ex._meta != null) {
         let meta = JSON.parse(JSON.stringify(ex._meta)) as unknown;
-        if (!geoEnabled && meta && typeof meta === "object" && !Array.isArray(meta)) {
-          const { "openai/userLocation": _location, ...rest } = meta as Record<string, unknown>;
-          meta = rest;
+        if (geo !== true && meta && typeof meta === "object" && !Array.isArray(meta)) {
+          const { "openai/userLocation": location, ...rest } = meta as Record<string, unknown>;
+          const country = geo === "country" ? locationCountry(location) : undefined;
+          meta = country ? { ...rest, "openai/userLocation": { country } } : rest;
         }
         clone._meta = meta;
       }
@@ -692,12 +695,12 @@ const CAPTURED_HEADERS = new Set([
  * The location part is gated behind `capture.geo` and reduced to the
  * 2-letter country code — city and coordinates are never lifted into a
  * first-class column. (They do travel inside the verbatim `_meta` clone in
- * `input_values` while `geo` is on; with `geo` off extractInputValues drops
- * the whole `openai/userLocation` object from that clone as well.)
+ * `input_values` while `geo` is `true`; with `"country"` extractInputValues
+ * reduces that object to the same country, with `false` it drops it.)
  */
 function extractClientMeta(
   extra: unknown,
-  geoEnabled: boolean,
+  geo: CaptureConfig["geo"],
 ): import("../core/events.js").ClientMeta | undefined {
   if (!extra || typeof extra !== "object") return undefined;
   const meta = (extra as Record<string, unknown>)._meta;
@@ -707,24 +710,27 @@ function extractClientMeta(
   const str = (v: unknown, max: number): string | undefined =>
     typeof v === "string" && v.length > 0 ? v.slice(0, max) : undefined;
 
-  let countryCode: string | undefined;
-  if (geoEnabled) {
-    const loc = m["openai/userLocation"];
-    if (loc && typeof loc === "object") {
-      const country = (loc as Record<string, unknown>).country;
-      if (typeof country === "string" && /^[A-Za-z]{2}$/.test(country)) {
-        countryCode = country.toUpperCase();
-      }
-    }
-  }
-
   const out = {
-    countryCode,
+    countryCode:
+      geo === true || geo === "country" ? locationCountry(m["openai/userLocation"]) : undefined,
     locale: str(m["openai/locale"], 35),
     endUserAgent: str(m["openai/userAgent"], 512),
     subjectId: str(m["openai/subject"], 256),
   };
   return out.countryCode || out.locale || out.endUserAgent || out.subjectId ? out : undefined;
+}
+
+/**
+ * The upper-cased ISO alpha-2 country of an `openai/userLocation` object, or
+ * undefined. The single check behind both `country_code` and the `"country"`
+ * reduction of `_meta`, so the two can never disagree.
+ */
+function locationCountry(location: unknown): string | undefined {
+  if (!location || typeof location !== "object") return undefined;
+  const country = (location as Record<string, unknown>).country;
+  return typeof country === "string" && /^[A-Za-z]{2}$/.test(country)
+    ? country.toUpperCase()
+    : undefined;
 }
 
 /**

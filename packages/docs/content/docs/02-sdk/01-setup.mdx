@@ -43,7 +43,7 @@ const instrumented = withYavio(server, {
 | `endpoint` | `string` | `https://ingest.yavio.ai/v1/events` | Ingestion API URL. Falls back to `YAVIO_ENDPOINT` env var. |
 | `capture.inputValues` | `boolean` | `true` | Capture tool input values, key names and types, plus client metadata |
 | `capture.outputValues` | `boolean` | `true` | Capture tool results |
-| `capture.geo` | `boolean` | `true` | Capture the end user's country code |
+| `capture.geo` | `boolean \| "country"` | `true` | End-user location: `true` keeps it as sent, `"country"` keeps only the country, `false` drops it |
 | `tools` | `Record<string, ToolCaptureOverride>` | — | Per-tool overrides of the capture flags (`inputValues`, `outputValues`, `intent`) |
 
 See [Configuration](/docs/02-sdk/03-configuration) for the full precedence chain.
@@ -66,7 +66,7 @@ Every `server.tool()` and `server.registerTool()` invocation is tracked with:
 - **Output** (with `capture.outputValues`, the default) — the tool result, binary content replaced by size placeholders
 
 <Callout type="warn">
-  On ChatGPT the request `_meta` carries the user's approximate location including coordinates and the platform's stable per-user id, and with the defaults both are stored on every tool call. Disclose that collection in your privacy policy, or turn it off with `capture.geo: false` (location) or `capture.inputValues: false` (everything) — globally or [per tool](/docs/02-sdk/03-configuration#per-tool-overrides).
+  On ChatGPT the request `_meta` carries the user's approximate location including coordinates and the platform's stable per-user id, and with the defaults both are stored on every tool call. Disclose that collection in your privacy policy, or reduce it with `capture.geo: "country"` (country only, no city or coordinates), `capture.geo: false` (no location) or `capture.inputValues: false` (everything, also available [per tool](/docs/02-sdk/03-configuration#per-tool-overrides)).
 </Callout>
 
 ### Connections

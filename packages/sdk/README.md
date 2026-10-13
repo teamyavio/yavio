@@ -53,7 +53,7 @@ withYavio(server, {
   capture: {
     inputValues: true,   // capture tool input values + client metadata (default: true)
     outputValues: true,  // capture tool output values (default: true)
-    geo: true,           // capture the country code (default: true)
+    geo: true,           // location: true | "country" | false (default: true), see below
     tokens: true,        // reserved — no effect today
     retries: true,       // reserved — no effect today (is_retry is never set)
   },
@@ -137,11 +137,11 @@ With `inputValues` on, `input_values` holds the tool's arguments plus a few fiel
 
 | Key | Content |
 |-----|---------|
-| `_meta` | The request `_meta` verbatim. On ChatGPT that is `openai/userAgent`, `openai/locale`, `openai/userLocation` (city, region, country, timezone, **latitude and longitude**), `openai/subject` (the platform's stable pseudonymous user id), `openai/session` and the client's capabilities. It intentionally duplicates the first-class `locale` / `end_user_agent` / `subject_id` / `country_code` fields. With `geo: false` the whole `openai/userLocation` object is removed |
+| `_meta` | The request `_meta` verbatim. On ChatGPT that is `openai/userAgent`, `openai/locale`, `openai/userLocation` (city, region, country, timezone, **latitude and longitude**), `openai/subject` (the platform's stable pseudonymous user id), `openai/session` and the client's capabilities. It intentionally duplicates the first-class `locale` / `end_user_agent` / `subject_id` / `country_code` fields. With `geo: "country"` that object is reduced to `{ country }`; with `geo: false` it is removed entirely |
 | `_taskId` | The MCP task id, for task-based flows |
 | `_requestInfo` | The calling request's `user-agent`, `accept-language`, `x-anthropic-client`, `mcp-protocol-version` and `traceparent` headers, plus its URL without the query string. Every other header is dropped — `Authorization`, `Cookie`, `X-Api-Key` and the like never reach analytics, and no `X-Forwarded-For` means an event stays free of end-user IPs |
 
-**Disclose this.** With the defaults, every tool call from ChatGPT stores the user's approximate position including coordinates and the platform's stable user id. Name that collection in your privacy policy, or set `geo: false` (drops the location) or `inputValues: false` (drops all of it) — per tool if that is enough, see above.
+**Disclose this.** With the defaults, every tool call from ChatGPT stores the user's approximate position including coordinates and the platform's stable user id. Name that collection in your privacy policy, or set `geo: "country"` (keeps only the country, drops city, region, timezone and coordinates), `geo: false` (drops the location) or `inputValues: false` (drops all of it; also per tool, see above).
 
 All captured input and output is PII-stripped before it leaves the process, but the stripper only matches emails, Luhn-valid card numbers, US Social Security numbers and US-format phone numbers.
 
