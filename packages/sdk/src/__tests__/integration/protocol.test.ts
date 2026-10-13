@@ -118,6 +118,31 @@ describe("protocol layer — failures before the handler", () => {
     expect(typeof event.trace_id).toBe("string");
   });
 
+  it.each([
+    ["country", "DE", { country: "DE" }],
+    [false, undefined, undefined],
+  ] as const)(
+    "applies capture.geo: %s to the location on a validation event",
+    async (geo, countryCode, location) => {
+      const h = await setup(
+        (proxy) => {
+          proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"));
+        },
+        { capture: { inputValues: true, outputValues: true, geo, tokens: true, retries: true } },
+      );
+
+      await h.client.callTool({ name: "search", arguments: { query: 42 }, _meta: CLIENT_META });
+
+      const [event] = toolCalls(h.events);
+      expect(event?.error_category).toBe("validation");
+      expect(event?.country_code).toBe(countryCode);
+      const meta = (event?.input_values as { _meta?: Record<string, unknown> })._meta;
+      expect(meta?.["openai/userLocation"]).toEqual(location);
+      expect(meta?.["openai/locale"]).toBe("de-DE");
+      expect(JSON.stringify(event)).not.toContain("Duisburg");
+    },
+  );
+
   it("counts a call to an unknown tool under the name the model asked for", async () => {
     const h = await setup((proxy) => {
       proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"));
