@@ -144,6 +144,14 @@ describe("run_query SQL guard — attack corpus", () => {
     rejected("SELECT joinGet('db.j','v',1) FROM events");
   });
 
+  it("rejects hasColumnInTable (verified on 24.3: its remote form connects to any host:port)", () => {
+    rejected(
+      "SELECT hasColumnInTable('192.0.2.10:9000', 'default', '', 'default', 'events', 'event_id') FROM events LIMIT 1",
+    );
+    rejected("SELECT hasColumnInTable ('192.0.2.10:8123', 'default', 'events', 'event_id')");
+    rejected("SELECT HASCOLUMNINTABLE('default', 'events', 'event_id')");
+  });
+
   it("rejects reserved words as table aliases (verified executable: AS array + JOIN)", () => {
     // `FROM events AS array JOIN mergeTreeIndex(...)` EXECUTED against
     // ClickHouse — the alias made a real JOIN look like an ARRAY JOIN and the
