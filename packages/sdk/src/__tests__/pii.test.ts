@@ -89,3 +89,26 @@ describe("stripPii", () => {
     expect(result[1]).toBe("[Circular]");
   });
 });
+
+describe("IBAN (#90)", () => {
+  it.each(["DE89370400440532013000", "DE89 3704 0044 0532 0130 00", "GB82 WEST 1234 5698 7654 32"])(
+    "redacts the whole IBAN %s",
+    (iban) => {
+      expect(stripPii(`IBAN ${iban}.`)).toBe("IBAN [IBAN_REDACTED].");
+    },
+  );
+
+  it("does not redact a wrong check digit as an IBAN", () => {
+    expect(stripPii("DE89370400440532013001")).not.toContain("[IBAN_REDACTED]");
+  });
+
+  it("leaves IBAN-shaped plain text alone", () => {
+    expect(stripPii("AB12 test case data here")).toBe("AB12 test case data here");
+  });
+
+  it("strips IBANs inside intent-like nested text", () => {
+    expect(stripPii({ note: "send to DE89370400440532013000 by friday" })).toEqual({
+      note: "send to [IBAN_REDACTED] by friday",
+    });
+  });
+});

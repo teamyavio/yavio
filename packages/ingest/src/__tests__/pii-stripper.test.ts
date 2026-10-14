@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { stripPii, stripPiiFromString } from "../lib/pii-stripper.js";
+import { EVENT_IDENTIFIER_FIELDS, stripPii, stripPiiFromString } from "../lib/pii-stripper.js";
 
 describe("stripPiiFromString", () => {
   it("redacts email addresses", () => {
@@ -165,5 +165,63 @@ describe("pathological input performance", () => {
     const email = `${"l".repeat(64)}@example.com`;
     const { result } = stripPiiFromString(`mail ${email} end`);
     expect(result).toBe("mail [EMAIL_REDACTED] end");
+  });
+});
+
+describe("IBAN (#90)", () => {
+  it.each([
+    "DE89370400440532013000",
+    "DE89 3704 0044 0532 0130 00",
+    "GB82 WEST 1234 5698 7654 32",
+    "NL91ABNA0417164300",
+    "de89370400440532013000",
+  ])("redacts the whole IBAN %s", (iban) => {
+    const { result, redacted } = stripPiiFromString(`pay to ${iban} please`);
+    expect(result).toBe("pay to [IBAN_REDACTED] please");
+    expect(redacted).toBe(true);
+  });
+
+  it("does not redact a string with a wrong check digit as an IBAN", () => {
+    const { result } = stripPiiFromString("DE89370400440532013001");
+    expect(result).not.toContain("[IBAN_REDACTED]");
+  });
+
+  it("leaves IBAN-shaped plain text alone", () => {
+    expect(stripPiiFromString("AB12 test case data here").result).toBe("AB12 test case data here");
+  });
+});
+
+describe("identifier fields are not stripped (#90)", () => {
+  // Found in CI: a random UUID ending in a phone-shaped digit run was stored
+  // as ...-95[PHONE_REDACTED], so the event could not be found by its id.
+  const event = {
+    event_id: "47e16ee3-3d22-430b-acb1-959114949231",
+    trace_id: "tr_4155550134",
+    session_id: "a83947291834ab5550134",
+    subject_id: "v1/415-555-0134",
+    timestamp: "2026-10-14T12:00:00.000Z",
+    event_name: "quote_jane@example.com",
+    user_id: "jane@example.com",
+    metadata: { session_id: "555 123 4567" },
+  };
+
+  it("keeps ids and timestamp verbatim, strips everything else", () => {
+    const { result } = stripPii([event], { exemptEventKeys: EVENT_IDENTIFIER_FIELDS });
+    const [out] = result;
+    expect(out.event_id).toBe(event.event_id);
+    expect(out.trace_id).toBe(event.trace_id);
+    expect(out.session_id).toBe(event.session_id);
+    expect(out.subject_id).toBe(event.subject_id);
+    expect(out.timestamp).toBe(event.timestamp);
+    // Content is still stripped — including a nested key that happens to be
+    // called session_id, and user_id, which integrators may set to an email.
+    expect(out.event_name).toBe("[EMAIL_REDACTED]");
+    expect(out.user_id).toBe("[EMAIL_REDACTED]");
+    expect(out.metadata.session_id).toBe("[PHONE_REDACTED]");
+  });
+
+  it("strips ids too when no exemption is passed (the old behaviour)", () => {
+    const { result } = stripPii([event]);
+    expect(result[0].event_id).toContain("[PHONE_REDACTED]");
   });
 });

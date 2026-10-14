@@ -2,7 +2,7 @@
  * Client-side best-effort PII stripping.
  *
  * Recursively walks all string values and replaces patterns matching
- * common PII: emails, credit cards, SSNs, phone numbers.
+ * common PII: emails, IBANs, credit cards, SSNs, phone numbers.
  * Zero dependencies. Not configurable. Defense-in-depth layer
  * (the ingestion API performs authoritative stripping).
  */
@@ -27,6 +27,25 @@ function passesLuhn(digits: string): boolean {
   return sum % 10 === 0;
 }
 
+/**
+ * ISO 13616 IBAN check (mod 97 = 1), mirroring the ingest-side stripper (#90).
+ * Intent text is stripped here, before it leaves the integrator's server.
+ */
+function passesIbanCheck(candidate: string): boolean {
+  const iban = candidate.replace(/\s/g, "").toUpperCase();
+  if (iban.length < 15 || iban.length > 34) return false;
+  if ((iban.slice(4).match(/\d/g) ?? []).length < 8) return false;
+  const rearranged = iban.slice(4) + iban.slice(0, 4);
+  let remainder = 0;
+  for (const char of rearranged) {
+    const value = /\d/.test(char) ? char : String(char.charCodeAt(0) - 55);
+    for (const digit of value) {
+      remainder = (remainder * 10 + Number(digit)) % 97;
+    }
+  }
+  return remainder === 1;
+}
+
 const PII_PATTERNS: Array<{
   pattern: RegExp;
   replacement: string;
@@ -37,6 +56,13 @@ const PII_PATTERNS: Array<{
   {
     pattern: /[a-zA-Z0-9._%+-]{1,64}@[a-zA-Z0-9.-]{1,255}\.[a-zA-Z]{2,24}/g,
     replacement: "[EMAIL_REDACTED]",
+  },
+  // IBANs, compact or grouped. Before the card and phone patterns, which
+  // would otherwise take only the digit tail.
+  {
+    pattern: /\b[A-Za-z]{2}\d{2}(?: ?[A-Za-z0-9]{4}){2,7}(?: ?[A-Za-z0-9]{1,4})?\b/g,
+    replacement: "[IBAN_REDACTED]",
+    validate: passesIbanCheck,
   },
   {
     pattern: /\b(?:\d[ -]*?){13,19}\b/g,

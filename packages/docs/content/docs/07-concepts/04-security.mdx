@@ -23,12 +23,13 @@ This ensures PII is caught regardless of SDK version and provides redundancy if 
 | Pattern | Detection Method | Replacement | Layer |
 |---------|-----------------|-------------|-------|
 | Email addresses | RFC 5322 regex | `[EMAIL_REDACTED]` | SDK + Ingest |
+| IBANs | Compact or grouped, ISO 13616 mod-97 check | `[IBAN_REDACTED]` | SDK + Ingest |
 | Credit card numbers | Luhn algorithm + format check | `[CC_REDACTED]` | SDK + Ingest |
 | SSN / Tax IDs | NNN-NN-NNNN patterns | `[SSN_REDACTED]` | SDK + Ingest |
 | Phone numbers | International format detection (E.164 + common formats) | `[PHONE_REDACTED]` | SDK + Ingest |
 | Physical addresses | Heuristic: number + street name patterns | `[ADDRESS_REDACTED]` | Ingest only |
 
-Both layers scan all string fields in the event, including nested JSON in `metadata`. They target identity data — business values like prices, cities, dates, and quantities are preserved.
+Both layers scan all string fields in the event, including nested JSON in `metadata`. Ingest leaves the identifier fields (`event_id`, `trace_id`, `session_id`, `subject_id`) and the timestamp alone: they hold no user content, and a digit run in a random id must not be mistaken for a phone number. They target identity data — business values like prices, cities, dates, and quantities are preserved.
 
 ## API Key Authentication
 
