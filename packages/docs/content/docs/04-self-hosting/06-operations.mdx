@@ -1,0 +1,159 @@
+---
+title: Backups & Operations
+description: Backups, restore and disaster recovery, logs, and what Yavio cleans up on its own
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+Everything on this page runs on the host, next to Docker Compose. The files are in the repository's `ops/` directory.
+
+## What Yavio cleans up on its own
+
+The dashboard runs an hourly housekeeping job against Postgres. Only one dashboard instance runs it at a time.
+
+| Data | Kept for |
+|---|---|
+| Failed login attempts (email, IP) | 24 hours |
+| Sessions | until they expire |
+| Email verification and password reset tokens | until used or expired |
+| Workspace invitations | until 1 day after they expire, accepted or not |
+| Revoked API keys | 1 year after revocation (audit trail) |
+| Expired OAuth codes and tokens, unused client registrations | days, see `pruneExpired` in the dashboard's OAuth store |
+
+Raw analytics events expire after 13 months, or sooner if a project's retention is set shorter in its settings. The daily statistics job deletes those events, so it must be running: set `CLICKHOUSE_ROLLUP_PASSWORD` (see [Configuration](/docs/04-self-hosting/02-configuration)).
+
+## Logs
+
+| Log | Contains | Kept for |
+|---|---|---|
+| Ingest request log | method, route, status, timing. **No client IP, no query string, no headers** | container log rotation |
+| Container logs (all services) | stdout and stderr | rotated by size: at most 5 × 25 MB per container |
+| ClickHouse system log tables (`system.query_log` and others) | query texts, metrics | 30 days |
+| ClickHouse server log | warnings and errors only | container log rotation |
+| Host journal (reverse proxy and system) | the proxy's runtime log; no access log | 30 days, at most 1 GB |
+
+**Container logs.** `docker-compose.yml` sets size-based rotation on every service; Docker's log drivers cannot rotate by age. Containers started outside Compose fall back to the daemon's default, so set one too:
+
+```bash
+# Merge ops/host/docker-daemon.json into /etc/docker/daemon.json, then:
+sudo systemctl restart docker
+```
+
+A daemon default only applies to containers **created** after the change. Recreate yours (`docker compose up -d --force-recreate`) to apply it.
+
+<Callout type="warn">
+If you run Compose from a file of your own instead of the repository's, copy the `x-logging` block and the `logging: *logging` lines into it. Without them Docker keeps every container's log for as long as the container exists.
+</Callout>
+
+**Journal.** Install the drop-in:
+
+```bash
+sudo install -D -m 644 ops/host/journald-yavio.conf /etc/systemd/journald.conf.d/yavio.conf
+sudo systemctl restart systemd-journald
+```
+
+**Reverse proxy.** Configure no access log. Every request line would hold a client IP and the full URL. The proxy's own runtime log goes to the journal.
+
+**ClickHouse.** `packages/db/clickhouse/config.d/system-logs.xml` is mounted into the ClickHouse container. It gives each system log table a 30-day TTL and sets the server log to `warning`. Without it, the system log tables grow without bound and keep every query's full text.
+
+## Backups
+
+Two nightly scripts write to `/var/backups/yavio` on the host. Each keeps its newest 14 archives.
+
+| Script | Writes | Contains |
+|---|---|---|
+| `yavio-pg-backup.sh` | `yavio-control-plane-<ts>.sql.gz`, plus `.globals.sql.gz` | Postgres: accounts, workspaces, projects, API keys. The globals file holds the roles, without passwords. |
+| `yavio-clickhouse-backup.sh` | `clickhouse/yavio-clickhouse-<ts>.zip` | ClickHouse: all analytics tables (native `BACKUP`). Also Yavio's ClickHouse users, grants and row policies. |
+
+Both scripts check their archive before rotating, and log a line to `/var/backups/yavio/backup.log`: `ok …` or `FAIL …`.
+
+```bash
+sudo install -m 755 ops/backup/*.sh /usr/local/bin/
+sudo crontab -e    # add the lines from ops/backup/crontab.example
+```
+
+Settings come from environment variables in the crontab line:
+
+| Variable | Default |
+|---|---|
+| `YAVIO_BACKUP_DIR` | `/var/backups/yavio` |
+| `YAVIO_BACKUP_KEEP` | `14` |
+| `YAVIO_PG_CONTAINER` | `yavio-postgres-1` |
+| `YAVIO_PG_USER` / `YAVIO_PG_DB` | `yavio_service` / `yavio` |
+| `YAVIO_CH_CONTAINER` | `yavio-clickhouse-1` |
+| `YAVIO_CH_PASSWORD` | unset: ClickHouse's `default` user without a password |
+
+**Get the backups off the host.** Use disk snapshots, or copy them to storage elsewhere. A backup on the same disk does not survive the loss of that disk.
+
+**Alert on failures.** The watchdog runs at 06:00. For each backup with no `ok` line that day, it appends a `FAIL` line. A backup that never ran, because cron was gone or the host was down, then alerts like one that failed. Ship `backup.log` to your alerting and alert on `FAIL`. `ops/backup/google-cloud-ops-agent.yaml` shows how on Google Cloud.
+
+<Callout type="info">
+**How long erased data survives in backups.** Deleting a project, workspace or account erases its data from the live databases. The data stays in backups taken earlier until those expire: the dumps on the host for 14 days, plus however long the copies of them live elsewhere. Yavio Cloud keeps that sum within 28 days and tells customers **"up to 4 weeks"**. If you change either retention, check the sum against what you tell your users.
+</Callout>
+
+## Restore
+
+### ClickHouse
+
+The examples restore the newest archive and run as root, because the backup directory is root-only.
+
+```bash
+A=$(ls -1t /var/backups/yavio/clickhouse/*.zip | head -1)
+# Stream it into the container as the clickhouse user (owner matters, else BACKUP_NOT_FOUND)
+docker exec -i -u clickhouse yavio-clickhouse-1 sh -c 'cat > /var/lib/clickhouse/backups/r.zip' < "$A"
+
+# Side by side, to compare first:
+docker exec yavio-clickhouse-1 clickhouse-client -q \
+  "RESTORE DATABASE default AS restoretest FROM File('/var/lib/clickhouse/backups/r.zip')"
+# Or over the live database:
+#   RESTORE DATABASE default FROM File('/var/lib/clickhouse/backups/r.zip')
+#     SETTINGS allow_non_empty_tables = true
+```
+
+**On a new server**, restore the users, grants and row policies along with the data. `default.schema_migrations` comes back from the archive saying every migration has run, so `migrate` will not create them again:
+
+```bash
+docker exec yavio-clickhouse-1 clickhouse-client -q "RESTORE DATABASE default,
+  TABLE system.users, TABLE system.roles, TABLE system.row_policies,
+  TABLE system.settings_profiles, TABLE system.quotas
+  FROM File('/var/lib/clickhouse/backups/r.zip')"
+```
+
+Then run `docker compose run --rm migrate`. It sets the users' passwords from `.env`.
+
+### Postgres, into the running server
+
+The dump is written with `--clean --if-exists`, so it drops and recreates every object:
+
+```bash
+gunzip -c /var/backups/yavio/yavio-control-plane-<ts>.sql.gz \
+  | docker exec -i yavio-postgres-1 psql -U yavio_service -d yavio
+```
+
+### Disaster recovery: a new host
+
+The order matters:
+- **Postgres roles before the dump.** The dump's grants refer to the roles, and a dump carries neither roles nor database-level privileges.
+- **ClickHouse before `migrate`, onto an empty server.** On a server without data, `migrate` would create fresh tables and users that collide with the restore.
+
+This sequence was tested end to end on fresh Postgres 16 and ClickHouse 26.8 containers. The app roles connected, a stranger role was refused, and `yavio_dashboard` saw only its own tenant's rows.
+
+1. Install Yavio as usual, with the **same `.env`** as before. Start only the databases: `docker compose up -d postgres clickhouse`. Do not run `migrate` yet.
+2. Recreate the Postgres roles. The globals file has no passwords; step 6 sets them from `.env`. A "role … already exists" error for `yavio_service` is expected:
+   ```bash
+   gunzip -c yavio-control-plane-<ts>.globals.sql.gz \
+     | docker exec -i yavio-postgres-1 psql -U yavio_service -d postgres
+   ```
+3. Restore the Postgres dump, stopping at the first error:
+   ```bash
+   gunzip -c yavio-control-plane-<ts>.sql.gz \
+     | docker exec -i yavio-postgres-1 psql -U yavio_service -d yavio -v ON_ERROR_STOP=1
+   ```
+4. Restore who may connect. A fresh database lets every role connect:
+   ```sql
+   REVOKE CONNECT ON DATABASE yavio FROM PUBLIC;
+   GRANT CONNECT ON DATABASE yavio TO yavio_app, yavio_api;
+   ```
+5. Restore ClickHouse **with its users**, as under "On a new server" above.
+6. Run the migrations: `docker compose run --rm migrate`. Both databases already record every migration, so this sets the role and user passwords from `.env`, plus whatever is newer than the backup.
+7. Start everything: `docker compose up -d`.

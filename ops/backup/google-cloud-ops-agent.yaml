@@ -1,0 +1,16 @@
+# Example for hosts on Google Cloud with the Ops Agent: ships backup.log to
+# Cloud Logging (log id "yavio_backup"). Merge into
+# /etc/google-cloud-ops-agent/config.yaml and restart the agent. Then create a
+# log-based counter metric on lines containing "FAIL" and an alert policy on
+# it (a metric-based policy: plain log-match alerts did not fire reliably for
+# Yavio Cloud). Any other log shipper works the same way: alert on FAIL.
+logging:
+  receivers:
+    yavio_backup:
+      type: files
+      include_paths:
+        - /var/backups/yavio/backup.log
+  service:
+    pipelines:
+      yavio_backup:
+        receivers: [yavio_backup]

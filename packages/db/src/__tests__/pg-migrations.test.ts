@@ -44,6 +44,42 @@ describe("PostgreSQL migrations", () => {
     });
   });
 
+  describe("database CONNECT (#92)", () => {
+    it("is held by yavio_app and yavio_api, not by PUBLIC", async () => {
+      const { sql } = getServiceDb();
+      const [row] = await sql`
+        SELECT has_database_privilege('yavio_app', current_database(), 'CONNECT') AS app,
+               has_database_privilege('yavio_api', current_database(), 'CONNECT') AS api,
+               EXISTS (
+                 SELECT 1 FROM pg_database d, aclexplode(d.datacl) a
+                 WHERE d.datname = current_database() AND a.grantee = 0
+                   AND a.privilege_type = 'CONNECT'
+               ) AS public
+      `;
+      expect(row).toEqual({ app: true, api: true, public: false });
+    });
+
+    it("refuses a role that merely exists", async () => {
+      const { sql } = getServiceDb();
+      const role = `stranger_${Date.now()}`;
+      await sql.unsafe(`CREATE ROLE ${role} LOGIN PASSWORD 'stranger'`);
+      try {
+        const url = new URL(process.env.DATABASE_URL as string);
+        url.username = role;
+        url.password = "stranger";
+        const postgres = (await import("postgres")).default;
+        const stranger = postgres(url.toString(), { max: 1, onnotice: () => {} });
+        try {
+          await expect(stranger`SELECT 1`).rejects.toThrow(/permission denied for database/);
+        } finally {
+          await stranger.end();
+        }
+      } finally {
+        await sql.unsafe(`DROP ROLE ${role}`);
+      }
+    });
+  });
+
   describe("projects.retention_months (#93)", () => {
     it("defaults to the platform window of 13 months", async () => {
       const { sql } = getServiceDb();

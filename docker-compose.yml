@@ -7,8 +7,19 @@
 #   docker compose up -d
 #   docker compose ps              # verify health checks pass
 
+# Container logs (#92). Without options Docker keeps a container's log for as
+# long as the container exists. The json-file driver rotates by size, not by
+# age: at most 5 x 25 MB per container. docker-compose.prod.yml sets its own
+# sizes; ops/host/docker-daemon.json covers containers started outside compose.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "25m"
+    max-file: "5"
+
 services:
   postgres:
+    logging: *logging
     image: postgres:16
     restart: unless-stopped
     environment:
@@ -28,6 +39,7 @@ services:
       retries: 5
 
   clickhouse:
+    logging: *logging
     # Exact pin, upgrades are one-way (#95). Dependabot proposes patch updates;
     # docker-compose.test.yml must carry the same tag (ch-image-pins.test.ts).
     image: clickhouse/clickhouse-server:26.8.26.12
@@ -62,6 +74,7 @@ services:
       retries: 5
 
   migrate:
+    logging: *logging
     build:
       context: .
       dockerfile: packages/db/Dockerfile
@@ -91,6 +104,7 @@ services:
         condition: service_healthy
 
   ingest:
+    logging: *logging
     build:
       context: .
       dockerfile: packages/ingest/Dockerfile
@@ -128,6 +142,7 @@ services:
       retries: 5
 
   dashboard:
+    logging: *logging
     build:
       context: .
       dockerfile: packages/dashboard/Dockerfile
@@ -172,6 +187,7 @@ services:
       retries: 3
 
   docs:
+    logging: *logging
     build:
       context: .
       dockerfile: packages/docs/Dockerfile

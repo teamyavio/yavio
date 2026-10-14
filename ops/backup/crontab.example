@@ -1,0 +1,5 @@
+# root's crontab (crontab -e as root). Times are the host's; Yavio Cloud runs UTC.
+# Backups first, the watchdog a few hours later (it checks for today's "ok").
+45 2 * * * /usr/local/bin/yavio-pg-backup.sh
+50 2 * * * /usr/local/bin/yavio-clickhouse-backup.sh
+0 6 * * * /usr/local/bin/yavio-backup-watchdog.sh
