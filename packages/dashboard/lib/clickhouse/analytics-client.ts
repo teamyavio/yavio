@@ -72,6 +72,11 @@ export async function queryAnalytics<T>(options: AnalyticsQueryOptions<T>): Prom
       format: "JSONEachRow",
       clickhouse_settings: {
         ...options.settings,
+        // ClickHouse 25.8 changed the default to 0, so UInt64/Int64 values such
+        // as count() arrive as JSON numbers instead of strings (#95). Pinned to
+        // the old shape so the query code, its tests and run_query results stay
+        // unchanged; switching to numbers is its own change.
+        output_format_json_quote_64bit_integers: 1,
         SQL_workspace_id: workspaceId,
         SQL_project_id: projectId,
       },

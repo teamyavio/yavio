@@ -1,0 +1,15 @@
+# Patch updates for the pinned ClickHouse image (#95). The pin is exact
+# (docker-compose.yml, docker-compose.test.yml; CI reads the latter), so a
+# security fix only arrives when someone bumps it. Minor and major versions
+# are a deliberate upgrade with its own procedure, never a bot PR.
+version: 2
+updates:
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    allow:
+      - dependency-name: "clickhouse/clickhouse-server"
+    ignore:
+      - dependency-name: "clickhouse/clickhouse-server"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]

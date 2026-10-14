@@ -208,7 +208,7 @@ importers:
   packages/db:
     dependencies:
       '@clickhouse/client':
-        specifier: ^1.8.1
+        specifier: ^1.17.0
         version: 1.17.0
       '@yavio/shared':
         specifier: workspace:*
@@ -285,7 +285,7 @@ importers:
   packages/ingest:
     dependencies:
       '@clickhouse/client':
-        specifier: ^1.8.1
+        specifier: ^1.17.0
         version: 1.17.0
       '@fastify/cors':
         specifier: ^11.0.0

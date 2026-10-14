@@ -41,7 +41,7 @@ services:
       retries: 5
 
   clickhouse:
-    image: clickhouse/clickhouse-server:24.3
+    image: clickhouse/clickhouse-server:26.8.26.12
     restart: unless-stopped
     volumes:
       - clickhouse_data:/var/lib/clickhouse

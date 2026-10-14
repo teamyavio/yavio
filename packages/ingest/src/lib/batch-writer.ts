@@ -116,6 +116,10 @@ export class BatchWriter {
           table: this.table,
           values,
           format: "JSONEachRow",
+          // Regular inserts only. async_insert is on by default from ClickHouse
+          // 26.3 (#95); this writer already batches, so it gains nothing, and
+          // async inserts deduplicate under different rules (#90).
+          clickhouse_settings: { async_insert: 0 },
         });
         return;
       } catch (err) {

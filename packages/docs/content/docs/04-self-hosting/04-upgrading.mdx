@@ -48,6 +48,34 @@ Database migrations run automatically when services start. Both PostgreSQL (via 
 
 ## Version Notes
 
+### ClickHouse 24.3 → 26.8 (one-way)
+
+ClickHouse is pinned to `26.8.26.12`. ClickHouse 24.x no longer receives security fixes.
+
+<Callout type="warn">
+  **This upgrade cannot be undone.** Once 26.8 has started on your data, 24.3 refuses to start on the same volume. The only way back is a backup taken before the upgrade.
+</Callout>
+
+1. **Take a cold backup of the ClickHouse volume.** Stop ClickHouse only, archive its volume, then continue:
+
+   ```bash
+   docker compose stop clickhouse
+   VOLUME=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/lib/clickhouse"}}{{.Name}}{{end}}{{end}}' "$(docker compose ps -a -q clickhouse)")
+   docker run --rm -v "$VOLUME":/data -v "$PWD":/backup alpine tar czf /backup/clickhouse-before-26.8.tgz -C /data .
+   ```
+
+   ClickHouse's own log tables (`system.query_log`, `system.metric_log` and others) can be most of that volume. To shrink the backup, truncate them before stopping ClickHouse, e.g. `TRUNCATE TABLE system.metric_log`.
+2. **Pull and start:** `docker compose pull clickhouse && docker compose up -d`. Migrations run as usual.
+3. **Clean up.** The new version, and the system-log retention the compose file now mounts (see below), redefine ClickHouse's log tables. ClickHouse keeps the old ones under a numbered name. List and drop them:
+
+   ```sql
+   SELECT name, formatReadableSize(total_bytes) FROM system.tables
+   WHERE database = 'system' AND match(name, '_log_[0-9]+$');
+   -- then, per table: DROP TABLE system.<name>
+   ```
+
+**ClickHouse's own logs** are now kept for 30 days, and the server logs at `warning` level. The settings are in `packages/db/clickhouse/config.d/system-logs.xml`, which `docker-compose.yml` mounts. Previously these tables grew without limit.
+
 ### `CLICKHOUSE_ERASER_PASSWORD` is required
 
 The dashboard deletes account, workspace and project data as the `yavio_eraser` ClickHouse user, which can delete rows from the events table and do nothing else. It used to fall back to the unrestricted `default` user when `CLICKHOUSE_ERASER_PASSWORD` was unset. It no longer does: Compose refuses to start without the variable, and the dashboard exits at startup with a message naming it.

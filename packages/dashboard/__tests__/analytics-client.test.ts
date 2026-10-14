@@ -33,6 +33,8 @@ describe("queryAnalytics", () => {
     expect(mockQuery).toHaveBeenCalledWith(
       expect.objectContaining({
         clickhouse_settings: {
+          // 64-bit integers stay JSON strings on ClickHouse 25.8+ (#95).
+          output_format_json_quote_64bit_integers: 1,
           SQL_workspace_id: "ws_123",
           SQL_project_id: "proj_456",
         },

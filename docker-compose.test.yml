@@ -31,7 +31,8 @@ services:
       retries: 5
 
   clickhouse:
-    image: clickhouse/clickhouse-server:24.3
+    # CI reads this tag for its ClickHouse service containers (ci.yml, detect).
+    image: clickhouse/clickhouse-server:26.8.26.12
     environment:
       CLICKHOUSE_PASSWORD: test
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
@@ -39,6 +40,8 @@ services:
       - "127.0.0.1:${TEST_CLICKHOUSE_PORT:-8124}:8123"
     tmpfs:
       - /var/lib/clickhouse
+    volumes:
+      - ./packages/db/clickhouse/config.d/system-logs.xml:/etc/clickhouse-server/config.d/yavio-system-logs.xml:ro
     healthcheck:
       test: ["CMD", "clickhouse-client", "--password", "test", "--query", "SELECT 1"]
       interval: 3s

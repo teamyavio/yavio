@@ -61,6 +61,9 @@ describe("BatchWriter", () => {
       table: "events",
       values: [expect.objectContaining({ event_id: "evt-1" })],
       format: "JSONEachRow",
+      // async_insert is on by default from ClickHouse 26.3; this writer batches
+      // itself and must stay on the regular insert path (#95, #90).
+      clickhouse_settings: { async_insert: 0 },
     });
     expect(writer.bufferedCount).toBe(0);
   });

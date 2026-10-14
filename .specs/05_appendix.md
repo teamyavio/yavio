@@ -57,7 +57,7 @@ See [infrastructure/observability.md](./infrastructure/observability.md) for ful
 | Docker | v24+ | Container runtime |
 | docker-compose | v2.20+ | Service orchestration |
 | PostgreSQL | 16 | Application data storage |
-| ClickHouse | 24.3+ | Analytics event storage |
+| ClickHouse | 26.8 (pinned `26.8.26.12`) | Analytics event storage |
 | Node.js | 20+ LTS | Runtime for all Node services |
 
 ## 12.2 Performance Targets

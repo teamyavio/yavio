@@ -27,8 +27,18 @@ jobs:
       dashboard: ${{ steps.filter.outputs.dashboard }}
       cli: ${{ steps.filter.outputs.cli }}
       docs: ${{ steps.filter.outputs.docs }}
+      clickhouse_image: ${{ steps.images.outputs.clickhouse }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      # One source of truth for the ClickHouse version: the exact tag pinned in
+      # docker-compose.test.yml (which ch-image-pins.test.ts keeps equal to
+      # docker-compose.yml). A Dependabot bump of the compose files therefore
+      # moves CI with it.
+      - id: images
+        run: |
+          image=$(grep -m1 -oE 'clickhouse/clickhouse-server:[0-9][0-9.]*' docker-compose.test.yml)
+          test -n "$image" || { echo "::error::no clickhouse image in docker-compose.test.yml"; exit 1; }
+          echo "clickhouse=$image" >> "$GITHUB_OUTPUT"
       - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
         id: filter
         with:
@@ -44,6 +54,7 @@ jobs:
             db:
               - 'packages/db/**'
               - 'packages/shared/**'
+              - 'docker-compose*.yml'
               - '.github/**'
               - 'package.json'
               - 'pnpm-lock.yaml'
@@ -57,6 +68,7 @@ jobs:
               - 'packages/ingest/**'
               - 'packages/shared/**'
               - 'packages/db/**'
+              - 'docker-compose*.yml'
               - '.github/**'
               - 'package.json'
               - 'pnpm-lock.yaml'
@@ -64,6 +76,7 @@ jobs:
               - 'packages/dashboard/**'
               - 'packages/shared/**'
               - 'packages/db/**'
+              - 'docker-compose*.yml'
               - '.github/**'
               - 'package.json'
               - 'pnpm-lock.yaml'
@@ -130,7 +143,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       clickhouse:
-        image: clickhouse/clickhouse-server:24.3
+        image: ${{ needs.detect.outputs.clickhouse_image }}
         env:
           CLICKHOUSE_PASSWORD: test
           CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
@@ -144,12 +157,27 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: ./.github/actions/setup
+      # Service containers start before checkout, so they cannot mount repo
+      # files. This one runs the shipped config.d (#92) for ch-system-logs.test.ts.
+      - name: ClickHouse with the shipped config.d
+        run: |
+          docker run -d --name ch-config -p 8125:8123 -e CLICKHOUSE_PASSWORD=test \
+            -v "$PWD/packages/db/clickhouse/config.d/system-logs.xml:/etc/clickhouse-server/config.d/yavio-system-logs.xml:ro" \
+            "${{ needs.detect.outputs.clickhouse_image }}"
+          for i in $(seq 1 60); do
+            curl -sf -u default:test "http://localhost:8125/?query=SELECT%201" >/dev/null && exit 0
+            sleep 1
+          done
+          docker logs ch-config | tail -50
+          exit 1
       - run: pnpm --filter @yavio/shared build
       - run: pnpm --filter @yavio/db exec vitest run --coverage
         env:
           DATABASE_URL: postgres://yavio_service:test@localhost:5432/yavio_test
+          DATABASE_APP_URL: postgres://yavio_app:test@localhost:5432/yavio_test
           CLICKHOUSE_URL: http://localhost:8123
           CLICKHOUSE_PASSWORD: test
+          CLICKHOUSE_CONFIG_URL: http://localhost:8125
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
@@ -163,7 +191,7 @@ jobs:
     if: needs.detect.outputs.ingest == 'true'
     services:
       clickhouse:
-        image: clickhouse/clickhouse-server:24.3
+        image: ${{ needs.detect.outputs.clickhouse_image }}
         env:
           CLICKHOUSE_PASSWORD: test
           CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
@@ -208,7 +236,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       clickhouse:
-        image: clickhouse/clickhouse-server:24.3
+        image: ${{ needs.detect.outputs.clickhouse_image }}
         env:
           CLICKHOUSE_PASSWORD: test
           CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1

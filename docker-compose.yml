@@ -28,13 +28,17 @@ services:
       retries: 5
 
   clickhouse:
-    image: clickhouse/clickhouse-server:24.3
+    # Exact pin, upgrades are one-way (#95). Dependabot proposes patch updates;
+    # docker-compose.test.yml must carry the same tag (ch-image-pins.test.ts).
+    image: clickhouse/clickhouse-server:26.8.26.12
     restart: unless-stopped
     environment:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default. This user is unrestricted and can manage access.}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
       - clickhouse_data:/var/lib/clickhouse
+      # Retention for ClickHouse's own logs and logger level (#92).
+      - ./packages/db/clickhouse/config.d/system-logs.xml:/etc/clickhouse-server/config.d/yavio-system-logs.xml:ro
     ports:
       - "127.0.0.1:${CLICKHOUSE_HTTP_PORT:-8123}:8123"
       - "127.0.0.1:${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
