@@ -67,9 +67,15 @@ export function normalizeEvents(events: BaseEvent[], now = Date.now()): Normaliz
   return { events: normalized, clampedTimestamps, invalidFields };
 }
 
+/**
+ * The canonical BCP-47 form, or null. The POSIX spelling (en_US, de_DE) is
+ * the most common non-BCP-47 locale clients send; it is normalised rather
+ * than dropped (#111), since a dropped locale is gone for good in the
+ * statistics (the geo slice's language).
+ */
 function canonicalLocale(value: string): string | null {
   try {
-    const [canonical] = Intl.getCanonicalLocales(value);
+    const [canonical] = Intl.getCanonicalLocales(value.replaceAll("_", "-"));
     return canonical ?? null;
   } catch {
     // RangeError: not a structurally valid BCP-47 tag.

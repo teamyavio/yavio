@@ -80,17 +80,19 @@ describe("POST /v1/events — ingest hardening (#90)", () => {
 
   it("NULLs invalid country/currency/locale and keeps the event", async () => {
     const { response, stored } = await send([
-      event({ country_code: "ZZ", locale: "en_US" }),
+      event({ country_code: "ZZ", locale: "not a locale" }),
       event({ event_type: "conversion", conversion_currency: "ABC" }),
       event({ country_code: "XK", locale: "de-de" }),
+      event({ locale: "en_US" }), // the POSIX spelling is normalised, not dropped (#111)
     ]);
     expect(response.statusCode).toBe(200);
-    expect(stored).toHaveLength(3);
+    expect(stored).toHaveLength(4);
     expect(stored[0].country_code).toBeNull();
     expect(stored[0].locale).toBeNull();
     expect(stored[1].conversion_currency).toBeNull();
     expect(stored[2].country_code).toBe("XK");
     expect(stored[2].locale).toBe("de-DE");
+    expect(stored[3].locale).toBe("en-US");
   });
 
   it("stores ids verbatim even when they contain phone-shaped digit runs", async () => {
