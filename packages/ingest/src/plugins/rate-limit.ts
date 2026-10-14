@@ -18,7 +18,9 @@ import fp from "fastify-plugin";
  *   the second one only if it fails to authenticate, and is refused up front
  *   only once that one is exhausted. This bounds a flood of bogus keys per
  *   address, while scanners — which carry no credential — can never throttle
- *   a client that authenticates.
+ *   a client that authenticates. On the events route the header is checked
+ *   before the body is parsed (#113), so a keyed client whose body fails to
+ *   parse is authenticated by then and is not charged here.
  *
  * `request.ip` is the real client only when TRUST_PROXY names the proxy in
  * front of ingest; otherwise it is the socket peer.

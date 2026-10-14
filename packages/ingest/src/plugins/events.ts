@@ -6,7 +6,7 @@ import { normalizeEvents } from "../lib/event-normalizer.js";
 import { enforceFieldLimits, isBatchTooLarge } from "../lib/field-limits.js";
 import { EVENT_IDENTIFIER_FIELDS, stripPii } from "../lib/pii-stripper.js";
 import { validateBatch } from "../lib/schema-validator.js";
-import { authenticateHeaderOrBody } from "./auth.js";
+import { authenticateHeaderIfPresent, authenticateHeaderOrBody } from "./auth.js";
 
 /**
  * Widget beacons send their JSON as text/plain: a CORS-safelisted type, so the
@@ -38,6 +38,8 @@ function registerEventsRoute(app: FastifyInstance): void {
   app.post(
     "/v1/events",
     {
+      // The header before parsing (#113), the body token after it (#96).
+      onRequest: [authenticateHeaderIfPresent],
       preHandler: [authenticateHeaderOrBody],
       config: { rawBody: true },
     },

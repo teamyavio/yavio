@@ -147,6 +147,37 @@ describe("Rate limit plugin", () => {
     expect((await authedEvents(app, "198.51.100.67")).statusCode).toBe(200);
   });
 
+  it("does not count a keyed client's malformed bodies as auth failures (#113)", async () => {
+    // Header auth runs before body parsing on the events route, so a 400 from
+    // the parser arrives authenticated. Before, it drained the auth-failure
+    // bucket and the client's well-formed requests were refused with 429.
+    app = await buildApp({
+      rateLimiter: new RateLimiter(undefined, { burstCapacity: 2, ratePerSecond: 1 }),
+      resolve: async (token) =>
+        token === TEST_KEY ? { projectId: TEST_PROJECT_ID, workspaceId: TEST_WORKSPACE_ID } : null,
+    });
+    const address = "198.51.100.70";
+    const malformed = (authorization: string) =>
+      app.inject({
+        method: "POST",
+        url: "/v1/events",
+        remoteAddress: address,
+        headers: { authorization, "content-type": "application/json" },
+        payload: "{not json",
+      });
+
+    for (let i = 0; i < 5; i++) {
+      expect((await malformed(`Bearer ${TEST_KEY}`)).statusCode).toBe(400);
+    }
+    expect((await authedEvents(app, address)).statusCode).toBe(200);
+
+    // A bad key is refused before the body is parsed: 401, not 400 — and it
+    // still counts as a failure.
+    expect((await malformed("Bearer yav_00000000000000000000000000000000")).statusCode).toBe(401);
+    expect((await malformed("Bearer yav_00000000000000000000000000000000")).statusCode).toBe(401);
+    expect((await malformed("Bearer yav_00000000000000000000000000000000")).statusCode).toBe(429);
+  });
+
   it("does not rate limit health endpoint", async () => {
     app = await buildApp({
       rateLimiter: new RateLimiter(undefined, { burstCapacity: 0, ratePerSecond: 0 }),

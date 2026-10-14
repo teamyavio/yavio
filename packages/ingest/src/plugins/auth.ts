@@ -24,8 +24,21 @@ export async function authenticate(request: FastifyRequest): Promise<void> {
 }
 
 /**
- * The events route's preHandler: the Authorization header as everywhere, or —
- * for widget beacons — a widget JWT in the body (#96). navigator.sendBeacon
+ * The events route's onRequest hook: the Authorization header, when there is
+ * one, is checked BEFORE the body is parsed (#113). A request whose body then
+ * fails to parse (400, 413) is already authenticated, so the rate limiter does
+ * not count it as a failed credential — it used to, and a keyed client with a
+ * serialisation bug locked its own address out of the events route. A bad key
+ * is refused before any parsing work, too.
+ */
+export async function authenticateHeaderIfPresent(request: FastifyRequest): Promise<void> {
+  if (request.headers.authorization) await authenticate(request);
+}
+
+/**
+ * The events route's preHandler: the Authorization header as everywhere
+ * (already checked by authenticateHeaderIfPresent on that route), or — for
+ * widget beacons — a widget JWT in the body (#96). navigator.sendBeacon
  * cannot set headers, so the widget sends `{ token, events, ... }`.
  *
  * - The header wins when both are present.
@@ -41,6 +54,7 @@ export async function authenticateHeaderOrBody(request: FastifyRequest): Promise
     Reflect.deleteProperty(body, "token");
   }
 
+  if (request.authContext) return;
   if (request.headers.authorization) {
     await authenticate(request);
     return;
