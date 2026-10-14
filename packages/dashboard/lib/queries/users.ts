@@ -17,6 +17,48 @@ interface QueryContext {
   to: string;
 }
 
+/**
+ * Who a user is (#89), per event:
+ *   coalesce(user_id, the user_id stitched to its subject_id, subject_id)
+ *
+ * - user_id: what the integrator passed to identify().
+ * - subject_id: the platform's stable pseudonymous per-user-per-app id
+ *   (ChatGPT's openai/subject), so apps that never call identify() still have
+ *   user metrics.
+ * - Stitching: events before identify() carry only subject_id, events after
+ *   it carry user_id. Each subject_id is mapped to the user_id last seen with
+ *   it, so such a person counts once, not twice.
+ * - Never session_id: a session is not a person. An empty user_id is not one
+ *   either.
+ *
+ * All user metrics come straight from events, which holds the same 13 months
+ * a per-user summary would; users_mv / sessions_mv are no longer read (they
+ * merged wrongly, #89). "First seen" therefore means within that window.
+ *
+ * #85's statistics job counts users with the same key, so tier 1 and tier 2
+ * agree. Aliases never shadow a column a WHERE refers to: ClickHouse resolves
+ * the alias first.
+ */
+function keyedEvents(timeFilter = ""): string {
+  return `
+      stitch AS (
+        SELECT assumeNotNull(subject_id) AS stitched_subject,
+               argMax(assumeNotNull(user_id), timestamp) AS mapped_user_id
+        FROM events
+        WHERE project_id = {projectId:String}
+          AND subject_id IS NOT NULL AND subject_id != ''
+          AND user_id IS NOT NULL AND user_id != ''
+        GROUP BY stitched_subject
+      ),
+      keyed AS (
+        SELECT e.*,
+               coalesce(nullIf(e.user_id, ''), nullIf(s.mapped_user_id, ''), nullIf(e.subject_id, '')) AS user_key
+        FROM events AS e
+        LEFT JOIN stitch AS s ON s.stitched_subject = ifNull(e.subject_id, '')
+        WHERE e.project_id = {projectId:String} ${timeFilter}
+      )`;
+}
+
 export async function queryUserList(
   ctx: QueryContext,
   page: number,
@@ -35,25 +77,27 @@ export async function queryUserList(
     totalRevenue: "totalRevenue",
   };
   const sortCol = validSorts[sort] ?? "lastSeen";
+  const sortOrder = order === "asc" ? "asc" : "desc";
 
   const users = await queryAnalytics<UserListItem>({
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
+      WITH ${keyedEvents()}
       SELECT
-        user_id AS userId,
-        min(first_seen) AS firstSeen,
-        max(last_seen) AS lastSeen,
-        sum(total_events) AS totalEvents,
-        sum(total_sessions) AS totalSessions,
-        sum(total_tool_calls) AS totalToolCalls,
-        sum(total_conversions) AS totalConversions,
-        sum(total_revenue) AS totalRevenue,
-        anyLast(last_platform) AS lastPlatform
-      FROM users_mv FINAL
-      WHERE project_id = {projectId:String}
-      GROUP BY user_id
-      ORDER BY ${sortCol} ${order}
+        user_key AS userId,
+        min(timestamp) AS firstSeen,
+        max(timestamp) AS lastSeen,
+        count() AS totalEvents,
+        uniqExact(session_id) AS totalSessions,
+        countIf(event_type = 'tool_call') AS totalToolCalls,
+        countIf(event_type = 'conversion') AS totalConversions,
+        sumIf(ifNull(conversion_value, 0), event_type = 'conversion') AS totalRevenue,
+        argMax(ifNull(platform, ''), timestamp) AS lastPlatform
+      FROM keyed
+      WHERE user_key IS NOT NULL
+      GROUP BY user_key
+      ORDER BY ${sortCol} ${sortOrder}, userId
       LIMIT {limit:UInt32} OFFSET {offset:UInt32}
     `,
     params: { projectId: ctx.projectId, limit: pageSize, offset },
@@ -63,16 +107,23 @@ export async function queryUserList(
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
-      SELECT uniqExact(user_id) AS total
-      FROM users_mv FINAL
-      WHERE project_id = {projectId:String}
+      WITH ${keyedEvents()}
+      SELECT uniqExact(user_key) AS total FROM keyed WHERE user_key IS NOT NULL
     `,
     params: { projectId: ctx.projectId },
   });
 
-  return { users, total: countRows[0]?.total ?? 0 };
+  return { users, total: Number(countRows[0]?.total ?? 0) };
 }
 
+/**
+ * Users first seen in the selected range, by period, and how many of them were
+ * active again 0, 1, 2, ... periods later (within the range). The array is
+ * indexed by that offset, with 0 for an offset nobody returned in.
+ *
+ * It used to fail on every call: `groupArray(x ORDER BY y)` is Postgres syntax
+ * (#89). The order is now built with arraySort over (offset, count) tuples.
+ */
 export async function queryRetentionCohorts(
   ctx: QueryContext,
   period: "day" | "week" | "month" = "week",
@@ -85,87 +136,125 @@ export async function queryRetentionCohorts(
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
-      WITH cohort_users AS (
-        SELECT
-          user_id,
-          ${fn}(min(first_seen)) AS cohort_period
-        FROM users_mv FINAL
-        WHERE project_id = {projectId:String}
-        GROUP BY user_id
+      WITH ${keyedEvents()},
+      firsts AS (
+        SELECT user_key AS person, ${fn}(min(timestamp)) AS cohort_period
+        FROM keyed WHERE user_key IS NOT NULL
+        GROUP BY person
+      ),
+      cohorts AS (
+        SELECT person, cohort_period FROM firsts
+        WHERE cohort_period >= ${fn}({from:DateTime64(3)}) AND cohort_period < {to:DateTime64(3)}
       ),
       activity AS (
-        SELECT
-          user_id,
-          ${fn}(timestamp) AS activity_period
-        FROM events
-        WHERE project_id = {projectId:String}
-          AND user_id IS NOT NULL AND user_id != ''
+        SELECT DISTINCT user_key AS person, ${fn}(timestamp) AS activity_period
+        FROM keyed
+        WHERE user_key IS NOT NULL
           AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}
-        GROUP BY user_id, activity_period
+      ),
+      sizes AS (
+        SELECT cohort_period, uniqExact(person) AS cohort_size FROM cohorts GROUP BY cohort_period
+      ),
+      per_offset AS (
+        SELECT c.cohort_period AS cohort_period,
+               dateDiff('${interval}', c.cohort_period, a.activity_period) AS period_offset,
+               uniqExact(c.person) AS period_count
+        FROM cohorts AS c
+        INNER JOIN activity AS a ON a.person = c.person
+        WHERE a.activity_period >= c.cohort_period
+        GROUP BY cohort_period, period_offset
       )
       SELECT
-        toString(c.cohort_period) AS cohortPeriod,
-        count(DISTINCT c.user_id) AS cohortSize,
-        groupArray(period_count ORDER BY period_offset) AS retentionByPeriod
-      FROM cohort_users c
-      LEFT JOIN (
+        cohortPeriod,
+        cohortSize,
+        arrayMap(i -> toUInt32(arrayFirst(x -> x.1 = i, pairs).2), range(toUInt32(maxOffset + 1)))
+          AS retentionByPeriod
+      FROM (
         SELECT
-          c2.cohort_period,
-          dateDiff('${interval}', c2.cohort_period, a.activity_period) AS period_offset,
-          count(DISTINCT a.user_id) AS period_count
-        FROM cohort_users c2
-        INNER JOIN activity a ON c2.user_id = a.user_id
-        GROUP BY c2.cohort_period, period_offset
-        ORDER BY period_offset
-      ) sub ON c.cohort_period = sub.cohort_period
-      GROUP BY c.cohort_period
-      ORDER BY c.cohort_period
+          toString(s.cohort_period) AS cohortPeriod,
+          toUInt32(s.cohort_size) AS cohortSize,
+          arraySort(x -> x.1, groupArray((p.period_offset, p.period_count))) AS pairs,
+          max(p.period_offset) AS maxOffset
+        FROM sizes AS s
+        LEFT JOIN per_offset AS p ON p.cohort_period = s.cohort_period
+        GROUP BY s.cohort_period, s.cohort_size
+      )
+      ORDER BY cohortPeriod
     `,
     params: { projectId: ctx.projectId, from: ctx.from, to: ctx.to },
   });
 }
 
+/**
+ * Active users per bucket: users active in the bucket's first day (or hour),
+ * and in the 7 and 30 days ending with it — the same windows as before.
+ *
+ * Built from one row per person and day, fanned out over the 30 days each
+ * activity counts towards, instead of a CROSS JOIN of every bucket with every
+ * event, which got expensive over long ranges (#85 step 7).
+ */
 export async function queryActiveUsers(
   ctx: QueryContext,
   granularity: Granularity,
 ): Promise<ActiveUsersPoint[]> {
   const fn = granularityToFunction(granularity);
-  const interval = granularity === "hour" ? "HOUR" : "DAY";
+  const window = `AND e.timestamp >= ({from:DateTime64(3)} - INTERVAL 30 DAY)
+          AND e.timestamp < {to:DateTime64(3)}`;
+  const inRange = "timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}";
+
+  const query =
+    granularity === "hour"
+      ? `
+      WITH ${keyedEvents(window)},
+      act AS (
+        SELECT DISTINCT user_key AS person, toStartOfHour(timestamp) AS active_hour
+        FROM keyed WHERE user_key IS NOT NULL
+      ),
+      buckets AS (
+        SELECT DISTINCT toStartOfHour(timestamp) AS bucket_hour
+        FROM keyed WHERE user_key IS NOT NULL AND ${inRange}
+      )
+      SELECT
+        b.bucket_hour AS bucket,
+        uniqExactIf(a.person, a.active_hour = b.bucket_hour) AS dau,
+        uniqExactIf(a.person, a.active_hour >= b.bucket_hour - INTERVAL 6 DAY
+                              AND a.active_hour <= b.bucket_hour) AS wau,
+        uniqExactIf(a.person, a.active_hour >= b.bucket_hour - INTERVAL 29 DAY
+                              AND a.active_hour <= b.bucket_hour) AS mau
+      FROM buckets AS b CROSS JOIN act AS a
+      GROUP BY b.bucket_hour
+      ORDER BY bucket
+    `
+      : `
+      WITH ${keyedEvents(window)},
+      act AS (
+        SELECT DISTINCT user_key AS person, toDate(timestamp) AS active_day
+        FROM keyed WHERE user_key IS NOT NULL
+      ),
+      buckets AS (
+        SELECT DISTINCT toDate(${fn}(timestamp)) AS bucket_day
+        FROM keyed WHERE user_key IS NOT NULL AND ${inRange}
+      )
+      SELECT
+        ${granularity === "day" ? "toDateTime(window_day, 'UTC')" : "window_day"} AS bucket,
+        dau, wau, mau
+      FROM (
+        SELECT
+          addDays(active_day, days_back) AS window_day,
+          uniqExactIf(person, days_back = 0) AS dau,
+          uniqExactIf(person, days_back < 7) AS wau,
+          uniqExact(person) AS mau
+        FROM act ARRAY JOIN range(30) AS days_back
+        WHERE addDays(active_day, days_back) IN (SELECT bucket_day FROM buckets)
+        GROUP BY window_day
+      )
+      ORDER BY bucket
+    `;
 
   const rows = await queryAnalytics<ActiveUsersPoint>({
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
-    query: `
-      WITH buckets AS (
-        SELECT ${fn}(timestamp) AS bucket
-        FROM events
-        WHERE project_id = {projectId:String}
-          AND user_id IS NOT NULL AND user_id != ''
-          AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}
-        GROUP BY bucket
-      )
-      SELECT
-        b.bucket,
-        uniqExactIf(e.user_id,
-          e.timestamp >= b.bucket AND e.timestamp < b.bucket + INTERVAL 1 ${interval}
-        ) AS dau,
-        uniqExactIf(e.user_id,
-          e.timestamp >= b.bucket - INTERVAL 6 DAY
-          AND e.timestamp < b.bucket + INTERVAL 1 ${interval}
-        ) AS wau,
-        uniqExactIf(e.user_id,
-          e.timestamp >= b.bucket - INTERVAL 29 DAY
-          AND e.timestamp < b.bucket + INTERVAL 1 ${interval}
-        ) AS mau
-      FROM buckets b
-      CROSS JOIN events e
-      WHERE e.project_id = {projectId:String}
-        AND e.user_id IS NOT NULL AND e.user_id != ''
-        AND e.timestamp >= ({from:DateTime64(3)} - INTERVAL 30 DAY)
-        AND e.timestamp < {to:DateTime64(3)}
-      GROUP BY b.bucket
-      ORDER BY b.bucket
-    `,
+    query,
     params: { projectId: ctx.projectId, from: ctx.from, to: ctx.to },
   });
   return fillTimeBuckets(rows, ctx.from, ctx.to, granularity, (bucket) => ({
@@ -186,23 +275,19 @@ export async function queryNewVsReturning(
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
-      WITH first_periods AS (
-        SELECT
-          user_id,
-          ${fn}(min(first_seen)) AS first_period
-        FROM users_mv FINAL
-        WHERE project_id = {projectId:String}
-        GROUP BY user_id
+      WITH ${keyedEvents()},
+      firsts AS (
+        SELECT user_key AS person, ${fn}(min(timestamp)) AS first_period
+        FROM keyed WHERE user_key IS NOT NULL
+        GROUP BY person
       )
       SELECT
-        ${fn}(e.timestamp) AS bucket,
-        countDistinctIf(e.user_id, fp.first_period = ${fn}(e.timestamp)) AS newUsers,
-        countDistinctIf(e.user_id, fp.first_period < ${fn}(e.timestamp)) AS returningUsers
-      FROM events e
-      LEFT JOIN first_periods fp ON e.user_id = fp.user_id
-      WHERE e.project_id = {projectId:String}
-        AND e.user_id IS NOT NULL AND e.user_id != ''
-        AND e.timestamp >= {from:DateTime64(3)} AND e.timestamp < {to:DateTime64(3)}
+        ${fn}(k.timestamp) AS bucket,
+        uniqExactIf(k.user_key, f.first_period = ${fn}(k.timestamp)) AS newUsers,
+        uniqExactIf(k.user_key, f.first_period < ${fn}(k.timestamp)) AS returningUsers
+      FROM keyed AS k
+      INNER JOIN firsts AS f ON f.person = k.user_key
+      WHERE k.timestamp >= {from:DateTime64(3)} AND k.timestamp < {to:DateTime64(3)}
       GROUP BY bucket
       ORDER BY bucket
     `,
@@ -223,6 +308,7 @@ export async function queryUserDetail(
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
+      WITH ${keyedEvents("AND e.timestamp >= {from:DateTime64(3)} AND e.timestamp < {to:DateTime64(3)}")}
       SELECT
         event_id AS eventId,
         event_type AS eventType,
@@ -235,10 +321,8 @@ export async function queryUserDetail(
         error_category AS errorCategory,
         error_message AS errorMessage,
         platform
-      FROM events
-      WHERE project_id = {projectId:String}
-        AND user_id = {userId:String}
-        AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}
+      FROM keyed
+      WHERE user_key = {userId:String}
       ORDER BY timestamp DESC
       LIMIT 200
     `,

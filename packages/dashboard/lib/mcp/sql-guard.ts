@@ -110,8 +110,6 @@ const BANNED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 /** Tables the row policies cover — the only ones worth querying anyway. */
 export const QUERYABLE_TABLES = [
   "events",
-  "sessions_mv",
-  "users_mv",
   "tool_registry",
   // Anonymous statistics (#85), row-policy covered like the rest.
   "stats_daily",
