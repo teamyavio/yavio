@@ -80,6 +80,9 @@ const BANNED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
         "dictionary",
         "dictGet\\w*",
         "joinGet(?:OrNull)?",
+        // Scalar, but its remote form ('host:port', db, table, column) opens a
+        // connection to any address the server can reach. Removed in 26.7.
+        "hasColumnInTable",
         "executable(?:Pool)?",
         "input",
         // introspection that reads past row policies
