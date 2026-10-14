@@ -198,12 +198,13 @@ The PII stripping engine runs in the **ingestion API** on every event before it 
 | Pattern | Detection Method | Replacement |
 |---------|-----------------|-------------|
 | Email addresses | RFC 5322 regex | `[EMAIL_REDACTED]` |
+| IBANs | Compact or grouped, ISO 13616 mod-97 check (#90) | `[IBAN_REDACTED]` |
 | Credit card numbers | Luhn algorithm + format check (13–19 digits) | `[CC_REDACTED]` |
 | SSN / Tax IDs | NNN-NN-NNNN pattern and variants | `[SSN_REDACTED]` |
 | Phone numbers | International format detection (E.164 + common formats) | `[PHONE_REDACTED]` |
 | Physical addresses | Heuristic: number + street name patterns | `[ADDRESS_REDACTED]` |
 
-The engine scans all string fields in the event, including nested JSON in the `metadata` field. It targets identity data; business values (prices, cities, dates, quantities) are preserved.
+The engine scans all string fields in the event, including nested JSON in the `metadata` field, except the identifier fields `event_id`, `trace_id`, `session_id`, `subject_id` and `timestamp` (#90): they hold no user content, and the phone pattern used to rewrite random ids that contained a digit run. It targets identity data; business values (prices, cities, dates, quantities) are preserved.
 
 > **Why server-side PII stripping?** Centralizing PII stripping in the ingestion API (instead of in each SDK) has three advantages: (1) single place to update detection patterns, (2) PII rules apply consistently regardless of SDK version, (3) easier to audit and prove GDPR compliance.
 

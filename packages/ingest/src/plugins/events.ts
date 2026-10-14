@@ -2,8 +2,9 @@ import { ErrorCode, YavioError } from "@yavio/shared/errors";
 import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { enrichEvents } from "../lib/event-enricher.js";
+import { normalizeEvents } from "../lib/event-normalizer.js";
 import { enforceFieldLimits, isBatchTooLarge } from "../lib/field-limits.js";
-import { stripPii } from "../lib/pii-stripper.js";
+import { EVENT_IDENTIFIER_FIELDS, stripPii } from "../lib/pii-stripper.js";
 import { validateBatch } from "../lib/schema-validator.js";
 import { authenticateHeaderOrBody } from "./auth.js";
 
@@ -108,8 +109,23 @@ function registerEventsRoute(app: FastifyInstance): void {
         }
       }
 
-      // 5. PII stripping
-      const { result: strippedEvents } = stripPii(fieldResult.accepted);
+      // 5. Normalise client-supplied fields (#90): clamp timestamps, NULL
+      //    invalid country/currency/locale. Never rejects an event.
+      const normalized = normalizeEvents(fieldResult.accepted);
+      if (normalized.clampedTimestamps > 0 || normalized.invalidFields > 0) {
+        request.log.warn(
+          {
+            timestamps_clamped: normalized.clampedTimestamps,
+            invalid_fields_nulled: normalized.invalidFields,
+          },
+          "Normalised client-supplied event fields",
+        );
+      }
+
+      // 5b. PII stripping — over content, not over ids (EVENT_IDENTIFIER_FIELDS)
+      const { result: strippedEvents } = stripPii(normalized.events, {
+        exemptEventKeys: EVENT_IDENTIFIER_FIELDS,
+      });
 
       // 6. Event enrichment
       const enriched = enrichEvents(strippedEvents, ctx);

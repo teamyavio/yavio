@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ClickHouseClient } from "@clickhouse/client";
 import type { EnrichedEvent } from "./event-enricher.js";
 
@@ -108,6 +109,12 @@ export class BatchWriter {
 
   private async insertWithRetry(batch: EnrichedEvent[]): Promise<void> {
     const values = this.mapRow ? batch.map(this.mapRow) : batch;
+    // One token per batch, the same on every retry (#90). With the table's
+    // non_replicated_deduplication_window (migration 0014), ClickHouse drops a
+    // block it has already stored under this token, so a retry after an insert
+    // that reached the server but failed on the way back is stored once.
+    // Derived from the content, so it is deterministic across retries.
+    const dedupToken = createHash("sha256").update(JSON.stringify(values)).digest("hex");
     let lastError: unknown;
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -119,7 +126,7 @@ export class BatchWriter {
           // Regular inserts only. async_insert is on by default from ClickHouse
           // 26.3 (#95); this writer already batches, so it gains nothing, and
           // async inserts deduplicate under different rules (#90).
-          clickhouse_settings: { async_insert: 0 },
+          clickhouse_settings: { async_insert: 0, insert_deduplication_token: dedupToken },
         });
         return;
       } catch (err) {

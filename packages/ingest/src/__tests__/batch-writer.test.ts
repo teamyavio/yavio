@@ -62,8 +62,12 @@ describe("BatchWriter", () => {
       values: [expect.objectContaining({ event_id: "evt-1" })],
       format: "JSONEachRow",
       // async_insert is on by default from ClickHouse 26.3; this writer batches
-      // itself and must stay on the regular insert path (#95, #90).
-      clickhouse_settings: { async_insert: 0 },
+      // itself and must stay on the regular insert path (#95, #90). The token
+      // lets ClickHouse drop a retried batch it already stored (#90).
+      clickhouse_settings: {
+        async_insert: 0,
+        insert_deduplication_token: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
     });
     expect(writer.bufferedCount).toBe(0);
   });
@@ -209,5 +213,45 @@ describe("BatchWriter", () => {
     writer.start();
     writer.start(); // should not throw or create duplicate timers
     writer.shutdown();
+  });
+
+  it("sends the same deduplication token on every retry of a batch (#90)", async () => {
+    vi.useFakeTimers();
+    try {
+      const insertFn = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("socket hang up"))
+        .mockResolvedValueOnce(undefined);
+      const writer = new BatchWriter({ clickhouse: mockClickHouse(insertFn), flushSize: 5 });
+      writer.enqueue([makeEvent()]);
+      const flushing = writer.flush();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushing;
+
+      expect(insertFn).toHaveBeenCalledTimes(2);
+      const tokens = insertFn.mock.calls.map(
+        (c) =>
+          (c[0] as { clickhouse_settings: Record<string, unknown> }).clickhouse_settings
+            .insert_deduplication_token,
+      );
+      expect(tokens[0]).toBe(tokens[1]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives different batches different tokens", async () => {
+    const insertFn = vi.fn().mockResolvedValue(undefined);
+    const writer = new BatchWriter({ clickhouse: mockClickHouse(insertFn), flushSize: 5 });
+    writer.enqueue([makeEvent("evt-a")]);
+    await writer.flush();
+    writer.enqueue([makeEvent("evt-b")]);
+    await writer.flush();
+    const [a, b] = insertFn.mock.calls.map(
+      (c) =>
+        (c[0] as { clickhouse_settings: Record<string, unknown> }).clickhouse_settings
+          .insert_deduplication_token,
+    );
+    expect(a).not.toBe(b);
   });
 });

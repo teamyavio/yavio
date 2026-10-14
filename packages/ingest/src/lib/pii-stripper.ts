@@ -2,8 +2,8 @@
  * PII stripping engine.
  *
  * Recursively walks all string values in an object and replaces
- * patterns matching common PII: emails, credit cards, SSNs, phone numbers,
- * and physical addresses.
+ * patterns matching common PII: emails, IBANs, credit cards, SSNs, phone
+ * numbers, and physical addresses.
  */
 
 /**
@@ -23,6 +23,28 @@ function passesLuhn(digits: string): boolean {
     alternate = !alternate;
   }
   return sum % 10 === 0;
+}
+
+/**
+ * ISO 13616 IBAN check: move the first four characters to the end, map
+ * letters to 10..35, and the number mod 97 must be 1. Filters out random
+ * letter/digit strings of the right shape (#90).
+ */
+function passesIbanCheck(candidate: string): boolean {
+  const iban = candidate.replace(/\s/g, "").toUpperCase();
+  if (iban.length < 15 || iban.length > 34) return false;
+  // Real BBANs are mostly digits (even GB/NL, whose bank codes are letters).
+  // Plain text like "AB12 test case data here" has the shape but no digits.
+  if ((iban.slice(4).match(/\d/g) ?? []).length < 8) return false;
+  const rearranged = iban.slice(4) + iban.slice(0, 4);
+  let remainder = 0;
+  for (const char of rearranged) {
+    const value = /\d/.test(char) ? char : String(char.charCodeAt(0) - 55);
+    for (const digit of value) {
+      remainder = (remainder * 10 + Number(digit)) % 97;
+    }
+  }
+  return remainder === 1;
 }
 
 /**
@@ -46,6 +68,14 @@ const PII_PATTERNS: Array<{
   {
     pattern: /[a-zA-Z0-9._%+-]{1,64}@[a-zA-Z0-9.-]{1,255}\.[a-zA-Z]{2,24}/g,
     replacement: "[EMAIL_REDACTED]",
+  },
+  // IBANs, compact or in groups of four (#90). Before the card and phone
+  // patterns: those used to take the digit tail and leave the country code,
+  // check digits and bank code in place (DE8937040044[PHONE_REDACTED]).
+  {
+    pattern: /\b[A-Za-z]{2}\d{2}(?: ?[A-Za-z0-9]{4}){2,7}(?: ?[A-Za-z0-9]{1,4})?\b/g,
+    replacement: "[IBAN_REDACTED]",
+    validate: passesIbanCheck,
   },
   // Credit card numbers (13-19 digits with optional space/dash separators, Luhn-validated)
   {
@@ -116,13 +146,40 @@ export function stripPiiFromString(value: string): { result: string; redacted: b
 }
 
 /**
+ * Event fields that hold identifiers or validated formats, never user content.
+ *
+ * The patterns must not run over them: a random UUID or a hex session hash
+ * that happens to contain a digit run was rewritten (an event_id ending in
+ * -959114949231 was stored as -95[PHONE_REDACTED]), which corrupts the id,
+ * breaks joins on trace/session, and can make two events collide on one
+ * event_id. `user_id` is not listed: integrators choose it, and some use an
+ * email address.
+ */
+export const EVENT_IDENTIFIER_FIELDS: ReadonlySet<string> = new Set([
+  "event_id",
+  "trace_id",
+  "session_id",
+  "subject_id",
+  "timestamp",
+]);
+
+export interface StripPiiOptions {
+  /** Keys left untouched on each object directly inside the top-level array. */
+  exemptEventKeys?: ReadonlySet<string>;
+}
+
+/**
  * Recursively strip PII from all string values in an object.
  * Returns a new object (does not mutate the original).
  */
-export function stripPii<T>(data: T): { result: T; piiDetected: boolean } {
+export function stripPii<T>(
+  data: T,
+  options: StripPiiOptions = {},
+): { result: T; piiDetected: boolean } {
   let piiDetected = false;
+  const exempt = options.exemptEventKeys;
 
-  function walk(value: unknown): unknown {
+  function walk(value: unknown, depth: number): unknown {
     if (typeof value === "string") {
       const { result, redacted } = stripPiiFromString(value);
       if (redacted) piiDetected = true;
@@ -130,13 +187,14 @@ export function stripPii<T>(data: T): { result: T; piiDetected: boolean } {
     }
 
     if (Array.isArray(value)) {
-      return value.map(walk);
+      return value.map((item) => walk(item, depth + 1));
     }
 
     if (value !== null && typeof value === "object") {
       const result: Record<string, unknown> = {};
       for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-        result[key] = walk(val);
+        // depth 1: an event inside the top-level batch array.
+        result[key] = exempt && depth === 1 && exempt.has(key) ? val : walk(val, depth + 1);
       }
       return result;
     }
@@ -144,6 +202,6 @@ export function stripPii<T>(data: T): { result: T; piiDetected: boolean } {
     return value;
   }
 
-  const result = walk(data) as T;
+  const result = walk(data, 0) as T;
   return { result, piiDetected };
 }
