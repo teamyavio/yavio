@@ -131,8 +131,10 @@ services:
       # This service narrows the ClickHouse username; when set it uses that
       # user's own password instead of the default user's.
       CLICKHOUSE_DASHBOARD_PASSWORD: ${CLICKHOUSE_DASHBOARD_PASSWORD:-}
-      # Erasure only: ALTER DELETE on default.events and nothing else.
-      CLICKHOUSE_ERASER_PASSWORD: ${CLICKHOUSE_ERASER_PASSWORD:-}
+      # Erasure only: ALTER DELETE on default.events and nothing else. Required:
+      # the dashboard refuses to start without it rather than erasing as the
+      # superuser (#91).
+      CLICKHOUSE_ERASER_PASSWORD: ${CLICKHOUSE_ERASER_PASSWORD:?CLICKHOUSE_ERASER_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — the dashboard erases data as the yavio_eraser user and no longer falls back to the superuser.}
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET}

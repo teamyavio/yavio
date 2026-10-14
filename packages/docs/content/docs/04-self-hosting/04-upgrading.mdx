@@ -46,6 +46,22 @@ Database migrations run automatically when services start. Both PostgreSQL (via 
   There is no manual migration step required. Just pull the latest images and restart.
 </Callout>
 
+## Version Notes
+
+### `CLICKHOUSE_ERASER_PASSWORD` is required
+
+The dashboard deletes account, workspace and project data as the `yavio_eraser` ClickHouse user, which can delete rows from the events table and do nothing else. It used to fall back to the unrestricted `default` user when `CLICKHOUSE_ERASER_PASSWORD` was unset. It no longer does: Compose refuses to start without the variable, and the dashboard exits at startup with a message naming it.
+
+If your `.env` predates the variable:
+
+```bash
+echo "CLICKHOUSE_ERASER_PASSWORD=$(openssl rand -hex 24)" >> .env
+docker compose run --rm migrate   # applies the password to yavio_eraser
+docker compose up -d
+```
+
+Run the migration before starting the new dashboard, so the password is in place when the first deletion happens.
+
 ## Rollback
 
 If an update causes issues, you can roll back to a specific image version by pinning the version in your `docker-compose.yml` or using a tagged image:

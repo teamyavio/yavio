@@ -63,43 +63,39 @@ describe("read-only client — least privilege", () => {
   });
 });
 
-describe("mutating client — must retain ALTER DELETE rights", () => {
-  it("does NOT narrow the user, because erasure needs privileges yavio_dashboard lacks", async () => {
-    // Regression guard for b3fd7e7. yavio_dashboard is granted SELECT on four
-    // tables (migration 0010); ALTER TABLE ... DELETE fails for it with
-    // ACCESS_DENIED. Narrowing this client silently broke every account,
-    // workspace and project erasure while the routes still returned 200.
-    process.env.CLICKHOUSE_URL = "http://default:pw@clickhouse:8123";
-    const url = new URL((await urlFor("mutate")) as string);
-    expect(url.username).toBe("default");
-    expect(url.username).not.toBe("yavio_dashboard");
-  });
-
-  it("narrows to yavio_eraser when its password is configured", async () => {
+describe("mutating client — yavio_eraser only, never the superuser (#91)", () => {
+  it("connects as yavio_eraser with its own password", async () => {
     // yavio_eraser holds ALTER DELETE on default.events and nothing else
-    // (CH migration 0012), so erasure no longer needs the superuser.
+    // (CH migration 0012). yavio_dashboard would fail with ACCESS_DENIED, and
+    // `default` is the superuser this user exists to retire.
     process.env.CLICKHOUSE_URL = "http://default:pw@clickhouse:8123";
     process.env.CLICKHOUSE_ERASER_PASSWORD = "eraser-secret";
     const url = new URL((await urlFor("mutate")) as string);
     expect(url.username).toBe("yavio_eraser");
     expect(url.password).toBe("eraser-secret");
+    expect(url.hostname).toBe("clickhouse");
+    expect(url.port).toBe("8123");
   });
 
-  it("falls back to the URL user when no eraser password is set", async () => {
-    // A deployment that has not yet run 0012 must keep erasing rather than
-    // silently failing — the exact failure this file exists to prevent.
+  it("refuses to create a client without the eraser password instead of falling back", async () => {
+    // The old fallback connected as the CLICKHOUSE_URL user — the superuser.
     process.env.CLICKHOUSE_URL = "http://default:pw@clickhouse:8123";
-    const url = new URL((await urlFor("mutate")) as string);
-    expect(url.username).toBe("default");
+    const mod = await import("@/lib/clickhouse");
+    expect(() => mod.getMutatingClickHouseClient()).toThrow(
+      /CLICKHOUSE_ERASER_PASSWORD is not set/,
+    );
+    expect(created).toHaveLength(0);
   });
 
   it("is a different identity from the read-only client", async () => {
     process.env.CLICKHOUSE_URL = "http://default:pw@clickhouse:8123";
+    process.env.CLICKHOUSE_ERASER_PASSWORD = "eraser-secret";
     const mod = await import("@/lib/clickhouse");
     mod.getClickHouseClient();
     mod.getMutatingClickHouseClient();
     const [readUrl, mutateUrl] = created;
-    expect(new URL(readUrl as string).username).not.toBe(new URL(mutateUrl as string).username);
+    expect(new URL(readUrl as string).username).toBe("yavio_dashboard");
+    expect(new URL(mutateUrl as string).username).toBe("yavio_eraser");
   });
 });
 
