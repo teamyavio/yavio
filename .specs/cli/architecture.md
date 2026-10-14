@@ -203,7 +203,7 @@ $ yavio update
 Pulling latest images...
   ✓ yavio/ingest:latest      (updated: v1.2.0 → v1.3.0)
   ✓ yavio/dashboard:latest   (updated: v1.2.0 → v1.3.0)
-  · clickhouse/clickhouse-server:24.3  (unchanged)
+  · clickhouse/clickhouse-server:26.8.26.12  (unchanged)
   · postgres:16              (unchanged)
 
 Restarting services...

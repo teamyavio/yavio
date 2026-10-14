@@ -41,7 +41,7 @@
     "db:studio": "dotenv -e ../../.env -- drizzle-kit studio"
   },
   "dependencies": {
-    "@clickhouse/client": "^1.8.1",
+    "@clickhouse/client": "^1.17.0",
     "@yavio/shared": "workspace:*",
     "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.5"

@@ -1,0 +1,59 @@
+<!--
+  Retention for ClickHouse's own logs (#92), mounted into the clickhouse
+  service by docker-compose.yml.
+
+  Without it, the system log tables have no TTL and are never cleaned. On a
+  production deployment they grew to over 99% of the ClickHouse volume and
+  nearly filled the disk. query_log also keeps the text of every query, and
+  free-form run_query SQL can carry user identifiers as literals, so an
+  unbounded query_log would also break the 13-month retention promise (#85).
+
+  Every system log the stock config enables gets a 30-day row TTL. A section
+  here MERGES into the stock one, so it only adds the TTL. Do not add a
+  section for a log the stock config leaves disabled (session_log,
+  zookeeper_log): a section is what enables it. opentelemetry_span_log is left
+  alone: its stock section sets <engine>, which cannot be combined with <ttl>,
+  and it stays empty unless tracing is turned on.
+
+  Changing a system log's definition (and so this file) makes ClickHouse
+  rename the old table to <name>_N and create a new one. Drop the leftovers
+  after a deploy that changes it; see the ClickHouse upgrade procedure (#95).
+
+  Checked against clickhouse/clickhouse-server:26.8.26.12 by
+  packages/db/src/__tests__/ch-system-logs.test.ts.
+-->
+<clickhouse>
+    <!-- The image defaults to trace, written into the container's writable layer. -->
+    <logger>
+        <level>warning</level>
+        <size>100M</size>
+        <count>5</count>
+    </logger>
+
+    <query_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></query_log>
+    <query_thread_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></query_thread_log>
+    <query_views_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></query_views_log>
+    <query_metric_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></query_metric_log>
+    <part_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></part_log>
+    <trace_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></trace_log>
+    <instrumentation_trace_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></instrumentation_trace_log>
+    <metric_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></metric_log>
+    <asynchronous_metric_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></asynchronous_metric_log>
+    <processors_profile_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></processors_profile_log>
+    <background_schedule_pool_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></background_schedule_pool_log>
+    <error_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></error_log>
+    <crash_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></crash_log>
+    <backup_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></backup_log>
+    <blob_storage_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></blob_storage_log>
+    <iceberg_metadata_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></iceberg_metadata_log>
+    <delta_lake_metadata_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></delta_lake_metadata_log>
+    <aggregated_zookeeper_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></aggregated_zookeeper_log>
+    <zookeeper_connection_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></zookeeper_connection_log>
+    <asynchronous_insert_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></asynchronous_insert_log>
+    <s3queue_log><ttl>event_date + INTERVAL 30 DAY DELETE</ttl></s3queue_log>
+    <!-- text_log copies the server log into a table; same level as the file log. -->
+    <text_log>
+        <level>warning</level>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+    </text_log>
+</clickhouse>

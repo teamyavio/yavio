@@ -153,7 +153,7 @@ Build order respects dependency chain: `shared` / `db` → `sdk` / `ingest` / `c
 ### 2.7 Integration Tests
 
 **Runner:** `ubuntu-latest`, Node.js 22
-**Services:** ClickHouse 24.3 + PostgreSQL 16 (GitHub Actions service containers)
+**Services:** ClickHouse 26.8 (exact tag read from `docker-compose.test.yml`) + PostgreSQL 16 (GitHub Actions service containers)
 
 Integration tests validate the full data path: SDK → ingestion API → ClickHouse → dashboard query. They run against real databases, not mocks. See [testing.md](./testing.md) for the full test matrix.
 
@@ -176,7 +176,7 @@ integration-test:
         --health-timeout 5s
         --health-retries 5
     clickhouse:
-      image: clickhouse/clickhouse-server:24.3
+      image: ${{ needs.detect.outputs.clickhouse_image }}  # from docker-compose.test.yml
       ports:
         - 8123:8123
       options: >-
@@ -545,7 +545,7 @@ services:
       - /var/lib/postgresql/data  # RAM-backed for speed
 
   clickhouse:
-    image: clickhouse/clickhouse-server:24.3
+    image: clickhouse/clickhouse-server:26.8.26.12
     ports:
       - "8123:8123"
     tmpfs:
