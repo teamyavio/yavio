@@ -212,6 +212,17 @@ describe.skipIf(!url)("user queries on a real ClickHouse (#89)", () => {
     const ben = await q.queryUserDetail(ctx(day(-60), day(1)), "ben");
     expect(ben).toHaveLength(3);
   });
+
+  it("shows the detail of a user identified before the selected range (#112)", async () => {
+    // A later session of ben's that never reaches identify(): subject only.
+    // The list attributes it to ben through the all-time mapping, so the
+    // detail page for the same range must find it as well — the stitch for
+    // a named user is never bounded to the range.
+    await insert([{ subject_id: "sub-ben", session_id: "b2", timestamp: day(-1) }]);
+    const inRange = await q.queryUserDetail(ctx(day(-2), day(1)), "ben");
+    expect(inRange).toHaveLength(1);
+    expect(inRange[0].sessionId).toBe("b2");
+  });
 });
 
 describe("no query reads users_mv / sessions_mv any more (#89 release 1)", () => {

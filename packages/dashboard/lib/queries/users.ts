@@ -38,8 +38,30 @@ interface QueryContext {
  * #85's statistics job counts users with the same key, so tier 1 and tier 2
  * agree. Aliases never shadow a column a WHERE refers to: ClickHouse resolves
  * the alias first.
+ *
+ * A windowed COUNT stitches from the window it reads (#112): the mapping
+ * only has to cover the subject_ids that appear there, and a person seen as
+ * subject and as user_id within the window is still one person. Without
+ * the bound, every users-page query aggregated the whole project's events
+ * before its own time filter applied — several times per page view, and
+ * growing with the 13 months now kept. Queries that name a person — the
+ * all-time list, first seen, retention cohorts, and the detail of one user
+ * — keep the full mapping, so the list and the detail agree on whose the
+ * subject-only events are.
  */
-function keyedEvents(timeFilter = ""): string {
+interface TimeWindow {
+  /** SQL expressions; the window is [from, to). */
+  from: string;
+  to: string;
+}
+
+const bound = (column: string, window?: TimeWindow): string =>
+  window ? `AND ${column} >= ${window.from} AND ${column} < ${window.to}` : "";
+
+function keyedEvents({
+  events,
+  stitch,
+}: { events?: TimeWindow; stitch?: TimeWindow } = {}): string {
   return `
       stitch AS (
         SELECT assumeNotNull(subject_id) AS stitched_subject,
@@ -48,6 +70,7 @@ function keyedEvents(timeFilter = ""): string {
         WHERE project_id = {projectId:String}
           AND subject_id IS NOT NULL AND subject_id != ''
           AND user_id IS NOT NULL AND user_id != ''
+          ${bound("timestamp", stitch)}
         GROUP BY stitched_subject
       ),
       keyed AS (
@@ -55,7 +78,7 @@ function keyedEvents(timeFilter = ""): string {
                coalesce(nullIf(e.user_id, ''), nullIf(s.mapped_user_id, ''), nullIf(e.subject_id, '')) AS user_key
         FROM events AS e
         LEFT JOIN stitch AS s ON s.stitched_subject = ifNull(e.subject_id, '')
-        WHERE e.project_id = {projectId:String} ${timeFilter}
+        WHERE e.project_id = {projectId:String} ${bound("e.timestamp", events)}
       )`;
 }
 
@@ -198,14 +221,14 @@ export async function queryActiveUsers(
   granularity: Granularity,
 ): Promise<ActiveUsersPoint[]> {
   const fn = granularityToFunction(granularity);
-  const window = `AND e.timestamp >= ({from:DateTime64(3)} - INTERVAL 30 DAY)
-          AND e.timestamp < {to:DateTime64(3)}`;
+  // 30 days before the range, for the rolling WAU/MAU windows.
+  const window = { from: "({from:DateTime64(3)} - INTERVAL 30 DAY)", to: "{to:DateTime64(3)}" };
   const inRange = "timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}";
 
   const query =
     granularity === "hour"
       ? `
-      WITH ${keyedEvents(window)},
+      WITH ${keyedEvents({ events: window, stitch: window })},
       act AS (
         SELECT DISTINCT user_key AS person, toStartOfHour(timestamp) AS active_hour
         FROM keyed WHERE user_key IS NOT NULL
@@ -226,7 +249,7 @@ export async function queryActiveUsers(
       ORDER BY bucket
     `
       : `
-      WITH ${keyedEvents(window)},
+      WITH ${keyedEvents({ events: window, stitch: window })},
       act AS (
         SELECT DISTINCT user_key AS person, toDate(timestamp) AS active_day
         FROM keyed WHERE user_key IS NOT NULL
@@ -308,7 +331,7 @@ export async function queryUserDetail(
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
-      WITH ${keyedEvents("AND e.timestamp >= {from:DateTime64(3)} AND e.timestamp < {to:DateTime64(3)}")}
+      WITH ${keyedEvents({ events: { from: "{from:DateTime64(3)}", to: "{to:DateTime64(3)}" } })}
       SELECT
         event_id AS eventId,
         event_type AS eventType,
