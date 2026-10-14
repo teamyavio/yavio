@@ -240,6 +240,25 @@ describe("BatchWriter", () => {
     }
   });
 
+  it("gives the same batch enriched again (an SDK resend) a different token", async () => {
+    // The token is hashed from event_id, timestamp and ingested_at (#114),
+    // not the whole batch: a resend is enriched anew and must still be
+    // stored, to be collapsed by FINAL later (#90).
+    const insertFn = vi.fn().mockResolvedValue(undefined);
+    const writer = new BatchWriter({ clickhouse: mockClickHouse(insertFn), flushSize: 5 });
+    const first = makeEvent("evt-same");
+    writer.enqueue([first]);
+    await writer.flush();
+    writer.enqueue([{ ...first, ingested_at: new Date(Date.now() + 1_000).toISOString() }]);
+    await writer.flush();
+    const [a, b] = insertFn.mock.calls.map(
+      (c) =>
+        (c[0] as { clickhouse_settings: Record<string, unknown> }).clickhouse_settings
+          .insert_deduplication_token,
+    );
+    expect(a).not.toBe(b);
+  });
+
   it("gives different batches different tokens", async () => {
     const insertFn = vi.fn().mockResolvedValue(undefined);
     const writer = new BatchWriter({ clickhouse: mockClickHouse(insertFn), flushSize: 5 });

@@ -7,6 +7,29 @@ const DEFAULT_FLUSH_SIZE = 10_000;
 const DEFAULT_MAX_BUFFER_SIZE = 100_000;
 const MAX_RETRIES = 3;
 
+/**
+ * One token per batch, the same on every retry (#90). With the table's
+ * non_replicated_deduplication_window (migration 0014), ClickHouse drops a
+ * block it has already stored under this token, so a retry after an insert
+ * that reached the server but failed on the way back is stored once.
+ *
+ * Hashed from each row's identity — event_id, the client's timestamp and
+ * ingested_at — rather than from the whole serialised batch, which cost a
+ * second full JSON.stringify per flush on top of the client's own (#114).
+ * It still tells apart what has to be told apart: a retry of the same batch
+ * carries the same three values; an SDK resend is enriched again and gets a
+ * new ingested_at; a clamped resend carries a new timestamp (#90).
+ * (The client serialises JSONEachRow itself and accepts no pre-serialised
+ * bytes for it, so the one serialisation cannot be shared with the token.)
+ */
+function batchToken(batch: ReadonlyArray<EnrichedEvent>): string {
+  const hash = createHash("sha256");
+  for (const event of batch) {
+    hash.update(`${event.event_id}\t${event.timestamp}\t${event.ingested_at}\n`);
+  }
+  return hash.digest("hex");
+}
+
 export interface BatchWriterLogger {
   warn: (msg: string, ...args: unknown[]) => void;
 }
@@ -109,12 +132,7 @@ export class BatchWriter {
 
   private async insertWithRetry(batch: EnrichedEvent[]): Promise<void> {
     const values = this.mapRow ? batch.map(this.mapRow) : batch;
-    // One token per batch, the same on every retry (#90). With the table's
-    // non_replicated_deduplication_window (migration 0014), ClickHouse drops a
-    // block it has already stored under this token, so a retry after an insert
-    // that reached the server but failed on the way back is stored once.
-    // Derived from the content, so it is deterministic across retries.
-    const dedupToken = createHash("sha256").update(JSON.stringify(values)).digest("hex");
+    const dedupToken = batchToken(batch);
     let lastError: unknown;
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
