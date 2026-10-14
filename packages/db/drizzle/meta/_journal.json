@@ -43,6 +43,13 @@
       "when": 1791989553099,
       "tag": "0005_stats_job_runs",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791991664996,
+      "tag": "0006_erasure_requests",
+      "breakpoints": true
     }
   ]
 }

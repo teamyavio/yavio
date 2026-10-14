@@ -3,6 +3,7 @@ import {
   boolean,
   index,
   inet,
+  integer,
   jsonb,
   numeric,
   pgTable,
@@ -376,3 +377,38 @@ export const statsJobRuns = pgTable("stats_job_runs", {
   lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
   lastError: text("last_error"),
 });
+
+// =============================================================================
+// 13. Erasure Requests (#91)
+// =============================================================================
+
+/**
+ * Pending ClickHouse erasure for a deleted workspace or project. The delete
+ * handlers write a row in the same transaction that deletes the Postgres
+ * rows; the dashboard's erasure worker retries until every table is done.
+ *
+ * No foreign keys on purpose: the request must outlive the workspace and
+ * projects it erases. project_ids is the snapshot taken at deletion time —
+ * afterwards nothing in Postgres knows them any more, and tool_registry has
+ * no workspace_id to erase by.
+ */
+export const erasureRequests = pgTable(
+  "erasure_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** "workspace" or "project". */
+    scope: text("scope").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    projectIds: text("project_ids").array().notNull().default(sql`'{}'::text[]`),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    /** ClickHouse tables already erased for this request. */
+    tablesDone: text("tables_done").array().notNull().default(sql`'{}'::text[]`),
+    attempts: integer("attempts").notNull().default(0),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("idx_erasure_requests_pending").on(table.requestedAt).where(sql`completed_at IS NULL`),
+  ],
+);

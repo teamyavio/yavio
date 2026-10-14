@@ -25,4 +25,13 @@ export async function runStartupChecks(): Promise<void> {
     console.error(`[startup] ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   }
+
+  // The erasure queue's worker (#91 part 2): retries every queued deletion
+  // until each ClickHouse table is done, including requests left over from
+  // before a restart. Needs Postgres; a server started without it (as in the
+  // standalone boot test) has no queue to work off.
+  if (process.env.DATABASE_URL) {
+    const { startErasureWorker } = await import("./erasure");
+    startErasureWorker();
+  }
 }

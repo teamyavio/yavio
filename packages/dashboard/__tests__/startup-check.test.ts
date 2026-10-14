@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // while the real bug — a deployment that boots without the eraser credential —
 // is still there. So: register() itself, and the built standalone server.
 
-const KEYS = ["CLICKHOUSE_ERASER_PASSWORD", "NEXT_RUNTIME", "NEXT_PHASE"] as const;
+// DATABASE_URL too: with it, register() also starts the erasure worker (#91 part 2).
+const KEYS = ["CLICKHOUSE_ERASER_PASSWORD", "NEXT_RUNTIME", "NEXT_PHASE", "DATABASE_URL"] as const;
 let saved: Record<string, string | undefined>;
 
 beforeEach(() => {

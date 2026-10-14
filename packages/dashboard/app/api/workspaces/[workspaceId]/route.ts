@@ -1,5 +1,7 @@
 import { type AuthContext, withRole } from "@/lib/auth/require-role";
 import { getDb } from "@/lib/db";
+import { kickErasure } from "@/lib/erasure";
+import { deleteWorkspaceWithErasure } from "@/lib/erasure/requests";
 import { updateWorkspaceSchema } from "@/lib/workspace/validation";
 import { withRLS } from "@yavio/db/rls";
 import { workspaceMembers, workspaces } from "@yavio/db/schema";
@@ -84,27 +86,11 @@ export const DELETE = withRole("owner")(async (_request: Request, ctx: AuthConte
     );
   }
 
-  const db = getDb();
-
-  // Delete workspace (cascades members, projects, api keys, invitations)
-  await db.delete(workspaces).where(eq(workspaces.id, ctx.workspaceId));
-
-  // Clean up ClickHouse data asynchronously
-  try {
-    const { getMutatingClickHouseClient } = await import("@/lib/clickhouse");
-    const ch = getMutatingClickHouseClient();
-    await ch.command({
-      query: "ALTER TABLE events DELETE WHERE workspace_id = {id:String}",
-      query_params: { id: ctx.workspaceId },
-    });
-  } catch (err) {
-    // A failed erasure must never be invisible: the Postgres rows are already
-    // gone, so nothing else will ever point at these events again.
-    console.error(
-      `[erasure] ClickHouse cleanup FAILED for workspace ${ctx.workspaceId} — events retained`,
-      err,
-    );
-  }
+  // Deletes the workspace (cascading members, projects, api keys, invitations)
+  // and queues the erasure of its ClickHouse data in one transaction; the
+  // erasure worker retries until every table is done.
+  await deleteWorkspaceWithErasure(getDb(), ctx.workspaceId);
+  kickErasure();
 
   return NextResponse.json({ message: "Workspace deleted" });
 });

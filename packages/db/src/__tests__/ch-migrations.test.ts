@@ -1,10 +1,25 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   assertNoPasswordlessUsers,
   readManagedUserAuth,
   repairPasswordlessUsers,
 } from "../clickhouse-credentials.js";
-import { MANAGED_USER_NAMES, UNUSABLE_PASSWORD_HASH } from "../migrate-clickhouse-helpers.js";
+import {
+  MANAGED_USER_NAMES,
+  UNUSABLE_PASSWORD_HASH,
+  splitStatements,
+} from "../migrate-clickhouse-helpers.js";
+
+const MIGRATIONS_DIR = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "migrations",
+  "clickhouse",
+);
 import { disconnect, dropAll, getClient, runMigrations } from "./helpers/clickhouse.js";
 
 /**
@@ -99,7 +114,7 @@ describe("ClickHouse migrations", () => {
       expect(await result.json()).toHaveLength(1);
     });
 
-    it("records all 15 migration versions", async () => {
+    it("records all 16 migration versions", async () => {
       const ch = getClient();
       const result = await ch.query({
         query: "SELECT version FROM schema_migrations ORDER BY version",
@@ -122,6 +137,7 @@ describe("ClickHouse migrations", () => {
         "0013",
         "0014",
         "0015",
+        "0016",
       ]);
     });
   });
@@ -143,16 +159,32 @@ describe("ClickHouse migrations", () => {
       expect([...auth.keys()].sort()).toEqual([...MANAGED_USER_NAMES].sort());
     });
 
-    it("grants yavio_eraser row deletion on events and nothing else", async () => {
+    it("grants yavio_eraser row deletion on the tenant tables and nothing else", async () => {
       const ch = getClient();
       const grants = await ch.query({
         query:
-          "SELECT access_type, database, table, grant_option FROM system.grants WHERE user_name = 'yavio_eraser' ORDER BY access_type",
+          "SELECT access_type, database, table, grant_option FROM system.grants WHERE user_name = 'yavio_eraser' ORDER BY table",
         format: "JSONEachRow",
       });
-      expect(await grants.json()).toEqual([
-        { access_type: "ALTER DELETE", database: "default", table: "events", grant_option: 0 },
-      ]);
+      // 0012 granted events; 0016 every other table holding a tenant's data
+      // (#91 part 2). ALTER DELETE only — still no SELECT.
+      expect(await grants.json()).toEqual(
+        [
+          "events",
+          "sessions_mv",
+          "stats_cohorts",
+          "stats_daily",
+          "stats_users_daily",
+          "stats_users_periods",
+          "tool_registry",
+          "users_mv",
+        ].map((table) => ({
+          access_type: "ALTER DELETE",
+          database: "default",
+          table,
+          grant_option: 0,
+        })),
+      );
 
       // Direct grants are only half the picture: a role would carry its own
       // privileges in, and "nothing else" has to mean that too.
@@ -175,6 +207,21 @@ describe("ClickHouse migrations", () => {
       // Exactly what migration 0012 shipped before it was amended.
       await ch.command({ query: "CREATE USER yavio_eraser IDENTIFIED WITH no_password" });
       await ch.command({ query: "GRANT ALTER DELETE ON default.events TO yavio_eraser" });
+    });
+
+    // This block rebuilds yavio_eraser in its pre-fix state. Put it back the
+    // way the migrations define it — every grant (0012, 0016) and the
+    // unusable credential — so later suites on the same ClickHouse (the
+    // dashboard's erasure tests, locally) see the real user.
+    afterAll(async () => {
+      const ch = getClient();
+      for (const file of ["0012_eraser_user.sql", "0016_eraser_all_tables.sql"]) {
+        const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
+        for (const stmt of splitStatements(sql)) await ch.command({ query: stmt });
+      }
+      await ch.command({
+        query: `ALTER USER yavio_eraser IDENTIFIED WITH sha256_hash BY '${UNUSABLE_PASSWORD_HASH}'`,
+      });
     });
 
     it("reproduces the defect: the account authenticates with a WRONG password", async () => {
