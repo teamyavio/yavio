@@ -321,6 +321,43 @@ describe.skipIf(!ready)("erasure queue (#91 part 2)", () => {
     expect(Object.values(await rowsFor("project_id", t.p1)).every((n) => n === 0)).toBe(true);
   });
 
+  it("keeps the requests already worked off when the run dies later on", async () => {
+    // Progress is committed per request, not at the end of the run: the
+    // deletes wait for their mutations and can take minutes, so a crash or a
+    // dropped connection on the second request must not lose the first.
+    const t = await seedPostgres();
+    await seedClickHouse(t.ws, t.p1);
+    await seedClickHouse(t.ws, t.p2);
+    await deleteProjectWithErasure(db, t.ws, t.p1);
+    await deleteProjectWithErasure(db, t.ws, t.p2);
+    const queued = await db
+      .select()
+      .from(erasureRequests)
+      .where(eq(erasureRequests.workspaceId, t.ws));
+    const first = queued.find((r) => r.projectIds.includes(t.p1));
+    const second = queued.find((r) => r.projectIds.includes(t.p2));
+    if (!first || !second) throw new Error("both deletions should have queued a request");
+
+    let stamped = 0;
+    const w = new ErasureWorker({
+      db,
+      clickhouse: () => eraser,
+      now: () => {
+        if (++stamped === 2) throw new Error("process died"); // on the second request
+        return new Date();
+      },
+    });
+    await expect(w.processPending()).rejects.toThrow("process died");
+
+    expect((await request(first.id)).completedAt).not.toBeNull();
+    expect(Object.values(await rowsFor("project_id", t.p1)).every((n) => n === 0)).toBe(true);
+    expect((await request(second.id)).attempts).toBe(0);
+
+    // The lock went with the run; the next one finishes the second request.
+    await worker().w.processPending();
+    expect((await request(second.id)).completedAt).not.toBeNull();
+  });
+
   it("reports a request still pending after 24 h as an error", async () => {
     const t = await seedPostgres();
     await deleteProjectWithErasure(db, t.ws, t.p1);

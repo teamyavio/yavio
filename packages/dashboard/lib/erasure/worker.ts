@@ -1,7 +1,7 @@
 import type { ClickHouseClient } from "@clickhouse/client";
-import type { Database } from "@yavio/db/client";
+import { type Database, withSessionLock } from "@yavio/db/client";
 import { erasureRequests } from "@yavio/db/schema";
-import { asc, eq, isNull, sql } from "drizzle-orm";
+import { asc, eq, isNull } from "drizzle-orm";
 
 type Request = typeof erasureRequests.$inferSelect;
 
@@ -79,8 +79,11 @@ function deleteStatement(
  * Works off erasure_requests (#91 part 2): for each pending request, delete
  * the tenant's rows from every table in ERASURE_TABLES, remembering which are
  * done, until all are. Runs every minute, and right after a deletion; under a
- * Postgres advisory lock, so several dashboard instances never duplicate the
- * work. A request pending for more than 24 h is logged as an error on every
+ * session-level Postgres advisory lock (withSessionLock), so several
+ * dashboard instances never duplicate the work. Each request's progress is
+ * committed as soon as it is known: the deletes wait for their mutations and
+ * can take minutes, and a run that dies on a later request keeps the earlier
+ * ones. A request pending for more than 24 h is logged as an error on every
  * run until it completes.
  */
 export class ErasureWorker {
@@ -131,13 +134,8 @@ export class ErasureWorker {
     const { db, logger } = this.options;
     const now = this.options.now ?? (() => new Date());
 
-    return db.transaction(async (tx) => {
-      const [lock] = await tx.execute<{ locked: boolean }>(
-        sql`SELECT pg_try_advisory_xact_lock(${ERASURE_LOCK_KEY}) AS locked`,
-      );
-      if (!lock?.locked) return null;
-
-      const pending = await tx
+    return withSessionLock(db, ERASURE_LOCK_KEY, async () => {
+      const pending = await db
         .select()
         .from(erasureRequests)
         .where(isNull(erasureRequests.completedAt))
@@ -176,7 +174,7 @@ export class ErasureWorker {
 
         const completed = ERASURE_TABLES.every((t) => done.has(t.table));
         const at = now();
-        await tx
+        await db
           .update(erasureRequests)
           .set({
             tablesDone: [...done],

@@ -3,10 +3,14 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const created: Array<string | undefined> = [];
+const createdWith: Array<unknown> = [];
+const LONG_TIMEOUT = 3_600_000;
 
 vi.mock("@yavio/db/clickhouse", () => ({
-  createClickHouseClient: (url?: string) => {
+  LONG_RUNNING_REQUEST_TIMEOUT_MS: LONG_TIMEOUT,
+  createClickHouseClient: (url?: string, options?: unknown) => {
     created.push(url);
+    createdWith.push(options);
     return {} as never;
   },
 }));
@@ -24,6 +28,7 @@ beforeEach(() => {
   saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   for (const k of ENV_KEYS) Reflect.deleteProperty(process.env, k);
   created.length = 0;
+  createdWith.length = 0;
   vi.resetModules();
 });
 
@@ -75,6 +80,8 @@ describe("mutating client — yavio_eraser only, never the superuser (#91)", () 
     expect(url.password).toBe("eraser-secret");
     expect(url.hostname).toBe("clickhouse");
     expect(url.port).toBe("8123");
+    // Its deletes wait for their mutation; the 30 s default gave up on them.
+    expect(createdWith[0]).toEqual({ requestTimeoutMs: LONG_TIMEOUT });
   });
 
   it("refuses to create a client without the eraser password instead of falling back", async () => {
@@ -96,6 +103,7 @@ describe("mutating client — yavio_eraser only, never the superuser (#91)", () 
     const [readUrl, mutateUrl] = created;
     expect(new URL(readUrl as string).username).toBe("yavio_dashboard");
     expect(new URL(mutateUrl as string).username).toBe("yavio_eraser");
+    expect(createdWith[0]).toBeUndefined(); // the read path keeps the default timeout
   });
 });
 
