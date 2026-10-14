@@ -98,16 +98,55 @@ describe("ClickHouse schema validation", () => {
     });
   });
 
-  describe("TTL configured", () => {
-    it("events table has 90-day TTL", async () => {
+  describe("TTL configured (#85 step 1)", () => {
+    it("events table keeps rows 13 months from the earlier of timestamp and ingested_at", async () => {
       const ch = getClient();
       const result = await ch.query({
         query: "SHOW CREATE TABLE events",
         format: "TabSeparatedRaw",
       });
       const createStmt = await result.text();
-      expect(createStmt).toMatch(/TTL/);
-      expect(createStmt).toMatch(/toIntervalDay\(90\)/);
+      expect(createStmt).toContain(
+        "TTL least(toDateTime(timestamp), toDateTime(ingested_at)) + toIntervalMonth(13)",
+      );
+      expect(createStmt).not.toMatch(/toIntervalDay\(90\)/);
+      // Row-wise expiry: with ttl_only_drop_parts = 1 a monthly partition would
+      // only go once ALL its rows expired, overshooting 13 months.
+      expect(createStmt).not.toMatch(/ttl_only_drop_parts\s*=\s*1/);
+    });
+
+    it("expires a future-dated event 13 months after ingestion and keeps rows inside the window", async () => {
+      const ch = getClient();
+      const ws = "ws-ttl-test";
+      const row = (id: string, timestamp: string, ingestedAt: string) =>
+        `('${id}', '${ws}', 'p-ttl-test', 'tool_call', ${timestamp}, ${ingestedAt})`;
+      await ch.command({
+        query: `
+          INSERT INTO events (event_id, workspace_id, project_id, event_type, timestamp, ingested_at)
+          VALUES
+            ${row("future-but-old", "now64(3) + INTERVAL 5 YEAR", "now64(3) - INTERVAL 14 MONTH")},
+            ${row("old", "now64(3) - INTERVAL 14 MONTH", "now64(3)")},
+            ${row("inside", "now64(3) - INTERVAL 12 MONTH", "now64(3) - INTERVAL 12 MONTH")},
+            ${row("tomorrow", "now64(3) + INTERVAL 1 DAY", "now64(3)")}
+        `,
+      });
+      // Expired rows are dropped on insert already; the forced merge makes the
+      // assertion independent of when ClickHouse would apply TTL by itself.
+      await ch.command({ query: "OPTIMIZE TABLE events FINAL" });
+
+      const result = await ch.query({
+        query: "SELECT event_id FROM events WHERE workspace_id = {ws:String} ORDER BY event_id",
+        query_params: { ws },
+        format: "JSONEachRow",
+      });
+      const ids = (await result.json<{ event_id: string }>()).map((r) => r.event_id);
+      expect(ids).toEqual(["inside", "tomorrow"]);
+
+      await ch.command({
+        query:
+          "ALTER TABLE events DELETE WHERE workspace_id = {ws:String} SETTINGS mutations_sync = 2",
+        query_params: { ws },
+      });
     });
   });
 

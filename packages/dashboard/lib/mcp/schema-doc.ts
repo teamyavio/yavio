@@ -14,7 +14,7 @@ That means a cross-project comparison is NOT possible in one query: to compare
 projects, call run_query once per project_id and combine the results yourself.
 A GROUP BY project_id returns exactly one group, not an error.
 
-Always also filter on a timestamp range. Events are retained for 90 days.
+Always also filter on a timestamp range. Events are kept for 13 months.
 
 ## events — one row per SDK event (the main table)
 Identity: event_id, workspace_id, project_id, trace_id, session_id

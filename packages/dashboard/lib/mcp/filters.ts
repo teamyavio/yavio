@@ -9,7 +9,9 @@ export interface McpQueryContext {
   platform?: string[];
 }
 
-const MAX_LOOKBACK_DAYS = 90; // events TTL — nothing older exists
+// Caps the lookback shortcut only, to bound the scan a single call can cause.
+// Events are kept 13 months; explicit from/to ranges reach all of it.
+const MAX_LOOKBACK_DAYS = 90;
 
 /** ClickHouse DateTime64 rejects the T/Z of ISO strings. */
 function toClickHouseDateTime(date: Date): string {
@@ -42,7 +44,7 @@ export interface RangeInput {
 
 /**
  * from/to win when given; otherwise a lookback window ending now
- * (default 7 days). Data older than 90 days no longer exists (TTL).
+ * (default 7 days, at most MAX_LOOKBACK_DAYS). Events are kept for 13 months.
  */
 export function resolveDateRange(input: RangeInput): { from: string; to: string } {
   if (input.from || input.to) {
