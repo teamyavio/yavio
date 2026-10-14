@@ -243,6 +243,44 @@ describe("statistics job (#85)", () => {
     expect(Number(total[0].individuals)).toBe(3);
   });
 
+  it("writes no period or cohort that begins before the first stored event", async () => {
+    // What the raw data cannot support must not be frozen as final. After the
+    // TTL grew from 90 days to 13 months (0013), the first backfill saw a few
+    // months of events — yet Q3 and the year begin long before them, and a
+    // month is never recomputed once its raw data is gone.
+    const user = (id: string, ts: string) => event(project, ts, { user_id: id });
+    await insert([
+      user("u1", "2026-07-16 10:00:00.000"), // the earliest event still stored
+      user("u1", "2026-08-05 10:00:00.000"),
+      user("u2", "2026-08-20 10:00:00.000"),
+      user("u3", "2026-09-10 10:00:00.000"),
+    ]);
+    await job(new MemoryStore([project])).runIfDue(NOW);
+
+    const periods = await rows(
+      `SELECT period, toString(period_start) AS start, users FROM stats_users_periods
+       WHERE project_id = {p:String} AND period != 'week' ORDER BY period, start`,
+      { p: project },
+    );
+    // Not July and not Q3 (both begin before July 16); Q4 and 2026 are still open.
+    expect(periods.map((r) => [r.period, r.start, Number(r.users)])).toEqual([
+      ["month", "2026-08-01", 2],
+      ["month", "2026-09-01", 1],
+    ]);
+
+    const cohorts = await rows(
+      `SELECT toString(cohort_month) AS cohort, toString(activity_month) AS month, users
+       FROM stats_cohorts WHERE project_id = {p:String} ORDER BY month, cohort`,
+      { p: project },
+    );
+    // u1's July cohort is left out: first seen in the month the data starts
+    // in, so possibly seen before it. u2 (August) and u3 (September) count.
+    expect(cohorts.map((r) => [r.cohort, r.month, Number(r.users)])).toEqual([
+      ["2026-08-01", "2026-08-01", 1],
+      ["2026-09-01", "2026-09-01", 1],
+    ]);
+  });
+
   it("admits only registered tools and common names into event_name; the rest is '(other)'", async () => {
     await getClient().insert({
       table: "tool_registry",

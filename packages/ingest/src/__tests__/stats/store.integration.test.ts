@@ -76,8 +76,26 @@ describe.skipIf(!url)("PgStatsJobStore", () => {
 
     expect(second).toBeNull();
     expect(await first).toBe("first");
-    // Released with the transaction.
+    // Released with the run.
     expect(await new PgStatsJobStore(other).withLock(async () => "after")).toBe("after");
+  });
+
+  it("keeps what was recorded when the run fails later on, and releases the lock", async () => {
+    // A backfill of many months runs for a long time; a ClickHouse error, a
+    // deploy restart or a dropped connection late in it must not undo the
+    // tables already marked done — the next run would start over.
+    const store = new PgStatsJobStore(db);
+    const success = new Date("2026-10-14T03:00:00Z");
+    await expect(
+      store.withLock(async (s) => {
+        await s.recordSuccess("test_job_b", success);
+        throw new Error("ClickHouse went away");
+      }),
+    ).rejects.toThrow("ClickHouse went away");
+
+    const [row] = await db.select().from(statsJobRuns).where(eq(statsJobRuns.job, "test_job_b"));
+    expect(row.lastSuccessAt?.toISOString()).toBe(success.toISOString());
+    expect(await new PgStatsJobStore(other).withLock(async () => "free")).toBe("free");
   });
 
   it("lists the projects that exist", async () => {

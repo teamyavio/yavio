@@ -30,6 +30,11 @@ export interface MonthWindow {
   nextMonthStart: string;
   /** Today (UTC): days and periods on or after it are not written yet. */
   today: string;
+  /**
+   * The day the stored events start (EARLIEST_MONTH). A period or cohort that
+   * begins before it cannot be counted from what is kept.
+   */
+  dataStart: string;
 }
 
 /** Below this many distinct individuals a free-text event_name is not admitted (see stats_daily). */
@@ -183,6 +188,11 @@ GROUP BY workspace_id, project_id, day`;
  * stats_users_periods: distinct users per calendar week (from Monday),
  * month, quarter and year, for the periods that END in this month and have
  * closed. Reads 12 months before the month, which covers a whole year.
+ * A period that begins before the stored data starts is left out: its
+ * distinct users cannot be counted from what is kept, and a month's figures
+ * are never recomputed once its raw data is gone. Without this, the first
+ * run after the TTL grew from 90 days to 13 months (0013) froze a year and
+ * a quarter counted from a few months of events.
  */
 export function statsUsersPeriodsInsert(stage: string): string {
   return `
@@ -208,12 +218,15 @@ SELECT workspace_id, project_id, period, period_start, period_end, uniqExact(per
 FROM periods
 WHERE period_end >= {monthStart:Date} AND period_end < {nextMonthStart:Date}
   AND period_end < {today:Date}
+  AND period_start >= {dataStart:Date}
 GROUP BY workspace_id, project_id, period, period_start, period_end`;
 }
 
 /**
  * stats_cohorts: users active in this month, by the month they were first
- * seen (offset 0-12). "First seen" is the earliest event still stored.
+ * seen (offset 0-12). "First seen" is the earliest event still stored, so
+ * only cohorts after the month the stored data starts in: someone first seen
+ * IN that month may have been seen before it.
  */
 export function statsCohortsInsert(stage: string): string {
   return `
@@ -237,11 +250,18 @@ SELECT a.workspace_id AS workspace_id, a.project_id AS project_id, f.cohort_mont
 FROM active AS a
 INNER JOIN first_seen AS f ON f.project_id = a.project_id AND f.person = a.person
 WHERE dateDiff('month', f.cohort_month, {monthStart:Date}) BETWEEN 0 AND 12
+  AND f.cohort_month > toStartOfMonth({dataStart:Date})
 GROUP BY workspace_id, project_id, cohort_month, month_offset`;
 }
 
-/** The first month that still has events for these projects, or null. */
+/**
+ * The first month that still has events for these projects, and the day the
+ * stored data starts: the earliest collected date — the earlier of timestamp
+ * and ingested_at, the TTL's clock (0013). n = 0 means there is none.
+ */
 export const EARLIEST_MONTH = `
-SELECT toString(toStartOfMonth(min(timestamp))) AS month, count() AS n
+SELECT toString(toStartOfMonth(min(timestamp))) AS month,
+       toString(toDate(min(least(toDateTime(timestamp), toDateTime(ingested_at))))) AS data_start,
+       count() AS n
 FROM events
 WHERE project_id IN {projects:Array(String)}`;

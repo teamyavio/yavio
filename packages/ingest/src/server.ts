@@ -1,4 +1,4 @@
-import { createClickHouseClient } from "@yavio/db/clickhouse";
+import { LONG_RUNNING_REQUEST_TIMEOUT_MS, createClickHouseClient } from "@yavio/db/clickhouse";
 import { createDb } from "@yavio/db/client";
 import { loadConfig } from "./config.js";
 import { createApp } from "./index.js";
@@ -65,7 +65,12 @@ async function main() {
   let statsJob: StatsJob | null = null;
   if (config.rollupClickhouseUrl) {
     statsJob = new StatsJob({
-      clickhouse: createClickHouseClient(config.rollupClickhouseUrl),
+      // A month's INSERT ... SELECT over events FINAL runs for minutes on a
+      // large table; with the library's 30 s default the first backfill of a
+      // big month failed every day and that month was never computed.
+      clickhouse: createClickHouseClient(config.rollupClickhouseUrl, {
+        requestTimeoutMs: LONG_RUNNING_REQUEST_TIMEOUT_MS,
+      }),
       store: new PgStatsJobStore(db),
       logger: app.log,
     });

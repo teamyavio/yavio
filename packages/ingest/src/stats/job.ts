@@ -108,7 +108,7 @@ export class StatsJob {
         tables: STATS_TABLES.map((t) => ({ table: t.table, months: [], status: "skipped" })),
       };
     }
-    const earliest = await this.earliestMonth(projects);
+    const { earliest, dataStart } = await this.dataRange(projects);
     const tables: TableReport[] = [];
 
     for (const { table, insert } of STATS_TABLES) {
@@ -119,7 +119,9 @@ export class StatsJob {
       }
       const months = monthsToProcess(lastSuccess, now, earliest);
       try {
-        for (const month of months) await this.rollupMonth(table, insert, month, projects, now);
+        for (const month of months) {
+          await this.rollupMonth(table, insert, month, projects, dataStart, now);
+        }
         await session.recordSuccess(table, now);
         tables.push({ table, months, status: "done" });
         logger.info({ table, months }, "Statistics computed");
@@ -138,6 +140,7 @@ export class StatsJob {
     insert: (stage: string) => string,
     month: string,
     projects: string[],
+    dataStart: string,
     now: Date,
   ): Promise<void> {
     const ch = this.options.clickhouse;
@@ -153,6 +156,7 @@ export class StatsJob {
         monthStart: month,
         nextMonthStart: addMonths(month, 1),
         today: utcDay(now),
+        dataStart,
       },
       clickhouse_settings: { async_insert: 0 },
     });
@@ -167,13 +171,20 @@ export class StatsJob {
     });
   }
 
-  private async earliestMonth(projects: string[]): Promise<string | null> {
+  /**
+   * The first month with events (null when there are none) and the day the
+   * stored data starts, which periods and cohorts are measured against.
+   */
+  private async dataRange(
+    projects: string[],
+  ): Promise<{ earliest: string | null; dataStart: string }> {
     const result = await this.options.clickhouse.query({
       query: EARLIEST_MONTH,
       query_params: { projects },
       format: "JSONEachRow",
     });
-    const [row] = await result.json<{ month: string; n: string | number }>();
-    return row && Number(row.n) > 0 ? row.month : null;
+    const [row] = await result.json<{ month: string; data_start: string; n: string | number }>();
+    if (!row || Number(row.n) === 0) return { earliest: null, dataStart: "1970-01-01" };
+    return { earliest: row.month, dataStart: row.data_start };
   }
 }
