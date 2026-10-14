@@ -69,7 +69,7 @@ All metrics computed at query time from captured events. Nothing in this file is
 
 ## Session Aggregates
 
-Continuously materialized by ClickHouse's `sessions_mv` materialized view as events arrive. There is no explicit "session close" event — sessions are implicit aggregates over all events sharing the same `session_id`. Session boundaries are defined by the MCP `initialize` handshake (see [server-sdk.md Section 3.7](../sdk/server-sdk.md#37-session-lifecycle)).
+Computed from `events` at query time, grouped by `session_id` (the `sessions_mv` materialized view was dropped, #89). There is no explicit "session close" event — sessions are implicit aggregates over all events sharing the same `session_id`. Session boundaries are defined by the MCP `initialize` handshake (see [server-sdk.md Section 3.7](../sdk/server-sdk.md#37-session-lifecycle)).
 
 | Field | Computation |
 |-------|-------------|

@@ -74,24 +74,29 @@ describe("ClickHouse migrations", () => {
       expect(await result.json()).toHaveLength(1);
     });
 
-    it("creates sessions_mv materialized view", async () => {
+    it("dropped sessions_mv and users_mv with their row policies and grants (#89, 0018)", async () => {
       const ch = getClient();
-      const result = await ch.query({
-        query:
-          "SELECT name FROM system.tables WHERE database = 'default' AND name = 'sessions_mv' AND engine = 'MaterializedView'",
-        format: "JSONEachRow",
-      });
-      expect(await result.json()).toHaveLength(1);
-    });
-
-    it("creates users_mv materialized view", async () => {
-      const ch = getClient();
-      const result = await ch.query({
-        query:
-          "SELECT name FROM system.tables WHERE database = 'default' AND name = 'users_mv' AND engine = 'MaterializedView'",
-        format: "JSONEachRow",
-      });
-      expect(await result.json()).toHaveLength(1);
+      const count = async (query: string) => {
+        const r = await ch.query({ query, format: "JSONEachRow" });
+        return Number((await r.json<{ n: string }>())[0].n);
+      };
+      const names = "('sessions_mv', 'users_mv')";
+      expect(
+        await count(
+          `SELECT count() AS n FROM system.tables WHERE database = 'default' AND name IN ${names}`,
+        ),
+      ).toBe(0);
+      // ClickHouse keeps both for a dropped table, by name.
+      expect(
+        await count(`SELECT count() AS n FROM system.row_policies WHERE table IN ${names}`),
+      ).toBe(0);
+      expect(await count(`SELECT count() AS n FROM system.grants WHERE table IN ${names}`)).toBe(0);
+      // The inner tables went with the views.
+      expect(
+        await count(
+          "SELECT count() AS n FROM system.tables WHERE database = 'default' AND name LIKE '.inner%'",
+        ),
+      ).toBe(0);
     });
 
     it("creates tool_registry table", async () => {
@@ -114,7 +119,7 @@ describe("ClickHouse migrations", () => {
       expect(await result.json()).toHaveLength(1);
     });
 
-    it("records all 17 migration versions", async () => {
+    it("records all 18 migration versions", async () => {
       const ch = getClient();
       const result = await ch.query({
         query: "SELECT version FROM schema_migrations ORDER BY version",
@@ -139,6 +144,7 @@ describe("ClickHouse migrations", () => {
         "0015",
         "0016",
         "0017",
+        "0018",
       ]);
     });
   });
@@ -168,17 +174,16 @@ describe("ClickHouse migrations", () => {
         format: "JSONEachRow",
       });
       // 0012 granted events; 0016 every other table holding a tenant's data
-      // (#91 part 2). ALTER DELETE only — still no SELECT.
+      // (#91 part 2), 0018 revoked the dropped summaries (#89). ALTER DELETE
+      // only — still no SELECT.
       expect(await grants.json()).toEqual(
         [
           "events",
-          "sessions_mv",
           "stats_cohorts",
           "stats_daily",
           "stats_users_daily",
           "stats_users_periods",
           "tool_registry",
-          "users_mv",
         ].map((table) => ({
           access_type: "ALTER DELETE",
           database: "default",
@@ -211,12 +216,18 @@ describe("ClickHouse migrations", () => {
     });
 
     // This block rebuilds yavio_eraser in its pre-fix state. Put it back the
-    // way the migrations define it — every grant (0012, 0016) and the
-    // unusable credential — so later suites on the same ClickHouse (the
-    // dashboard's erasure tests, locally) see the real user.
+    // way the migrations define it — every grant (0012, 0016, minus what 0018
+    // revoked) and the unusable credential — so later suites on the same
+    // ClickHouse (the dashboard's erasure tests, locally) see the real user.
+    // 0018 is idempotent; without it, 0016 would grant on the dropped views
+    // again (ClickHouse accepts grants on tables that do not exist).
     afterAll(async () => {
       const ch = getClient();
-      for (const file of ["0012_eraser_user.sql", "0016_eraser_all_tables.sql"]) {
+      for (const file of [
+        "0012_eraser_user.sql",
+        "0016_eraser_all_tables.sql",
+        "0018_drop_user_summaries.sql",
+      ]) {
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
         for (const stmt of splitStatements(sql)) await ch.command({ query: stmt });
       }

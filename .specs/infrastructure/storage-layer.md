@@ -112,68 +112,9 @@ ALTER TABLE events ADD INDEX idx_status status TYPE set(5) GRANULARITY 4;
 ALTER TABLE events ADD INDEX idx_user_id user_id TYPE bloom_filter GRANULARITY 4;
 ```
 
-### 5.1.4 Sessions Materialized View
+### 5.1.4 Sessions and users (no materialized views)
 
-Aggregated session summaries, auto-computed by ClickHouse's materialized view engine.
-
-```sql
-CREATE MATERIALIZED VIEW sessions_mv
-ENGINE = AggregatingMergeTree()
-PARTITION BY toYYYYMM(session_start)
-ORDER BY (workspace_id, project_id, session_id)
-AS SELECT
-  workspace_id,
-  project_id,
-  session_id,
-  anyLastIf(user_id, user_id IS NOT NULL) AS user_id,
-  min(timestamp) AS session_start,
-  max(timestamp) AS session_end,
-  anyLast(platform) AS platform,
-  anyLast(country_code) AS country_code,
-  uniqExactIf(event_name, event_type = 'tool_call') AS tool_count,
-  countIf(event_type = 'tool_call') AS invocation_count,
-  count() AS event_count,
-  countIf(event_type = 'conversion') AS conversion_count,
-  sumIf(conversion_value, event_type = 'conversion') AS total_revenue,
-  anyLastIf(conversion_currency, event_type = 'conversion') AS revenue_currency,
-  dateDiff('millisecond', min(timestamp), max(timestamp)) AS duration_ms,
-  maxIf(1, event_type = 'widget_render') AS has_widget,
-  dateDiff('millisecond',
-    minIf(timestamp, event_type = 'widget_render'),
-    minIf(timestamp, event_type = 'widget_click')
-  ) AS ttfi_ms
-FROM events
-GROUP BY workspace_id, project_id, session_id;
-```
-
-### 5.1.5 Users Materialized View
-
-Aggregated user-level summaries, auto-computed by ClickHouse. Enables retention analysis, DAU/WAU/MAU, per-user funnels, and cohort breakdowns. Only populated for sessions where `.identify()` was called.
-
-```sql
-CREATE MATERIALIZED VIEW users_mv
-ENGINE = AggregatingMergeTree()
-PARTITION BY toYYYYMM(first_seen)
-ORDER BY (workspace_id, project_id, user_id)
-AS SELECT
-  workspace_id,
-  project_id,
-  user_id,
-  min(timestamp) AS first_seen,
-  max(timestamp) AS last_seen,
-  count() AS total_events,
-  uniq(session_id) AS total_sessions,
-  countIf(event_type = 'tool_call') AS total_tool_calls,
-  countIf(event_type = 'conversion') AS total_conversions,
-  sumIf(conversion_value, event_type = 'conversion') AS total_revenue,
-  anyLastIf(conversion_currency, event_type = 'conversion') AS revenue_currency,
-  anyLast(user_traits) AS latest_traits,
-  anyLast(platform) AS last_platform,
-  anyLast(country_code) AS last_country
-FROM events
-WHERE user_id IS NOT NULL
-GROUP BY workspace_id, project_id, user_id;
-```
+Sessions and user metrics are computed from `events` at query time (#89). The former `sessions_mv` and `users_mv` were `AggregatingMergeTree` tables with plain-typed columns, so background merges kept an arbitrary row per key: counts collapsed and first/last seen froze. Migration `0018` dropped them, with their row policies and grants. User metrics use one key per person: `user_id`, else the `user_id` the same `subject_id` was identified with, else `subject_id`; never `session_id` (§5.3.1).
 
 ### 5.1.6 Tool Registry Table
 
@@ -233,15 +174,6 @@ One policy per table, scoped by the column available in that table. Tables with 
 ```sql
 -- ── Events table (workspace-scoped) ──────────────────────────────
 CREATE ROW POLICY workspace_isolation ON events
-  USING workspace_id = getSetting('SQL_workspace_id')
-  TO yavio_dashboard;
-
--- ── Materialized views (workspace-scoped) ────────────────────────
-CREATE ROW POLICY workspace_isolation ON sessions_mv
-  USING workspace_id = getSetting('SQL_workspace_id')
-  TO yavio_dashboard;
-
-CREATE ROW POLICY workspace_isolation ON users_mv
   USING workspace_id = getSetting('SQL_workspace_id')
   TO yavio_dashboard;
 
@@ -676,7 +608,7 @@ The sentence names no threshold on purpose: how anonymity is ensured is implemen
 
 **Self-hosted.** The same tiers and the same 13-month ceiling apply. There is no global retention variable: `YAVIO_RETENTION_DAYS`, described in earlier versions of this spec, was never implemented and is not planned. A shorter retention is set per project (#93).
 
-**User summaries.** `users_mv` and `sessions_mv` are not read any more (#89 release 1), and #89's second release drops them. User metrics are computed from `events` with the stitched key.
+**User summaries.** `users_mv` and `sessions_mv` are dropped (#89, migration `0018`, with their row policies and grants). User metrics are computed from `events` with the stitched key. "First seen" and "new vs returning" therefore mean within the stored window; long-term cohorts come from `stats_cohorts`.
 
 ### 5.3.2 PostgreSQL cleanup
 
@@ -743,7 +675,7 @@ Every schema change falls into one of three categories:
 Adding a new column to the `events` table is the most common schema change. The procedure:
 
 1. **ClickHouse:** `ALTER TABLE events ADD COLUMN <name> <Type> DEFAULT <default>`. New columns must be `Nullable` or have an explicit `DEFAULT`. This is a non-blocking, zero-downtime operation in ClickHouse.
-2. **Materialized views:** If the new field should appear in `sessions_mv` or `users_mv`, recreate the view (ClickHouse materialized views are append-only — existing rows are not backfilled). New view only applies to events ingested after the migration.
+2. **Statistics:** if the field should reach the anonymous tier, extend the `stats_*` table and its query in `packages/ingest/src/stats` — through the fixed vocabulary, never as free text.
 3. **Ingestion API:** Accept the new field. Older SDKs that do not send it produce `NULL` (or the default). No validation error.
 4. **SDK:** New SDK version populates the field. Released as a MINOR bump.
 5. **Dashboard:** New queries and visualizations for the field. Gracefully handle `NULL` for historical data that predates the field.

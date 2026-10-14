@@ -77,7 +77,7 @@ Run against real Docker services using Testcontainers or a shared `docker-compos
 | Trace correlation | Server tool call + widget events share `trace_id` → query by trace | Both server and widget events returned, ordered by timestamp |
 | Identify propagation | `yavio.identify(userId, traits)` → subsequent events | All events after identify carry `user_id`, `user_traits` populated |
 | Conversion tracking | `yavio.conversion("purchase", { value: 29.99, currency: "USD" })` | Event has `conversion_value=29.99`, `conversion_currency=USD` |
-| Materialized views | Insert events → wait for MV refresh → query `sessions_mv` and `users_mv` | Aggregated rows match expected counts and sums |
+| User metrics | Insert events over several batches and months, with and without `identify()` → run the user queries as `yavio_dashboard` | Exact totals, first/last seen, one person per stitched key (`__tests__/queries-users.test.ts`) |
 
 ### Dashboard Query Accuracy
 
