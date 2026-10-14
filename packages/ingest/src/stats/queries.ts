@@ -6,7 +6,9 @@
  * Every query starts from the same prelude:
  * - `stitch`: per project, each subject_id mapped to the user_id last seen
  *   together with it (#89), so a person counted before identify() and after it
- *   is one person;
+ *   is one person — read from the same window as `base` (#112): the mapping
+ *   only has to cover the subject_ids that appear there, and reading it from
+ *   all events repeated a project-wide scan per table and month;
  * - `base`: the window's events from `events FINAL`, existing projects only,
  *   deduplicated with LIMIT 1 BY event_id (FINAL alone misses a clamped event
  *   the SDK re-sent: different timestamp, so a different sort key, #90);
@@ -68,6 +70,7 @@ function prelude(from: string, to: string): string {
     WHERE project_id IN {projects:Array(String)}
       AND subject_id IS NOT NULL AND subject_id != ''
       AND user_id IS NOT NULL AND user_id != ''
+      AND timestamp >= ${from} AND timestamp < ${to}
       AND ${COLLECTED} >= ${FLOOR("project_id")}
     GROUP BY project_id, stitched_subject
   ),

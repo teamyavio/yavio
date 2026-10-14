@@ -38,8 +38,26 @@ interface QueryContext {
  * #85's statistics job counts users with the same key, so tier 1 and tier 2
  * agree. Aliases never shadow a column a WHERE refers to: ClickHouse resolves
  * the alias first.
+ *
+ * A windowed query stitches from the window it reads (#112): the mapping
+ * only has to cover the subject_ids that appear there, and a person seen as
+ * subject and as user_id within the window is still one person. Without
+ * the bound, every users-page query aggregated the whole project's events
+ * before its own time filter applied — several times per page view, and
+ * growing with the 13 months now kept. The all-time queries (the user list,
+ * first seen, retention cohorts) keep the full mapping.
  */
-function keyedEvents(timeFilter = ""): string {
+interface Window {
+  /** SQL expressions; the window is [from, to). */
+  from: string;
+  to: string;
+}
+
+function keyedEvents(window?: Window): string {
+  const inWindow = window ? `AND timestamp >= ${window.from} AND timestamp < ${window.to}` : "";
+  const eInWindow = window
+    ? `AND e.timestamp >= ${window.from} AND e.timestamp < ${window.to}`
+    : "";
   return `
       stitch AS (
         SELECT assumeNotNull(subject_id) AS stitched_subject,
@@ -48,6 +66,7 @@ function keyedEvents(timeFilter = ""): string {
         WHERE project_id = {projectId:String}
           AND subject_id IS NOT NULL AND subject_id != ''
           AND user_id IS NOT NULL AND user_id != ''
+          ${inWindow}
         GROUP BY stitched_subject
       ),
       keyed AS (
@@ -55,7 +74,7 @@ function keyedEvents(timeFilter = ""): string {
                coalesce(nullIf(e.user_id, ''), nullIf(s.mapped_user_id, ''), nullIf(e.subject_id, '')) AS user_key
         FROM events AS e
         LEFT JOIN stitch AS s ON s.stitched_subject = ifNull(e.subject_id, '')
-        WHERE e.project_id = {projectId:String} ${timeFilter}
+        WHERE e.project_id = {projectId:String} ${eInWindow}
       )`;
 }
 
@@ -198,8 +217,8 @@ export async function queryActiveUsers(
   granularity: Granularity,
 ): Promise<ActiveUsersPoint[]> {
   const fn = granularityToFunction(granularity);
-  const window = `AND e.timestamp >= ({from:DateTime64(3)} - INTERVAL 30 DAY)
-          AND e.timestamp < {to:DateTime64(3)}`;
+  // 30 days before the range, for the rolling WAU/MAU windows.
+  const window = { from: "({from:DateTime64(3)} - INTERVAL 30 DAY)", to: "{to:DateTime64(3)}" };
   const inRange = "timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}";
 
   const query =
@@ -308,7 +327,7 @@ export async function queryUserDetail(
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
-      WITH ${keyedEvents("AND e.timestamp >= {from:DateTime64(3)} AND e.timestamp < {to:DateTime64(3)}")}
+      WITH ${keyedEvents({ from: "{from:DateTime64(3)}", to: "{to:DateTime64(3)}" })}
       SELECT
         event_id AS eventId,
         event_type AS eventType,
