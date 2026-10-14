@@ -1,17 +1,43 @@
 import { ErrorCode, YavioError } from "@yavio/shared/errors";
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { enrichEvents } from "../lib/event-enricher.js";
 import { enforceFieldLimits, isBatchTooLarge } from "../lib/field-limits.js";
 import { stripPii } from "../lib/pii-stripper.js";
 import { validateBatch } from "../lib/schema-validator.js";
-import { authenticate } from "./auth.js";
+import { authenticateHeaderOrBody } from "./auth.js";
 
-const eventsRoute: FastifyPluginAsync = async (app) => {
+/**
+ * Widget beacons send their JSON as text/plain: a CORS-safelisted type, so the
+ * cross-origin beacon needs no preflight (#96). Parse it as JSON here.
+ */
+function parseTextAsJson(
+  _request: unknown,
+  body: string | Buffer,
+  done: (err: Error | null, body?: unknown) => void,
+): void {
+  try {
+    done(null, JSON.parse(body.toString()));
+  } catch {
+    done(new YavioError(ErrorCode.INGEST.SCHEMA_VALIDATION_FAILED, "Body is not valid JSON", 400));
+  }
+}
+
+const eventsRoute: FastifyPluginAsync = async (root) => {
+  // An encapsulated scope, so the text/plain parser applies to this route only;
+  // every other route keeps Fastify's default (text/plain stays a string).
+  await root.register(async (app) => {
+    app.removeContentTypeParser("text/plain");
+    app.addContentTypeParser("text/plain", { parseAs: "string" }, parseTextAsJson);
+    registerEventsRoute(app);
+  });
+};
+
+function registerEventsRoute(app: FastifyInstance): void {
   app.post(
     "/v1/events",
     {
-      preHandler: [authenticate],
+      preHandler: [authenticateHeaderOrBody],
       config: { rawBody: true },
     },
     async (request, reply) => {
@@ -162,6 +188,6 @@ const eventsRoute: FastifyPluginAsync = async (app) => {
       });
     },
   );
-};
+}
 
 export const eventsPlugin = fp(eventsRoute, { name: "events" });

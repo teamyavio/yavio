@@ -84,26 +84,37 @@ export class WidgetTransport {
     }
   }
 
-  /** Synchronous beacon flush for page teardown. */
+  /**
+   * Synchronous beacon flush for page teardown.
+   *
+   * sendBeacon cannot set headers, so the widget token travels in the body
+   * (#96). It used to go in `?token=`, which ingest never read — every beacon
+   * got a 401 — and which put the token into request logs. The body is sent as
+   * text/plain: a CORS-safelisted type, so the cross-origin beacon needs no
+   * preflight (application/json would). Ingest parses it as JSON on the events
+   * route only.
+   */
   beaconFlush(): void {
     if (this.buffer.length === 0) return;
     if (typeof navigator === "undefined" || !navigator.sendBeacon) return;
 
-    const url = `${this.config.endpoint}?token=${encodeURIComponent(this.config.token)}`;
     const events = [...this.buffer];
     this.buffer.length = 0;
-    this.sendBeaconChunked(url, events);
+    this.sendBeaconChunked(this.config.endpoint, events);
   }
 
   private sendBeaconChunked(url: string, events: BaseEvent[]): void {
     const body = JSON.stringify({
+      token: this.config.token,
       events,
       sdk_version: SDK_VERSION,
       sent_at: new Date().toISOString(),
     });
+    const blob = new Blob([body], { type: "text/plain;charset=UTF-8" });
 
-    if (body.length <= BEACON_MAX_BYTES) {
-      navigator.sendBeacon(url, new Blob([body], { type: "application/json" }));
+    // Blob size is bytes; body.length would count UTF-16 code units.
+    if (blob.size <= BEACON_MAX_BYTES) {
+      navigator.sendBeacon(url, blob);
       return;
     }
 

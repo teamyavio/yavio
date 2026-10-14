@@ -183,7 +183,32 @@ describe("WidgetTransport", () => {
 
     expect(sendBeacon).toHaveBeenCalledOnce();
     const [url] = sendBeacon.mock.calls[0] as [string, Blob];
-    expect(url).toContain("token=jwt_test");
+    // #96: never in the URL — ingest did not read it there, and URLs get logged.
+    expect(url).toBe("http://test/v1/events");
+    expect(url).not.toContain("jwt_test");
+  });
+
+  it("sends the token in a text/plain beacon body (#96)", async () => {
+    const fetch = createMockFetch();
+    const sendBeacon = vi.fn().mockReturnValue(true);
+    Object.defineProperty(navigator, "sendBeacon", {
+      value: sendBeacon,
+      writable: true,
+      configurable: true,
+    });
+
+    const transport = new WidgetTransport(mockConfig(), fetch);
+    transport.send([fakeEvent({ event_name: "beacon_event" })]);
+    transport.beaconFlush();
+
+    const [, blob] = sendBeacon.mock.calls[0] as [string, Blob];
+    // CORS-safelisted, so the cross-origin beacon needs no preflight.
+    expect(blob.type).toBe("text/plain;charset=utf-8");
+    const body = JSON.parse(await blob.text());
+    expect(body.token).toBe("jwt_test");
+    expect(body.events).toHaveLength(1);
+    expect(body.events[0].event_name).toBe("beacon_event");
+    expect(body.sdk_version).toBe(SDK_VERSION);
   });
 
   it("clears buffer after beaconFlush", () => {
