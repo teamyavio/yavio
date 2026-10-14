@@ -171,19 +171,6 @@ describe("ClickHouse schema validation", () => {
       const rows = await result.json<{ engine: string }>();
       expect(rows[0].engine).toBe("ReplacingMergeTree");
     });
-
-    it("sessions_mv uses AggregatingMergeTree as backing engine", async () => {
-      const ch = getClient();
-      const result = await ch.query({
-        query: `
-          SELECT create_table_query FROM system.tables
-          WHERE database = 'default' AND name = 'sessions_mv'
-        `,
-        format: "JSONEachRow",
-      });
-      const rows = await result.json<{ create_table_query: string }>();
-      expect(rows[0].create_table_query).toContain("AggregatingMergeTree");
-    });
   });
 
   describe("secondary indexes on events", () => {

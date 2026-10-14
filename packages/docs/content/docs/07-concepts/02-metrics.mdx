@@ -62,17 +62,23 @@ Funnels stitch `step` and `conversion` events within a trace to visualize user j
 | Time-to-first-tool-call | Time from session start to first tool invocation |
 | Latency percentiles | p50, p95, and p99 latency across tool calls |
 
-## Session Aggregates
+## Sessions
 
-Sessions are continuously materialized by ClickHouse as events arrive. There is no explicit "session close" event — sessions are implicit aggregates over events sharing the same `session_id`.
+A session is the set of events sharing one `session_id`. Sessions are computed from the raw events at query time. Nothing is materialized, and there is no "session close" event. The dashboard counts distinct sessions. Per-session figures like duration or tool count are an aggregation over `events` grouped by `session_id`; you can run one yourself through the analytics MCP server's `run_query`.
 
-| Field | Description |
-|-------|-------------|
-| `tool_count` | Distinct tools used in the session |
-| `invocation_count` | Total tool calls in the session |
-| `event_count` | Total events in the session |
-| `conversion_count` | Conversions in the session |
-| `total_revenue` | Sum of conversion values |
-| `duration_ms` | Time from first to last event |
-| `has_widget` | Whether any widget was rendered |
-| `ttfi_ms` | Time to first interaction in widget |
+## Users
+
+Users are counted with one key per person:
+- the `user_id` from `.identify()`;
+- otherwise the `user_id` that the same `subject_id` was identified with, so events before `.identify()` count for the right user;
+- otherwise the `subject_id` itself.
+
+A session is never counted as a user.
+
+| Metric | Description |
+|--------|-------------|
+| Active users (DAU / WAU / MAU) | Distinct users in the day, and in the 7 and 30 days up to it |
+| New vs returning | New: the user's first event in the data Yavio holds falls in the bucket |
+| Retention cohorts | Users by the period they were first seen, and how many came back in later periods |
+
+"First seen" means **within the raw events still stored**: 13 months, or the project's shorter retention ([Data retention](/docs/07-concepts/06-data-retention)). A user last active 14 months ago counts as new.

@@ -32,8 +32,8 @@ interface QueryContext {
  *   either.
  *
  * All user metrics come straight from events, which holds the same 13 months
- * a per-user summary would; users_mv / sessions_mv are no longer read (they
- * merged wrongly, #89). "First seen" therefore means within that window.
+ * a per-user summary would; users_mv / sessions_mv merged wrongly and are
+ * dropped (#89). "First seen" therefore means within that window.
  *
  * #85's statistics job counts users with the same key, so tier 1 and tier 2
  * agree. Aliases never shadow a column a WHERE refers to: ClickHouse resolves

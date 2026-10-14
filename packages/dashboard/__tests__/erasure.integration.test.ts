@@ -380,24 +380,6 @@ describe.skipIf(!ready)("erasure queue (#91 part 2)", () => {
     await worker().w.processPending();
   });
 
-  it("treats a table that no longer exists (users_mv after #89) as done", async () => {
-    const t = await seedPostgres();
-    await deleteProjectWithErasure(db, t.ws, t.p1);
-    const queued = await latestRequestFor(t.ws);
-    const withoutMv = {
-      command: async (params: Parameters<ClickHouseClient["command"]>[0]) => {
-        if (params.query.includes("users_mv")) {
-          throw Object.assign(new Error("Table default.users_mv does not exist. (UNKNOWN_TABLE)"), {
-            code: "60",
-          });
-        }
-        return eraser.command(params);
-      },
-    } as unknown as ClickHouseClient;
-    await worker(() => withoutMv).w.processPending();
-    expect((await request(queued.id)).completedAt).not.toBeNull();
-  });
-
   it("lets only one dashboard instance work the queue at a time", async () => {
     const t = await seedPostgres();
     await deleteProjectWithErasure(db, t.ws, t.p1);

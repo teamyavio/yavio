@@ -8,22 +8,15 @@ type Request = typeof erasureRequests.$inferSelect;
 /**
  * The ClickHouse tables a tenant's data lives in, and how to select it.
  * tool_registry has no workspace_id, so it is erased by the projects
- * snapshotted with the request. users_mv / sessions_mv go away with #89;
- * once they no longer exist they count as done.
+ * snapshotted with the request. (users_mv / sessions_mv were dropped, #89.)
  */
-export const ERASURE_TABLES: ReadonlyArray<{
-  table: string;
-  byProjectOnly?: boolean;
-  mayNotExist?: boolean;
-}> = [
+export const ERASURE_TABLES: ReadonlyArray<{ table: string; byProjectOnly?: boolean }> = [
   { table: "events" },
   { table: "tool_registry", byProjectOnly: true },
   { table: "stats_daily" },
   { table: "stats_users_daily" },
   { table: "stats_users_periods" },
   { table: "stats_cohorts" },
-  { table: "users_mv", mayNotExist: true },
-  { table: "sessions_mv", mayNotExist: true },
 ];
 
 /** Requests still pending after this long are reported as an error. */
@@ -50,11 +43,6 @@ export interface ErasureRunReport {
   completed: number;
   failed: number;
   stale: number;
-}
-
-function isUnknownTable(err: unknown): boolean {
-  const e = err as { code?: string; type?: string; message?: string };
-  return e?.code === "60" || e?.type === "UNKNOWN_TABLE" || /UNKNOWN_TABLE/.test(e?.message ?? "");
 }
 
 function deleteStatement(
@@ -152,7 +140,7 @@ export class ErasureWorker {
         const done = new Set(request.tablesDone);
         let error: string | null = null;
 
-        for (const { table, byProjectOnly = false, mayNotExist = false } of ERASURE_TABLES) {
+        for (const { table, byProjectOnly = false } of ERASURE_TABLES) {
           if (done.has(table)) continue;
           const statement = deleteStatement(table, byProjectOnly, request);
           try {
@@ -163,10 +151,6 @@ export class ErasureWorker {
             }
             done.add(table);
           } catch (err) {
-            if (mayNotExist && isUnknownTable(err)) {
-              done.add(table);
-              continue;
-            }
             error = `${table}: ${err instanceof Error ? err.message : String(err)}`.slice(0, 2_000);
             break; // retry this request on the next run
           }
