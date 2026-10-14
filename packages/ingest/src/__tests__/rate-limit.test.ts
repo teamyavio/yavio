@@ -37,6 +37,37 @@ function makeEvent() {
   };
 }
 
+interface AppOptions {
+  rateLimiter: RateLimiter;
+  trustProxy?: string[];
+  resolve?: (token: string) => Promise<{ projectId: string; workspaceId: string } | null>;
+}
+
+async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
+  const resolver = opts.resolve
+    ? ({ resolve: opts.resolve, clearCache: () => {} } as unknown as ApiKeyResolver)
+    : mockApiKeyResolver();
+  return createApp({
+    db: mockDb(),
+    clickhouse: mockClickHouse(),
+    apiKeyResolver: resolver,
+    jwtSecret: "test-secret",
+    rateLimiter: opts.rateLimiter,
+    trustProxy: opts.trustProxy,
+    logger: false,
+  });
+}
+
+function authedEvents(app: FastifyInstance, remoteAddress = "198.51.100.1") {
+  return app.inject({
+    method: "POST",
+    url: "/v1/events",
+    remoteAddress,
+    headers: { authorization: `Bearer ${TEST_KEY}` },
+    payload: { events: [makeEvent()] },
+  });
+}
+
 describe("Rate limit plugin", () => {
   let app: FastifyInstance;
 
@@ -44,46 +75,81 @@ describe("Rate limit plugin", () => {
     await app?.close();
   });
 
-  it("returns 429 when IP rate limit is exceeded", async () => {
-    const rateLimiter = new RateLimiter(undefined, { burstCapacity: 1, ratePerSecond: 1 });
-    app = await createApp({
-      db: mockDb(),
-      clickhouse: mockClickHouse(),
-      apiKeyResolver: mockApiKeyResolver(),
-      jwtSecret: "test-secret",
-      rateLimiter,
-      logger: false,
+  it("returns 429 once an address exceeds the limit for requests without a credential", async () => {
+    app = await buildApp({
+      rateLimiter: new RateLimiter(undefined, { burstCapacity: 1, ratePerSecond: 1 }),
     });
 
-    // First request should pass
-    const r1 = await app.inject({
-      method: "POST",
-      url: "/v1/events",
-      headers: { authorization: `Bearer ${TEST_KEY}` },
-      payload: { events: [makeEvent()] },
-    });
-    expect(r1.statusCode).toBe(200);
+    const r1 = await app.inject({ method: "GET", url: "/.env", remoteAddress: "198.51.100.9" });
+    expect(r1.statusCode).toBe(404);
 
-    // Second request should be rate limited
     const r2 = await app.inject({
-      method: "POST",
-      url: "/v1/events",
-      headers: { authorization: `Bearer ${TEST_KEY}` },
-      payload: { events: [makeEvent()] },
+      method: "GET",
+      url: "/.git/config",
+      remoteAddress: "198.51.100.9",
     });
     expect(r2.statusCode).toBe(429);
     expect(r2.headers["retry-after"]).toBeDefined();
   });
 
+  it("does not charge authenticated requests to the IP bucket", async () => {
+    app = await buildApp({
+      rateLimiter: new RateLimiter(undefined, { burstCapacity: 1, ratePerSecond: 1 }),
+    });
+
+    for (let i = 0; i < 5; i++) {
+      expect((await authedEvents(app)).statusCode).toBe(200);
+    }
+  });
+
+  it("scanner traffic from the same address never throttles an authenticated SDK", async () => {
+    // Behind a proxy without TRUST_PROXY every client shares one address —
+    // the situation #94 was filed for.
+    app = await buildApp({
+      rateLimiter: new RateLimiter(undefined, { burstCapacity: 20, ratePerSecond: 10 }),
+    });
+
+    const shared = "172.18.0.1";
+    const statuses: number[] = [];
+    for (let i = 0; i < 30; i++) {
+      statuses.push(
+        (await app.inject({ method: "GET", url: `/scan-${i}`, remoteAddress: shared })).statusCode,
+      );
+    }
+    expect(statuses).toContain(429); // the scanner itself is limited
+
+    expect((await authedEvents(app, shared)).statusCode).toBe(200);
+  });
+
+  it("refuses credentialed requests from an address only after repeated auth failures", async () => {
+    app = await buildApp({
+      rateLimiter: new RateLimiter(undefined, { burstCapacity: 2, ratePerSecond: 1 }),
+      resolve: async (token) =>
+        token === TEST_KEY ? { projectId: TEST_PROJECT_ID, workspaceId: TEST_WORKSPACE_ID } : null,
+    });
+    const badKey = { authorization: "Bearer yav_00000000000000000000000000000000" };
+    const send = (headers: Record<string, string>) =>
+      app.inject({
+        method: "POST",
+        url: "/v1/events",
+        remoteAddress: "198.51.100.66",
+        headers,
+        payload: { events: [makeEvent()] },
+      });
+
+    expect((await send(badKey)).statusCode).toBe(401);
+    expect((await send(badKey)).statusCode).toBe(401);
+    // Budget of 2 failures used: further credentialed requests are refused
+    // before the key is looked up, valid key or not.
+    expect((await send(badKey)).statusCode).toBe(429);
+    expect((await send({ authorization: `Bearer ${TEST_KEY}` })).statusCode).toBe(429);
+    // A different address is unaffected.
+    expect((await authedEvents(app, "198.51.100.67")).statusCode).toBe(200);
+  });
+
   it("does not rate limit health endpoint", async () => {
-    const rateLimiter = new RateLimiter(undefined, { burstCapacity: 0, ratePerSecond: 0 });
-    app = await createApp({
-      db: mockDb(),
-      clickhouse: mockClickHouse(),
-      apiKeyResolver: mockApiKeyResolver(),
-      jwtSecret: "test-secret",
-      rateLimiter,
-      logger: false,
+    app = await buildApp({
+      rateLimiter: new RateLimiter(undefined, { burstCapacity: 0, ratePerSecond: 0 }),
     });
 
     const response = await app.inject({ method: "GET", url: "/health" });
@@ -91,32 +157,59 @@ describe("Rate limit plugin", () => {
   });
 
   it("returns 429 when API key rate limit is exceeded", async () => {
-    const rateLimiter = new RateLimiter({ burstCapacity: 1, ratePerSecond: 1 });
-    app = await createApp({
-      db: mockDb(),
-      clickhouse: mockClickHouse(),
-      apiKeyResolver: mockApiKeyResolver(),
-      jwtSecret: "test-secret",
-      rateLimiter,
-      logger: false,
-    });
+    app = await buildApp({ rateLimiter: new RateLimiter({ burstCapacity: 1, ratePerSecond: 1 }) });
 
     // First request passes (1 event fits in burst capacity of 1)
-    const r1 = await app.inject({
-      method: "POST",
-      url: "/v1/events",
-      headers: { authorization: `Bearer ${TEST_KEY}` },
-      payload: { events: [makeEvent()] },
-    });
-    expect(r1.statusCode).toBe(200);
-
+    expect((await authedEvents(app)).statusCode).toBe(200);
     // Second request should be rate limited by API key bucket
-    const r2 = await app.inject({
-      method: "POST",
-      url: "/v1/events",
-      headers: { authorization: `Bearer ${TEST_KEY}` },
-      payload: { events: [makeEvent()] },
+    expect((await authedEvents(app)).statusCode).toBe(429);
+  });
+});
+
+describe("TRUST_PROXY (#94)", () => {
+  let app: FastifyInstance;
+
+  afterEach(async () => {
+    await app?.close();
+  });
+
+  const unauthenticated = (remoteAddress: string, forwardedFor: string) =>
+    app.inject({
+      method: "GET",
+      url: "/unknown",
+      remoteAddress,
+      headers: { "x-forwarded-for": forwardedFor },
     });
-    expect(r2.statusCode).toBe(429);
+
+  it("keys requests from the trusted proxy on X-Forwarded-For", async () => {
+    app = await buildApp({
+      rateLimiter: new RateLimiter(undefined, { burstCapacity: 1, ratePerSecond: 1 }),
+      trustProxy: ["172.30.240.1"],
+    });
+
+    expect((await unauthenticated("172.30.240.1", "203.0.113.5")).statusCode).toBe(404);
+    expect((await unauthenticated("172.30.240.1", "203.0.113.6")).statusCode).toBe(404);
+    // Same client again: its own bucket is used up.
+    expect((await unauthenticated("172.30.240.1", "203.0.113.5")).statusCode).toBe(429);
+  });
+
+  it("ignores X-Forwarded-For from an address that is not trusted", async () => {
+    app = await buildApp({
+      rateLimiter: new RateLimiter(undefined, { burstCapacity: 1, ratePerSecond: 1 }),
+      trustProxy: ["172.30.240.1"],
+    });
+
+    expect((await unauthenticated("198.51.100.20", "203.0.113.5")).statusCode).toBe(404);
+    // A forged header does not buy a fresh bucket.
+    expect((await unauthenticated("198.51.100.20", "203.0.113.99")).statusCode).toBe(429);
+  });
+
+  it("trusts nothing when unset", async () => {
+    app = await buildApp({
+      rateLimiter: new RateLimiter(undefined, { burstCapacity: 1, ratePerSecond: 1 }),
+    });
+
+    expect((await unauthenticated("172.30.240.1", "203.0.113.5")).statusCode).toBe(404);
+    expect((await unauthenticated("172.30.240.1", "203.0.113.6")).statusCode).toBe(429);
   });
 });

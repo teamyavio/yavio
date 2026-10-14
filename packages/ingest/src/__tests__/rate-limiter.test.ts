@@ -117,4 +117,38 @@ describe("RateLimiter", () => {
       limiter.stop(); // should not throw
     });
   });
+
+  describe("auth-failure bucket (#94)", () => {
+    it("is separate from the credential-less IP bucket", () => {
+      const limiter = new RateLimiter(undefined, { burstCapacity: 1, ratePerSecond: 1 });
+      expect(limiter.consumeIp("10.0.0.1").allowed).toBe(true);
+      expect(limiter.consumeIp("10.0.0.1").allowed).toBe(false);
+      // Exhausting one never touches the other.
+      expect(limiter.peekAuthFailure("10.0.0.1").allowed).toBe(true);
+      expect(limiter.consumeAuthFailure("10.0.0.1").allowed).toBe(true);
+      expect(limiter.peekAuthFailure("10.0.0.1").allowed).toBe(false);
+    });
+
+    it("peeks without consuming and refills over time", () => {
+      const limiter = new RateLimiter(undefined, { burstCapacity: 1, ratePerSecond: 1 });
+      expect(limiter.peekAuthFailure("10.0.0.2").allowed).toBe(true);
+      expect(limiter.peekAuthFailure("10.0.0.2").allowed).toBe(true);
+      limiter.consumeAuthFailure("10.0.0.2");
+      const blocked = limiter.peekAuthFailure("10.0.0.2");
+      expect(blocked.allowed).toBe(false);
+      if (!blocked.allowed) expect(blocked.retryAfterMs).toBeGreaterThan(0);
+      vi.advanceTimersByTime(1_000);
+      expect(limiter.peekAuthFailure("10.0.0.2").allowed).toBe(true);
+    });
+
+    it("cleans up stale auth-failure buckets", () => {
+      const limiter = new RateLimiter({ cleanupIntervalMs: 1_000, staleAfterMs: 500 });
+      limiter.consumeAuthFailure("10.0.0.3");
+      expect(limiter.authFailureBucketCount).toBe(1);
+      limiter.start();
+      vi.advanceTimersByTime(1_000);
+      expect(limiter.authFailureBucketCount).toBe(0);
+      limiter.stop();
+    });
+  });
 });

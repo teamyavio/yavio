@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadConfig } from "../config.js";
+import { loadConfig, parseTrustProxy } from "../config.js";
 
 const REQUIRED = {
   DATABASE_URL: "postgres://yavio_service:pw@localhost:5432/yavio",
@@ -85,5 +85,43 @@ describe("loadConfig — ClickHouse least privilege", () => {
     // Rewriting must not turn a bad value into an opaque URL parse crash.
     process.env.CLICKHOUSE_URL = "not-a-url";
     expect(loadConfig().clickhouseUrl).toBe("not-a-url");
+  });
+});
+
+describe("TRUST_PROXY (#94)", () => {
+  it("is empty when unset or blank", () => {
+    expect(parseTrustProxy(undefined)).toEqual([]);
+    expect(parseTrustProxy("  ")).toEqual([]);
+  });
+
+  it("accepts IP addresses and CIDR ranges, IPv4 and IPv6", () => {
+    expect(parseTrustProxy("172.30.240.1, 172.30.241.0/24,::1,fd00::/8")).toEqual([
+      "172.30.240.1",
+      "172.30.241.0/24",
+      "::1",
+      "fd00::/8",
+    ]);
+  });
+
+  it.each([
+    "true",
+    "*",
+    "loopback",
+    "uniquelocal",
+    "300.1.1.1",
+    "10.0.0.0/33",
+    "10.0.0.1/8/1",
+    "fd00::/129",
+  ])("rejects %s — trusting more than the proxy lets clients forge their address", (value) => {
+    expect(() => parseTrustProxy(value)).toThrow(/TRUST_PROXY/);
+  });
+
+  it("is read by loadConfig", () => {
+    process.env.TRUST_PROXY = "172.30.240.1";
+    try {
+      expect(loadConfig().trustProxy).toEqual(["172.30.240.1"]);
+    } finally {
+      Reflect.deleteProperty(process.env, "TRUST_PROXY");
+    }
   });
 });

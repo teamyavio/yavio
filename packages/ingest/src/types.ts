@@ -27,5 +27,7 @@ declare module "fastify" {
 
   interface FastifyRequest {
     authContext?: AuthContext;
+    /** Set when the IP bucket was charged on arrival (plugins/rate-limit.ts). */
+    ipRateCharged: boolean;
   }
 }

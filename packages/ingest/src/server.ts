@@ -52,6 +52,7 @@ async function main() {
     batchWriter,
     toolRegistryWriter,
     rateLimiter,
+    trustProxy: config.trustProxy,
   });
 
   app.addHook("onClose", async () => {
