@@ -55,6 +55,7 @@ export const GET = withRole("viewer")(async (_request: Request, ctx: AuthContext
       id: projects.id,
       name: projects.name,
       slug: projects.slug,
+      retentionMonths: projects.retentionMonths,
       createdAt: projects.createdAt,
       updatedAt: projects.updatedAt,
     })

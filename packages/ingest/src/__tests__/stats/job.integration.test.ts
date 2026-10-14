@@ -18,11 +18,13 @@ class MemoryStore implements StatsJobStore {
   lastSuccess = new Map<string, Date>();
   failures = new Map<string, string>();
   locked = false;
+  retention = new Map<string, number>();
   constructor(public projects: string[]) {}
   async withLock<T>(fn: (s: StatsJobSession) => Promise<T>): Promise<T | null> {
     if (this.locked) return null;
     return fn({
-      listProjectIds: async () => this.projects,
+      listProjects: async () =>
+        this.projects.map((id) => ({ id, retentionMonths: this.retention.get(id) ?? 13 })),
       getLastSuccess: async (job) => this.lastSuccess.get(job) ?? null,
       recordSuccess: async (job, at) => {
         this.lastSuccess.set(job, at);
@@ -143,12 +145,21 @@ describe("statistics job (#85)", () => {
       event(project, "2026-10-02 10:00:00.000"),
       event(project, "2026-10-02 11:00:00.000"),
     ];
-    await insert(batch);
-    // Stored a second time, past insert deduplication (as before #90).
-    await insert(batch, { insert_deduplicate: 0 });
-    const raw = await rows("SELECT count() AS n FROM events WHERE project_id = {p:String}", {
-      p: project,
-    });
+    // events is a ReplacingMergeTree: a background merge between the inserts
+    // and the count below would collapse the copies and fail the precondition
+    // (seen in a full-suite run). Merges stay off until the count.
+    await getClient().command({ query: "SYSTEM STOP MERGES events" });
+    let raw: Record<string, unknown>[];
+    try {
+      await insert(batch);
+      // Stored a second time, past insert deduplication (as before #90).
+      await insert(batch, { insert_deduplicate: 0 });
+      raw = await rows("SELECT count() AS n FROM events WHERE project_id = {p:String}", {
+        p: project,
+      });
+    } finally {
+      await getClient().command({ query: "SYSTEM START MERGES events" });
+    }
     expect(Number(raw[0].n)).toBe(4);
 
     await job(new MemoryStore([project])).runIfDue(NOW);
@@ -338,5 +349,179 @@ describe("statistics job (#85)", () => {
       p: deleted,
     });
     expect(Number(after[0].n)).toBe(0);
+  });
+
+  describe("per-project retention (#93)", () => {
+    it("deletes old raw events after aggregating them, in one statement, and keeps the statistics", async () => {
+      const short = `p-short-${randomUUID().slice(0, 8)}`;
+      const full = `p-full-${randomUUID().slice(0, 8)}`;
+      await insert([
+        event(short, "2026-06-20 10:00:00.000"),
+        event(short, "2026-07-20 10:00:00.000"),
+        event(short, "2026-08-10 10:00:00.000"),
+        event(short, "2026-08-20 10:00:00.000"),
+        event(short, "2026-09-20 10:00:00.000"),
+        event(short, "2026-10-05 10:00:00.000"),
+        event(full, "2026-06-20 10:00:00.000"),
+      ]);
+      const store = new MemoryStore([short, full]);
+      store.retention.set(short, 2);
+
+      const deletes: string[] = [];
+      const spying = {
+        query: rollup.query.bind(rollup),
+        command: (params: Parameters<ClickHouseClient["command"]>[0]) => {
+          if (params.query.startsWith("ALTER TABLE events DELETE")) deletes.push(params.query);
+          return rollup.command(params);
+        },
+      } as unknown as ClickHouseClient;
+      const run = () => new StatsJob({ clickhouse: spying, store, logger: silent });
+
+      const report = await run().runIfDue(NOW);
+      expect(report?.retention).toMatchObject({ status: "done", projects: 1 });
+      expect(deletes).toHaveLength(1);
+
+      // Raw events older than 2 months before NOW (2026-08-14 03:00) are gone,
+      // and only for the project that keeps 2 months.
+      const raw = await rows(
+        "SELECT project_id, toString(toDate(timestamp)) AS d FROM events WHERE project_id IN ({a:String}, {b:String}) ORDER BY project_id, d",
+        { a: short, b: full },
+      );
+      expect(raw.filter((r) => r.project_id === short).map((r) => r.d)).toEqual([
+        "2026-08-20",
+        "2026-09-20",
+        "2026-10-05",
+      ]);
+      expect(raw.filter((r) => r.project_id === full).map((r) => r.d)).toEqual(["2026-06-20"]);
+
+      // Everything was aggregated before the delete.
+      const monthly = async () =>
+        rows(
+          `SELECT toString(toStartOfMonth(day)) AS m, sum(events) AS n FROM stats_daily
+           WHERE project_id = {p:String} AND slice = 'total' GROUP BY m ORDER BY m`,
+          { p: short },
+        );
+      const before = await monthly();
+      expect(before.map((r) => [r.m, Number(r.n)])).toEqual([
+        ["2026-06-01", 1],
+        ["2026-07-01", 1],
+        ["2026-08-01", 2],
+        ["2026-09-01", 1],
+        ["2026-10-01", 1],
+      ]);
+
+      // The next day: previous and current month are recomputed from the raw
+      // events still there; August is frozen. No month's statistics change.
+      const next = await run().runIfDue(new Date("2026-10-15T03:00:00Z"));
+      expect(next?.retention.status).toBe("done");
+      expect(await monthly()).toEqual(before);
+    }, 60_000);
+
+    it("leaves every statistics table unchanged across the delete, look-back measures included", async () => {
+      // The issue's acceptance test, for all four tables. stats_daily reads
+      // only its month; the other three look back — 29 days (WAU/MAU), up to
+      // a year (quarter/year users), all history (cohort first-seen). Without
+      // a floor, the day-2 recompute of September reads fewer events than
+      // day 1 did, and its numbers drift.
+      const short = `p-short-${randomUUID().slice(0, 8)}`;
+      const user = (id: string, ts: string) => event(short, ts, { user_id: id });
+      await insert([
+        user("u1", "2026-06-10 10:00:00.000"), // first seen in June
+        user("u1", "2026-08-10 10:00:00.000"), // deleted on day 1
+        user("u1", "2026-09-20 10:00:00.000"),
+        user("u2", "2026-08-20 10:00:00.000"),
+        user("u2", "2026-09-05 10:00:00.000"),
+        user("u3", "2026-07-15 10:00:00.000"), // only in Q3's deleted part
+        user("u4", "2026-09-02 10:00:00.000"),
+        user("u4", "2026-10-02 10:00:00.000"),
+      ]);
+      const store = new MemoryStore([short]);
+      store.retention.set(short, 2);
+
+      const snapshot = async () => {
+        const out: Record<string, unknown[]> = {};
+        for (const t of [
+          "stats_daily",
+          "stats_users_daily",
+          "stats_users_periods",
+          "stats_cohorts",
+        ]) {
+          out[t] = await rows(`SELECT * FROM ${t} WHERE project_id = {p:String} ORDER BY ALL`, {
+            p: short,
+          });
+        }
+        return out;
+      };
+
+      const day1 = await job(store).runIfDue(NOW);
+      expect(day1?.retention.status).toBe("done");
+      const afterDay1 = await snapshot();
+      const day2 = await job(store).runIfDue(new Date("2026-10-15T03:00:00Z"));
+      expect(day2?.tables.every((t) => t.status === "done")).toBe(true);
+      // Every row day 1 wrote is unchanged; day 2 only adds the day that
+      // closed in between (2026-10-14).
+      const afterDay2 = await snapshot();
+      const added = afterDay2.stats_users_daily.filter(
+        (r) => (r as { day: string }).day === "2026-10-14",
+      );
+      expect(added).toHaveLength(1);
+      expect({
+        ...afterDay2,
+        stats_users_daily: afterDay2.stats_users_daily.filter((r) => !added.includes(r)),
+      }).toEqual(afterDay1);
+
+      // What a 2-month window can honestly say about September (floor =
+      // 2026-09-01): MAU counts only retained days; Q3 began before the
+      // floor, so it has no distinct-user figure; and no September cohort,
+      // because "first seen in September" cannot be told apart from "seen
+      // before and deleted".
+      const sep5 = afterDay1.stats_users_daily.find(
+        (r) => (r as { day: string }).day === "2026-09-05",
+      ) as { mau: string | number } | undefined;
+      expect(Number(sep5?.mau)).toBe(2); // u4 (Sep 2), u2 (Sep 5) — not u1's Aug 10
+      expect(
+        afterDay1.stats_users_periods.filter((r) => (r as { period: string }).period === "quarter"),
+      ).toEqual([]);
+      expect(
+        afterDay1.stats_cohorts.filter(
+          (r) => (r as { activity_month: string }).activity_month >= "2026-09-01",
+        ),
+      ).toEqual([]);
+    }, 60_000);
+
+    it("deletes nothing when the aggregation failed in that run", async () => {
+      const short = `p-short-${randomUUID().slice(0, 8)}`;
+      await insert([
+        event(short, "2026-06-20 10:00:00.000"),
+        event(short, "2026-10-05 10:00:00.000"),
+      ]);
+      const store = new MemoryStore([short]);
+      store.retention.set(short, 2);
+      const failing = {
+        query: rollup.query.bind(rollup),
+        command: (params: Parameters<ClickHouseClient["command"]>[0]) => {
+          if (params.query.includes("INSERT INTO stats_cohorts_stage")) {
+            return Promise.reject(new Error("simulated failure"));
+          }
+          return rollup.command(params);
+        },
+      } as unknown as ClickHouseClient;
+
+      const report = await new StatsJob({ clickhouse: failing, store, logger: silent }).runIfDue(
+        NOW,
+      );
+      expect(report?.tables.find((t) => t.table === "stats_cohorts")?.status).toBe("failed");
+      expect(report?.retention.status).toBe("skipped");
+      const raw = await rows("SELECT count() AS n FROM events WHERE project_id = {p:String}", {
+        p: short,
+      });
+      expect(Number(raw[0].n)).toBe(2);
+    }, 60_000);
+
+    it("needs no statement when every project keeps the platform window", async () => {
+      await insert([event(project, "2026-10-05 10:00:00.000")]);
+      const report = await job(new MemoryStore([project])).runIfDue(NOW);
+      expect(report?.retention).toMatchObject({ status: "not-needed", projects: 0 });
+    }, 60_000);
   });
 });

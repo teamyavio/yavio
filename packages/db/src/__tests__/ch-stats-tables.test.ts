@@ -123,7 +123,8 @@ describe("anonymous statistics tables (0015)", () => {
     const actual = [...byTable].map(([table, access]) => ({ table, access }));
     actual.sort((a, b) => (a.table < b.table ? -1 : 1));
     const expected = [
-      { table: "events", access: ["SELECT"] },
+      // ALTER DELETE: per-project retention (#93, migration 0017).
+      { table: "events", access: ["ALTER DELETE", "SELECT"] },
       { table: "tool_registry", access: ["SELECT"] },
       // REPLACE PARTITION needs INSERT and ALTER DELETE on the target, and
       // SELECT on its source (checked on 26.8).

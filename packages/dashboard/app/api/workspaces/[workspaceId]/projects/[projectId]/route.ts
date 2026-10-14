@@ -85,6 +85,11 @@ export async function PATCH(request: Request, routeContext: RouteContext) {
   const values: Record<string, unknown> = { updatedAt: new Date() };
 
   if (parsed.data.name) values.name = parsed.data.name;
+  // Shorter retention (#93): ingest's statistics job deletes the older raw
+  // events at its next daily run, after aggregating them.
+  if (parsed.data.retentionMonths !== undefined) {
+    values.retentionMonths = parsed.data.retentionMonths;
+  }
   if (parsed.data.slug) {
     // Check slug uniqueness within workspace
     const existing = await db

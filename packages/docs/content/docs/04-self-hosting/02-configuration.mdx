@@ -49,7 +49,7 @@ These must be set before starting the platform. Each should be a unique random s
 | `CLICKHOUSE_INGEST_PASSWORD` | `pnpm migrate:clickhouse` | ClickHouse `yavio_ingest` — INSERT only |
 | `CLICKHOUSE_DASHBOARD_PASSWORD` | `pnpm migrate:clickhouse` | ClickHouse `yavio_dashboard` — SELECT only, row policies |
 | `CLICKHOUSE_ERASER_PASSWORD` | `pnpm migrate:clickhouse` | ClickHouse `yavio_eraser` — `ALTER DELETE` on the events table only; cannot read what it erases |
-| `CLICKHOUSE_ROLLUP_PASSWORD` | `pnpm migrate:clickhouse` | ClickHouse `yavio_rollup` — ingest's daily statistics job: reads events, writes the anonymous statistics tables. Unset disables the job, and raw events then expire after 13 months with nothing kept |
+| `CLICKHOUSE_ROLLUP_PASSWORD` | `pnpm migrate:clickhouse` | ClickHouse `yavio_rollup` — ingest's daily statistics job: reads events, writes the anonymous statistics tables, and deletes the raw events of projects set to keep less than 13 months. Unset disables the job: raw events then expire after 13 months with nothing kept, and a project's shorter retention setting is **not applied** |
 
 <Callout type="warn">
   Compose refuses to start when `POSTGRES_SERVICE_PASSWORD`, `POSTGRES_API_PASSWORD`, `CLICKHOUSE_PASSWORD` or `CLICKHOUSE_ERASER_PASSWORD` is missing, rather than substituting a value. The dashboard also checks `CLICKHOUSE_ERASER_PASSWORD` itself when it starts: account, workspace and project deletion run as `yavio_eraser`, with no fallback to the unrestricted `default` user. That is deliberate: a startup error takes a minute to fix, a published default is a credential anyone can read on GitHub.
