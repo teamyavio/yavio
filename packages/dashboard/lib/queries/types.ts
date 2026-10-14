@@ -45,7 +45,7 @@ export interface ErrorListItem {
   platform: string;
 }
 
-/** User list row from users_mv. */
+/** User list row, computed from events (#89). userId is the user key: user_id, else subject_id. */
 export interface UserListItem {
   userId: string;
   firstSeen: string;

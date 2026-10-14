@@ -154,13 +154,19 @@ export function UsersContent({ projectId }: { projectId: string }) {
           <TabsTrigger value="active">Active Users</TabsTrigger>
         </TabsList>
 
+        <p className="mt-3 text-sm text-muted-foreground">
+          Users are counted by the ID your server passes to <code>.identify()</code>. Where it does
+          not, the platform's pseudonymous user ID is used instead (ChatGPT, with input capture on);
+          one person seen both ways is counted once.
+        </p>
+
         <TabsContent value="list" className="mt-4">
           {listError ? (
             <ErrorAlert message={listError.message} retry={listRetry} />
           ) : !isLoading && (!listData || listData.users.length === 0) ? (
             <EmptyState
-              title="No identified users"
-              description="Users will appear here once .identify() is called in your MCP server."
+              title="No users yet"
+              description="Users appear once your MCP server calls .identify(), or — on ChatGPT, with input capture on — by the platform's pseudonymous user ID."
             />
           ) : (
             <DataTable
