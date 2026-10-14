@@ -79,12 +79,15 @@ const TOOL_OVERRIDE_KEYS = ["inputValues", "outputValues", "intent"] as const;
 function resolveTools(
   ...sources: Array<Record<string, ToolCaptureOverride> | undefined>
 ): Record<string, ToolCaptureOverride> {
-  const tools: Record<string, ToolCaptureOverride> = {};
+  // No prototype: a tool is looked up by its name, and a tool (or a JSON key)
+  // called `__proto__` or `constructor` must be an ordinary entry, not the
+  // object's prototype. Readers use Object.hasOwn for the same reason.
+  const tools: Record<string, ToolCaptureOverride> = Object.create(null);
   for (const source of sources) {
     if (!source || typeof source !== "object") continue;
     for (const [name, override] of Object.entries(source)) {
       if (!override || typeof override !== "object") continue;
-      const merged: ToolCaptureOverride = { ...tools[name] };
+      const merged: ToolCaptureOverride = { ...(Object.hasOwn(tools, name) ? tools[name] : {}) };
       for (const key of TOOL_OVERRIDE_KEYS) {
         const value = (override as Record<string, unknown>)[key];
         if (typeof value === "boolean") merged[key] = value;
@@ -171,10 +174,13 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
   const endpoint =
     options?.endpoint ?? process.env.YAVIO_ENDPOINT ?? fileConfig?.endpoint ?? DEFAULT_ENDPOINT;
 
+  // A field set to undefined is "not set" — untyped JS and computed options
+  // (`geo: flag ? "country" : undefined`) produce one routinely — so it must
+  // not override the file's value or the default; a plain spread would.
   const capture: CaptureConfig = {
     ...DEFAULT_CAPTURE,
-    ...fileConfig?.capture,
-    ...options?.capture,
+    ...defined(fileConfig?.capture),
+    ...defined(options?.capture),
   };
   capture.geo = resolveGeo(capture.geo);
 
@@ -192,6 +198,14 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
   const tools = resolveTools(fileConfig?.tools, options?.tools);
 
   return { apiKey, endpoint, capture, serverOnly, intent, tools };
+}
+
+/** The entries of `source` whose value is not undefined. */
+function defined<T extends object>(source: T | undefined): Partial<T> {
+  if (!source || typeof source !== "object") return {};
+  return Object.fromEntries(
+    Object.entries(source).filter(([, value]) => value !== undefined),
+  ) as Partial<T>;
 }
 
 function resolveIntent(option: NonNullable<WithYavioOptions["intent"]>): IntentConfig {

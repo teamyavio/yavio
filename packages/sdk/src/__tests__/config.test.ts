@@ -257,6 +257,20 @@ describe("per-tool capture overrides (tools)", () => {
     const config = withCwd(tempDir, () => resolveConfig());
     expect(config?.tools).toEqual({ book: { intent: false } });
   });
+
+  it("treats __proto__ and constructor as tool names, never as the object's prototype", () => {
+    // JSON.parse makes `__proto__` an own key; assigning it on a plain object
+    // would have replaced the prototype and the override would be lost.
+    const config = resolveConfig({
+      apiKey: "test",
+      tools: JSON.parse('{"__proto__": {"inputValues": false}, "constructor": {"intent": false}}'),
+    });
+    expect(Object.hasOwn(config?.tools ?? {}, "__proto__")).toBe(true);
+    // biome-ignore lint/complexity/useLiteralKeys: `.__proto__` would read the prototype accessor on an ordinary object
+    expect(config?.tools["__proto__"]).toEqual({ inputValues: false });
+    expect(config?.tools.constructor).toEqual({ intent: false });
+    expect(Object.hasOwn(config?.tools ?? {}, "inputValues")).toBe(false); // not poisoned
+  });
 });
 
 describe("capture.geo validation", () => {
@@ -273,6 +287,13 @@ describe("capture.geo validation", () => {
 
   it.each([true, false, "country"] as const)("passes %s through without a warning", (geo) => {
     expect(resolveConfig({ apiKey: "test", capture: { geo } })?.capture.geo).toBe(geo);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("leaves an undefined geo at the default, without a warning", () => {
+    // A computed option: `geo: process.env.GEO_COUNTRY ? "country" : undefined`.
+    const config = resolveConfig({ apiKey: "test", capture: { geo: undefined } });
+    expect(config?.capture.geo).toBe(true);
     expect(warn).not.toHaveBeenCalled();
   });
 

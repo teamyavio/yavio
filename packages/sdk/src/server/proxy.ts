@@ -65,7 +65,9 @@ async function getWidgetToken(
  * intent controller resolves that flag itself.
  */
 function resolveToolCapture(config: YavioConfig, toolName: string): CaptureConfig {
-  const override = config.tools[toolName];
+  // Own entries only: a tool named `constructor` has no override just because
+  // Object has one.
+  const override = Object.hasOwn(config.tools, toolName) ? config.tools[toolName] : undefined;
   if (!override) return config.capture;
   return {
     ...config.capture,
