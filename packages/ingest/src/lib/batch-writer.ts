@@ -19,8 +19,11 @@ const MAX_RETRIES = 3;
  * It still tells apart what has to be told apart: a retry of the same batch
  * carries the same three values; an SDK resend is enriched again and gets a
  * new ingested_at; a clamped resend carries a new timestamp (#90).
- * (The client serialises JSONEachRow itself and accepts no pre-serialised
- * bytes for it, so the one serialisation cannot be shared with the token.)
+ * Sharing one serialisation between the token and the request body is not
+ * an option with @clickhouse/client 1.x: validateInsertValues rejects a
+ * non-object-mode (raw bytes) stream for JSONEachRow — raw streams are for
+ * CSV/TSV-style formats only — and serialises object-mode rows itself. The
+ * identity hash is the cheaper choice anyway: it serialises nothing.
  */
 function batchToken(batch: ReadonlyArray<EnrichedEvent>): string {
   const hash = createHash("sha256");
