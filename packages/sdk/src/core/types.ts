@@ -11,6 +11,39 @@ export interface YavioConfig {
    */
   serverOnly: boolean;
   intent: IntentConfig;
+  /** Per-tool overrides of the capture flags, keyed by tool name. Empty when none. */
+  tools: Record<string, ToolCaptureOverride>;
+}
+
+/**
+ * Per-tool overrides of the capture flags. A key that is omitted inherits the
+ * global `capture` value. Lets a tool with sensitive input (an IBAN, a message
+ * body) stay on the instrumented server — keeping latency, status, intent and
+ * the `yavio.*` tracking context — while the SDK guarantees what is not
+ * captured for it.
+ */
+export interface ToolCaptureOverride {
+  /**
+   * `false`: no `input_keys`, `input_types`, `input_values`, no client
+   * metadata (`locale`, `country_code`, `end_user_agent`, `subject_id`) and no
+   * thrown error's message (messages tend to interpolate the arguments) for
+   * this tool, on success and on error. Same semantics as the global flag.
+   */
+  inputValues?: boolean;
+  /**
+   * `false`: no `output_content` for this tool, and no `error_message` taken
+   * from an `isError` result (that text is output). `status` and
+   * `error_category` are still recorded; a thrown error's message still is
+   * (gated on `inputValues` instead).
+   */
+  outputValues?: boolean;
+  /**
+   * `false`: the `context` parameter is neither advertised nor captured for
+   * this tool. A `context` a client still sends (cached schema) is stripped
+   * before validation, so strict schemas keep accepting the call. Has no
+   * effect while intent capture is off globally.
+   */
+  intent?: boolean;
 }
 
 /** Resolved user-intent capture configuration. */
@@ -46,7 +79,15 @@ export interface IntentOptions {
 export interface CaptureConfig {
   inputValues: boolean;
   outputValues: boolean;
-  geo: boolean;
+  /**
+   * Location the platform relays in `_meta["openai/userLocation"]`.
+   * - `true` (default): `country_code` is set and `input_values._meta` keeps
+   *   the whole object (city, region, country, timezone, coordinates).
+   * - `"country"`: `country_code` is set and `input_values._meta` keeps only
+   *   `{ country }` — nothing else, including fields added later.
+   * - `false`: no `country_code`, and the object is removed from `_meta`.
+   */
+  geo: boolean | "country";
   tokens: boolean;
   retries: boolean;
 }
@@ -78,6 +119,20 @@ export interface WithYavioOptions {
    * disabled.
    */
   intent?: boolean | IntentOptions;
+  /**
+   * Per-tool overrides of the `capture` flags, keyed by tool name:
+   *
+   * ```ts
+   * tools: { "book-contract": { inputValues: false, outputValues: false, intent: false } }
+   * ```
+   *
+   * Prefer this over registering a sensitive tool on the unwrapped server —
+   * that loses the `tool_call` event and turns `yavio.conversion()` and
+   * friends into no-ops for the tool. Names are not validated (tools register
+   * after `withYavio()` runs); an override for a tool that never registers is
+   * simply unused. Also readable from `.yaviorc.json` as `"tools"`.
+   */
+  tools?: Record<string, ToolCaptureOverride>;
 }
 
 /** The tracking context available via the `yavio` singleton. */

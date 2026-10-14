@@ -1,6 +1,13 @@
 import { readFileSync } from "node:fs";
 import { dirname, join, parse } from "node:path";
-import type { CaptureConfig, IntentConfig, WithYavioOptions, YavioConfig } from "./types.js";
+import { ErrorCode } from "@yavio/shared/error-codes";
+import type {
+  CaptureConfig,
+  IntentConfig,
+  ToolCaptureOverride,
+  WithYavioOptions,
+  YavioConfig,
+} from "./types.js";
 
 // This hostname MUST resolve. The SDK swallows transport errors by design, so a
 // dead default does not surface as an error to the integrator — it silently
@@ -58,6 +65,61 @@ interface ConfigFile {
   capture?: Partial<CaptureConfig>;
   serverOnly?: boolean;
   intent?: boolean;
+  tools?: Record<string, ToolCaptureOverride>;
+}
+
+const TOOL_OVERRIDE_KEYS = ["inputValues", "outputValues", "intent"] as const;
+
+/**
+ * Merge per-tool overrides from the config file and the code options, field
+ * by field per tool (code wins), the same way `capture` merges. Only the known
+ * keys with boolean values survive: the file is hand-written JSON, and an
+ * unknown key or a `"false"` string must not become a silent override.
+ */
+function resolveTools(
+  ...sources: Array<Record<string, ToolCaptureOverride> | undefined>
+): Record<string, ToolCaptureOverride> {
+  // No prototype: a tool is looked up by its name, and a tool (or a JSON key)
+  // called `__proto__` or `constructor` must be an ordinary entry, not the
+  // object's prototype. Readers use Object.hasOwn for the same reason.
+  const tools: Record<string, ToolCaptureOverride> = Object.create(null);
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    for (const [name, override] of Object.entries(source)) {
+      if (!override || typeof override !== "object") continue;
+      const merged: ToolCaptureOverride = { ...(Object.hasOwn(tools, name) ? tools[name] : {}) };
+      for (const key of TOOL_OVERRIDE_KEYS) {
+        const value = (override as Record<string, unknown>)[key];
+        if (typeof value === "boolean") merged[key] = value;
+      }
+      if (Object.keys(merged).length > 0) tools[name] = merged;
+    }
+  }
+  return tools;
+}
+
+let warnedInvalidGeo = false;
+
+/** @internal Reset the warn-once state — exposed for testing only. */
+export function _resetConfigWarnings(): void {
+  warnedInvalidGeo = false;
+}
+
+/**
+ * `capture` is spread from hand-written JSON and untyped JS, so `geo` can be
+ * anything — and `"false"` is truthy. A privacy flag must fail closed: any
+ * value other than `true`, `false` or `"country"` turns geo off. Warn once per
+ * process; stateless servers resolve the config on every request.
+ */
+function resolveGeo(value: unknown): CaptureConfig["geo"] {
+  if (value === true || value === false || value === "country") return value;
+  if (!warnedInvalidGeo) {
+    warnedInvalidGeo = true;
+    console.warn(
+      `[${ErrorCode.SDK.INVALID_CAPTURE_OPTION}] capture.geo must be true, false or "country", got ${JSON.stringify(value)} — treating it as false. Shown once per process.`,
+    );
+  }
+  return false;
 }
 
 /**
@@ -112,11 +174,15 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
   const endpoint =
     options?.endpoint ?? process.env.YAVIO_ENDPOINT ?? fileConfig?.endpoint ?? DEFAULT_ENDPOINT;
 
+  // A field set to undefined is "not set" — untyped JS and computed options
+  // (`geo: flag ? "country" : undefined`) produce one routinely — so it must
+  // not override the file's value or the default; a plain spread would.
   const capture: CaptureConfig = {
     ...DEFAULT_CAPTURE,
-    ...fileConfig?.capture,
-    ...options?.capture,
+    ...defined(fileConfig?.capture),
+    ...defined(options?.capture),
   };
+  capture.geo = resolveGeo(capture.geo);
 
   const serverOnly =
     options?.serverOnly ??
@@ -128,7 +194,18 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
     options?.intent ?? parseBoolEnv(process.env.YAVIO_INTENT) ?? fileConfig?.intent ?? false,
   );
 
-  return { apiKey, endpoint, capture, serverOnly, intent };
+  // No env-var form: the shape is nested. File first, code options win.
+  const tools = resolveTools(fileConfig?.tools, options?.tools);
+
+  return { apiKey, endpoint, capture, serverOnly, intent, tools };
+}
+
+/** The entries of `source` whose value is not undefined. */
+function defined<T extends object>(source: T | undefined): Partial<T> {
+  if (!source || typeof source !== "object") return {};
+  return Object.fromEntries(
+    Object.entries(source).filter(([, value]) => value !== undefined),
+  ) as Partial<T>;
 }
 
 function resolveIntent(option: NonNullable<WithYavioOptions["intent"]>): IntentConfig {

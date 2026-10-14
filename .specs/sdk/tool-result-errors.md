@@ -1,6 +1,6 @@
 # Tool-Result Errors Count as Errors
 
-**Status:** Proposed (2026-08-26), reviewed 2026-08-26 (#75, corrections folded in) · **Packages:** sdk, shared, ingest, docs · **Version:** @yavio/sdk 0.4.0 (behavioural change in metrics)
+**Status:** Implemented 2026-09-03 (#75; proposed 2026-08-26, reviewed 2026-08-26 with corrections folded in) · **Packages:** sdk, shared, ingest, docs · **Version:** @yavio/sdk 0.4.0 (behavioural change in metrics)
 
 ## Problem
 
@@ -23,7 +23,7 @@ A result with `isError === true` is an error. It gets its own category so "the h
 |-------|------------------------------------------|--------------------|
 | status | `error` | `error` |
 | error_category | `tool_error` *(new)* | `unknown` |
-| error_message | first `content[]` item of type `text`, trimmed, PII-stripped, clamped to 500 chars; absent if no text | exception message, PII-stripped, clamped to 500 chars |
+| error_message | first `content[]` item of type `text`, trimmed, PII-stripped, clamped to 500 chars; absent if no text | exception message, PII-stripped, clamped to 500 chars; absent while `inputValues` is off (changed 2026-10-13, see per-tool-capture.md) |
 | latency_ms | as today | as today |
 | is_retry | unchanged — and note: never set by the SDK today (`proxy.ts` passes no `isRetry`, `capture.retries` is read by nothing), so the column is always 0 despite `metrics/events.md` defining a semantic. Not this spec's job; do not describe it as working. | same |
 | input_keys / input_types / input_values / client meta | captured as on the success path (same `captureInput` gate) | as today (`captureInputOnError`) |
@@ -35,7 +35,7 @@ Only the literal boolean `true` counts. `"true"`, `1` or a missing flag are not 
 
 `status` is derived from the result object regardless of `capture.outputValues`, so integrators with output capture off (Shipal) get a correct error rate too.
 
-**Interaction with per-tool overrides ([per-tool-capture.md](./per-tool-capture.md)):** for a tool with `outputValues: false`, keep `status` and `error_category` but do **not** store the result-derived `error_message` — that text is output, and a handler echoing "no tariff for customer number …" would leak exactly what the override hides. The thrown-path message stays (developer-written).
+**Interaction with per-tool overrides ([per-tool-capture.md](./per-tool-capture.md)):** for a tool with `outputValues: false`, keep `status` and `error_category` but do **not** store the result-derived `error_message` — that text is output, and a handler echoing "no tariff for customer number …" would leak exactly what the override hides. The thrown-path message is not gated on `outputValues` (developer-written) but on `inputValues` (it tends to interpolate the arguments) — decided 2026-10-13.
 
 `error_message` is stripped through `stripPii()` on **both** paths — today the thrown message is stored raw (`events.ts` `buildToolCallEvent` passes `data.errorMessage` through untouched; it is the one free-text field that bypasses the stripper). A thrown `Error("customer max@example.com not found")` currently lands verbatim. The clamp is a named constant next to `MAX_INTENT_LENGTH` (`MAX_ERROR_MESSAGE_LENGTH = 500`), well below the ingest field limit of 2 048.
 

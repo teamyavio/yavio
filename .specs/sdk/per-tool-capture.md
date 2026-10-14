@@ -1,6 +1,6 @@
 # Per-Tool Capture Overrides
 
-**Status:** Proposed (2026-08-26), reviewed 2026-08-26 (#74, corrections folded in) · **Packages:** sdk, shared (error catalog text), docs · **Version:** @yavio/sdk 0.4.0 (additive)
+**Status:** Implemented 2026-09-03 (#74; proposed 2026-08-26, reviewed 2026-08-26 with corrections folded in) · **Packages:** sdk, shared (error catalog text), docs · **Version:** @yavio/sdk 0.4.0 (additive)
 
 ## Problem
 
@@ -40,8 +40,8 @@ interface WithYavioOptions { …; tools?: Record<string, ToolCaptureOverride> }
 | Aspect | Decision |
 |--------|----------|
 | Resolution | `resolveToolCapture(name) = { ...config.capture, ...config.tools?.[name] }`, computed in both interceptors (`tool()` and `registerTool()`, MCP SDK and Skybridge calling conventions) and passed into `wrapToolCallback` as `capture` (replaces the `config.capture` reads inside). |
-| `inputValues: false` semantics | Identical to the global flag on that call: no `input_keys`, `input_types`, `input_values`, and no client meta (`locale`, `country_code`, `end_user_agent`, `subject_id`), on both the success and the throw path. One code path, no new semantics. |
-| `outputValues: false` | No `output_content`, and — once [tool-result-errors.md](./tool-result-errors.md) ships — no result-derived `error_message` either (that text is output). `status`/`error_category` stay. `error_message` on a throw is still captured — it is developer-written; the README says so. |
+| `inputValues: false` semantics | Identical to the global flag on that call: no `input_keys`, `input_types`, `input_values`, and no client meta (`locale`, `country_code`, `end_user_agent`, `subject_id`), on both the success and the throw path. One code path, no new semantics. **Changed 2026-10-13 (Marcel, after code review):** also no `error_message` on a throw — messages interpolate arguments (`IBAN ${iban} rejected`) and `stripPii` does not catch IBANs. |
+| `outputValues: false` | No `output_content`, and — once [tool-result-errors.md](./tool-result-errors.md) ships — no result-derived `error_message` either (that text is output). `status`/`error_category` stay. `error_message` on a throw is not gated by `outputValues` (developer-written) — but by `inputValues`, see above. |
 | `intent: false` | A **third state** in the intent controller (today `isEligible()` means strip *and* capture): never advertise `context` for the tool, never capture it, **still strip** it if a client sends one — a client with a cached schema keeps sending it, and a strict Zod schema would otherwise reject the call. Motivation: a model's intent sentence for a booking tool tends to contain the user's name. Scope: on/off per tool; per-tool *required/optional* (#73 item 2) stays open. |
 | Still emitted | `tool_discovery` (description + schema, no user data), `tool_call` with latency/status/intent (unless disabled), conversions/track/step/identify from inside the handler with full session context. |
 | Config sources | `withYavio()` options and `.yaviorc.json` (`"tools": {…}`). No env-var form (nested). |

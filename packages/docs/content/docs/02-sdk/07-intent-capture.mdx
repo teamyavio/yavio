@@ -69,6 +69,8 @@ The SDK reports its intent setting with the first tool call of each session, so 
 
 If you plan to submit your server to the **ChatGPT App Store** or the **Claude Directory**, review their data-collection policies first. OpenAI's guidelines permit an intent field only when it meaningfully improves tool execution, and Anthropic's directory policy prohibits collecting extraneous conversation data. For a listed app, the safe default is `intent: false` — or explicit disclosure in your submission.
 
+Intent capture can also stay on for the server while individual tools are excluded: a booking or support-message tool, where the model's sentence tends to contain the user's name, gets `intent: false` as a [per-tool override](/docs/02-sdk/03-configuration#per-tool-overrides). The `context` parameter is then neither advertised nor captured for that tool.
+
 Two token-related costs are worth knowing: the parameter description (~11 words) is added to every tool's schema in the model's context, and the model writes roughly a sentence per tool call.
 
 ## What intent capture does not protect you from

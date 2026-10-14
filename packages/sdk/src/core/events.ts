@@ -90,11 +90,57 @@ export function buildConversionEvent(
   };
 }
 
+/**
+ * Hard cap on the stored `error_message`. Well below the ingest field limit
+ * (2 048), so the limit can never wipe the whole field. Same precedent as
+ * MAX_INTENT_LENGTH in server/intent.ts.
+ */
+export const MAX_ERROR_MESSAGE_LENGTH = 500;
+
+/**
+ * Bounds the regex work before redaction (see normalizeIntent for the same
+ * reasoning): an error message can be a handler's arbitrary text.
+ */
+const ERROR_MESSAGE_SAFETY_CEILING = MAX_ERROR_MESSAGE_LENGTH * 8;
+
+/**
+ * Trim, redact, clamp — in that order. Redacting before the clamp means the
+ * cut never lands inside an email or card number, and the stored value is
+ * genuinely <= MAX_ERROR_MESSAGE_LENGTH even though redaction tokens are longer
+ * than what they replace. Returns undefined for anything unusable.
+ *
+ * Applied to BOTH sources of error_message — a thrown exception's message and
+ * the text of an `isError: true` result. Until 0.4.0 the thrown message was the
+ * one free-text field that bypassed stripPii, so
+ * `Error("customer max@example.com not found")` landed verbatim.
+ */
+export function normalizeErrorMessage(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const redacted = stripPii(trimmed.slice(0, ERROR_MESSAGE_SAFETY_CEILING));
+  return redacted.slice(0, MAX_ERROR_MESSAGE_LENGTH) || undefined;
+}
+
+export type ErrorCategory =
+  | "auth"
+  | "validation"
+  | "timeout"
+  | "rate_limit"
+  | "server"
+  | "tool_error"
+  | "unknown";
+
 export interface ToolCallData {
   toolName: string;
   latencyMs?: number;
   status?: "success" | "error";
-  errorCategory?: "auth" | "validation" | "timeout" | "rate_limit" | "server" | "unknown";
+  /**
+   * `tool_error`: the handler returned `isError: true`. `unknown`: the handler
+   * threw. Server-side distinction only — the MCP SDK delivers a throw to the
+   * client as an isError result too, so the model sees the same shape.
+   */
+  errorCategory?: ErrorCategory;
   errorMessage?: string;
   isRetry?: boolean;
   inputKeys?: Record<string, unknown>;
@@ -130,7 +176,9 @@ export function buildToolCallEvent(ctx: EventContext, data: ToolCallData): ToolC
     latency_ms: data.latencyMs,
     status: data.status,
     error_category: data.errorCategory,
-    error_message: data.errorMessage,
+    error_message: normalizeErrorMessage(data.errorMessage),
+    // Never set by the SDK today: nothing passes isRetry and ingest does not
+    // derive it, so the column is always 0. Do not describe it as working.
     is_retry: data.isRetry ? 1 : 0,
     input_keys: data.inputKeys ? stripPii(data.inputKeys) : undefined,
     input_types: data.inputTypes,

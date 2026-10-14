@@ -86,6 +86,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
       capture: { inputValues: true, outputValues: true, geo: true, tokens: true, retries: true },
       serverOnly: false,
       intent: { enabled: false, required: true, description: "test" },
+      tools: {},
     };
     const proxy = createProxy(server, config, transport, "0.0.1");
 
@@ -170,6 +171,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
       capture: { inputValues: true, outputValues: true, geo: true, tokens: true, retries: true },
       serverOnly: false,
       intent: { enabled: false, required: true, description: "test" },
+      tools: {},
     };
     const proxy = createProxy(server, config, transport, "0.0.1");
 
@@ -220,6 +222,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
       capture: { inputValues: true, outputValues: true, geo: true, tokens: true, retries: true },
       serverOnly: false,
       intent: { enabled: false, required: true, description: "test" },
+      tools: {},
     };
     const proxy = createProxy(server, config, transport, "0.0.1");
 
@@ -296,6 +299,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
       capture: { inputValues: true, outputValues: true, geo: true, tokens: true, retries: true },
       serverOnly: false,
       intent: { enabled: false, required: true, description: "test" },
+      tools: {},
     };
     const proxy = createProxy(server, config, transport, "0.0.1");
 

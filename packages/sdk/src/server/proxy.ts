@@ -6,7 +6,7 @@ import {
 } from "../core/events.js";
 import { deriveSessionId, generateSessionId, generateTraceId } from "../core/ids.js";
 import { detectPlatform } from "../core/platform.js";
-import type { SessionState, YavioConfig } from "../core/types.js";
+import type { CaptureConfig, SessionState, YavioConfig } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
 import { type RequestStore, runInContext } from "./context.js";
 import { type IntentController, createIntentController, getCapturedIntent } from "./intent.js";
@@ -60,10 +60,31 @@ async function getWidgetToken(
 }
 
 /**
+ * The capture flags in force for one tool: the global `capture` config with
+ * the tool's own `tools` override on top. `intent` is not part of it — the
+ * intent controller resolves that flag itself.
+ */
+function resolveToolCapture(config: YavioConfig, toolName: string): CaptureConfig {
+  // Own entries only: a tool named `constructor` has no override just because
+  // Object has one.
+  const override = Object.hasOwn(config.tools, toolName) ? config.tools[toolName] : undefined;
+  if (!override) return config.capture;
+  return {
+    ...config.capture,
+    ...(override.inputValues !== undefined ? { inputValues: override.inputValues } : {}),
+    ...(override.outputValues !== undefined ? { outputValues: override.outputValues } : {}),
+  };
+}
+
+/**
  * Wrap a tool callback with Yavio instrumentation.
  *
  * Handles lazy platform detection, trace/session context,
  * latency measurement, and tool_call event emission.
+ *
+ * `capture` is the tool's resolved capture config (see resolveToolCapture);
+ * nothing in here reads `config.capture` directly, so a per-tool override is
+ * honoured on every path.
  */
 function wrapToolCallback(
   originalCb: (...cbArgs: unknown[]) => unknown,
@@ -71,6 +92,7 @@ function wrapToolCallback(
   resolveSession: (sessionKey?: string) => SessionState,
   server: McpServer,
   config: YavioConfig,
+  capture: CaptureConfig,
   transport: Transport,
   sdkVersion: string,
   tokenCache: { current: CachedWidgetToken | null },
@@ -171,7 +193,14 @@ function wrapToolCallback(
       const result = await runInContext(store, () => originalCb(...cbArgs));
       const latencyMs = Math.round(performance.now() - startTime);
 
-      const captureInput = config.capture.inputValues && cbArgs[0] !== extra;
+      // A result with `isError: true` is an error — that flag is how MCP
+      // reports tool failures in-band (the model sees them; a throw would
+      // reach it in the same shape). Derived from the result regardless of
+      // output capture, so integrators with outputValues off still get a
+      // correct error rate.
+      const resultError = toolResultError(result);
+
+      const captureInput = capture.inputValues && cbArgs[0] !== extra;
       const toolCallEvent = buildToolCallEvent(
         {
           traceId,
@@ -183,13 +212,18 @@ function wrapToolCallback(
         {
           toolName,
           latencyMs,
-          status: "success",
+          status: resultError ? "error" : "success",
+          errorCategory: resultError ? "tool_error" : undefined,
+          // The message is the result's own text — output. With output capture
+          // off it stays out too: a handler echoing "no tariff for customer
+          // number …" would otherwise leak the very input the flag hides.
+          errorMessage: resultError && capture.outputValues ? resultError.message : undefined,
           inputKeys: captureInput ? extractInputKeys(cbArgs[0]) : undefined,
           inputTypes: captureInput ? extractInputTypes(cbArgs[0]) : undefined,
-          inputValues: captureInput ? extractInputValues(cbArgs[0], extra) : undefined,
-          outputContent: config.capture.outputValues ? extractOutputContent(result) : undefined,
+          inputValues: captureInput ? extractInputValues(cbArgs[0], extra, capture.geo) : undefined,
+          outputContent: capture.outputValues ? extractOutputContent(result) : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
-          clientMeta: captureInput ? extractClientMeta(extra, config.capture.geo) : undefined,
+          clientMeta: captureInput ? extractClientMeta(extra, capture.geo) : undefined,
         },
       );
       transport.send([toolCallEvent]);
@@ -225,7 +259,7 @@ function wrapToolCallback(
     } catch (error) {
       const latencyMs = Math.round(performance.now() - startTime);
 
-      const captureInputOnError = config.capture.inputValues && cbArgs[0] !== extra;
+      const captureInputOnError = capture.inputValues && cbArgs[0] !== extra;
       const toolCallEvent = buildToolCallEvent(
         {
           traceId,
@@ -239,12 +273,21 @@ function wrapToolCallback(
           latencyMs,
           status: "error",
           errorCategory: "unknown",
-          errorMessage: error instanceof Error ? error.message : String(error),
-          inputValues: captureInputOnError ? extractInputValues(cbArgs[0], extra) : undefined,
-          intentSignals: getCapturedIntent() ?? undefined,
-          clientMeta: captureInputOnError
-            ? extractClientMeta(extra, config.capture.geo)
+          // Developer-written, so output capture does not gate it (unlike the
+          // text of an isError result, see the success path). Input capture
+          // does: messages routinely interpolate the arguments
+          // (`IBAN ${iban} rejected`, a ZodError echoing received values),
+          // and stripPii does not catch IBANs or customer numbers.
+          errorMessage: capture.inputValues
+            ? error instanceof Error
+              ? error.message
+              : String(error)
             : undefined,
+          inputValues: captureInputOnError
+            ? extractInputValues(cbArgs[0], extra, capture.geo)
+            : undefined,
+          intentSignals: getCapturedIntent() ?? undefined,
+          clientMeta: captureInputOnError ? extractClientMeta(extra, capture.geo) : undefined,
         },
       );
       transport.send([toolCallEvent]);
@@ -290,9 +333,15 @@ export function createProxy<T extends McpServer>(
 
   // Intent capture operates at the protocol layer (wrapped tools/list and
   // tools/call handlers on the low-level server) — registered tool schemas
-  // are never modified.
+  // are never modified. Tools with a per-tool `intent: false` override are
+  // never advertised or captured (still stripped, see intent.ts).
+  const intentDisabledTools = new Set(
+    Object.entries(config.tools)
+      .filter(([, override]) => override.intent === false)
+      .map(([name]) => name),
+  );
   const intent: IntentController | null = config.intent.enabled
-    ? createIntentController(config.intent)
+    ? createIntentController(config.intent, intentDisabledTools)
     : null;
   intent?.install(server);
 
@@ -378,6 +427,7 @@ export function createProxy<T extends McpServer>(
             resolveSession,
             server,
             config,
+            resolveToolCapture(config, toolName),
             transport,
             sdkVersion,
             tokenCache,
@@ -448,6 +498,7 @@ export function createProxy<T extends McpServer>(
               resolveSession,
               server,
               config,
+              resolveToolCapture(config, toolName),
               transport,
               sdkVersion,
               tokenCache,
@@ -561,21 +612,52 @@ function extractInputTypes(args: unknown): Record<string, unknown> | undefined {
 }
 
 /**
- * Deep-clone tool arguments and merge serializable fields from RequestHandlerExtra.
- * Extra fields are prefixed with `_` to avoid collisions with tool arguments.
+ * Deep-clone tool arguments and merge the parts of RequestHandlerExtra worth
+ * keeping, under `_`-prefixed keys so they cannot collide with arguments:
+ *
+ * - `_meta`: the request `_meta` verbatim. On ChatGPT that is the richest
+ *   client context there is (user agent, locale, location, subject, session,
+ *   capabilities) and it is wanted as such — a product decision, 2026-08-26.
+ *   It deliberately DUPLICATES what extractClientMeta lifts into the
+ *   first-class `subject_id` / `locale` / `end_user_agent` / `country_code`
+ *   columns; do not "deduplicate" either side away. With `capture.geo` off
+ *   the `openai/userLocation` object (city, region, timezone, coordinates)
+ *   is removed from the clone — a flag named geo must not leave coordinates
+ *   in. With `"country"` it is replaced by a NEW `{ country }` object, built
+ *   from an allow-list so a field the platform adds later cannot leak
+ *   through, or removed when there is no valid country. The clone is what
+ *   makes this safe: the handler's own `_meta` is never touched.
+ * - `_taskId`: MCP task id, for correlating task-based flows.
+ * - `_requestInfo`: allow-listed headers and the URL sans query, see
+ *   sanitizeRequestInfo.
+ *
+ * Dropped in 0.4.0 after an inventory (input-values-extra-fields.md):
+ * `_requestId` (a per-connection counter, on ~every call, says nothing),
+ * `_taskRequestedTtl` (never seen), and `_sessionId` — the RAW Mcp-Session-Id
+ * while the `session_id` column is hashed on purpose, empirically absent
+ * fleet-wide (stateless transports), and exactly the kind of identifier an
+ * app-store review flags.
  */
-function extractInputValues(args: unknown, extra: unknown): Record<string, unknown> | undefined {
+function extractInputValues(
+  args: unknown,
+  extra: unknown,
+  geo: CaptureConfig["geo"],
+): Record<string, unknown> | undefined {
   if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
   try {
     const clone = JSON.parse(JSON.stringify(args)) as Record<string, unknown>;
     if (extra && typeof extra === "object") {
       const ex = extra as Record<string, unknown>;
-      // Serializable extra fields (skip signal, functions, taskStore)
-      if (ex._meta != null) clone._meta = JSON.parse(JSON.stringify(ex._meta));
-      if (typeof ex.sessionId === "string") clone._sessionId = ex.sessionId;
-      if (ex.requestId != null) clone._requestId = ex.requestId;
+      if (ex._meta != null) {
+        let meta = JSON.parse(JSON.stringify(ex._meta)) as unknown;
+        if (geo !== true && meta && typeof meta === "object" && !Array.isArray(meta)) {
+          const { "openai/userLocation": location, ...rest } = meta as Record<string, unknown>;
+          const country = geo === "country" ? locationCountry(location) : undefined;
+          meta = country ? { ...rest, "openai/userLocation": { country } } : rest;
+        }
+        clone._meta = meta;
+      }
       if (typeof ex.taskId === "string") clone._taskId = ex.taskId;
-      if (ex.taskRequestedTtl !== undefined) clone._taskRequestedTtl = ex.taskRequestedTtl;
       if (ex.requestInfo != null) {
         const requestInfo = sanitizeRequestInfo(ex.requestInfo);
         if (requestInfo) clone._requestInfo = requestInfo;
@@ -596,9 +678,10 @@ function extractInputValues(args: unknown, extra: unknown): Record<string, unkno
  * reach analytics, and `X-Forwarded-For` would put an end-user IP on an event
  * that is otherwise anonymous.
  *
- * These two survive because they answer questions the dashboard actually asks —
- * which client called (beyond the coarse `platform` field) and in which
- * language — and neither identifies a person.
+ * The first two survive because they answer questions the dashboard actually
+ * asks — which client called (beyond the coarse `platform` field) and in which
+ * language — and neither identifies a person. The README lists all five; keep
+ * it in step.
  */
 const CAPTURED_HEADERS = new Set([
   "user-agent",
@@ -619,12 +702,14 @@ const CAPTURED_HEADERS = new Set([
  * sends all of these; platforms that send none produce undefined.
  *
  * The location part is gated behind `capture.geo` and reduced to the
- * 2-letter country code — city and coordinates never leave the process
- * as structured fields.
+ * 2-letter country code — city and coordinates are never lifted into a
+ * first-class column. (They do travel inside the verbatim `_meta` clone in
+ * `input_values` while `geo` is `true`; with `"country"` extractInputValues
+ * reduces that object to the same country, with `false` it drops it.)
  */
 function extractClientMeta(
   extra: unknown,
-  geoEnabled: boolean,
+  geo: CaptureConfig["geo"],
 ): import("../core/events.js").ClientMeta | undefined {
   if (!extra || typeof extra !== "object") return undefined;
   const meta = (extra as Record<string, unknown>)._meta;
@@ -634,24 +719,27 @@ function extractClientMeta(
   const str = (v: unknown, max: number): string | undefined =>
     typeof v === "string" && v.length > 0 ? v.slice(0, max) : undefined;
 
-  let countryCode: string | undefined;
-  if (geoEnabled) {
-    const loc = m["openai/userLocation"];
-    if (loc && typeof loc === "object") {
-      const country = (loc as Record<string, unknown>).country;
-      if (typeof country === "string" && /^[A-Za-z]{2}$/.test(country)) {
-        countryCode = country.toUpperCase();
-      }
-    }
-  }
-
   const out = {
-    countryCode,
+    countryCode:
+      geo === true || geo === "country" ? locationCountry(m["openai/userLocation"]) : undefined,
     locale: str(m["openai/locale"], 35),
     endUserAgent: str(m["openai/userAgent"], 512),
     subjectId: str(m["openai/subject"], 256),
   };
   return out.countryCode || out.locale || out.endUserAgent || out.subjectId ? out : undefined;
+}
+
+/**
+ * The upper-cased ISO alpha-2 country of an `openai/userLocation` object, or
+ * undefined. The single check behind both `country_code` and the `"country"`
+ * reduction of `_meta`, so the two can never disagree.
+ */
+function locationCountry(location: unknown): string | undefined {
+  if (!location || typeof location !== "object") return undefined;
+  const country = (location as Record<string, unknown>).country;
+  return typeof country === "string" && /^[A-Za-z]{2}$/.test(country)
+    ? country.toUpperCase()
+    : undefined;
 }
 
 /**
@@ -685,6 +773,31 @@ function sanitizeRequestInfo(requestInfo: unknown): Record<string, unknown> | un
   }
 
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Is this CallToolResult a tool-reported failure? Only the literal boolean
+ * `true` counts — MCP types `isError` as boolean, and PostHog's
+ * `isToolResultError()` applies the same rule. `"true"`, `1` or a missing flag
+ * are not errors.
+ *
+ * Returns the first text content item as the message (the text is what the
+ * handler told the model went wrong), or no message when there is none.
+ * Redaction and the length clamp happen in buildToolCallEvent.
+ */
+function toolResultError(result: unknown): { message?: string } | null {
+  if (!result || typeof result !== "object") return null;
+  const res = result as Record<string, unknown>;
+  if (res.isError !== true) return null;
+  if (!Array.isArray(res.content)) return {};
+  for (const item of res.content) {
+    if (!item || typeof item !== "object") continue;
+    const entry = item as Record<string, unknown>;
+    if (entry.type === "text" && typeof entry.text === "string") {
+      return { message: entry.text };
+    }
+  }
+  return {};
 }
 
 /**

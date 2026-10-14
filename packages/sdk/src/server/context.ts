@@ -30,6 +30,39 @@ export function getStore(): RequestStore | undefined {
   return requestStore.getStore();
 }
 
+/**
+ * Set once `withYavio()` has resolved a configuration. Until then a tracking
+ * call with no active store is expected — no-op mode (no API key), or a call
+ * made before `withYavio()` ran — and stays silent; afterwards it is a bug
+ * worth one warning (see droppedOutsideContext).
+ */
+let sdkActive = false;
+let warnedOutsideContext = false;
+
+export function markSdkActive(): void {
+  sdkActive = true;
+}
+
+/** @internal Reset the warn-once state — exposed for testing only. */
+export function _resetContextWarnings(): void {
+  sdkActive = false;
+  warnedOutsideContext = false;
+}
+
+/**
+ * A `yavio.*` call with no request store is dropped — it has no trace or
+ * session to attach to. That used to be silent, and the silence is how a
+ * booking tool registered on the unwrapped server lost every conversion for
+ * weeks without a hint (Commerce for Agents, 2026-08). Warn once per process.
+ */
+function droppedOutsideContext(method: string): void {
+  if (!sdkActive || warnedOutsideContext) return;
+  warnedOutsideContext = true;
+  console.warn(
+    `[${ErrorCode.SDK.CONTEXT_INJECTION_UNAVAILABLE}] yavio.${method}() called outside a wrapped tool call — event dropped. Register the tool through withYavio() (use the \`tools\` overrides to limit what is captured for it). Shown once per process.`,
+  );
+}
+
 function buildCtx(store: RequestStore): EventContext {
   return {
     traceId: store.traceId,
@@ -49,7 +82,10 @@ export function createYavioContext(fallbackStore?: RequestStore): YavioContext {
   return {
     identify(userId: string, traits?: Record<string, unknown>): void {
       const store = getActiveStore();
-      if (!store) return;
+      if (!store) {
+        droppedOutsideContext("identify");
+        return;
+      }
 
       if (store.session.userId && store.session.userId !== userId) {
         console.warn(
@@ -69,7 +105,10 @@ export function createYavioContext(fallbackStore?: RequestStore): YavioContext {
 
     step(name: string, meta?: Record<string, unknown>): void {
       const store = getActiveStore();
-      if (!store) return;
+      if (!store) {
+        droppedOutsideContext("step");
+        return;
+      }
 
       store.session.stepSequence += 1;
       const event = buildStepEvent(buildCtx(store), name, store.session.stepSequence, meta);
@@ -78,7 +117,10 @@ export function createYavioContext(fallbackStore?: RequestStore): YavioContext {
 
     track(eventName: string, properties?: Record<string, unknown>): void {
       const store = getActiveStore();
-      if (!store) return;
+      if (!store) {
+        droppedOutsideContext("track");
+        return;
+      }
 
       const event = buildTrackEvent(buildCtx(store), eventName, properties);
       store.transport.send([event]);
@@ -89,7 +131,10 @@ export function createYavioContext(fallbackStore?: RequestStore): YavioContext {
       data: { value: number; currency: string; meta?: Record<string, unknown> },
     ): void {
       const store = getActiveStore();
-      if (!store) return;
+      if (!store) {
+        droppedOutsideContext("conversion");
+        return;
+      }
 
       const event = buildConversionEvent(
         buildCtx(store),

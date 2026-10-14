@@ -30,6 +30,14 @@ docker compose pull
 docker compose up -d
 ```
 
+## Upgrade the server before the SDK
+
+Upgrade your self-hosted Yavio **before** you bump `@yavio/sdk` in your apps. A newer SDK can send values an older ingest service does not know yet, and ingest rejects such events one by one. The SDK never surfaces delivery errors, so they are lost silently.
+
+<Callout type="warn">
+  `@yavio/sdk` 0.4.0 reports tool results with `isError: true` as `error_category: "tool_error"`. An ingest image from before that release rejects every one of those events — so on an old server, tool-reported failures disappear instead of being counted. Pull the latest images first, then upgrade the SDK.
+</Callout>
+
 ## Checking for Updates
 
 Preview what would be pulled without making changes:

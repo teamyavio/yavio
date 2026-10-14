@@ -1,6 +1,6 @@
 # `input_values` Extra Fields (`_`-prefixed)
 
-**Status:** Proposed (2026-08-26), reviewed 2026-08-26 (#76, corrections folded in) · **Packages:** sdk, docs · **Version:** patch
+**Status:** Implemented 2026-09-03 (#76; proposed 2026-08-26, reviewed 2026-08-26 with corrections folded in, geo gating decided 2026-09-03; `geo: "country"` added 2026-10-13, #82) · **Packages:** sdk, docs · **Version:** patch
 
 ## Current Behaviour
 
@@ -36,6 +36,21 @@ Live counts, tool_call events, 2026-08-26: `_requestId` on 497/497 (Commerce for
 - Nothing in dashboard, ingest or db reads `_meta["openai/userLocation"]` out of `input_values`; the only functional reader of `userLocation` anywhere is `extractClientMeta()` (`proxy.ts:639`), which is **already** gated on `geoEnabled` and only derives `country_code`.
 - Affects only integrators who explicitly set `geo: false`, and only by removing data they asked not to collect. Rows already in ClickHouse are untouched.
 - Existing coverage to extend: `proxy.test.ts` "omits the country when capture.geo is off, keeps the rest".
+
+## Decided: `geo: "country"` (#82)
+
+**Decided — Marcel, 2026-10-13; ships with 0.4.0.** `geo` was all-or-nothing: the country came with city, region, timezone and coordinates or not at all. A privacy review that wants country-level analytics without precise location had no setting. `capture.geo` is now `boolean | "country"`:
+
+| `geo` | `country_code` | `input_values._meta["openai/userLocation"]` |
+|---|---|---|
+| `true` (default, unchanged) | ✅ | verbatim |
+| `"country"` | ✅ | a **new** `{ country }` object; the key is removed when there is no valid 2-letter country |
+| `false` (unchanged) | — | removed |
+
+- **Allow-list, not deny-list:** the reduced object is built, not copied-and-pruned, so a field the platform adds later (postal code, accuracy, …) cannot leak through.
+- **One country check** (`locationCountry()` in `proxy.ts`) feeds both the column and the `_meta` reduction, so they cannot disagree.
+- **Fails closed:** `resolveConfig()` accepts exactly `true`, `false`, `"country"`. Anything else — `"false"` from a hand-written `.yaviorc.json` is truthy — becomes `false` with one `YAVIO-1006` warning per process (stateless servers resolve the config per request).
+- Per-tool overrides stay without `geo`.
 
 ## Changes
 

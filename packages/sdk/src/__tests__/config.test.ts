@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveConfig } from "../core/config.js";
+import { _resetConfigWarnings, resolveConfig } from "../core/config.js";
 
 describe("resolveConfig", () => {
   const originalEnv = process.env;
@@ -173,5 +173,160 @@ describe("resolveConfig", () => {
         process.cwd = originalCwd;
       }
     });
+  });
+});
+
+describe("per-tool capture overrides (tools)", () => {
+  const originalEnv = process.env;
+  let tempDir: string;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    process.env.YAVIO_API_KEY = undefined;
+    tempDir = mkdtempSync(join(tmpdir(), "yavio-tools-test-"));
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  function withCwd<T>(dir: string, fn: () => T): T {
+    const originalCwd = process.cwd;
+    process.cwd = () => dir;
+    try {
+      return fn();
+    } finally {
+      process.cwd = originalCwd;
+    }
+  }
+
+  it("defaults to no overrides", () => {
+    expect(resolveConfig({ apiKey: "test" })?.tools).toEqual({});
+  });
+
+  it("passes code-option overrides through, leaving the global capture untouched", () => {
+    const config = resolveConfig({
+      apiKey: "test",
+      tools: { book: { inputValues: false, outputValues: false, intent: false } },
+    });
+    expect(config?.tools).toEqual({
+      book: { inputValues: false, outputValues: false, intent: false },
+    });
+    expect(config?.capture.inputValues).toBe(true);
+  });
+
+  it("reads tools from .yaviorc.json", () => {
+    writeFileSync(
+      join(tempDir, ".yaviorc.json"),
+      JSON.stringify({ apiKey: "file_key", tools: { book: { inputValues: false } } }),
+    );
+    const config = withCwd(tempDir, () => resolveConfig());
+    expect(config?.tools).toEqual({ book: { inputValues: false } });
+  });
+
+  it("merges file and code overrides per tool, field by field, code winning", () => {
+    writeFileSync(
+      join(tempDir, ".yaviorc.json"),
+      JSON.stringify({
+        apiKey: "file_key",
+        tools: { book: { inputValues: false, outputValues: false }, other: { intent: false } },
+      }),
+    );
+    const config = withCwd(tempDir, () =>
+      resolveConfig({ tools: { book: { outputValues: true, intent: false } } }),
+    );
+    expect(config?.tools).toEqual({
+      book: { inputValues: false, outputValues: true, intent: false },
+      other: { intent: false },
+    });
+  });
+
+  it("ignores unknown keys and non-boolean values from the config file", () => {
+    writeFileSync(
+      join(tempDir, ".yaviorc.json"),
+      JSON.stringify({
+        apiKey: "file_key",
+        tools: {
+          book: { inputValues: "false", geo: false, intent: false },
+          bogus: "not an object",
+          empty: { unknownKey: true },
+        },
+      }),
+    );
+    const config = withCwd(tempDir, () => resolveConfig());
+    expect(config?.tools).toEqual({ book: { intent: false } });
+  });
+
+  it("treats __proto__ and constructor as tool names, never as the object's prototype", () => {
+    // JSON.parse makes `__proto__` an own key; assigning it on a plain object
+    // would have replaced the prototype and the override would be lost.
+    const config = resolveConfig({
+      apiKey: "test",
+      tools: JSON.parse('{"__proto__": {"inputValues": false}, "constructor": {"intent": false}}'),
+    });
+    expect(Object.hasOwn(config?.tools ?? {}, "__proto__")).toBe(true);
+    // biome-ignore lint/complexity/useLiteralKeys: `.__proto__` would read the prototype accessor on an ordinary object
+    expect(config?.tools["__proto__"]).toEqual({ inputValues: false });
+    expect(config?.tools.constructor).toEqual({ intent: false });
+    expect(Object.hasOwn(config?.tools ?? {}, "inputValues")).toBe(false); // not poisoned
+  });
+});
+
+describe("capture.geo validation", () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    _resetConfigWarnings();
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  it.each([true, false, "country"] as const)("passes %s through without a warning", (geo) => {
+    expect(resolveConfig({ apiKey: "test", capture: { geo } })?.capture.geo).toBe(geo);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("leaves an undefined geo at the default, without a warning", () => {
+    // A computed option: `geo: process.env.GEO_COUNTRY ? "country" : undefined`.
+    const config = resolveConfig({ apiKey: "test", capture: { geo: undefined } });
+    expect(config?.capture.geo).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each(["false", "Country", 1, null])("fails closed on %j with one warning", (geo) => {
+    const config = resolveConfig({ apiKey: "test", capture: { geo: geo as never } });
+    expect(config?.capture.geo).toBe(false);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0][0]).toContain("YAVIO-1006");
+  });
+
+  it("warns once per process, not once per resolution", () => {
+    for (let i = 0; i < 3; i++) {
+      expect(resolveConfig({ apiKey: "test", capture: { geo: "yes" as never } })?.capture.geo).toBe(
+        false,
+      );
+    }
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed on a hand-written "false" string in .yaviorc.json', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "yavio-geo-test-"));
+    const originalCwd = process.cwd;
+    try {
+      writeFileSync(
+        join(tempDir, ".yaviorc.json"),
+        JSON.stringify({ apiKey: "file_key", capture: { geo: "false" } }),
+      );
+      process.cwd = () => tempDir;
+      expect(resolveConfig()?.capture.geo).toBe(false);
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      process.cwd = originalCwd;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });
