@@ -13,7 +13,7 @@ All events from all projects land in ClickHouse. The schema is optimized for tim
 | Engine | ReplacingMergeTree | Optimal for append-heavy analytics workloads with at-least-once dedup on `event_id`. |
 | Partitioning | By month (`toYYYYMM(timestamp)`) | Efficient range queries and TTL-based retention |
 | Order key | `(workspace_id, project_id, event_type, timestamp, event_id)` | Primary query patterns: workspace-scoped, project-scoped, type-filtered, time-sorted. `event_id` for dedup. |
-| TTL | Community: 90 days. Pro: configurable (default unlimited) | Automatic cleanup for free tiers. Prevents unbounded growth. |
+| TTL | 13 months from collection, row-wise (`least(timestamp, ingested_at)`) | The identifiable window: a year-over-year comparison plus the current month. See §5.3.1. |
 | Compression | LZ4 (default) | Best compression-to-speed ratio for analytics data |
 
 ### 5.1.2 Events Table
@@ -96,7 +96,7 @@ CREATE TABLE events (
 ENGINE = ReplacingMergeTree()
 PARTITION BY toYYYYMM(timestamp)
 ORDER BY (workspace_id, project_id, event_type, timestamp, event_id)
-TTL timestamp + INTERVAL 90 DAY  -- default for self-hosted; Cloud overrides via ALTER TABLE at startup
+TTL least(toDateTime(timestamp), toDateTime(ingested_at)) + INTERVAL 13 MONTH  -- migration 0013 (#85)
 SETTINGS index_granularity = 8192;
 ```
 
@@ -629,16 +629,17 @@ export async function GET(req: Request) {
 
 ### 5.3.1 ClickHouse TTL
 
-Data retention is managed by ClickHouse's built-in TTL mechanism. TTL is applied **globally per deployment** (not per workspace) — all workspaces within a deployment share the same retention window. This follows the same model as PostHog and avoids the complexity of per-tenant TTL in a shared table.
+Data retention is managed by ClickHouse's built-in TTL mechanism. The TTL is set by migration `0013_events_ttl_13_months.sql` (#85) and applies to every deployment and every workspace alike.
 
-| Deployment | Default Retention | Configurable |
-|------------|------------------|--------------|
-| Self-hosted (Community) | 90 days | Yes, via env var `YAVIO_RETENTION_DAYS` |
-| Cloud | 1 year | No |
+| Table | Retention |
+|-------|-----------|
+| `events` | 13 months from collection |
 
-**Mechanism:** On startup, the API server reads the configured retention period and runs `ALTER TABLE events MODIFY TTL timestamp + INTERVAL <N> DAY` (and the same for materialized view target tables). For self-hosted, `<N>` comes from `YAVIO_RETENTION_DAYS` (default: 90). For Cloud, it is hardcoded to 365.
+**Expression:** `least(toDateTime(timestamp), toDateTime(ingested_at)) + INTERVAL 13 MONTH`. `timestamp` is client-supplied; taking the earlier of it and the server-set `ingested_at` means a future-dated event cannot escape retention. `toDateTime()` is required on ClickHouse 24.3 (a TTL expression must be `Date`/`DateTime` there) and keeps working on later versions.
 
-**What happens when data expires:** ClickHouse automatically drops entire monthly partitions once all rows in the partition exceed the TTL threshold. Data is **permanently deleted** — there is no archival, downsampling, or rollup before deletion. The month-based partitioning (`toYYYYMM(timestamp)`) makes this efficient: whole partitions are dropped at once, not row-by-row.
+**What happens when data expires:** rows are deleted **row by row** during merges, and rows that are already expired when inserted are dropped at insert. Data is **permanently deleted**. `ttl_only_drop_parts` stays at its default `0`: with `1`, a monthly partition would only be dropped once *all* its rows expired, which would overshoot 13 months by up to a month.
+
+**Not implemented (yet):** there is no runtime `MODIFY TTL` at startup and no `YAVIO_RETENTION_DAYS` handling in code; earlier versions of this section described both. The two-tier design (13 months identifiable, then anonymous daily statistics) and the meaning of `YAVIO_RETENTION_DAYS` for self-hosters are tracked in #85.
 
 **Enterprise (future):** If per-workspace custom retention is needed, this will be implemented as a background cleanup job that deletes rows by `workspace_id` + age, running alongside the global TTL (which acts as a hard ceiling). See appendix for roadmap.
 
