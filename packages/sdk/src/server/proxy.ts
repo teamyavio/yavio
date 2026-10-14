@@ -70,6 +70,21 @@ async function getWidgetToken(
 }
 
 /**
+ * JSON-RPC code of McpError UrlElicitationRequired. By number: the MCP SDK
+ * floor this package supports predates the enum member.
+ */
+const URL_ELICITATION_REQUIRED = -32042;
+
+/** A URL elicitation is a protocol flow McpServer passes to the client unwrapped, not a failure. */
+function isUrlElicitationRequired(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === URL_ELICITATION_REQUIRED
+  );
+}
+
+/**
  * The capture flags in force for one tool: the global `capture` config with
  * the tool's own `tools` override on top. `intent` is not part of it — the
  * intent controller resolves that flag itself.
@@ -306,6 +321,11 @@ function wrapToolCallback(
 
       return result;
     } catch (error) {
+      // Nothing to record: the elicitation reaches the client as the
+      // protocol intends, and the status wrapper has no business classifying
+      // it either.
+      if (isUrlElicitationRequired(error)) throw error;
+
       const latencyMs = Math.round(performance.now() - startTime);
 
       const captureInputOnError = capture.inputValues && cbArgs[0] !== extra;
@@ -403,7 +423,9 @@ export function createProxy<T extends McpServer>(
       const tools = (server as unknown as { _registeredTools?: Record<string, unknown> })
         ._registeredTools;
       // Registry unreadable: assume registered, i.e. never invent an event.
-      return !tools || typeof tools !== "object" || tools[toolName] !== undefined;
+      // Own entries only: `constructor` or `__proto__` is not a registered
+      // tool just because Object has it.
+      return !tools || typeof tools !== "object" || Object.hasOwn(tools, toolName);
     } catch {
       return true;
     }
@@ -490,7 +512,11 @@ export function createProxy<T extends McpServer>(
   const statusWrapper: HandlerWrapper = (handler) => async (request, extra) => {
     const params = (request as { params?: { name?: unknown; arguments?: unknown } } | undefined)
       ?.params;
-    const toolName = typeof params?.name === "string" ? params.name : "unknown";
+    // No usable name: McpServer answers "not found" itself, and there is no
+    // tool to attribute the call to (an empty name would be rejected by
+    // ingest, "unknown" would collide with a tool of that name).
+    if (typeof params?.name !== "string" || params.name === "") return handler(request, extra);
+    const toolName = params.name;
 
     // A registered tool the proxy did not wrap (unwrapped server, task tool)
     // stays untracked: no frame, no session work, no connection event.

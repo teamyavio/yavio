@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpServer as McpServerCtor } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { BaseEvent, ToolCallEvent } from "@yavio/shared/events";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -159,6 +160,31 @@ describe("protocol layer — failures before the handler", () => {
     expect(events[0]?.error_message).toContain("not found");
   });
 
+  it("counts a call to a tool named like an Object property as unknown", async () => {
+    const h = await setup((proxy) => {
+      proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"));
+    });
+
+    const result = await h.client.callTool({ name: "constructor", arguments: {} });
+
+    expect(result.isError).toBe(true);
+    const events = toolCalls(h.events);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.event_name).toBe("constructor");
+    expect(events[0]?.error_category).toBe("validation");
+  });
+
+  it("leaves a call without a usable tool name untracked", async () => {
+    const h = await setup((proxy) => {
+      proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"));
+    });
+
+    const result = await h.client.callTool({ name: "", arguments: {} });
+
+    expect(result.isError).toBe(true);
+    expect(toolCalls(h.events)).toHaveLength(0);
+  });
+
   it("counts a call to a disabled tool", async () => {
     const h = await setup((proxy) => {
       const registered = proxy.registerTool(
@@ -297,6 +323,58 @@ describe("protocol layer — failures before the handler", () => {
     expect(event?.input_values).toBeUndefined();
     expect(event?.error_message).toBeUndefined();
     expect(JSON.stringify(h.events)).not.toContain("DE89370400440532013000");
+  });
+
+  it("does not count a URL elicitation as a tool failure", async () => {
+    const h = await setup((proxy) => {
+      proxy.registerTool("pay", { inputSchema: { amount: z.number() } }, async () => {
+        throw new McpError(-32042 as never, "Elicitation required", { elicitations: [] });
+      });
+    });
+
+    const outcome = await h.client.callTool({ name: "pay", arguments: { amount: 1 } }).then(
+      (result) => ({ result }),
+      (error: unknown) => ({ error }),
+    );
+
+    const events = toolCalls(h.events);
+    if ("error" in outcome) {
+      // MCP SDK ≥ 1.25 passes the elicitation to the client unwrapped: a
+      // protocol flow, not a failure, so nothing is recorded.
+      expect(events).toHaveLength(0);
+    } else {
+      // An older SDK reports it to the client as an isError result; what the
+      // client sees is what is counted.
+      expect(outcome.result.isError).toBe(true);
+      expect(events).toHaveLength(1);
+      expect(events[0]?.status).toBe("error");
+    }
+  });
+
+  it("gives a second proxy on the same server callback instrumentation, without the protocol layer", async () => {
+    // A memoised server wrapped from two modules. The wrappers installed by
+    // the first proxy know only its tools; the second proxy must not believe
+    // it is covered — it emits discovery at registration and its calls from
+    // the callback wrapper, as without the private API.
+    const server = new McpServerCtor({ name: "protocol-test", version: "1.0" });
+    const first = createMockTransport();
+    const second = createMockTransport();
+    const proxyA = createProxy(server, makeConfig(), first, "0.4.0");
+    const proxyB = createProxy(server, makeConfig(), second, "0.4.0");
+    proxyA.registerTool("alpha", { inputSchema: { q: z.string() } }, async () => ok("a"));
+    proxyB.registerTool("beta", { inputSchema: { q: z.string() } }, async () => ok("b"));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await proxyA.connect(serverTransport);
+    const client = new Client({ name: "protocol-test-client", version: "1.0" });
+    await client.connect(clientTransport);
+
+    const result = await client.callTool({ name: "beta", arguments: { q: "x" } });
+
+    expect(result.isError).toBeFalsy();
+    const discoveries = second.sent.flat().filter((e) => e.event_type === "tool_discovery");
+    expect(discoveries.map((e) => (e as { tool_name?: string }).tool_name)).toEqual(["beta"]);
+    expect(toolCalls(second.sent).map((e) => e.event_name)).toEqual(["beta"]);
+    expect(toolCalls(first.sent)).toHaveLength(0);
   });
 
   it("never fails the client's call when opening the call context throws", async () => {

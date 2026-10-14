@@ -90,8 +90,12 @@ export interface ProtocolWrappers {
 /**
  * Patch the low-level server so every tools/call and tools/list handler —
  * registered before or after this runs — goes through the given wrappers.
- * Idempotent per server. Returns false when the private API is not there,
- * in which case nothing was changed.
+ * Returns false when the private API is not there, in which case nothing was
+ * changed — and for a second caller on a server that is already patched: the
+ * installed wrappers belong to the first proxy and know only its tools, so
+ * the second must degrade to callback-only instrumentation (discovery at
+ * registration, events sent by the callback wrapper) rather than believe it
+ * is covered.
  *
  * McpServer registers its tool handlers lazily on the first tool
  * registration, usually AFTER withYavio() ran, so the patched
@@ -102,7 +106,7 @@ export function installProtocolWrappers(server: McpServer, wrappers: ProtocolWra
   try {
     const low = (server as unknown as { server?: LowLevelServerLike }).server;
     if (!low || typeof low.setRequestHandler !== "function") return false;
-    if (installedServers.has(low)) return true;
+    if (installedServers.has(low)) return false;
     installedServers.add(low);
 
     // A handler that was composed once must not be composed again when the
