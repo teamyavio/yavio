@@ -627,30 +627,86 @@ export async function GET(req: Request) {
 
 ## 5.3 Data Retention
 
-### 5.3.1 ClickHouse TTL
+### 5.3.1 ClickHouse: two tiers
 
-Data retention is managed by ClickHouse's built-in TTL mechanism. The TTL is set by migration `0013_events_ttl_13_months.sql` (#85) and applies to every deployment and every workspace alike.
+Analytics data is kept in two tiers (#85). Customers can quote one sentence about it in their privacy policy (docs: Concepts → Data retention):
 
-| Table | Retention |
-|-------|-----------|
-| `events` | 13 months from collection |
+> **EN:** "Usage data is deleted automatically 13 months after collection. Only anonymous daily statistics without identifiers are kept beyond that."
+> **DE:** „Nutzungsdaten werden 13 Monate nach Erhebung automatisch gelöscht. Dauerhaft bleiben nur anonyme Statistiken auf Tagesbasis ohne Kennungen."
 
-**Expression:** `least(toDateTime(timestamp), toDateTime(ingested_at)) + INTERVAL 13 MONTH`. `timestamp` is client-supplied; taking the earlier of it and the server-set `ingested_at` means a future-dated event cannot escape retention. `toDateTime()` is required on ClickHouse 24.3 (a TTL expression must be `Date`/`DateTime` there) and keeps working on later versions.
+The sentence names no threshold on purpose: how anonymity is ensured is implementation.
 
-**What happens when data expires:** rows are deleted **row by row** during merges, and rows that are already expired when inserted are dropped at insert. Data is **permanently deleted**. `ttl_only_drop_parts` stays at its default `0`: with `1`, a monthly partition would only be dropped once *all* its rows expired, which would overshoot 13 months by up to a month.
+| Tier | Tables | Kept | Detail |
+|------|--------|------|--------|
+| 1 — identifiable | `events` (incl. content columns `input_values`, `output_content`, `intent_signals`, `error_message`, `end_user_agent`, `user_traits`), `tool_registry` | 13 months from collection; per project 2–13 months (#93) | full, hourly |
+| 2 — anonymous | `stats_daily`, `stats_users_daily`, `stats_users_periods`, `stats_cohorts` | no TTL | daily, no identifiers, fixed vocabulary |
 
-**Not implemented (yet):** there is no runtime `MODIFY TTL` at startup and no `YAVIO_RETENTION_DAYS` handling in code; earlier versions of this section described both. The two-tier design (13 months identifiable, then anonymous daily statistics) and the meaning of `YAVIO_RETENTION_DAYS` for self-hosters are tracked in #85.
+**Tier 1 TTL.** Migration `0013_events_ttl_13_months.sql` sets it for every deployment and workspace alike:
+- **Expression:** `least(toDateTime(timestamp), toDateTime(ingested_at)) + INTERVAL 13 MONTH`.
+  - `timestamp` is client-supplied. Taking the earlier of it and the server-set `ingested_at` means a future-dated event cannot escape retention.
+  - Ingest also clamps `timestamp` to the last 72 h (#90).
+- **Counted per event**, from collection. There is no reset on new activity.
+- **Deletion:** rows go **row by row** during merges. Rows already expired at insert are dropped. `ttl_only_drop_parts` stays `0`: with `1`, a monthly partition would only go once all its rows expired, overshooting by up to a month.
+- **13 months** allows a year-over-year comparison: 12 months plus the current one.
 
-**Enterprise (future):** If per-workspace custom retention is needed, this will be implemented as a background cleanup job that deletes rows by `workspace_id` + age, running alongside the global TTL (which acts as a hard ceiling). See appendix for roadmap.
+**Per-project retention (#93).** `projects.retention_months` is 2–13, default 13, with a CHECK constraint.
+- **The delete:** the statistics job deletes older raw events daily, in **one** `ALTER TABLE events DELETE` for all affected projects. It counts like the TTL, and runs only after every stats table succeeded in the same run.
+- **Why at least 2:** the job recomputes the previous month every day.
+- **Retention floor:** for a project at R < 13 months, the statistics of month M read only events collected on or after `start(M + 2 − R)`.
+  - No delete reaches that floor before M's last recompute, so a recompute never reads fewer rows than the one before.
+  - Look-back measures are cut at the floor: WAU/MAU windows are clamped. Quarter and year users, and cohorts, are left out when they would start before the floor.
+- **Prerequisite:** the job runs as `yavio_rollup`. Without `CLICKHOUSE_ROLLUP_PASSWORD` it does not run, and the setting is **not applied**. Ingest logs an error at startup.
 
-### 5.3.2 PostgreSQL Cleanup
+**Tier 2: the statistics job** (`packages/ingest/src/stats`, #85 step 3).
+- **Schedule:** daily (UTC), under a session-level Postgres advisory lock. Run state lives in `stats_job_runs` and is committed per table as the run goes, so a failure or restart late in a backfill keeps the tables already done.
+- **What it computes:** for the previous and current month, plus every month since its last success (backfill on the first run), each stats table is rebuilt from `events FINAL`, deduplicated on `event_id`, via a stage table and `REPLACE PARTITION`. Finished months are frozen and outlive their raw data.
+- **Data start.** A period (`stats_users_periods`) that begins before the earliest stored event is not written, nor is a cohort first seen in that month: the raw data cannot support them, and a frozen month is never corrected. After `0013` the first run sees about 90 days of events, so Q3 2026 and the year 2026 get no distinct-user figure; from Q4 2026 on they do. The retention floor (above) applies the same rule per project.
+- **No identifiers.** People are counted (`individuals`, `uniqExact` of the stitched user key, falling back to `session_id`) but never stored.
+  - **Limit of that fallback:** an app without a user key only has sessions, so one person with several conversations counts several times.
+- **Fixed vocabulary.** An `event_name` is kept if it is a registered tool, or one of a project's top 50 names in the month used by at least 5 individuals. Everything else becomes `(other)`. Platform, client name, country, currency and language are normalized.
+- **Minimum cell size (planned):** cells with fewer than 5 individuals will be folded into `(other)`. It only matters for months older than 13 months, which exist from mid-2027. The tables keep `individuals` per cell so k can be applied later to months whose raw data is gone.
+- **Deletion:** deleting a project, workspace or account erases its rows from both tiers. See §5.3.3.
 
-- Expired sessions: cleaned up by a background job every hour
-- Expired invitations: cleaned up daily
-- Revoked API keys: retained for audit trail, cleaned up after 1 year
-- Login attempts: rows older than 24 hours cleaned up daily
-- Used/expired verification tokens: cleaned up daily
-- Stripe webhook events: records older than 30 days cleaned up by scheduled job
+**Identifiers are personal data.** All three ids are pseudonymous personal data. They are in tier 1 only, never in tier 2:
+- `user_id`: set by `identify()`.
+- `subject_id`: the platform's stable per-user-per-app id, e.g. ChatGPT's `openai/subject`.
+- `session_id`: an unsalted SHA-256 of the platform's session key, truncated.
+
+(Migration `0009`'s comment calls `subject_id` "no personal data". That is wrong; migrations stay unchanged.)
+
+**Self-hosted.** The same tiers and the same 13-month ceiling apply. There is no global retention variable: `YAVIO_RETENTION_DAYS`, described in earlier versions of this spec, was never implemented and is not planned. A shorter retention is set per project (#93).
+
+**User summaries.** `users_mv` and `sessions_mv` are not read any more (#89 release 1), and #89's second release drops them. User metrics are computed from `events` with the stitched key.
+
+### 5.3.2 PostgreSQL cleanup
+
+The dashboard's housekeeping job (`lib/housekeeping`, #92) runs hourly under an advisory lock:
+
+| Data | Deleted |
+|------|---------|
+| Login attempts (email, IP) | after 24 h |
+| Sessions | once expired |
+| Verification tokens | once used or expired |
+| Invitations | 1 day after expiry, accepted or not |
+| Revoked API keys | 1 year after revocation (audit trail) |
+| Stripe webhook ids | after 30 days |
+| OAuth codes, tokens, unused client registrations | `pruneExpired()`, also called from the token endpoint |
+
+### 5.3.3 Erasure
+
+Deleting an account, workspace or project removes the Postgres rows and queues an `erasure_requests` row **in the same transaction** (#91).
+- **Worker:** the dashboard's erasure worker deletes the tenant's rows from every ClickHouse table, both tiers and `tool_registry` (by the snapshotted project ids). It runs as `yavio_eraser` (`ALTER DELETE` only, no `SELECT`).
+- **Retries:** it retries every minute and remembers finished tables. A request pending for more than 24 h is logged as an error.
+- **Backups:** erased data stays in earlier backups until they expire, **up to 4 weeks** on Yavio Cloud (14 days on the host plus 14 days of disk snapshots). Docs: Self-Hosting → Backups & Operations.
+
+### 5.3.4 Logs
+
+| Log | Kept |
+|-----|------|
+| Ingest request log | method, route, status. No IP, query string or headers (#92). Container log rotation. |
+| Container logs | size rotation, 5 × 25 MB per container (`docker-compose.yml`) |
+| ClickHouse system log tables | 30 days (`packages/db/clickhouse/config.d/system-logs.xml`) |
+| Host journal (reverse proxy, no access log) | 30 days, at most 1 GB (`ops/host/journald-yavio.conf`) |
 
 ## 5.4 Schema Evolution
 

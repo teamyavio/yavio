@@ -166,7 +166,6 @@ A `docker-compose.prod.yml` provides production-ready overrides:
 | `NEXTAUTH_URL` | Yes | `http://localhost:3000` | Dashboard public URL |
 | `CLICKHOUSE_URL` | No | `http://default:yavio_dev@clickhouse:8123` | ClickHouse HTTP endpoint (includes credentials) |
 | `DATABASE_URL` | No | Auto-constructed | PostgreSQL connection string |
-| `YAVIO_RETENTION_DAYS` | No | `90` | ClickHouse event retention in days. Self-hosted only — applied via `ALTER TABLE ... MODIFY TTL` at startup. Ignored on Cloud (hardcoded to 365). |
 | `SMTP_HOST` | No | - | SMTP server hostname. If unset, email features are disabled (verification skipped, password reset/invites unavailable). See [dashboard/architecture.md §7.11](../dashboard/architecture.md#711-email-sending). |
 | `SMTP_PORT` | No | `587` | SMTP port (`587` for STARTTLS, `465` for TLS). |
 | `SMTP_USER` | No | - | SMTP authentication username. |
@@ -188,6 +187,8 @@ A `docker-compose.prod.yml` provides production-ready overrides:
 | `STRIPE_SECRET_KEY` | No (Cloud) | - | Stripe API secret key. Required when `YAVIO_CLOUD=true`. |
 | `STRIPE_WEBHOOK_SECRET` | No (Cloud) | - | Stripe webhook signing secret. Required when `YAVIO_CLOUD=true`. |
 | `STRIPE_PRO_PRICE_ID` | No (Cloud) | - | Stripe Price ID for the Cloud Pro usage-based plan. |
+
+**Retention has no variable.** Raw events are kept 13 months for every deployment, and a project can be set shorter (2–13 months) in its settings. `YAVIO_RETENTION_DAYS`, listed in earlier versions of this table, was never implemented (storage-layer.md §5.3.1).
 
 ### 9.1.5 `.env.example` File
 
