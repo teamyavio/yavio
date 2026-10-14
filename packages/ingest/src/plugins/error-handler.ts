@@ -33,7 +33,9 @@ const errorHandler: FastifyPluginAsync = async (app) => {
     const status = (error as { statusCode?: unknown }).statusCode;
     if (typeof status === "number" && status >= 400 && status < 500) {
       const code =
-        status === 413 ? ErrorCode.INGEST.BATCH_TOO_LARGE : ErrorCode.INGEST.SCHEMA_VALIDATION_FAILED;
+        status === 413
+          ? ErrorCode.INGEST.BATCH_TOO_LARGE
+          : ErrorCode.INGEST.SCHEMA_VALIDATION_FAILED;
       const message = error instanceof Error ? error.message : "Bad request";
       const clientError = new YavioError(code, message, status);
       return reply.status(status).send({ error: clientError.toJSON(request.id) });
