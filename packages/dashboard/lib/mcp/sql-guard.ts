@@ -108,7 +108,17 @@ const BANNED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 ];
 
 /** Tables the row policies cover — the only ones worth querying anyway. */
-export const QUERYABLE_TABLES = ["events", "sessions_mv", "users_mv", "tool_registry"] as const;
+export const QUERYABLE_TABLES = [
+  "events",
+  "sessions_mv",
+  "users_mv",
+  "tool_registry",
+  // Anonymous statistics (#85), row-policy covered like the rest.
+  "stats_daily",
+  "stats_users_daily",
+  "stats_users_periods",
+  "stats_cohorts",
+] as const;
 
 /**
  * Table references may also be comma-separated (`FROM a, b`), which a
@@ -194,7 +204,7 @@ type TableState = "outside" | "expect_ref" | "after_ref" | "alias_next" | "join_
 function assertNoTableFunctionInTableList(sql: string): void {
   const reject = () => {
     throw new McpToolError(
-      "Query rejected: table functions are not allowed (query the events/sessions_mv/users_mv/tool_registry tables).",
+      "Query rejected: table functions are not allowed (query the tables get_schema lists).",
     );
   };
   // Optionally database-qualified, with whitespace tolerated around the dot:

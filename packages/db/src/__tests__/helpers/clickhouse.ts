@@ -99,9 +99,27 @@ export async function dropAll() {
     "VIEW IF EXISTS users_mv",
     "TABLE IF EXISTS events",
     "TABLE IF EXISTS tool_registry",
+    ...["stats_daily", "stats_users_daily", "stats_users_periods", "stats_cohorts"].flatMap((t) => [
+      `TABLE IF EXISTS ${t}`,
+      `TABLE IF EXISTS ${t}_stage`,
+    ]),
     "TABLE IF EXISTS schema_migrations",
   ]) {
     await ch.command({ query: `DROP ${obj}` });
+  }
+  // Row policies outlive the tables and users they name. Dropping a user
+  // removes it from every policy's apply list, and the re-run's CREATE ROW
+  // POLICY IF NOT EXISTS then skips the existing, now-empty policy — which
+  // applies to nobody, so the recreated yavio_dashboard would see every
+  // tenant. Drop them too, so a re-run recreates them whole.
+  const policies = await ch.query({
+    query: "SELECT short_name, database, table FROM system.row_policies",
+    format: "JSONEachRow",
+  });
+  for (const p of await policies.json<{ short_name: string; database: string; table: string }>()) {
+    await ch.command({
+      query: `DROP ROW POLICY IF EXISTS ${p.short_name} ON ${p.database}.${p.table}`,
+    });
   }
   for (const user of MANAGED_USER_NAMES) {
     await ch.command({ query: `DROP USER IF EXISTS ${user}` });

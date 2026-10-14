@@ -41,6 +41,11 @@ export function getAppDb() {
  * Ensure the yavio_app role exists with a known password.
  * Handles both CI (no init-roles.sh) and local Docker (role already exists
  * but may have a different password).
+ *
+ * Grants are NOT added here: the migrations own them (0001's default
+ * privileges), and a blanket GRANT ON ALL TABLES used to undo the ones the
+ * migrations deliberately withhold (oauth_* in 0002, stats_job_runs in 0005),
+ * so tests could not see them.
  */
 async function ensureAppRole() {
   const { sql } = getServiceDb();
@@ -54,8 +59,6 @@ async function ensureAppRole() {
       END IF;
     END
     $$;
-    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO yavio_app;
-    GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO yavio_app;
   `);
 }
 

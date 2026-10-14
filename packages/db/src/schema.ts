@@ -357,3 +357,22 @@ export const stripeWebhookEvents = pgTable(
   },
   (table) => [index("idx_stripe_webhook_cleanup").on(table.processedAt)],
 );
+
+// =============================================================================
+// 12. Statistics Job Runs (#85)
+// =============================================================================
+
+/**
+ * Run state of the anonymous-statistics job in ingest, one row per stats
+ * table. Ingest restarts on every deploy, so an in-memory timer cannot know
+ * whether today's run happened or which months to catch up; the job reads
+ * this table under a Postgres advisory lock.
+ */
+export const statsJobRuns = pgTable("stats_job_runs", {
+  /** The ClickHouse stats table the row tracks, e.g. "stats_daily". */
+  job: text("job").primaryKey(),
+  /** End of the last run that finished every month it attempted. */
+  lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
+  lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+  lastError: text("last_error"),
+});

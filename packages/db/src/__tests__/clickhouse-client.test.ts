@@ -46,6 +46,21 @@ describe("createClickHouseClient", () => {
     expect(createClient).toHaveBeenCalledWith({ url: "http://explicit:8123" });
   });
 
+  it("passes a request timeout through, and only when one is given", async () => {
+    const { LONG_RUNNING_REQUEST_TIMEOUT_MS, createClickHouseClient } = await import(
+      "../clickhouse-client.js"
+    );
+    createClickHouseClient("http://ch:8123", { requestTimeoutMs: LONG_RUNNING_REQUEST_TIMEOUT_MS });
+    expect(createClient).toHaveBeenCalledWith({
+      url: "http://ch:8123",
+      request_timeout: LONG_RUNNING_REQUEST_TIMEOUT_MS,
+    });
+    expect(LONG_RUNNING_REQUEST_TIMEOUT_MS).toBeGreaterThan(30_000);
+
+    createClickHouseClient("http://ch:8123", {});
+    expect(createClient).toHaveBeenLastCalledWith({ url: "http://ch:8123" });
+  });
+
   it("throws YavioError when no URL is available", async () => {
     // biome-ignore lint/performance/noDelete: env vars require delete to truly unset
     delete process.env.CLICKHOUSE_URL;

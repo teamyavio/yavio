@@ -45,18 +45,31 @@ export function splitStatements(sql: string): string[] {
  * environment variable that supplies each one.
  *
  * Single source of truth: applyUserPasswords iterates it, the passwordless
- * repair and assertion derive their user list from it, and `warnWhenUnset`
+ * repair and assertion derive their user list from it, and `unsetWarning`
  * keeps the per-user policy next to the user rather than in an `if` somewhere
  * downstream. Adding a user here is all it takes to bring it under the guard.
  */
 export const MANAGED_USERS = [
-  { user: "yavio_ingest", envVar: "CLICKHOUSE_INGEST_PASSWORD", warnWhenUnset: false },
-  { user: "yavio_dashboard", envVar: "CLICKHOUSE_DASHBOARD_PASSWORD", warnWhenUnset: false },
+  { user: "yavio_ingest", envVar: "CLICKHOUSE_INGEST_PASSWORD", unsetWarning: null },
+  { user: "yavio_dashboard", envVar: "CLICKHOUSE_DASHBOARD_PASSWORD", unsetWarning: null },
   // Worth saying out loud: with no password the dashboard refuses to start
   // (#91); it used to erase as the CLICKHOUSE_URL superuser, the arrangement
   // migration 0012 exists to end. The other two are commonly left unset by
   // deployments that share one password, so warning on those would be noise.
-  { user: "yavio_eraser", envVar: "CLICKHOUSE_ERASER_PASSWORD", warnWhenUnset: true },
+  {
+    user: "yavio_eraser",
+    envVar: "CLICKHOUSE_ERASER_PASSWORD",
+    unsetWarning:
+      "the dashboard will refuse to start until it is, because it erases data only as yavio_eraser.",
+  },
+  // Without it ingest's statistics job (#85) cannot run, and raw events
+  // expire after 13 months without anonymous statistics being kept.
+  {
+    user: "yavio_rollup",
+    envVar: "CLICKHOUSE_ROLLUP_PASSWORD",
+    unsetWarning:
+      "ingest's statistics job stays disabled, and raw events expire after 13 months without anonymous statistics being kept.",
+  },
 ] as const;
 
 export const MANAGED_USER_NAMES = MANAGED_USERS.map((u) => u.user);

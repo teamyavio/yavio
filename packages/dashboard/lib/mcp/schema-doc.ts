@@ -56,8 +56,37 @@ project_id, tool_name, description, input_schema (JSON), registered_at, updated_
 NOTE: queries touching tool_registry are filtered to the project_id you pass
 to run_query — rows of other projects are invisible.
 
+## Anonymous statistics — kept indefinitely (filled daily by ingest)
+Raw events are kept 13 months; these daily tables outlive them. No identifiers,
+a fixed vocabulary per dimension. The current and previous month are
+recomputed every day, older months are final. Use them for ranges older than
+13 months; within the window, query events.
+
+### stats_daily — one row per cell of a "slice"
+workspace_id, project_id, slice, day (Date), event_type, event_name, status,
+error_category, platform, client_name, country_code, language,
+conversion_currency, events, individuals, latency_sum, latency_count,
+conversions, conversion_value
+- slice decides which dimensions are filled (the others are ''):
+  'total' (event_type) | 'tool' (event_type, event_name, status,
+  error_category) | 'client' (event_type, platform, client_name) |
+  'geo' (event_type, country_code, language) | 'conversion' (event_name,
+  conversion_currency). ALWAYS filter on one slice: summing across slices
+  counts every event several times.
+- event_name is a registered tool or a common event name; rare free-text
+  names are '(other)'. platform outside the known list is 'other'.
+- individuals = distinct people (or sessions where the app identifies no one)
+  in that cell. NOT additive across days or cells.
+- Average latency: sum(latency_sum) / sum(latency_count).
+
+### stats_users_daily — day, dau, wau, mau (7/30 days ending that day)
+### stats_users_periods — period ('week'|'month'|'quarter'|'year'), period_start,
+period_end, users (distinct users in that closed calendar period)
+### stats_cohorts — cohort_month, activity_month, month_offset (0-12), users
+Users are counted by user_id, else the platform's subject_id, never by session.
+
 ## Rules for run_query
-- Single SELECT (or WITH ... SELECT) statement only, against the four tables
+- Single SELECT (or WITH ... SELECT) statement only, against the tables
   above (the database user can read nothing else).
 - No SETTINGS or FORMAT clauses, no comments, no quoted identifiers,
   no system tables, no table functions (incl. numbers()).
