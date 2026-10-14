@@ -1,5 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ToolCallEvent } from "@yavio/shared/events";
+import type { ToolCallEvent, ToolDiscoveryEvent } from "@yavio/shared/events";
 import {
   buildConnectionEvent,
   buildToolCallEvent,
@@ -561,12 +561,49 @@ export function createProxy<T extends McpServer>(
     return result;
   };
 
+  /**
+   * tool_discovery from the tools/list result: the JSON Schema clients see,
+   * converted by the MCP SDK itself (Zod 3 or 4, raw shape or object). The
+   * schema handed to registerTool() is a Zod object whose serialisation is
+   * Zod's internal state (#83). Inner to the intent wrapper, so the injected
+   * `context` parameter is not part of the tool's registered schema. Only
+   * tools the proxy wrapped, once per tool name per process, as before.
+   */
+  const discoveryWrapper: HandlerWrapper = (handler) => async (request, extra) => {
+    const result = await handler(request, extra);
+    try {
+      const tools = (result as { tools?: unknown } | undefined)?.tools;
+      if (Array.isArray(tools)) {
+        // One batch for the listing, not one send per tool.
+        const events: ToolDiscoveryEvent[] = [];
+        for (const tool of tools as Array<Record<string, unknown> | null>) {
+          const name = tool?.name;
+          if (typeof name !== "string" || !instrumentedTools.has(name)) continue;
+          if (emittedToolDiscoveries.has(name)) continue;
+          emittedToolDiscoveries.add(name);
+          events.push(
+            discoveryEvent(
+              name,
+              typeof tool?.description === "string" ? tool.description : undefined,
+              listedInputSchema(tool?.inputSchema),
+            ),
+          );
+        }
+        if (events.length > 0) transport.send(events);
+      }
+    } catch {
+      // Discovery is best effort; the listing itself must never fail on it.
+    }
+    return result;
+  };
+
   // Innermost first: intent(status(mcpHandler)). Returns false when the
   // private API is missing — then no frame is ever opened and the callback
-  // wrapper keeps sending on its own.
-  installProtocolWrappers(server, {
+  // wrapper keeps sending on its own, and discovery falls back to
+  // registration time (keys only, see the interceptors below).
+  const protocolInstalled = installProtocolWrappers(server, {
     call: intent ? [statusWrapper, intent.wrapCall] : [statusWrapper],
-    list: intent ? [intent.wrapList] : [],
+    list: intent ? [discoveryWrapper, intent.wrapList] : [discoveryWrapper],
   });
 
   // Reference to the current MCP transport for lazy sessionId lookup
@@ -611,24 +648,29 @@ export function createProxy<T extends McpServer>(
   const chainable = (result: unknown, receiver: unknown): unknown =>
     result === server ? receiver : result;
 
-  /** Emit a tool_discovery event via the transport. */
+  /**
+   * A tool_discovery event. The description is clamped to ingest's limit
+   * (2048) — a longer one got the whole event rejected.
+   */
+  const discoveryEvent = (
+    toolName: string,
+    description: string | undefined,
+    inputSchema: Record<string, unknown> | undefined,
+  ) =>
+    buildToolDiscoveryEvent(
+      {
+        traceId: generateTraceId(),
+        sessionId: session.sessionId,
+        sdkVersion,
+        platform: session.platform,
+      },
+      { toolName, description: description?.slice(0, MAX_DISCOVERY_DESCRIPTION), inputSchema },
+    );
   const emitDiscovery = (
     toolName: string,
     description: string | undefined,
     inputSchema: Record<string, unknown> | undefined,
-  ) => {
-    transport.send([
-      buildToolDiscoveryEvent(
-        {
-          traceId: generateTraceId(),
-          sessionId: session.sessionId,
-          sdkVersion,
-          platform: session.platform,
-        },
-        { toolName, description, inputSchema },
-      ),
-    ]);
-  };
+  ) => transport.send([discoveryEvent(toolName, description, inputSchema)]);
 
   return new Proxy<T>(server, {
     get(target, prop, receiver) {
@@ -660,8 +702,9 @@ export function createProxy<T extends McpServer>(
 
           const result = (originalTool as (...a: unknown[]) => unknown)(...args);
 
-          // Emit tool_discovery event (once per tool name)
-          if (!emittedToolDiscoveries.has(toolName)) {
+          // Fallback when tools/list could not be wrapped (see discoveryWrapper):
+          // emit at registration, once per tool name, with property names only.
+          if (!protocolInstalled && !emittedToolDiscoveries.has(toolName)) {
             emittedToolDiscoveries.add(toolName);
             let description: string | undefined;
             let inputSchema: Record<string, unknown> | undefined;
@@ -733,20 +776,16 @@ export function createProxy<T extends McpServer>(
 
           const result = (originalRegisterTool as (...a: unknown[]) => unknown)(...args);
 
-          // Emit tool_discovery event (once per tool name)
-          if (!emittedToolDiscoveries.has(toolName)) {
+          // Fallback when tools/list could not be wrapped (see discoveryWrapper).
+          // Property names only: the raw inputSchema is a Zod object, and
+          // serialising it ships Zod's internal state, not a schema (#83).
+          if (cbIndex !== -1 && !protocolInstalled && !emittedToolDiscoveries.has(toolName)) {
             emittedToolDiscoveries.add(toolName);
-            let description: string | undefined;
-            let inputSchema: Record<string, unknown> | undefined;
-            if (configArg) {
-              if (typeof configArg.description === "string") {
-                description = configArg.description;
-              }
-              if (configArg.inputSchema && typeof configArg.inputSchema === "object") {
-                inputSchema = configArg.inputSchema as Record<string, unknown>;
-              }
-            }
-            emitDiscovery(toolName, description, inputSchema);
+            emitDiscovery(
+              toolName,
+              typeof configArg?.description === "string" ? configArg.description : undefined,
+              extractParamKeys(configArg?.inputSchema),
+            );
           }
 
           return chainable(result, receiver);
@@ -811,6 +850,31 @@ function extractParamKeys(obj: unknown): Record<string, unknown> | undefined {
     properties[key] = {};
   }
   return { type: "object", properties };
+}
+
+const MAX_DISCOVERY_DESCRIPTION = 2048;
+const MAX_DISCOVERY_SCHEMA_LENGTH = 16_384;
+
+/**
+ * A listed tool's `inputSchema` as sent on tool_discovery: a detached copy (the
+ * listing object is shared with the response and the intent wrapper), or
+ * undefined when it is not a plain object. Longer than 16,384 characters
+ * serialised — a giant enum is not worth an oversized event — it degrades to
+ * the property names, like the registration-time fallback: ingest stores a
+ * missing schema as `{}`, which would replace whatever the registry had.
+ */
+function listedInputSchema(schema: unknown): Record<string, unknown> | undefined {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return undefined;
+  const json = JSON.stringify(schema);
+  if (json.length > MAX_DISCOVERY_SCHEMA_LENGTH) {
+    const properties = (schema as { properties?: unknown }).properties;
+    const names =
+      properties && typeof properties === "object" && !Array.isArray(properties)
+        ? Object.keys(properties)
+        : [];
+    return { type: "object", properties: Object.fromEntries(names.map((name) => [name, {}])) };
+  }
+  return JSON.parse(json) as Record<string, unknown>;
 }
 
 /** Extract top-level key names from tool args (values set to `true`). */

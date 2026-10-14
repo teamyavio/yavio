@@ -1,3 +1,5 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BaseEvent } from "@yavio/shared/events";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -395,9 +397,9 @@ describe("createProxy — serverOnly mode", () => {
       content: [{ type: "text", text: "ok" }],
     }));
 
-    // tool_discovery fires synchronously on registration
-    const discoveryBatch = transport.sent[0];
-    expect(discoveryBatch?.[0].event_type).toBe("tool_discovery");
+    // tool_discovery fires on the first tools/list
+    await listToolsThrough(proxy);
+    expect(discoveries(transport.sent).map((e) => e.tool_name)).toEqual(["events_still_fire"]);
 
     const tool = getRegisteredTool(server, "events_still_fire");
     await tool?.handler({
@@ -537,6 +539,8 @@ describe("createProxy — Skybridge registerTool(config, cb)", () => {
     };
   }
 
+  // This mock has no low-level server, so tools/list cannot be wrapped and
+  // discovery falls back to registration time, with property names only.
   it("derives the tool name from config.name for tool_discovery", () => {
     const { server } = makeSkybridgeServer();
     const transport = createMockTransport();
@@ -551,7 +555,7 @@ describe("createProxy — Skybridge registerTool(config, cb)", () => {
       {
         name: "search_rooms",
         description: "Search available rooms",
-        inputSchema: { query: { type: "string" } },
+        inputSchema: { query: z.string() },
       },
       () => ({ content: [{ type: "text", text: "ok" }] }),
     );
@@ -561,7 +565,8 @@ describe("createProxy — Skybridge registerTool(config, cb)", () => {
     expect(event.event_type).toBe("tool_discovery");
     expect(event.tool_name).toBe("search_rooms");
     expect(event.description).toBe("Search available rooms");
-    expect(event.input_schema).toEqual({ query: { type: "string" } });
+    // Never the raw Zod object (#83).
+    expect(event.input_schema).toEqual({ type: "object", properties: { query: {} } });
   });
 
   it("wraps the handler so invoking it emits connection and tool_call events", async () => {
@@ -669,6 +674,20 @@ describe("createProxy — Skybridge registerTool(config, cb)", () => {
   });
 });
 
+/** Connect a real client to the proxy and list its tools once. */
+async function listToolsThrough(proxy: McpServer) {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await proxy.connect(serverTransport);
+  const client = new Client({ name: "discovery-test", version: "1.0" });
+  await client.connect(clientTransport);
+  return client.listTools();
+}
+
+const discoveries = (sent: BaseEvent[][]) =>
+  sent.flat().filter((e) => e.event_type === "tool_discovery") as unknown as Array<
+    Record<string, unknown>
+  >;
+
 describe("createProxy — tool_discovery emission", () => {
   beforeEach(() => {
     mockedMint.mockReset();
@@ -676,122 +695,198 @@ describe("createProxy — tool_discovery emission", () => {
     _resetGlobalState();
   });
 
-  it("emits tool_discovery event when tool() is called", () => {
-    const server = new McpServer({ name: "test", version: "1.0" });
-    const transport = createMockTransport();
-    createProxy(server, testConfig, transport, "0.0.1").tool("search_rooms", () => ({
-      content: [{ type: "text", text: "ok" }],
-    }));
-
-    expect(transport.sent.length).toBe(1);
-    const event = transport.sent[0][0];
-    expect(event.event_type).toBe("tool_discovery");
-    expect((event as Record<string, unknown>).tool_name).toBe("search_rooms");
-  });
-
-  it("emits tool_discovery with description from tool(name, desc, cb)", () => {
-    const server = new McpServer({ name: "test", version: "1.0" });
-    const transport = createMockTransport();
-    createProxy(server, testConfig, transport, "0.0.1").tool("my_tool", "A helpful tool", () => ({
-      content: [{ type: "text", text: "ok" }],
-    }));
-
-    const event = transport.sent[0][0] as Record<string, unknown>;
-    expect(event.event_type).toBe("tool_discovery");
-    expect(event.tool_name).toBe("my_tool");
-    expect(event.description).toBe("A helpful tool");
-  });
-
-  it("emits tool_discovery with inputSchema from tool(name, schema, cb)", () => {
-    const server = new McpServer({ name: "test", version: "1.0" });
-    const transport = createMockTransport();
-    createProxy(server, testConfig, transport, "0.0.1").tool(
-      "schema_tool",
-      { query: z.string(), limit: z.number().optional() },
-      () => ({ content: [{ type: "text", text: "ok" }] }),
-    );
-
-    const event = transport.sent[0][0] as Record<string, unknown>;
-    expect(event.event_type).toBe("tool_discovery");
-    expect(event.tool_name).toBe("schema_tool");
-    expect(event.input_schema).toEqual({
-      type: "object",
-      properties: { query: {}, limit: {} },
-    });
-  });
-
-  it("emits tool_discovery with description and inputSchema from tool(name, desc, schema, cb)", () => {
-    const server = new McpServer({ name: "test", version: "1.0" });
-    const transport = createMockTransport();
-    createProxy(server, testConfig, transport, "0.0.1").tool(
-      "full_tool",
-      "A full tool",
-      { query: z.string() },
-      () => ({ content: [{ type: "text", text: "ok" }] }),
-    );
-
-    const event = transport.sent[0][0] as Record<string, unknown>;
-    expect(event.event_type).toBe("tool_discovery");
-    expect(event.tool_name).toBe("full_tool");
-    expect(event.description).toBe("A full tool");
-    expect(event.input_schema).toEqual({
-      type: "object",
-      properties: { query: {} },
-    });
-  });
-
-  it("emits tool_discovery event when registerTool() is called", () => {
-    const server = new McpServer({ name: "test", version: "1.0" });
-    const transport = createMockTransport();
-    createProxy(server, testConfig, transport, "0.0.1").registerTool(
-      "reg_tool",
-      {
-        description: "A registered tool",
-        inputSchema: { query: z.string() },
-      },
-      () => ({ content: [{ type: "text", text: "ok" }] }),
-    );
-
-    expect(transport.sent.length).toBe(1);
-    const event = transport.sent[0][0] as Record<string, unknown>;
-    expect(event.event_type).toBe("tool_discovery");
-    expect(event.tool_name).toBe("reg_tool");
-    expect(event.description).toBe("A registered tool");
-    // Pins today's behaviour: the raw Zod shape is passed through instead of
-    // JSON Schema (#83). The fix has to change this assertion on purpose.
-    expect((event.input_schema as Record<string, unknown>).query).toBeInstanceOf(z.ZodString);
-  });
-
-  it("only emits tool_discovery once per tool name", () => {
+  it("emits tool_discovery on tools/list, not on registration", async () => {
     const server = new McpServer({ name: "test", version: "1.0" });
     const transport = createMockTransport();
     const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("search_rooms", () => ({ content: [{ type: "text", text: "ok" }] }));
 
-    proxy.tool("dup_tool", () => ({
-      content: [{ type: "text", text: "first" }],
-    }));
+    expect(transport.sent).toHaveLength(0);
+    await listToolsThrough(proxy);
 
-    // Registering again with different config — should not emit again
-    // (McpServer would throw on duplicate, but we're testing the proxy dedup)
-    expect(transport.sent.length).toBe(1);
-    expect((transport.sent[0][0] as Record<string, unknown>).tool_name).toBe("dup_tool");
+    const [event] = discoveries(transport.sent);
+    expect(event?.tool_name).toBe("search_rooms");
   });
 
-  it("emits tool_discovery with correct base event fields", () => {
+  it("emits tool_discovery with description from tool(name, desc, cb)", async () => {
     const server = new McpServer({ name: "test", version: "1.0" });
     const transport = createMockTransport();
-    createProxy(server, testConfig, transport, "0.0.1").tool("base_fields_tool", () => ({
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("my_tool", "A helpful tool", () => ({ content: [{ type: "text", text: "ok" }] }));
+    await listToolsThrough(proxy);
+
+    const [event] = discoveries(transport.sent);
+    expect(event?.tool_name).toBe("my_tool");
+    expect(event?.description).toBe("A helpful tool");
+  });
+
+  it("sends the JSON Schema from tools/list for tool(name, schema, cb)", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("schema_tool", { query: z.string(), limit: z.number().optional() }, () => ({
       content: [{ type: "text", text: "ok" }],
     }));
+    const listed = await listToolsThrough(proxy);
 
-    const event = transport.sent[0][0];
-    expect(event.event_type).toBe("tool_discovery");
-    expect(event.source).toBe("server");
-    expect(event.sdk_version).toBe("0.0.1");
-    expect(typeof event.event_id).toBe("string");
-    expect(typeof event.trace_id).toBe("string");
-    expect(typeof event.session_id).toBe("string");
-    expect(typeof event.timestamp).toBe("string");
+    const [event] = discoveries(transport.sent);
+    expect(event?.input_schema).toMatchObject({
+      type: "object",
+      properties: { query: { type: "string" }, limit: { type: "number" } },
+      required: ["query"],
+    });
+    // Exactly what the client was shown.
+    expect(event?.input_schema).toEqual(listed.tools[0]?.inputSchema);
+  });
+
+  it("emits description and schema from tool(name, desc, schema, cb)", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("full_tool", "A full tool", { query: z.string() }, () => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+    await listToolsThrough(proxy);
+
+    const [event] = discoveries(transport.sent);
+    expect(event?.description).toBe("A full tool");
+    expect(event?.input_schema).toMatchObject({ properties: { query: { type: "string" } } });
+  });
+
+  it("sends JSON Schema, not Zod internals, for registerTool() (#83)", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.registerTool(
+      "reg_tool",
+      {
+        description: "A registered tool",
+        inputSchema: { query: z.string(), language: z.enum(["de", "en"]).optional() },
+      },
+      () => ({ content: [{ type: "text", text: "ok" }] }),
+    );
+    await listToolsThrough(proxy);
+
+    const [event] = discoveries(transport.sent);
+    expect(event?.tool_name).toBe("reg_tool");
+    expect(event?.description).toBe("A registered tool");
+    expect(event?.input_schema).toMatchObject({
+      type: "object",
+      properties: { query: { type: "string" }, language: { enum: ["de", "en"] } },
+      required: ["query"],
+    });
+    expect(JSON.stringify(event?.input_schema)).not.toMatch(/"_?def"/);
+  });
+
+  it("leaves the injected intent `context` parameter out of the schema", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server,
+      { ...testConfig, intent: { enabled: true, required: true, description: "why" } },
+      transport,
+      "0.0.1",
+    );
+    proxy.registerTool("intent_tool", { inputSchema: { query: z.string() } }, () => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+    const listed = await listToolsThrough(proxy);
+
+    expect(listed.tools[0]?.inputSchema.properties).toHaveProperty("context");
+    const [event] = discoveries(transport.sent);
+    expect(event?.input_schema).toMatchObject({ properties: { query: { type: "string" } } });
+    expect((event?.input_schema as { properties: object }).properties).not.toHaveProperty(
+      "context",
+    );
+  });
+
+  it("does not discover a tool registered on the unwrapped server", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("wrapped", () => ({ content: [{ type: "text", text: "ok" }] }));
+    server.tool("unwrapped", () => ({ content: [{ type: "text", text: "ok" }] }));
+    await listToolsThrough(proxy);
+
+    expect(discoveries(transport.sent).map((e) => e.tool_name)).toEqual(["wrapped"]);
+  });
+
+  it("only emits tool_discovery once per tool name", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("dup_tool", () => ({ content: [{ type: "text", text: "first" }] }));
+
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await proxy.connect(serverTransport);
+    const client = new Client({ name: "discovery-test", version: "1.0" });
+    await client.connect(clientTransport);
+    await client.listTools();
+    await client.listTools();
+
+    expect(discoveries(transport.sent).map((e) => e.tool_name)).toEqual(["dup_tool"]);
+  });
+
+  it("clamps the description to ingest's 2048 characters", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("long_desc", "x".repeat(5000), () => ({ content: [{ type: "text", text: "ok" }] }));
+    await listToolsThrough(proxy);
+
+    expect(discoveries(transport.sent)[0]?.description).toHaveLength(2048);
+  });
+
+  it("sends the discovery of every listed tool in one batch", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    for (const name of ["one", "two", "three"]) {
+      proxy.tool(name, () => ({ content: [{ type: "text", text: name }] }));
+    }
+    await listToolsThrough(proxy);
+
+    const batches = transport.sent.filter((b) => b.some((e) => e.event_type === "tool_discovery"));
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.map((e) => (e as { tool_name?: string }).tool_name)).toEqual([
+      "one",
+      "two",
+      "three",
+    ]);
+  });
+
+  it("degrades a schema longer than 16,384 characters to its property names", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    const values = Array.from({ length: 2000 }, (_, i) => `value_${i}`) as [string, ...string[]];
+    proxy.tool("huge_enum", "Big", { pick: z.enum(values) }, () => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+    await listToolsThrough(proxy);
+
+    const [event] = discoveries(transport.sent);
+    expect(event?.tool_name).toBe("huge_enum");
+    expect(event?.description).toBe("Big");
+    // Not undefined: ingest would store `{}` and replace the registry's
+    // schema with "no parameters".
+    expect(event?.input_schema).toEqual({ type: "object", properties: { pick: {} } });
+  });
+
+  it("emits tool_discovery with correct base event fields", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("base_fields_tool", () => ({ content: [{ type: "text", text: "ok" }] }));
+    await listToolsThrough(proxy);
+
+    const [event] = discoveries(transport.sent);
+    expect(event?.source).toBe("server");
+    expect(event?.sdk_version).toBe("0.0.1");
+    expect(typeof event?.event_id).toBe("string");
+    expect(typeof event?.trace_id).toBe("string");
+    expect(typeof event?.session_id).toBe("string");
+    expect(typeof event?.timestamp).toBe("string");
   });
 });
 
