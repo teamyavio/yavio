@@ -837,7 +837,25 @@ describe("createProxy — tool_discovery emission", () => {
     expect(discoveries(transport.sent)[0]?.description).toHaveLength(2048);
   });
 
-  it("omits a schema longer than 16,384 characters but still discovers the tool", async () => {
+  it("sends the discovery of every listed tool in one batch", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    for (const name of ["one", "two", "three"]) {
+      proxy.tool(name, () => ({ content: [{ type: "text", text: name }] }));
+    }
+    await listToolsThrough(proxy);
+
+    const batches = transport.sent.filter((b) => b.some((e) => e.event_type === "tool_discovery"));
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.map((e) => (e as { tool_name?: string }).tool_name)).toEqual([
+      "one",
+      "two",
+      "three",
+    ]);
+  });
+
+  it("degrades a schema longer than 16,384 characters to its property names", async () => {
     const server = new McpServer({ name: "test", version: "1.0" });
     const transport = createMockTransport();
     const proxy = createProxy(server, testConfig, transport, "0.0.1");
@@ -850,7 +868,9 @@ describe("createProxy — tool_discovery emission", () => {
     const [event] = discoveries(transport.sent);
     expect(event?.tool_name).toBe("huge_enum");
     expect(event?.description).toBe("Big");
-    expect(event?.input_schema).toBeUndefined();
+    // Not undefined: ingest would store `{}` and replace the registry's
+    // schema with "no parameters".
+    expect(event?.input_schema).toEqual({ type: "object", properties: { pick: {} } });
   });
 
   it("emits tool_discovery with correct base event fields", async () => {

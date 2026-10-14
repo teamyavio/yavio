@@ -1,5 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ToolCallEvent } from "@yavio/shared/events";
+import type { ToolCallEvent, ToolDiscoveryEvent } from "@yavio/shared/events";
 import {
   buildConnectionEvent,
   buildToolCallEvent,
@@ -574,17 +574,22 @@ export function createProxy<T extends McpServer>(
     try {
       const tools = (result as { tools?: unknown } | undefined)?.tools;
       if (Array.isArray(tools)) {
+        // One batch for the listing, not one send per tool.
+        const events: ToolDiscoveryEvent[] = [];
         for (const tool of tools as Array<Record<string, unknown> | null>) {
           const name = tool?.name;
           if (typeof name !== "string" || !instrumentedTools.has(name)) continue;
           if (emittedToolDiscoveries.has(name)) continue;
           emittedToolDiscoveries.add(name);
-          emitDiscovery(
-            name,
-            typeof tool?.description === "string" ? tool.description : undefined,
-            listedInputSchema(tool?.inputSchema),
+          events.push(
+            discoveryEvent(
+              name,
+              typeof tool?.description === "string" ? tool.description : undefined,
+              listedInputSchema(tool?.inputSchema),
+            ),
           );
         }
+        if (events.length > 0) transport.send(events);
       }
     } catch {
       // Discovery is best effort; the listing itself must never fail on it.
@@ -644,26 +649,28 @@ export function createProxy<T extends McpServer>(
     result === server ? receiver : result;
 
   /**
-   * Emit a tool_discovery event via the transport. The description is clamped
-   * to ingest's limit (2048) — a longer one got the whole event rejected.
+   * A tool_discovery event. The description is clamped to ingest's limit
+   * (2048) — a longer one got the whole event rejected.
    */
+  const discoveryEvent = (
+    toolName: string,
+    description: string | undefined,
+    inputSchema: Record<string, unknown> | undefined,
+  ) =>
+    buildToolDiscoveryEvent(
+      {
+        traceId: generateTraceId(),
+        sessionId: session.sessionId,
+        sdkVersion,
+        platform: session.platform,
+      },
+      { toolName, description: description?.slice(0, MAX_DISCOVERY_DESCRIPTION), inputSchema },
+    );
   const emitDiscovery = (
     toolName: string,
     description: string | undefined,
     inputSchema: Record<string, unknown> | undefined,
-  ) => {
-    transport.send([
-      buildToolDiscoveryEvent(
-        {
-          traceId: generateTraceId(),
-          sessionId: session.sessionId,
-          sdkVersion,
-          platform: session.platform,
-        },
-        { toolName, description: description?.slice(0, MAX_DISCOVERY_DESCRIPTION), inputSchema },
-      ),
-    ]);
-  };
+  ) => transport.send([discoveryEvent(toolName, description, inputSchema)]);
 
   return new Proxy<T>(server, {
     get(target, prop, receiver) {
@@ -851,13 +858,22 @@ const MAX_DISCOVERY_SCHEMA_LENGTH = 16_384;
 /**
  * A listed tool's `inputSchema` as sent on tool_discovery: a detached copy (the
  * listing object is shared with the response and the intent wrapper), or
- * undefined when it is not a plain object or longer than 16,384 characters
- * serialised — a giant enum is not worth an oversized event.
+ * undefined when it is not a plain object. Longer than 16,384 characters
+ * serialised — a giant enum is not worth an oversized event — it degrades to
+ * the property names, like the registration-time fallback: ingest stores a
+ * missing schema as `{}`, which would replace whatever the registry had.
  */
 function listedInputSchema(schema: unknown): Record<string, unknown> | undefined {
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) return undefined;
   const json = JSON.stringify(schema);
-  if (json.length > MAX_DISCOVERY_SCHEMA_LENGTH) return undefined;
+  if (json.length > MAX_DISCOVERY_SCHEMA_LENGTH) {
+    const properties = (schema as { properties?: unknown }).properties;
+    const names =
+      properties && typeof properties === "object" && !Array.isArray(properties)
+        ? Object.keys(properties)
+        : [];
+    return { type: "object", properties: Object.fromEntries(names.map((name) => [name, {}])) };
+  }
   return JSON.parse(json) as Record<string, unknown>;
 }
 
