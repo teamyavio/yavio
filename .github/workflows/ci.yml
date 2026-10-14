@@ -190,6 +190,20 @@ jobs:
     needs: detect
     if: needs.detect.outputs.ingest == 'true'
     services:
+      # The statistics job keeps its run state and lock in Postgres (#85).
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: yavio_test
+          POSTGRES_USER: yavio_service
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U yavio_service"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
       clickhouse:
         image: ${{ needs.detect.outputs.clickhouse_image }}
         env:
@@ -208,6 +222,7 @@ jobs:
       - run: pnpm turbo build --filter=@yavio/ingest...
       - run: pnpm --filter @yavio/ingest exec vitest run --coverage
         env:
+          DATABASE_URL: postgres://yavio_service:test@localhost:5432/yavio_test
           CLICKHOUSE_URL: http://localhost:8123
           CLICKHOUSE_PASSWORD: test
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -9,6 +9,11 @@ export interface AppConfig {
   jwtSecret: string;
   /** Proxy addresses whose X-Forwarded-For is trusted (TRUST_PROXY); empty = none. */
   trustProxy: string[];
+  /**
+   * ClickHouse URL as yavio_rollup for the statistics job (#85); undefined
+   * when CLICKHOUSE_ROLLUP_PASSWORD is unset, which disables the job.
+   */
+  rollupClickhouseUrl: string | undefined;
 }
 
 /** The least-privileged ClickHouse user ingest can do its job as. */
@@ -76,6 +81,25 @@ export function parseTrustProxy(raw: string | undefined): string[] {
   return entries;
 }
 
+/**
+ * The statistics job's own ClickHouse user (#85). Unlike yavio_ingest there is
+ * no fallback to the URL's password: yavio_rollup is created
+ * unauthenticatable (migration 0015) and only gets a password from
+ * CLICKHOUSE_ROLLUP_PASSWORD, so without one there is nothing to connect as.
+ */
+function rollupUrl(url: string | undefined): string | undefined {
+  const password = process.env.CLICKHOUSE_ROLLUP_PASSWORD;
+  if (!url || !password) return undefined;
+  try {
+    const parsed = new URL(url);
+    parsed.username = "yavio_rollup";
+    parsed.password = password;
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 export function loadConfig(): AppConfig {
   const port = Number.parseInt(process.env.PORT ?? "3001", 10);
   const databaseUrl = process.env.DATABASE_URL;
@@ -119,6 +143,15 @@ export function loadConfig(): AppConfig {
   }
 
   const trustProxy = parseTrustProxy(process.env.TRUST_PROXY);
+  const rollupClickhouseUrl = rollupUrl(process.env.CLICKHOUSE_URL);
 
-  return { port, databaseUrl, clickhouseUrl, apiKeyHashSecret, jwtSecret, trustProxy };
+  return {
+    port,
+    databaseUrl,
+    clickhouseUrl,
+    apiKeyHashSecret,
+    jwtSecret,
+    trustProxy,
+    rollupClickhouseUrl,
+  };
 }

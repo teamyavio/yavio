@@ -70,20 +70,19 @@ async function recordMigration(version: string): Promise<void> {
  * across users keep working untouched.
  */
 async function applyUserPasswords(): Promise<void> {
-  for (const { user, envVar, warnWhenUnset } of MANAGED_USERS) {
+  for (const { user, envVar, unsetWarning } of MANAGED_USERS) {
     const password = process.env[envVar];
     if (!password) {
-      // Say only what is known from here. The dashboard refuses to start
-      // without this same variable (dashboard/lib/startup-check.ts, #91), so
-      // that consequence is certain. The account's own state is not: a
-      // deployment that applied a real password on an earlier run and later
-      // dropped the variable still has a working user, and claiming otherwise
-      // would be exactly the manufactured confidence this file keeps having to
-      // guard against.
-      if (warnWhenUnset) {
-        console.warn(
-          `[migrate:clickhouse] ${envVar} is not set — the dashboard will refuse to start until it is, because it erases data only as ${user}.`,
-        );
+      // Say only what is known from here: each user's unsetWarning names the
+      // consequence that follows from the variable being unset (the dashboard
+      // refuses to start without the eraser's, #91; the statistics job stays
+      // off without the rollup's, #85). The account's own state is not
+      // known: a deployment that applied a real password on an earlier run
+      // and later dropped the variable still has a working user, and claiming
+      // otherwise would be exactly the manufactured confidence this file keeps
+      // having to guard against.
+      if (unsetWarning) {
+        console.warn(`[migrate:clickhouse] ${envVar} is not set — ${unsetWarning}`);
       }
       continue;
     }

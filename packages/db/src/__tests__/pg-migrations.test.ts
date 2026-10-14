@@ -11,7 +11,7 @@ describe("PostgreSQL migrations", () => {
   });
 
   describe("fresh migration — all tables created", () => {
-    it("creates all 14 application tables", async () => {
+    it("creates all 15 application tables", async () => {
       const { sql } = getServiceDb();
       const tables = await sql`
         SELECT table_name FROM information_schema.tables
@@ -20,7 +20,7 @@ describe("PostgreSQL migrations", () => {
       `;
       const names = tables.map((r) => r.table_name);
       const appTables = names.filter((n: string) => !n.startsWith("__"));
-      expect(appTables).toHaveLength(14);
+      expect(appTables).toHaveLength(15);
       expect(names).toEqual(
         expect.arrayContaining([
           "api_keys",
@@ -32,6 +32,7 @@ describe("PostgreSQL migrations", () => {
           "oauth_tokens",
           "projects",
           "sessions",
+          "stats_job_runs",
           "stripe_webhook_events",
           "users",
           "verification_tokens",
@@ -39,6 +40,24 @@ describe("PostgreSQL migrations", () => {
           "workspaces",
         ]),
       );
+    });
+  });
+
+  describe("stats_job_runs (#85)", () => {
+    it("is for ingest (yavio_api), not for the RLS-enforced yavio_app", async () => {
+      const { sql } = getServiceDb();
+      const grants = await sql`
+        SELECT grantee, privilege_type FROM information_schema.role_table_grants
+        WHERE table_name = 'stats_job_runs' AND grantee IN ('yavio_api', 'yavio_app')
+        ORDER BY grantee, privilege_type
+      `;
+      const by = (role: string) =>
+        grants.filter((g) => g.grantee === role).map((g) => g.privilege_type as string);
+      expect(by("yavio_app")).toEqual([]);
+      // yavio_api only exists where 0003 created it (it does in tests).
+      const [{ exists }] =
+        await sql`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'yavio_api') AS exists`;
+      if (exists) expect(by("yavio_api")).toEqual(["DELETE", "INSERT", "SELECT", "UPDATE"]);
     });
   });
 

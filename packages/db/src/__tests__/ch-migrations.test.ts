@@ -99,7 +99,7 @@ describe("ClickHouse migrations", () => {
       expect(await result.json()).toHaveLength(1);
     });
 
-    it("records all 14 migration versions", async () => {
+    it("records all 15 migration versions", async () => {
       const ch = getClient();
       const result = await ch.query({
         query: "SELECT version FROM schema_migrations ORDER BY version",
@@ -121,6 +121,7 @@ describe("ClickHouse migrations", () => {
         "0012",
         "0013",
         "0014",
+        "0015",
       ]);
     });
   });
