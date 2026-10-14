@@ -42,6 +42,7 @@ function tooMany(retryAfterMs: number): YavioError {
 
 const rateLimitHook: FastifyPluginAsync = async (app) => {
   app.decorateRequest("ipRateCharged", false);
+  app.decorateRequest("apiKeyCharged", false);
 
   app.addHook("onRequest", async (request) => {
     if (!app.rateLimiter || isHealthCheck(request)) return;
@@ -59,7 +60,18 @@ const rateLimitHook: FastifyPluginAsync = async (app) => {
 
   app.addHook("onResponse", async (request) => {
     if (!app.rateLimiter || isHealthCheck(request)) return;
-    if (request.ipRateCharged || request.authContext) return;
+    if (request.ipRateCharged) return;
+    const ctx = request.authContext;
+    if (ctx) {
+      // Authenticated, but the route handler never ran — the body failed to
+      // parse (400) or was over the limit (413). Charged to the key's bucket
+      // like any request of that key, so a flood of them is bounded there
+      // (#113); the handler charges per event when it does run.
+      if (ctx.source === "api_key" && !request.apiKeyCharged) {
+        app.rateLimiter.consumeApiKey(`${ctx.projectId}:${ctx.workspaceId}`, 1);
+      }
+      return;
+    }
     // May have carried a credential but did not authenticate (invalid or
     // missing credential on the events route, unknown route with a header).
     app.rateLimiter.consumeAuthFailure(request.ip);

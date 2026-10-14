@@ -117,6 +117,18 @@ describe("POST /v1/events", () => {
     expect(response.json().error.code).toBe("YAVIO-2100");
   });
 
+  it("returns 415 with its own code for an unsupported content type (#113)", async () => {
+    await buildApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/events",
+      headers: { authorization: `Bearer ${TEST_KEY}`, "content-type": "text/csv" },
+      payload: "a,b,c",
+    });
+    expect(response.statusCode).toBe(415);
+    expect(response.json().error.code).toBe("YAVIO-2113");
+  });
+
   it("returns 400 for empty events array", async () => {
     await buildApp();
     const response = await app.inject({

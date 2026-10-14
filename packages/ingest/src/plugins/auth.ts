@@ -29,25 +29,28 @@ export async function authenticate(request: FastifyRequest): Promise<void> {
  * fails to parse (400, 413) is already authenticated, so the rate limiter does
  * not count it as a failed credential — it used to, and a keyed client with a
  * serialisation bug locked its own address out of the events route. A bad key
- * is refused before any parsing work, too.
+ * is refused before any parsing work, too. Without a header the request goes
+ * on to authenticateBodyToken.
  */
-export async function authenticateHeaderIfPresent(request: FastifyRequest): Promise<void> {
+export async function authenticateHeader(request: FastifyRequest): Promise<void> {
   if (request.headers.authorization) await authenticate(request);
 }
 
 /**
- * The events route's preHandler: the Authorization header as everywhere
- * (already checked by authenticateHeaderIfPresent on that route), or — for
- * widget beacons — a widget JWT in the body (#96). navigator.sendBeacon
- * cannot set headers, so the widget sends `{ token, events, ... }`.
+ * The events route's preHandler, for widget beacons: a widget JWT in the body
+ * (#96). navigator.sendBeacon cannot set headers, so the widget sends
+ * `{ token, events, ... }`. The header is authenticateHeader's job, before
+ * parsing; a request it authenticated passes through here untouched except
+ * that a token in its body is still removed.
  *
- * - The header wins when both are present.
  * - Only a widget JWT is accepted from the body; API keys belong to servers,
  *   which can set headers.
  * - The token is removed from the body once read, so nothing downstream can
  *   store or log it.
+ * - A beacon whose body fails to parse never gets here: it carried no header,
+ *   so the rate limiter counts it as a request without a credential.
  */
-export async function authenticateHeaderOrBody(request: FastifyRequest): Promise<void> {
+export async function authenticateBodyToken(request: FastifyRequest): Promise<void> {
   const body = request.body as Record<string, unknown> | null | undefined;
   const bodyToken = body && typeof body === "object" ? body.token : undefined;
   if (body && typeof body === "object" && "token" in body) {
@@ -55,10 +58,6 @@ export async function authenticateHeaderOrBody(request: FastifyRequest): Promise
   }
 
   if (request.authContext) return;
-  if (request.headers.authorization) {
-    await authenticate(request);
-    return;
-  }
   if (typeof bodyToken !== "string" || bodyToken === "") {
     throw new YavioError(
       ErrorCode.INGEST.MISSING_AUTH_HEADER,

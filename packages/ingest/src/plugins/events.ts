@@ -6,7 +6,7 @@ import { normalizeEvents } from "../lib/event-normalizer.js";
 import { enforceFieldLimits, isBatchTooLarge } from "../lib/field-limits.js";
 import { EVENT_IDENTIFIER_FIELDS, stripPii } from "../lib/pii-stripper.js";
 import { validateBatch } from "../lib/schema-validator.js";
-import { authenticateHeaderIfPresent, authenticateHeaderOrBody } from "./auth.js";
+import { authenticateBodyToken, authenticateHeader } from "./auth.js";
 
 /**
  * Widget beacons send their JSON as text/plain: a CORS-safelisted type, so the
@@ -39,8 +39,8 @@ function registerEventsRoute(app: FastifyInstance): void {
     "/v1/events",
     {
       // The header before parsing (#113), the body token after it (#96).
-      onRequest: [authenticateHeaderIfPresent],
-      preHandler: [authenticateHeaderOrBody],
+      onRequest: [authenticateHeader],
+      preHandler: [authenticateBodyToken],
       config: { rawBody: true },
     },
     async (request, reply) => {
@@ -54,6 +54,7 @@ function registerEventsRoute(app: FastifyInstance): void {
         const body = request.body as Record<string, unknown> | null;
         const eventCount = Array.isArray(body?.events) ? body.events.length : 1;
         const keyId = `${ctx.projectId}:${ctx.workspaceId}`;
+        request.apiKeyCharged = true; // else the rate-limit plugin charges 1 on response
         const result = app.rateLimiter.consumeApiKey(keyId, eventCount);
         if (!result.allowed) {
           const err = new YavioError(

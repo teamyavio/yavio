@@ -30,13 +30,17 @@ const errorHandler: FastifyPluginAsync = async (app) => {
     // Fastify's own client errors — a body that is not JSON (400), one over
     // the body limit (413), an unsupported media type (415) — carry their
     // status; they are the client's fault and were answered 500 before (#113).
+    // Logged at warn, so a client that keeps sending them is visible.
     const status = (error as { statusCode?: unknown }).statusCode;
     if (typeof status === "number" && status >= 400 && status < 500) {
       const code =
         status === 413
           ? ErrorCode.INGEST.BATCH_TOO_LARGE
-          : ErrorCode.INGEST.SCHEMA_VALIDATION_FAILED;
+          : status === 415
+            ? ErrorCode.INGEST.UNSUPPORTED_MEDIA_TYPE
+            : ErrorCode.INGEST.SCHEMA_VALIDATION_FAILED;
       const message = error instanceof Error ? error.message : "Bad request";
+      request.log.warn({ status, code, message }, "Client error");
       const clientError = new YavioError(code, message, status);
       return reply.status(status).send({ error: clientError.toJSON(request.id) });
     }

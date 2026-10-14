@@ -178,6 +178,24 @@ describe("Rate limit plugin", () => {
     expect((await malformed("Bearer yav_00000000000000000000000000000000")).statusCode).toBe(429);
   });
 
+  it("charges a keyed client's unparseable bodies to its key's bucket (#113)", async () => {
+    // Not to the address, but not to nothing either: the handler never runs
+    // for them, so the plugin charges one unit on response.
+    app = await buildApp({ rateLimiter: new RateLimiter({ burstCapacity: 3, ratePerSecond: 1 }) });
+    const malformed = () =>
+      app.inject({
+        method: "POST",
+        url: "/v1/events",
+        remoteAddress: "198.51.100.71",
+        headers: { authorization: `Bearer ${TEST_KEY}`, "content-type": "application/json" },
+        payload: "{not json",
+      });
+    for (let i = 0; i < 3; i++) expect((await malformed()).statusCode).toBe(400);
+    const refused = await authedEvents(app, "198.51.100.71");
+    expect(refused.statusCode).toBe(429);
+    expect(refused.json().error.code).toBe("YAVIO-2050"); // the key's limit, not the IP's
+  });
+
   it("does not rate limit health endpoint", async () => {
     app = await buildApp({
       rateLimiter: new RateLimiter(undefined, { burstCapacity: 0, ratePerSecond: 0 }),
