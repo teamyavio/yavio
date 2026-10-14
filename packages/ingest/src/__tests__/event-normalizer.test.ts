@@ -62,7 +62,14 @@ describe("format checks (#90) — invalid becomes NULL, the event is kept", () =
     ["locale", "de-DE", "de-DE"],
     ["locale", "en-us", "en-US"],
     ["locale", "zh-Hant-TW", "zh-Hant-TW"],
-    ["locale", "en_US", null],
+    ["locale", "en_US", "en-US"], // the POSIX spelling is normalised (#111)
+    ["locale", "de_DE", "de-DE"],
+    ["locale", "zh_Hant_TW", "zh-Hant-TW"],
+    ["locale", "en_US.UTF-8", "en-US"], // as read from LANG / LC_ALL
+    ["locale", "de_DE@euro", "de-DE"],
+    ["locale", "C", null], // no language in the C and POSIX locales
+    ["locale", "POSIX", null],
+    ["locale", "C.UTF-8", null],
     ["locale", "not a locale", null],
   ];
 
