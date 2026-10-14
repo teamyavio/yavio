@@ -58,14 +58,37 @@ export function getClickHouseClient(): ClickHouseClient {
 }
 
 /**
+ * The eraser password, or an error naming the variable.
+ *
+ * Called by instrumentation.ts when the server starts, so a deployment without
+ * it refuses to boot instead of failing on the first deletion. It used to fall
+ * back to the CLICKHOUSE_URL user — the `default` superuser — which kept the
+ * very credential migration 0012 set out to retire in the dashboard process,
+ * and a failure there was swallowed by the deletion routes (#91).
+ */
+export function requireEraserPassword(): string {
+  const password = process.env.CLICKHOUSE_ERASER_PASSWORD;
+  if (!password) {
+    throw new Error(
+      "CLICKHOUSE_ERASER_PASSWORD is not set. The dashboard erases account, workspace and " +
+        "project data as the yavio_eraser ClickHouse user and no longer falls back to the " +
+        "superuser. Run ./scripts/setup-env.sh or add it to .env, then run migrations so " +
+        "migrate-clickhouse applies it.",
+    );
+  }
+  return password;
+}
+
+/**
  * ClickHouse client that can run mutations, used ONLY by the deletion paths
  * (account / workspace / project deletion) which issue
  * `ALTER TABLE events DELETE`.
  *
- * This deliberately keeps the user from CLICKHOUSE_URL rather than narrowing it.
- * Erasure needs the ALTER DELETE privilege, and yavio_dashboard does not have
- * it: migration 0010_narrow_dashboard_grant.sql grants that role SELECT on four
- * tables and nothing more.
+ * It connects as yavio_eraser, which holds exactly ALTER DELETE on
+ * default.events (CH migration 0012): enough to erase, not enough to read what
+ * it erases, and nothing at all elsewhere. There is no fallback to another
+ * user; requireEraserPassword() throws when the password is missing, and
+ * instrumentation.ts has already refused to start the server in that case.
  *
  * History worth keeping: these deletion routes reach this module through a
  * DYNAMIC import (`await import("@/lib/clickhouse")`), so a static search for
@@ -74,29 +97,11 @@ export function getClickHouseClient(): ClickHouseClient {
  * silently failed with ACCESS_DENIED while the route still returned 200.
  * Splitting the clients is what makes that mistake impossible to repeat
  * silently: the read path cannot mutate, and the mutating path is explicit.
- *
- * Follow-up worth doing: replace this with a dedicated least-privilege user
- * holding only `ALTER DELETE ON default.events`, so erasure does not need the
- * superuser either.
  */
 export function getMutatingClickHouseClient(): ClickHouseClient {
   if (!mutatingClient) {
-    // Narrow to yavio_eraser when it is configured. That user holds exactly
-    // ALTER DELETE on default.events (CH migration 0012) — enough to erase,
-    // not enough to read what it erases, and nothing at all elsewhere.
-    //
-    // Falls back to the CLICKHOUSE_URL user when unset, so a deployment that
-    // has not yet run 0012 or set the password keeps erasing rather than
-    // silently failing — which is the failure mode this whole file exists to
-    // prevent. That fallback is the superuser, so leaving the variable unset
-    // keeps the very credential 0012 set out to retire: yavio_eraser is created
-    // with an unusable credential until a password is supplied, and
-    // migrate-clickhouse.ts warns when it takes that branch.
-    const eraserPassword = process.env.CLICKHOUSE_ERASER_PASSWORD;
     mutatingClient = createClickHouseClient(
-      eraserPassword
-        ? narrowedUrl(process.env.CLICKHOUSE_URL, ERASER_CH_USER, eraserPassword)
-        : process.env.CLICKHOUSE_URL,
+      narrowedUrl(process.env.CLICKHOUSE_URL, ERASER_CH_USER, requireEraserPassword()),
     );
   }
   return mutatingClient;

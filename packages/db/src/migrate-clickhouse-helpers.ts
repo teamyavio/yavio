@@ -52,10 +52,10 @@ export function splitStatements(sql: string): string[] {
 export const MANAGED_USERS = [
   { user: "yavio_ingest", envVar: "CLICKHOUSE_INGEST_PASSWORD", warnWhenUnset: false },
   { user: "yavio_dashboard", envVar: "CLICKHOUSE_DASHBOARD_PASSWORD", warnWhenUnset: false },
-  // Worth saying out loud: with no password the dashboard erases as the
-  // CLICKHOUSE_URL superuser, which is the arrangement migration 0012 exists to
-  // end. The other two are commonly left unset by deployments that share one
-  // password, so warning on those would be noise.
+  // Worth saying out loud: with no password the dashboard refuses to start
+  // (#91); it used to erase as the CLICKHOUSE_URL superuser, the arrangement
+  // migration 0012 exists to end. The other two are commonly left unset by
+  // deployments that share one password, so warning on those would be noise.
   { user: "yavio_eraser", envVar: "CLICKHOUSE_ERASER_PASSWORD", warnWhenUnset: true },
 ] as const;
 
