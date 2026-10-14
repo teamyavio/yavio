@@ -39,25 +39,29 @@ interface QueryContext {
  * agree. Aliases never shadow a column a WHERE refers to: ClickHouse resolves
  * the alias first.
  *
- * A windowed query stitches from the window it reads (#112): the mapping
+ * A windowed COUNT stitches from the window it reads (#112): the mapping
  * only has to cover the subject_ids that appear there, and a person seen as
  * subject and as user_id within the window is still one person. Without
  * the bound, every users-page query aggregated the whole project's events
  * before its own time filter applied — several times per page view, and
- * growing with the 13 months now kept. The all-time queries (the user list,
- * first seen, retention cohorts) keep the full mapping.
+ * growing with the 13 months now kept. Queries that name a person — the
+ * all-time list, first seen, retention cohorts, and the detail of one user
+ * — keep the full mapping, so the list and the detail agree on whose the
+ * subject-only events are.
  */
-interface Window {
+interface TimeWindow {
   /** SQL expressions; the window is [from, to). */
   from: string;
   to: string;
 }
 
-function keyedEvents(window?: Window): string {
-  const inWindow = window ? `AND timestamp >= ${window.from} AND timestamp < ${window.to}` : "";
-  const eInWindow = window
-    ? `AND e.timestamp >= ${window.from} AND e.timestamp < ${window.to}`
-    : "";
+const bound = (column: string, window?: TimeWindow): string =>
+  window ? `AND ${column} >= ${window.from} AND ${column} < ${window.to}` : "";
+
+function keyedEvents({
+  events,
+  stitch,
+}: { events?: TimeWindow; stitch?: TimeWindow } = {}): string {
   return `
       stitch AS (
         SELECT assumeNotNull(subject_id) AS stitched_subject,
@@ -66,7 +70,7 @@ function keyedEvents(window?: Window): string {
         WHERE project_id = {projectId:String}
           AND subject_id IS NOT NULL AND subject_id != ''
           AND user_id IS NOT NULL AND user_id != ''
-          ${inWindow}
+          ${bound("timestamp", stitch)}
         GROUP BY stitched_subject
       ),
       keyed AS (
@@ -74,7 +78,7 @@ function keyedEvents(window?: Window): string {
                coalesce(nullIf(e.user_id, ''), nullIf(s.mapped_user_id, ''), nullIf(e.subject_id, '')) AS user_key
         FROM events AS e
         LEFT JOIN stitch AS s ON s.stitched_subject = ifNull(e.subject_id, '')
-        WHERE e.project_id = {projectId:String} ${eInWindow}
+        WHERE e.project_id = {projectId:String} ${bound("e.timestamp", events)}
       )`;
 }
 
@@ -224,7 +228,7 @@ export async function queryActiveUsers(
   const query =
     granularity === "hour"
       ? `
-      WITH ${keyedEvents(window)},
+      WITH ${keyedEvents({ events: window, stitch: window })},
       act AS (
         SELECT DISTINCT user_key AS person, toStartOfHour(timestamp) AS active_hour
         FROM keyed WHERE user_key IS NOT NULL
@@ -245,7 +249,7 @@ export async function queryActiveUsers(
       ORDER BY bucket
     `
       : `
-      WITH ${keyedEvents(window)},
+      WITH ${keyedEvents({ events: window, stitch: window })},
       act AS (
         SELECT DISTINCT user_key AS person, toDate(timestamp) AS active_day
         FROM keyed WHERE user_key IS NOT NULL
@@ -327,7 +331,7 @@ export async function queryUserDetail(
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
-      WITH ${keyedEvents({ from: "{from:DateTime64(3)}", to: "{to:DateTime64(3)}" })}
+      WITH ${keyedEvents({ events: { from: "{from:DateTime64(3)}", to: "{to:DateTime64(3)}" } })}
       SELECT
         event_id AS eventId,
         event_type AS eventType,
