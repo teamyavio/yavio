@@ -25,6 +25,16 @@ vi.mock("@/lib/db", () => ({
   })),
 }));
 
+// The route also deletes accounts, through lib/erasure, whose worker loads
+// the real db client; mocked here like account-delete.test.ts does, so the
+// drizzle-orm mock below stays the only database this file knows.
+vi.mock("@/lib/erasure/requests", () => ({
+  deleteAccountWithErasure: vi.fn(),
+}));
+vi.mock("@/lib/erasure", () => ({
+  kickErasure: vi.fn(),
+}));
+
 vi.mock("drizzle-orm", () => ({
   eq: vi.fn(),
 }));
