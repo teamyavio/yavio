@@ -8,6 +8,7 @@ import {
   loginAttempts,
   projects,
   sessions,
+  stripeWebhookEvents,
   users,
   verificationTokens,
   workspaces,
@@ -130,6 +131,16 @@ describe.skipIf(!pgUrl)("HousekeepingJob (#92)", () => {
       .returning();
     gone.api_keys = [keys[0].id];
     kept.api_keys = ids(keys.slice(1));
+
+    const hooks = await db
+      .insert(stripeWebhookEvents)
+      .values([
+        { eventId: `evt_${randomUUID()}`, eventType: "invoice.paid", processedAt: ago(31 * DAY) },
+        { eventId: `evt_${randomUUID()}`, eventType: "invoice.paid", processedAt: ago(DAY) },
+      ])
+      .returning({ id: stripeWebhookEvents.eventId });
+    gone.stripe_webhook_events = [hooks[0].id];
+    kept.stripe_webhook_events = [hooks[1].id];
   });
 
   afterAll(async () => {
@@ -181,13 +192,19 @@ describe.skipIf(!pgUrl)("HousekeepingJob (#92)", () => {
       invitations,
       api_keys: apiKeys,
     } as const;
-    const present = async (table: keyof typeof tables) => {
-      const t = tables[table];
+    const present = async (table: keyof typeof tables | "stripe_webhook_events") => {
       const all = [...(gone[table] ?? []), ...(kept[table] ?? [])];
+      if (table === "stripe_webhook_events") {
+        const t = stripeWebhookEvents;
+        const rows = await db.select({ id: t.eventId }).from(t).where(inArray(t.eventId, all));
+        return ids(rows).sort();
+      }
+      const t = tables[table];
       return ids(await db.select({ id: t.id }).from(t).where(inArray(t.id, all))).sort();
     };
-    for (const table of Object.keys(tables) as (keyof typeof tables)[]) {
-      expect(await present(table), table).toEqual([...kept[table]].sort());
+    for (const table of [...Object.keys(tables), "stripe_webhook_events"] as const) {
+      const name = table as keyof typeof tables | "stripe_webhook_events";
+      expect(await present(name), name).toEqual([...kept[name]].sort());
     }
   });
 });

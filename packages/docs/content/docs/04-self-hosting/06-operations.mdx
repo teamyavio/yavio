@@ -18,6 +18,7 @@ The dashboard runs an hourly housekeeping job against Postgres. Only one dashboa
 | Email verification and password reset tokens | until used or expired |
 | Workspace invitations | until 1 day after they expire, accepted or not |
 | Revoked API keys | 1 year after revocation (audit trail) |
+| Processed Stripe webhook ids (idempotency only) | 30 days |
 | Expired OAuth codes and tokens, unused client registrations | days, see `pruneExpired` in the dashboard's OAuth store |
 
 Raw analytics events expire after 13 months, or sooner if a project's retention is set shorter in its settings. The daily statistics job deletes those events, so it must be running: set `CLICKHOUSE_ROLLUP_PASSWORD` (see [Configuration](/docs/04-self-hosting/02-configuration)).

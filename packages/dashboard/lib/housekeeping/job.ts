@@ -4,6 +4,7 @@ import {
   invitations,
   loginAttempts,
   sessions,
+  stripeWebhookEvents,
   verificationTokens,
 } from "@yavio/db/schema";
 import { and, isNotNull, lt, or, sql } from "drizzle-orm";
@@ -34,6 +35,7 @@ interface HousekeepingOptions {
  * - verification tokens used or past expiry (both already read as invalid);
  * - invitations a day past expiry, accepted or not (nothing reads accepted ones);
  * - API keys revoked more than a year ago (kept that long for the audit trail);
+ * - processed Stripe webhook ids after 30 days (idempotency records only);
  * - expired OAuth codes, tokens and unused client registrations (pruneExpired,
  *   which the token endpoint also runs opportunistically).
  *
@@ -100,6 +102,12 @@ export class HousekeepingJob {
               ),
             )
             .returning({ id: apiKeys.id }),
+        ),
+        stripe_webhook_events: await count(
+          tx
+            .delete(stripeWebhookEvents)
+            .where(lt(stripeWebhookEvents.processedAt, new Date(now.getTime() - 30 * DAY)))
+            .returning({ id: stripeWebhookEvents.eventId }),
         ),
       } satisfies HousekeepingReport;
     });
