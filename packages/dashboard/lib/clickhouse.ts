@@ -1,4 +1,4 @@
-import { createClickHouseClient } from "@yavio/db/clickhouse";
+import { LONG_RUNNING_REQUEST_TIMEOUT_MS, createClickHouseClient } from "@yavio/db/clickhouse";
 
 type ClickHouseClient = ReturnType<typeof createClickHouseClient>;
 
@@ -97,11 +97,17 @@ export function requireEraserPassword(): string {
  * silently failed with ACCESS_DENIED while the route still returned 200.
  * Splitting the clients is what makes that mistake impossible to repeat
  * silently: the read path cannot mutate, and the mutating path is explicit.
+ *
+ * The erasure worker's deletes wait for their mutation (mutations_sync = 1),
+ * minutes on a large events table. With the library's 30 s request timeout
+ * the client gave up while the mutation ran on, the worker retried a minute
+ * later, and every retry queued one more full-table mutation.
  */
 export function getMutatingClickHouseClient(): ClickHouseClient {
   if (!mutatingClient) {
     mutatingClient = createClickHouseClient(
       narrowedUrl(process.env.CLICKHOUSE_URL, ERASER_CH_USER, requireEraserPassword()),
+      { requestTimeoutMs: LONG_RUNNING_REQUEST_TIMEOUT_MS },
     );
   }
   return mutatingClient;

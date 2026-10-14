@@ -1,6 +1,8 @@
 import { getServerSession } from "@/lib/auth/get-session";
 import { checkWorkspaceAccess } from "@/lib/auth/workspace-access";
 import { getDb } from "@/lib/db";
+import { kickErasure } from "@/lib/erasure";
+import { deleteProjectWithErasure } from "@/lib/erasure/requests";
 import { updateProjectSchema } from "@/lib/project/validation";
 import { projects } from "@yavio/db/schema";
 import { ErrorCode } from "@yavio/shared/error-codes";
@@ -127,13 +129,9 @@ export async function DELETE(_request: Request, routeContext: RouteContext) {
     );
   }
 
-  const db = getDb();
-
-  // Delete project (cascades api keys via FK)
-  const [deleted] = await db
-    .delete(projects)
-    .where(and(eq(projects.id, auth.projectId), eq(projects.workspaceId, auth.workspaceId)))
-    .returning({ id: projects.id });
+  // Deletes the project (cascading its api keys) and queues the erasure of its
+  // ClickHouse data in one transaction; the erasure worker retries until done.
+  const deleted = await deleteProjectWithErasure(getDb(), auth.workspaceId, auth.projectId);
 
   if (!deleted) {
     return NextResponse.json(
@@ -142,22 +140,7 @@ export async function DELETE(_request: Request, routeContext: RouteContext) {
     );
   }
 
-  // Clean up ClickHouse data asynchronously
-  try {
-    const { getMutatingClickHouseClient } = await import("@/lib/clickhouse");
-    const ch = getMutatingClickHouseClient();
-    await ch.command({
-      query: "ALTER TABLE events DELETE WHERE project_id = {id:String}",
-      query_params: { id: auth.projectId },
-    });
-  } catch (err) {
-    // A failed erasure must never be invisible: the Postgres rows are already
-    // gone, so nothing else will ever point at these events again.
-    console.error(
-      `[erasure] ClickHouse cleanup FAILED for project ${auth.projectId} — events retained`,
-      err,
-    );
-  }
+  kickErasure();
 
   return NextResponse.json({ message: "Project deleted" });
 }

@@ -2,6 +2,8 @@ import { changePasswordSchema, updateProfileSchema } from "@/lib/account/validat
 import { getServerSession } from "@/lib/auth/get-session";
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
 import { getDb } from "@/lib/db";
+import { kickErasure } from "@/lib/erasure";
+import { deleteAccountWithErasure } from "@/lib/erasure/requests";
 import { users, workspaces } from "@yavio/db/schema";
 import { ErrorCode } from "@yavio/shared/error-codes";
 import { eq } from "drizzle-orm";
@@ -156,34 +158,12 @@ export async function DELETE(request: Request) {
     }
   }
 
-  // Get owned workspaces for ClickHouse cleanup
-  const ownedWorkspaces = await db
-    .select({ id: workspaces.id })
-    .from(workspaces)
-    .where(eq(workspaces.ownerId, session.userId));
-
-  // Delete user (cascades sessions, workspace memberships, oauth accounts)
-  // Owned workspaces cascade via foreign key
-  await db.delete(users).where(eq(users.id, session.userId));
-
-  // Clean up ClickHouse data for owned workspaces
-  try {
-    const { getMutatingClickHouseClient } = await import("@/lib/clickhouse");
-    const ch = getMutatingClickHouseClient();
-    for (const ws of ownedWorkspaces) {
-      await ch.command({
-        query: "ALTER TABLE events DELETE WHERE workspace_id = {id:String}",
-        query_params: { id: ws.id },
-      });
-    }
-  } catch (err) {
-    // A failed erasure must never be invisible: the Postgres rows are already
-    // gone, so nothing else will ever point at these events again.
-    console.error(
-      "[erasure] ClickHouse cleanup FAILED during account deletion — events retained",
-      err,
-    );
-  }
+  // Deletes the user (cascading sessions, memberships, oauth accounts), their
+  // owned workspaces and the invitations they sent, and queues the erasure of
+  // each owned workspace's ClickHouse data — in one transaction; the erasure
+  // worker retries until done.
+  await deleteAccountWithErasure(db, session.userId);
+  kickErasure();
 
   return NextResponse.json({ message: "Account deleted" });
 }

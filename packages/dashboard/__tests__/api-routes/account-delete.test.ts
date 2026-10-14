@@ -23,10 +23,15 @@ vi.mock("@/lib/db", () => ({
   })),
 }));
 
-vi.mock("@/lib/clickhouse", () => ({
-  getClickHouseClient: vi.fn(() => ({
-    command: vi.fn(),
-  })),
+// Deleting the account and queueing its ClickHouse erasure is one transaction
+// in lib/erasure/requests (#91 part 2), tested against Postgres there.
+const mockDeleteAccountWithErasure = vi.fn();
+const mockKickErasure = vi.fn();
+vi.mock("@/lib/erasure/requests", () => ({
+  deleteAccountWithErasure: (...args: unknown[]) => mockDeleteAccountWithErasure(...args),
+}));
+vi.mock("@/lib/erasure", () => ({
+  kickErasure: () => mockKickErasure(),
 }));
 
 vi.mock("drizzle-orm", () => ({
@@ -128,6 +133,7 @@ describe("DELETE /api/auth/account", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.message).toBe("Account deleted");
+    expect(mockDeleteAccountWithErasure).toHaveBeenCalledWith(expect.anything(), "u-1");
   });
 
   it("returns 400 when password is incorrect", async () => {
@@ -175,6 +181,22 @@ describe("DELETE /api/auth/account", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.message).toBe("Account deleted");
-    expect(mockDelete).toHaveBeenCalled();
+    expect(mockDeleteAccountWithErasure).toHaveBeenCalledWith(expect.anything(), "u-1");
+    expect(mockKickErasure).toHaveBeenCalledOnce();
+  });
+
+  it("does not delete or queue anything when the password is wrong", async () => {
+    mockGetSession.mockResolvedValue({ userId: "u-1", email: "t@t.com", name: null });
+    mockVerifyPassword.mockResolvedValue(false);
+    mockSelect.mockReturnValue({ from: mockSelectFrom });
+    mockSelectFrom.mockReturnValue({ where: mockSelectWhere });
+    mockSelectWhere.mockImplementation(() => ({
+      limit: vi.fn().mockResolvedValue([{ passwordHash: "hash123", email: "t@t.com" }]),
+    }));
+
+    const res = await DELETE(makeRequest({ password: "wrong" }));
+    expect(res.status).toBe(400);
+    expect(mockDeleteAccountWithErasure).not.toHaveBeenCalled();
+    expect(mockKickErasure).not.toHaveBeenCalled();
   });
 });

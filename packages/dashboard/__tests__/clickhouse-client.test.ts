@@ -3,10 +3,14 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const created: Array<string | undefined> = [];
+const createdWith: Array<unknown> = [];
+const LONG_TIMEOUT = 3_600_000;
 
 vi.mock("@yavio/db/clickhouse", () => ({
-  createClickHouseClient: (url?: string) => {
+  LONG_RUNNING_REQUEST_TIMEOUT_MS: LONG_TIMEOUT,
+  createClickHouseClient: (url?: string, options?: unknown) => {
     created.push(url);
+    createdWith.push(options);
     return {} as never;
   },
 }));
@@ -24,6 +28,7 @@ beforeEach(() => {
   saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   for (const k of ENV_KEYS) Reflect.deleteProperty(process.env, k);
   created.length = 0;
+  createdWith.length = 0;
   vi.resetModules();
 });
 
@@ -75,6 +80,8 @@ describe("mutating client — yavio_eraser only, never the superuser (#91)", () 
     expect(url.password).toBe("eraser-secret");
     expect(url.hostname).toBe("clickhouse");
     expect(url.port).toBe("8123");
+    // Its deletes wait for their mutation; the 30 s default gave up on them.
+    expect(createdWith[0]).toEqual({ requestTimeoutMs: LONG_TIMEOUT });
   });
 
   it("refuses to create a client without the eraser password instead of falling back", async () => {
@@ -96,29 +103,38 @@ describe("mutating client — yavio_eraser only, never the superuser (#91)", () 
     const [readUrl, mutateUrl] = created;
     expect(new URL(readUrl as string).username).toBe("yavio_dashboard");
     expect(new URL(mutateUrl as string).username).toBe("yavio_eraser");
+    expect(createdWith[0]).toBeUndefined(); // the read path keeps the default timeout
   });
 });
 
-describe("erasure routes wire to the mutating client", () => {
-  // These routes reach the module through a DYNAMIC import
-  // (`await import("@/lib/clickhouse")`), so a static grep for
-  // `from "@/lib/clickhouse"` does not find them — which is exactly how the
-  // regression shipped. Assert the wiring at the source level so the next
-  // person cannot repeat it.
-  const ROUTES = [
-    "app/api/auth/account/route.ts",
-    "app/api/workspaces/[workspaceId]/route.ts",
-    "app/api/workspaces/[workspaceId]/projects/[projectId]/route.ts",
+describe("erasure is queued by the routes and done by the worker (#91 part 2)", () => {
+  // The routes used to run ALTER TABLE events DELETE themselves, after the
+  // Postgres rows were gone, inside a catch that logged and returned 200. Now
+  // they delete and queue in one transaction (lib/erasure/requests) and kick
+  // the worker, which alone talks to ClickHouse — as yavio_eraser. Assert the
+  // wiring at the source level, so the next person cannot quietly go back to
+  // erasing in the route or with the read-only client.
+  const ROUTES: Array<[string, string]> = [
+    ["app/api/auth/account/route.ts", "deleteAccountWithErasure"],
+    ["app/api/workspaces/[workspaceId]/route.ts", "deleteWorkspaceWithErasure"],
+    ["app/api/workspaces/[workspaceId]/projects/[projectId]/route.ts", "deleteProjectWithErasure"],
   ];
 
-  for (const rel of ROUTES) {
-    it(`${rel} uses the mutating client, not the read-only one`, () => {
+  for (const [rel, fn] of ROUTES) {
+    it(`${rel} deletes through ${fn} and kicks the worker`, () => {
       const src = readFileSync(join(process.cwd(), rel), "utf8");
-      expect(src).toContain("ALTER TABLE events DELETE");
-      expect(src).toContain("getMutatingClickHouseClient");
-      // The read-only accessor must not appear at all — matching on the exact
-      // identifier, since getMutatingClickHouseClient does not contain it.
-      expect(src).not.toMatch(/\bgetClickHouseClient\b/);
+      expect(src).toContain(fn);
+      expect(src).toContain("kickErasure()");
+      expect(src).not.toMatch(/ALTER TABLE/);
+      expect(src).not.toMatch(/\bgetClickHouseClient\b|getMutatingClickHouseClient/);
     });
   }
+
+  it("the worker erases with the mutating client, never the read-only one", () => {
+    const index = readFileSync(join(process.cwd(), "lib/erasure/index.ts"), "utf8");
+    expect(index).toContain("clickhouse: getMutatingClickHouseClient");
+    expect(index).not.toMatch(/\bgetClickHouseClient\b/);
+    const worker = readFileSync(join(process.cwd(), "lib/erasure/worker.ts"), "utf8");
+    expect(worker).toContain("ALTER TABLE ${table} DELETE WHERE");
+  });
 });
