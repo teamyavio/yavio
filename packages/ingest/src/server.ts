@@ -77,10 +77,11 @@ async function main() {
     statsJob.start();
   } else {
     // Loud on purpose: without the job, raw events expire after 13 months and
-    // nothing of them is kept.
+    // nothing of them is kept — and a project's shorter retention (#93),
+    // which the job applies, is not applied at all.
     app.log.error(
       { variable: "CLICKHOUSE_ROLLUP_PASSWORD" },
-      "Statistics job disabled: CLICKHOUSE_ROLLUP_PASSWORD is not set. Raw events expire after 13 months without anonymous statistics being kept.",
+      "Statistics job disabled: CLICKHOUSE_ROLLUP_PASSWORD is not set. Raw events expire after 13 months without anonymous statistics being kept, and shorter per-project retention settings are NOT applied.",
     );
   }
 

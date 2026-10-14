@@ -44,6 +44,26 @@ describe("PostgreSQL migrations", () => {
     });
   });
 
+  describe("projects.retention_months (#93)", () => {
+    it("defaults to the platform window of 13 months", async () => {
+      const { sql } = getServiceDb();
+      const [row] = await sql`
+        SELECT column_default, is_nullable FROM information_schema.columns
+        WHERE table_name = 'projects' AND column_name = 'retention_months'
+      `;
+      expect(row).toEqual({ column_default: "13", is_nullable: "NO" });
+    });
+
+    it.each([1, 14, 0, -1])("rejects %i months", async (months) => {
+      const { sql } = getServiceDb();
+      // CHECK runs before the foreign key (a trigger), so no workspace needed.
+      await expect(
+        sql`INSERT INTO projects (workspace_id, name, slug, retention_months)
+            VALUES (gen_random_uuid(), 'x', 'x', ${months})`,
+      ).rejects.toThrow(/projects_retention_months_range/);
+    });
+  });
+
   describe("job and queue tables are for yavio_api, not yavio_app (#85, #91)", () => {
     it.each(["stats_job_runs", "erasure_requests"])("%s", async (table) => {
       const { sql } = getServiceDb();

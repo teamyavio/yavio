@@ -22,6 +22,8 @@
  * as a person.
  */
 
+import { addMonths } from "./months.js";
+
 /** Months are passed as their first day (YYYY-MM-01). */
 export interface MonthWindow {
   /** First day of the month. */
@@ -35,6 +37,9 @@ export interface MonthWindow {
    * begins before it cannot be counted from what is kept.
    */
   dataStart: string;
+  /** Projects keeping less than the platform window, and their floors (#93). */
+  floorProjects: string[];
+  floorDates: string[];
 }
 
 /** Below this many distinct individuals a free-text event_name is not admitted (see stats_daily). */
@@ -43,6 +48,16 @@ export const VOCAB_MIN_INDIVIDUALS = 5;
 export const VOCAB_TOP_N = 50;
 /** client_name is trimmed and cut to this length. */
 export const CLIENT_NAME_MAX = 64;
+
+/**
+ * The project's retention floor for the month being computed (#93), or
+ * 1970-01-01 for a project at the platform window (indexOf finds nothing and
+ * element 0 of a constant array is the default value).
+ */
+const FLOOR = (projectId: string) =>
+  `{floorDates:Array(Date)}[indexOf({floorProjects:Array(String)}, ${projectId})]`;
+/** Same expression as the TTL and the retention delete. */
+const COLLECTED = "toDate(least(toDateTime(timestamp), toDateTime(ingested_at)))";
 
 function prelude(from: string, to: string): string {
   return `
@@ -53,12 +68,14 @@ function prelude(from: string, to: string): string {
     WHERE project_id IN {projects:Array(String)}
       AND subject_id IS NOT NULL AND subject_id != ''
       AND user_id IS NOT NULL AND user_id != ''
+      AND ${COLLECTED} >= ${FLOOR("project_id")}
     GROUP BY project_id, stitched_subject
   ),
   base AS (
     SELECT * FROM events FINAL
     WHERE project_id IN {projects:Array(String)}
       AND timestamp >= ${from} AND timestamp < ${to}
+      AND ${COLLECTED} >= ${FLOOR("project_id")}
     LIMIT 1 BY event_id
   ),
   keyed AS (
@@ -188,11 +205,12 @@ GROUP BY workspace_id, project_id, day`;
  * stats_users_periods: distinct users per calendar week (from Monday),
  * month, quarter and year, for the periods that END in this month and have
  * closed. Reads 12 months before the month, which covers a whole year.
- * A period that begins before the stored data starts is left out: its
- * distinct users cannot be counted from what is kept, and a month's figures
- * are never recomputed once its raw data is gone. Without this, the first
- * run after the TTL grew from 90 days to 13 months (0013) froze a year and
- * a quarter counted from a few months of events.
+ * A period that begins before the stored data starts, or before the
+ * project's retention floor, is left out: its distinct users cannot be
+ * counted from what is kept, and a month's figures are never recomputed once
+ * its raw data is gone. Without the former, the first run after the TTL grew
+ * from 90 days to 13 months (0013) froze a year and a quarter counted from a
+ * few months of events.
  */
 export function statsUsersPeriodsInsert(stage: string): string {
   return `
@@ -219,14 +237,16 @@ FROM periods
 WHERE period_end >= {monthStart:Date} AND period_end < {nextMonthStart:Date}
   AND period_end < {today:Date}
   AND period_start >= {dataStart:Date}
+  AND period_start >= ${FLOOR("project_id")}
 GROUP BY workspace_id, project_id, period, period_start, period_end`;
 }
 
 /**
  * stats_cohorts: users active in this month, by the month they were first
  * seen (offset 0-12). "First seen" is the earliest event still stored, so
- * only cohorts after the month the stored data starts in: someone first seen
- * IN that month may have been seen before it.
+ * only cohorts after the month the stored data starts in — and, below the
+ * platform window, after the project's floor month: someone first seen IN
+ * that month may have been seen before it.
  */
 export function statsCohortsInsert(stage: string): string {
   return `
@@ -251,6 +271,7 @@ FROM active AS a
 INNER JOIN first_seen AS f ON f.project_id = a.project_id AND f.person = a.person
 WHERE dateDiff('month', f.cohort_month, {monthStart:Date}) BETWEEN 0 AND 12
   AND f.cohort_month > toStartOfMonth({dataStart:Date})
+  AND f.cohort_month > ${FLOOR("a.project_id")}
 GROUP BY workspace_id, project_id, cohort_month, month_offset`;
 }
 
@@ -265,3 +286,66 @@ SELECT toString(toStartOfMonth(min(timestamp))) AS month,
        count() AS n
 FROM events
 WHERE project_id IN {projects:Array(String)}`;
+
+/** The platform window; projects at this value need no extra delete. */
+export const PLATFORM_RETENTION_MONTHS = 13;
+
+/**
+ * Retention floors for one month (#93): for each project keeping R < 13
+ * months, the first day of month M + 2 - R. The statistics of month M read
+ * only events collected on or after it.
+ *
+ * Why that day: month M is recomputed at the latest on the last day of M + 1
+ * (as the previous month; a catch-up only reaches months since the last
+ * success, and a delete only follows a successful run). Every delete before
+ * then cut at most start(M + 2) - R months — so everything from the floor on
+ * is still there at every recompute of M, and every recompute reads exactly
+ * the same rows. Without it, the measures that look back (WAU/MAU, quarter
+ * and year users, cohort first-seen) drifted day by day as the delete took
+ * their older events.
+ */
+export function retentionFloors(
+  projects: ReadonlyArray<{ id: string; retentionMonths: number }>,
+  month: string,
+): { floorProjects: string[]; floorDates: string[] } {
+  const short = projects.filter((p) => p.retentionMonths < PLATFORM_RETENTION_MONTHS);
+  return {
+    floorProjects: short.map((p) => p.id),
+    floorDates: short.map((p) => addMonths(month, 2 - p.retentionMonths)),
+  };
+}
+
+/**
+ * Per-project retention (#93): ONE statement for every project that keeps
+ * less than the platform window — each ALTER TABLE ... DELETE is a separate
+ * mutation, so one per project would pile them up. Projects are grouped by
+ * their retention; each group is one OR branch with its own parameters.
+ * Counted like the TTL (0013): from the earlier of timestamp and ingested_at.
+ * Returns null when no project needs it.
+ */
+export function retentionDelete(
+  projects: ReadonlyArray<{ id: string; retentionMonths: number }>,
+  now: Date,
+): { query: string; params: Record<string, unknown> } | null {
+  const groups = new Map<number, string[]>();
+  for (const p of projects) {
+    if (p.retentionMonths >= PLATFORM_RETENTION_MONTHS) continue;
+    groups.set(p.retentionMonths, [...(groups.get(p.retentionMonths) ?? []), p.id]);
+  }
+  if (groups.size === 0) return null;
+  // The job's clock, not ClickHouse's: one notion of "now" per run.
+  const params: Record<string, unknown> = {
+    now: now.toISOString().replace("T", " ").slice(0, 19),
+  };
+  const branches = [...groups.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([months, ids], i) => {
+      params[`ids${i}`] = ids;
+      params[`months${i}`] = months;
+      return `(project_id IN {ids${i}:Array(String)} AND least(toDateTime(timestamp), toDateTime(ingested_at)) < toDateTime({now:String}, 'UTC') - toIntervalMonth({months${i}:UInt8}))`;
+    });
+  return {
+    query: `ALTER TABLE events DELETE WHERE ${branches.join(" OR ")} SETTINGS mutations_sync = 1`,
+    params,
+  };
+}

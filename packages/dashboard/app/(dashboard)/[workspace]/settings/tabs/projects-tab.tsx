@@ -20,6 +20,13 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -31,6 +38,8 @@ import {
 } from "@/components/ui/table";
 import {
   type CreateProjectInput,
+  RETENTION_MONTHS_MAX,
+  RETENTION_MONTHS_MIN,
   type UpdateProjectInput,
   createProjectSchema,
   updateProjectSchema,
@@ -51,7 +60,17 @@ interface Project {
   id: string;
   name: string;
   slug: string;
+  retentionMonths: number;
   createdAt: string;
+}
+
+const RETENTION_OPTIONS = Array.from(
+  { length: RETENTION_MONTHS_MAX - RETENTION_MONTHS_MIN + 1 },
+  (_, i) => RETENTION_MONTHS_MAX - i,
+);
+
+function retentionLabel(months: number): string {
+  return months === RETENTION_MONTHS_MAX ? `${months} months (default)` : `${months} months`;
 }
 
 const fetcher = (url: string) =>
@@ -108,6 +127,7 @@ export function ProjectsTab({ workspaceId, workspaceSlug }: ProjectsTabProps) {
                 <TableRow>
                   <TableHead>Name</TableHead>
                   <TableHead>Slug</TableHead>
+                  <TableHead>Retention</TableHead>
                   <TableHead>Created</TableHead>
                   <TableHead className="w-10" />
                 </TableRow>
@@ -119,6 +139,7 @@ export function ProjectsTab({ workspaceId, workspaceSlug }: ProjectsTabProps) {
                     <TableCell className="font-mono text-sm text-muted-foreground">
                       {project.slug}
                     </TableCell>
+                    <TableCell>{retentionLabel(project.retentionMonths)}</TableCell>
                     <TableCell>{new Date(project.createdAt).toLocaleDateString()}</TableCell>
                     <TableCell>
                       <DropdownMenu>
@@ -144,7 +165,7 @@ export function ProjectsTab({ workspaceId, workspaceSlug }: ProjectsTabProps) {
                 ))}
                 {projects.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={4} className="text-center text-muted-foreground">
+                    <TableCell colSpan={5} className="text-center text-muted-foreground">
                       No projects yet.
                     </TableCell>
                   </TableRow>
@@ -283,14 +304,18 @@ function EditProjectDialog({
   const {
     register,
     handleSubmit,
+    watch,
+    setValue,
     formState: { errors, isSubmitting },
   } = useForm<UpdateProjectInput>({
     resolver: zodResolver(updateProjectSchema),
     defaultValues: {
       name: project.name,
       slug: project.slug,
+      retentionMonths: project.retentionMonths,
     },
   });
+  const retention = watch("retentionMonths") ?? project.retentionMonths;
 
   async function onSubmit(data: UpdateProjectInput) {
     setError("");
@@ -315,7 +340,7 @@ function EditProjectDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Edit Project</DialogTitle>
-          <DialogDescription>Update the project name and slug.</DialogDescription>
+          <DialogDescription>Update the project name, slug and data retention.</DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           {error && (
@@ -330,6 +355,37 @@ function EditProjectDialog({
             <Label htmlFor="edit-proj-slug">Slug</Label>
             <Input id="edit-proj-slug" {...register("slug")} />
             {errors.slug && <p className="text-sm text-destructive">{errors.slug.message}</p>}
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="edit-proj-retention">Data retention</Label>
+            <Select
+              value={String(retention)}
+              onValueChange={(v) => setValue("retentionMonths", Number(v), { shouldDirty: true })}
+            >
+              <SelectTrigger id="edit-proj-retention">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {RETENTION_OPTIONS.map((m) => (
+                  <SelectItem key={m} value={String(m)}>
+                    {retentionLabel(m)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-sm text-muted-foreground">
+              Raw events older than this are deleted once a day. Anonymous aggregated statistics are
+              kept.
+            </p>
+            {retention < project.retentionMonths && (
+              <p className="text-sm text-destructive">
+                Events older than {retention} months will be permanently deleted at the next daily
+                run. This cannot be undone.
+              </p>
+            )}
+            {errors.retentionMonths && (
+              <p className="text-sm text-destructive">{errors.retentionMonths.message}</p>
+            )}
           </div>
           <DialogFooter>
             <Button type="submit" disabled={isSubmitting}>

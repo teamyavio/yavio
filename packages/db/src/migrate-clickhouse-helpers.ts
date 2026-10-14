@@ -62,13 +62,14 @@ export const MANAGED_USERS = [
     unsetWarning:
       "the dashboard will refuse to start until it is, because it erases data only as yavio_eraser.",
   },
-  // Without it ingest's statistics job (#85) cannot run, and raw events
-  // expire after 13 months without anonymous statistics being kept.
+  // Without it ingest's statistics job (#85) cannot run: raw events expire
+  // after 13 months without anonymous statistics being kept, and shorter
+  // per-project retention (#93), which the job applies, is not applied.
   {
     user: "yavio_rollup",
     envVar: "CLICKHOUSE_ROLLUP_PASSWORD",
     unsetWarning:
-      "ingest's statistics job stays disabled, and raw events expire after 13 months without anonymous statistics being kept.",
+      "ingest's statistics job stays disabled: raw events expire after 13 months without anonymous statistics being kept, and shorter per-project retention settings are not applied.",
   },
 ] as const;
 

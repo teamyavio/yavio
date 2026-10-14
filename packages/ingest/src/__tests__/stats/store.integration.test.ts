@@ -112,12 +112,12 @@ describe.skipIf(!url)("PgStatsJobStore", () => {
       .values({ workspaceId: ws.id, name: "P", slug: "p" })
       .returning();
     try {
-      const ids = await new PgStatsJobStore(db).withLock((s) => s.listProjectIds());
-      expect(ids).toContain(project.id);
+      const listed = await new PgStatsJobStore(db).withLock((s) => s.listProjects());
+      expect(listed).toContainEqual({ id: project.id, retentionMonths: 13 });
 
       await db.delete(projects).where(eq(projects.id, project.id));
-      const after = await new PgStatsJobStore(db).withLock((s) => s.listProjectIds());
-      expect(after).not.toContain(project.id);
+      const after = await new PgStatsJobStore(db).withLock((s) => s.listProjects());
+      expect((after ?? []).map((p) => p.id)).not.toContain(project.id);
     } finally {
       await db.delete(workspaces).where(eq(workspaces.id, ws.id));
       await db.delete(users).where(eq(users.id, user.id));

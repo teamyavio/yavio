@@ -6,6 +6,8 @@ import {
   EARLIEST_MONTH,
   VOCAB_MIN_INDIVIDUALS,
   VOCAB_TOP_N,
+  retentionDelete,
+  retentionFloors,
   statsCohortsInsert,
   statsDailyInsert,
   statsUsersDailyInsert,
@@ -45,8 +47,18 @@ export interface TableReport {
   error?: string;
 }
 
+/** Run-state key of the per-project retention delete (#93). */
+export const RETENTION_JOB = "retention_delete";
+
+export interface RetentionReport {
+  status: "done" | "skipped" | "failed" | "not-needed";
+  /** Projects keeping less than the platform window. */
+  projects: number;
+  error?: string;
+}
+
 /** Outcome of one run; null means another instance held the lock. */
-export type RunReport = { tables: TableReport[] } | null;
+export type RunReport = { tables: TableReport[]; retention: RetentionReport } | null;
 
 /**
  * The anonymous-statistics job (#85, step 3).
@@ -61,6 +73,11 @@ export type RunReport = { tables: TableReport[] } | null;
  * That is atomic and idempotent: a failed or repeated run leaves either the
  * old or the new month, never a mix. Projects that no longer exist in
  * Postgres are skipped, so the job cannot resurrect deleted data.
+ *
+ * Afterwards, if every table succeeded, it applies per-project retention
+ * (#93): one delete for all projects keeping less than 13 months. Their
+ * statistics read only from a fixed floor per month (retentionFloors), so the
+ * delete never changes a month the job still recomputes.
  */
 export class StatsJob {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -98,14 +115,19 @@ export class StatsJob {
     }
   }
 
-  private async run(session: StatsJobSession, now: Date): Promise<{ tables: TableReport[] }> {
+  private async run(
+    session: StatsJobSession,
+    now: Date,
+  ): Promise<{ tables: TableReport[]; retention: RetentionReport }> {
     const { logger } = this.options;
-    const projects = await session.listProjectIds();
+    const projectRetention = await session.listProjects();
+    const projects = projectRetention.map((p) => p.id);
     if (projects.length === 0) {
       // Nothing to compute — and replacing partitions with an empty result
       // would erase statistics, so do not mark anything as done.
       return {
         tables: STATS_TABLES.map((t) => ({ table: t.table, months: [], status: "skipped" })),
+        retention: { status: "skipped", projects: 0 },
       };
     }
     const { earliest, dataStart } = await this.dataRange(projects);
@@ -120,7 +142,7 @@ export class StatsJob {
       const months = monthsToProcess(lastSuccess, now, earliest);
       try {
         for (const month of months) {
-          await this.rollupMonth(table, insert, month, projects, dataStart, now);
+          await this.rollupMonth(table, insert, month, projectRetention, dataStart, now);
         }
         await session.recordSuccess(table, now);
         tables.push({ table, months, status: "done" });
@@ -132,14 +154,55 @@ export class StatsJob {
         logger.error({ table, months, err }, "Statistics job failed for a table");
       }
     }
-    return { tables };
+    const retention = await this.applyRetention(session, projectRetention, tables, now);
+    return { tables, retention };
+  }
+
+  /**
+   * Per-project retention (#93), once a day and only after every stats table
+   * has been aggregated today — so a month is always aggregated, catch-up
+   * included, before any of its raw events are deleted. A run with a failed
+   * table deletes nothing; the next one tries again.
+   */
+  private async applyRetention(
+    session: StatsJobSession,
+    projectRetention: ReadonlyArray<{ id: string; retentionMonths: number }>,
+    tables: TableReport[],
+    now: Date,
+  ): Promise<RetentionReport> {
+    const statement = retentionDelete(projectRetention, now);
+    const affected = projectRetention.filter((p) => p.retentionMonths < 13).length;
+    if (tables.some((t) => t.status === "failed")) {
+      return { status: "skipped", projects: affected, error: "aggregation failed in this run" };
+    }
+    if (ranToday(await session.getLastSuccess(RETENTION_JOB), now)) {
+      return { status: "skipped", projects: affected };
+    }
+    try {
+      if (statement) {
+        await this.options.clickhouse.command({
+          query: statement.query,
+          query_params: statement.params,
+        });
+      }
+      await session.recordSuccess(RETENTION_JOB, now);
+      if (statement) {
+        this.options.logger.info({ projects: affected }, "Per-project retention applied");
+      }
+      return { status: statement ? "done" : "not-needed", projects: affected };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await session.recordFailure(RETENTION_JOB, now, message.slice(0, 2_000));
+      this.options.logger.error({ err }, "Per-project retention delete failed");
+      return { status: "failed", projects: affected, error: message };
+    }
   }
 
   private async rollupMonth(
     table: string,
     insert: (stage: string) => string,
     month: string,
-    projects: string[],
+    projectRetention: ReadonlyArray<{ id: string; retentionMonths: number }>,
     dataStart: string,
     now: Date,
   ): Promise<void> {
@@ -149,7 +212,8 @@ export class StatsJob {
     await ch.command({
       query: insert(stage),
       query_params: {
-        projects,
+        projects: projectRetention.map((p) => p.id),
+        ...retentionFloors(projectRetention, month),
         platforms: [...platformValues],
         vocabMinIndividuals: VOCAB_MIN_INDIVIDUALS,
         vocabTopN: VOCAB_TOP_N,

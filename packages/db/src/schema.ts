@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   index,
   inet,
   integer,
@@ -163,12 +164,21 @@ export const projects = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     slug: text("slug").notNull(),
+    /**
+     * Months raw events are kept for this project (#93): 2-13, default 13 =
+     * the platform window. Ingest's statistics job deletes older events
+     * daily, after aggregating them. Never below 2: the job recomputes the
+     * previous month every day, so a shorter window would thin a month it
+     * still recomputes.
+     */
+    retentionMonths: integer("retention_months").notNull().default(13),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
   },
   (table) => [
     uniqueIndex("projects_workspace_slug_unique").on(table.workspaceId, table.slug),
     index("idx_projects_workspace").on(table.workspaceId),
+    check("projects_retention_months_range", sql`${table.retentionMonths} BETWEEN 2 AND 13`),
   ],
 );
 
