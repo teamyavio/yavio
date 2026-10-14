@@ -1,8 +1,9 @@
 name: CI
 
 on:
+  # Every PR, including stacked ones whose base is another PR's branch;
+  # with a base filter of main those ran no CI at all.
   pull_request:
-    branches: [main]
   push:
     branches: [main]
 

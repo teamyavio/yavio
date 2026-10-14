@@ -86,6 +86,33 @@ Example — run the dashboard on port 8080:
 DASHBOARD_PORT=8080 docker compose up -d
 ```
 
+`BIND_ADDRESS` (default `0.0.0.0`) is the host address the dashboard, ingest and docs ports are published on. The databases are always bound to `127.0.0.1`.
+
+## Behind a Reverse Proxy
+
+When a reverse proxy on the same host (Caddy, nginx, Traefik) terminates TLS and forwards to the published ports, set:
+
+```bash
+BIND_ADDRESS=127.0.0.1                 # only the proxy can reach the ports
+TRUST_PROXY=172.30.240.1,172.30.241.1  # see below
+```
+
+and start with the proxy override, which pins the Docker networks' subnets:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d
+```
+
+**Why `TRUST_PROXY`.** Ingest limits requests that don't authenticate per client address, and logs no addresses at all. Behind a proxy, every request arrives from the proxy, so without `TRUST_PROXY` all clients share one address. With it, ingest takes the client address from `X-Forwarded-For`, but only for requests whose direct peer is listed.
+
+**Which address to list.** Not `127.0.0.1`: the proxy connects to a published port, and Docker's port forwarding hands the connection to the container from the **gateway of one of the container's networks**. Ingest is on two networks and Docker picks one, so list both gateways. `docker-compose.proxy.yml` pins them to `172.30.240.1` and `172.30.241.1` (override with `FRONTEND_SUBNET`/`FRONTEND_GATEWAY` and `BACKEND_SUBNET`/`BACKEND_GATEWAY`). Without pinning, the gateway could change whenever the networks are recreated.
+
+`TRUST_PROXY` takes IP addresses and CIDR ranges only. `true`, `*` and named ranges are rejected at startup: if ingest is reachable other than through the proxy, trusting everyone lets any client pick its own address.
+
+<Callout type="info">
+  Switching an existing deployment to `docker-compose.proxy.yml` recreates its networks. Run `docker compose down` first; volumes are kept.
+</Callout>
+
 ## Dashboard Settings
 
 | Variable | Default | Description |

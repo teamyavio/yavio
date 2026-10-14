@@ -2,7 +2,10 @@
  * Token bucket rate limiter.
  *
  * Per-API-key: 1,000 events/sec, 5,000 burst capacity.
- * Per-IP (unauthenticated): 10 req/sec.
+ * Per-IP, two separate buckets of 10 req/sec, burst 20 (plugins/rate-limit.ts):
+ *   - requests that carry no credential at all;
+ *   - requests that carry one and fail authentication.
+ * Authenticated traffic is bounded by the per-key bucket instead (#94).
  */
 
 interface TokenBucket {
@@ -34,6 +37,7 @@ const DEFAULT_IP_CONFIG: RateLimiterConfig = {
 export class RateLimiter {
   private readonly apiKeyBuckets = new Map<string, TokenBucket>();
   private readonly ipBuckets = new Map<string, TokenBucket>();
+  private readonly authFailureBuckets = new Map<string, TokenBucket>();
   private readonly apiKeyConfig: RateLimiterConfig;
   private readonly ipConfig: RateLimiterConfig;
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
@@ -82,6 +86,34 @@ export class RateLimiter {
     return this.consume(this.ipBuckets, ip, this.ipConfig, 1);
   }
 
+  /**
+   * Charge an address for a request that carried a credential and failed to
+   * authenticate. Separate from consumeIp, so credential-less traffic (scanners)
+   * can never throttle authenticated clients sharing that address.
+   */
+  consumeAuthFailure(ip: string): { allowed: true } | { allowed: false; retryAfterMs: number } {
+    return this.consume(this.authFailureBuckets, ip, this.ipConfig, 1);
+  }
+
+  /**
+   * Whether the address still has auth-failure budget, without consuming it.
+   * Credentialed requests are refused only once this is exhausted.
+   */
+  peekAuthFailure(ip: string): { allowed: true } | { allowed: false; retryAfterMs: number } {
+    const bucket = this.authFailureBuckets.get(ip);
+    if (!bucket) return { allowed: true };
+    const elapsed = (Date.now() - bucket.lastRefill) / 1000;
+    const tokens = Math.min(
+      this.ipConfig.burstCapacity,
+      bucket.tokens + elapsed * this.ipConfig.ratePerSecond,
+    );
+    if (tokens >= 1) return { allowed: true };
+    return {
+      allowed: false,
+      retryAfterMs: Math.ceil(((1 - tokens) / this.ipConfig.ratePerSecond) * 1000),
+    };
+  }
+
   private consume(
     buckets: Map<string, TokenBucket>,
     key: string,
@@ -119,9 +151,11 @@ export class RateLimiter {
         this.apiKeyBuckets.delete(key);
       }
     }
-    for (const [key, bucket] of this.ipBuckets) {
-      if (now - bucket.lastRefill > this.staleAfterMs) {
-        this.ipBuckets.delete(key);
+    for (const buckets of [this.ipBuckets, this.authFailureBuckets]) {
+      for (const [key, bucket] of buckets) {
+        if (now - bucket.lastRefill > this.staleAfterMs) {
+          buckets.delete(key);
+        }
       }
     }
   }
@@ -132,5 +166,9 @@ export class RateLimiter {
 
   get ipBucketCount(): number {
     return this.ipBuckets.size;
+  }
+
+  get authFailureBucketCount(): number {
+    return this.authFailureBuckets.size;
   }
 }

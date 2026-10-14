@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { ErrorCode, YavioError } from "@yavio/shared/errors";
 
 export interface AppConfig {
@@ -6,6 +7,8 @@ export interface AppConfig {
   clickhouseUrl: string;
   apiKeyHashSecret: string;
   jwtSecret: string;
+  /** Proxy addresses whose X-Forwarded-For is trusted (TRUST_PROXY); empty = none. */
+  trustProxy: string[];
 }
 
 /** The least-privileged ClickHouse user ingest can do its job as. */
@@ -39,6 +42,38 @@ function withIngestUser(url: string): string {
   } catch {
     return url;
   }
+}
+
+/**
+ * TRUST_PROXY: comma-separated IP addresses or CIDR ranges of the reverse
+ * proxy in front of ingest (#94). Only requests whose socket peer matches have
+ * their X-Forwarded-For honoured; everything else keeps its socket address.
+ *
+ * Deliberately no `true`, `*` or named ranges: if ingest's port is reachable
+ * other than through the proxy, trusting everyone lets any client pick its own
+ * address — a fresh rate-limit bucket per request and a forged IP in the logs.
+ */
+export function parseTrustProxy(raw: string | undefined): string[] {
+  if (raw === undefined || raw.trim() === "") return [];
+  const entries = raw
+    .split(",")
+    .map((e) => e.trim())
+    .filter((e) => e !== "");
+  for (const entry of entries) {
+    const [address, prefix, ...rest] = entry.split("/");
+    const family = isIP(address);
+    const max = family === 4 ? 32 : 128;
+    const prefixOk = prefix === undefined || (/^\d+$/.test(prefix) && Number(prefix) <= max);
+    if (family === 0 || rest.length > 0 || !prefixOk) {
+      throw new YavioError(
+        ErrorCode.INFRA.INVALID_ENV_VAR,
+        `TRUST_PROXY entry "${entry}" is not an IP address or CIDR range. List the proxy's address(es) explicitly, e.g. TRUST_PROXY=172.30.240.1,172.30.241.1`,
+        500,
+        { variable: "TRUST_PROXY" },
+      );
+    }
+  }
+  return entries;
 }
 
 export function loadConfig(): AppConfig {
@@ -83,5 +118,7 @@ export function loadConfig(): AppConfig {
     });
   }
 
-  return { port, databaseUrl, clickhouseUrl, apiKeyHashSecret, jwtSecret };
+  const trustProxy = parseTrustProxy(process.env.TRUST_PROXY);
+
+  return { port, databaseUrl, clickhouseUrl, apiKeyHashSecret, jwtSecret, trustProxy };
 }

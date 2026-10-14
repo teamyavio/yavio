@@ -1,0 +1,33 @@
+# For deployments where a reverse proxy on the host (Caddy, nginx, Traefik)
+# terminates TLS and forwards to the published ports (#94):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d
+#
+# with, in .env:
+#   BIND_ADDRESS=127.0.0.1                 # only the proxy can reach the ports
+#   TRUST_PROXY=172.30.240.1,172.30.241.1  # the two gateways below
+#
+# Why the gateways: the proxy connects to a published port on the host, and
+# Docker's port forwarding hands that connection to the container from the
+# gateway of one of the container's networks. Ingest is on two networks and
+# Docker picks which one by its own ordering, so both gateways are trusted.
+# Only processes on the host can originate from them.
+#
+# Why pinned: Docker assigns a subnet when it creates a network, so without a
+# fixed one the gateway — the trusted address — can change after
+# `docker compose down`. Pick other ranges with FRONTEND_SUBNET/BACKEND_SUBNET
+# (and their gateways) if these collide with something on your host.
+#
+# Switching an existing deployment to pinned subnets recreates the networks:
+# run `docker compose down` first (volumes are kept).
+networks:
+  frontend:
+    ipam:
+      config:
+        - subnet: ${FRONTEND_SUBNET:-172.30.240.0/24}
+          gateway: ${FRONTEND_GATEWAY:-172.30.240.1}
+  backend:
+    ipam:
+      config:
+        - subnet: ${BACKEND_SUBNET:-172.30.241.0/24}
+          gateway: ${BACKEND_GATEWAY:-172.30.241.1}

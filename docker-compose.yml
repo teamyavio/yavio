@@ -99,8 +99,15 @@ services:
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET}
       JWT_SECRET: ${JWT_SECRET}
       PORT: "3001"
+      # Address(es) of the reverse proxy in front of ingest, whose
+      # X-Forwarded-For is trusted (#94). Empty: request.ip is the socket peer.
+      # With a proxy on the host, use docker-compose.proxy.yml and see the
+      # self-hosting docs for which address to list.
+      TRUST_PROXY: ${TRUST_PROXY:-}
     ports:
-      - "${INGEST_PORT:-3001}:3001"
+      # BIND_ADDRESS=127.0.0.1 when a reverse proxy on this host is the only
+      # way in; the default publishes on all interfaces (#94).
+      - "${BIND_ADDRESS:-0.0.0.0}:${INGEST_PORT:-3001}:3001"
     networks:
       - frontend
       - backend
@@ -142,7 +149,7 @@ services:
       YAVIO_API_KEY: ${YAVIO_API_KEY:-}
       YAVIO_ENDPOINT: ${YAVIO_ENDPOINT:-}
     ports:
-      - "${DASHBOARD_PORT:-3000}:3000"
+      - "${BIND_ADDRESS:-0.0.0.0}:${DASHBOARD_PORT:-3000}:3000"
     networks:
       - frontend
       - backend
@@ -161,7 +168,7 @@ services:
       dockerfile: packages/docs/Dockerfile
     restart: unless-stopped
     ports:
-      - "${DOCS_PORT:-3002}:3000"
+      - "${BIND_ADDRESS:-0.0.0.0}:${DOCS_PORT:-3002}:3000"
     networks:
       - frontend
     healthcheck:

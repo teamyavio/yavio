@@ -99,7 +99,7 @@ describe("Concurrency scenarios", () => {
     expect(fromB).toHaveLength(1);
   });
 
-  it("concurrent requests from same IP: some pass, some get rate-limited", async () => {
+  it("concurrent unauthenticated requests from same IP: some pass, some get rate-limited", async () => {
     const rateLimiter = new RateLimiter(
       { burstCapacity: 10_000, ratePerSecond: 10_000 },
       { burstCapacity: 2, ratePerSecond: 1 },
@@ -119,8 +119,18 @@ describe("Concurrency scenarios", () => {
       logger: false,
     });
 
-    // Send 5 concurrent requests — with burstCapacity of 2, some should be rate-limited
+    // 5 concurrent requests without a credential — with a burst of 2, the rest
+    // are refused (#94: only unauthenticated traffic is charged per IP).
     const results = await Promise.all(
+      Array.from({ length: 5 }, (_, i) => app.inject({ method: "GET", url: `/probe-${i}` })),
+    );
+    const passed = results.filter((r) => r.statusCode === 404);
+    const rateLimited = results.filter((r) => r.statusCode === 429);
+    expect(passed).toHaveLength(2);
+    expect(rateLimited).toHaveLength(3);
+
+    // Authenticated requests from the same address are not charged to it.
+    const authed = await Promise.all(
       Array.from({ length: 5 }, () =>
         app.inject({
           method: "POST",
@@ -130,13 +140,7 @@ describe("Concurrency scenarios", () => {
         }),
       ),
     );
-
-    const successes = results.filter((r) => r.statusCode === 200);
-    const rateLimited = results.filter((r) => r.statusCode === 429);
-
-    expect(successes.length).toBeGreaterThanOrEqual(1);
-    expect(rateLimited.length).toBeGreaterThanOrEqual(1);
-    expect(successes.length + rateLimited.length).toBe(5);
+    expect(authed.map((r) => r.statusCode)).toEqual([200, 200, 200, 200, 200]);
   });
 
   it("concurrent batch writer enqueues do not corrupt buffer", async () => {

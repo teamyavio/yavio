@@ -53,19 +53,10 @@ describe("Rate limiting — API integration", () => {
       logger: false,
     });
 
-    await app.inject({
-      method: "POST",
-      url: "/v1/events",
-      headers: { authorization: `Bearer ${TEST_KEY}` },
-      payload: { events: [makeEvent()] },
-    });
+    // Only requests that do not authenticate are charged per IP (#94).
+    await app.inject({ method: "GET", url: "/.env" });
 
-    const r = await app.inject({
-      method: "POST",
-      url: "/v1/events",
-      headers: { authorization: `Bearer ${TEST_KEY}` },
-      payload: { events: [makeEvent()] },
-    });
+    const r = await app.inject({ method: "GET", url: "/.git/config" });
     expect(r.statusCode).toBe(429);
     expect(r.headers["retry-after"]).toBeDefined();
     expect(Number(r.headers["retry-after"])).toBeGreaterThan(0);
