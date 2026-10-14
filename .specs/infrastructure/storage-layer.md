@@ -658,8 +658,9 @@ The sentence names no threshold on purpose: how anonymity is ensured is implemen
 - **Prerequisite:** the job runs as `yavio_rollup`. Without `CLICKHOUSE_ROLLUP_PASSWORD` it does not run, and the setting is **not applied**. Ingest logs an error at startup.
 
 **Tier 2: the statistics job** (`packages/ingest/src/stats`, #85 step 3).
-- **Schedule:** daily (UTC), under a Postgres advisory lock. Run state lives in `stats_job_runs`.
+- **Schedule:** daily (UTC), under a session-level Postgres advisory lock. Run state lives in `stats_job_runs` and is committed per table as the run goes, so a failure or restart late in a backfill keeps the tables already done.
 - **What it computes:** for the previous and current month, plus every month since its last success (backfill on the first run), each stats table is rebuilt from `events FINAL`, deduplicated on `event_id`, via a stage table and `REPLACE PARTITION`. Finished months are frozen and outlive their raw data.
+- **Data start.** A period (`stats_users_periods`) that begins before the earliest stored event is not written, nor is a cohort first seen in that month: the raw data cannot support them, and a frozen month is never corrected. After `0013` the first run sees about 90 days of events, so Q3 2026 and the year 2026 get no distinct-user figure; from Q4 2026 on they do. The retention floor (above) applies the same rule per project.
 - **No identifiers.** People are counted (`individuals`, `uniqExact` of the stitched user key, falling back to `session_id`) but never stored.
   - **Limit of that fallback:** an app without a user key only has sessions, so one person with several conversations counts several times.
 - **Fixed vocabulary.** An `event_name` is kept if it is a registered tool, or one of a project's top 50 names in the month used by at least 5 individuals. Everything else becomes `(other)`. Platform, client name, country, currency and language are normalized.
