@@ -15,9 +15,9 @@ Fires on every tool invocation. The core event.
 | Field | Type | Description |
 |-------|------|-------------|
 | event_name | TEXT | Tool name |
-| latency_ms | REAL | Execution time |
-| status | TEXT | `success` or `error`. `error` when the handler threw **or** returned a result with `isError: true` (SDK ≥ 0.4.0; earlier SDKs only report throws) |
-| error_category | TEXT | `tool_error` (handler returned `isError: true`) / `unknown` (handler threw) / `auth` / `validation` / `timeout` / `rate_limit` / `server`. See [sdk/tool-result-errors.md](../sdk/tool-result-errors.md) |
+| latency_ms | REAL | Handler execution time. **Absent** when the handler never ran (pre-handler failures, see `validation`) |
+| status | TEXT | `success` or `error`. `error` when the handler threw, returned a result with `isError: true`, or the MCP SDK rejected the call before or after the handler (SDK ≥ 0.4.0; earlier SDKs only report throws) |
+| error_category | TEXT | `tool_error` (handler returned `isError: true`) / `unknown` (handler threw) / `validation` (failed before the handler: unknown or disabled tool, argument validation) / `server` (result failed the tool's `outputSchema`) / reserved: `auth`, `timeout`, `rate_limit`. See [sdk/tool-result-errors.md](../sdk/tool-result-errors.md) and [sdk/protocol-layer-status.md](../sdk/protocol-layer-status.md) |
 | error_message | TEXT | The exception message, or the first `text` content item of an `isError` result. PII-stripped, ≤ 500 chars. The result text is output and is only stored with `capture.outputValues` on |
 | is_retry | INTEGER | Intended: `1` if the immediately preceding event in the session was a `tool_call` with the same `event_name`. **Not implemented** — the SDK never sets it and ingest does not derive it, so the column is always `0` |
 | input_keys | TEXT (JSON) | Parameter key names |

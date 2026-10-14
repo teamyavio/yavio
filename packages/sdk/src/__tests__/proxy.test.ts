@@ -795,6 +795,35 @@ describe("createProxy — tool_discovery emission", () => {
   });
 });
 
+describe("createProxy — instrumentation failures never break the call", () => {
+  beforeEach(() => _resetGlobalState());
+
+  it("runs the original callback when opening the call context throws (YAVIO-1100)", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport: Transport = {
+      send(events: BaseEvent[]) {
+        if (events[0]?.event_type === "connection") throw new Error("transport down");
+      },
+      flush: async () => {},
+      shutdown: async () => {},
+    };
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("search", { q: z.string() }, () => ({ content: [{ type: "text", text: "found" }] }));
+
+    const result = await getRegisteredTool(server, "search")?.handler(
+      { q: "x" },
+      {
+        signal: new AbortController().signal,
+        requestId: "req-fail-1",
+        sendNotification: async () => {},
+        sendRequest: async () => ({}),
+      },
+    );
+
+    expect(result).toEqual({ content: [{ type: "text", text: "found" }] });
+  });
+});
+
 describe("createProxy — session reuse", () => {
   beforeEach(() => {
     mockedMint.mockReset();

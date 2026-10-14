@@ -10,6 +10,7 @@ import { z } from "zod";
 import { DEFAULT_INTENT_DESCRIPTION, resolveConfig } from "../../core/config.js";
 import type { IntentConfig, YavioConfig } from "../../core/types.js";
 import { MAX_INTENT_LENGTH, createIntentController } from "../../server/intent.js";
+import { installProtocolWrappers } from "../../server/protocol.js";
 import { _resetGlobalState, createProxy } from "../../server/proxy.js";
 import type { Transport } from "../../transport/types.js";
 
@@ -940,10 +941,12 @@ describe("intent capture — widget classification without listed _meta", () => 
     const handlers = new Map<string, (req: unknown, extra: unknown) => Promise<unknown>>();
     handlers.set("tools/list", async () => ({ tools: listedTools }));
     const controller = createIntentController(intent);
-    controller.install({
+    const stub = {
       server: { setRequestHandler: () => {}, _requestHandlers: handlers },
       _registeredTools: {},
-    } as unknown as McpServer);
+    } as unknown as McpServer;
+    controller.attach(stub);
+    installProtocolWrappers(stub, { call: [controller.wrapCall], list: [controller.wrapList] });
     return { controller, callList: () => handlers.get("tools/list")?.({}, {}) };
   }
 
