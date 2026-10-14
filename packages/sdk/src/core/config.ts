@@ -98,27 +98,38 @@ function resolveTools(
   return tools;
 }
 
-let warnedInvalidGeo = false;
+const warnedInvalidFlags = new Set<string>();
 
 /** @internal Reset the warn-once state — exposed for testing only. */
 export function _resetConfigWarnings(): void {
-  warnedInvalidGeo = false;
+  warnedInvalidFlags.clear();
 }
 
 /**
- * `capture` is spread from hand-written JSON and untyped JS, so `geo` can be
- * anything — and `"false"` is truthy. A privacy flag must fail closed: any
- * value other than `true`, `false` or `"country"` turns geo off. Warn once per
+ * `capture` is spread from hand-written JSON and untyped JS, so a flag can be
+ * anything — and `"false"` is truthy. A capture flag must fail closed: any
+ * value it does not accept turns that capture off. Warn once per flag and
  * process; stateless servers resolve the config on every request.
  */
+function warnInvalidFlag(flag: string, accepted: string, value: unknown): void {
+  if (warnedInvalidFlags.has(flag)) return;
+  warnedInvalidFlags.add(flag);
+  console.warn(
+    `[${ErrorCode.SDK.INVALID_CAPTURE_OPTION}] capture.${flag} must be ${accepted}, got ${JSON.stringify(value)} — treating it as false. Shown once per process.`,
+  );
+}
+
 function resolveGeo(value: unknown): CaptureConfig["geo"] {
   if (value === true || value === false || value === "country") return value;
-  if (!warnedInvalidGeo) {
-    warnedInvalidGeo = true;
-    console.warn(
-      `[${ErrorCode.SDK.INVALID_CAPTURE_OPTION}] capture.geo must be true, false or "country", got ${JSON.stringify(value)} — treating it as false. Shown once per process.`,
-    );
-  }
+  warnInvalidFlag("geo", 'true, false or "country"', value);
+  return false;
+}
+
+const BOOLEAN_CAPTURE_FLAGS = ["inputValues", "outputValues", "tokens", "retries"] as const;
+
+function resolveBooleanFlag(flag: (typeof BOOLEAN_CAPTURE_FLAGS)[number], value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  warnInvalidFlag(flag, "true or false", value);
   return false;
 }
 
@@ -183,6 +194,7 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
     ...defined(options?.capture),
   };
   capture.geo = resolveGeo(capture.geo);
+  for (const flag of BOOLEAN_CAPTURE_FLAGS) capture[flag] = resolveBooleanFlag(flag, capture[flag]);
 
   const serverOnly =
     options?.serverOnly ??

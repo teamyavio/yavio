@@ -264,6 +264,10 @@ function wrapToolCallback(
       // correct error rate.
       const resultError = toolResultError(result);
 
+      // The inputs need arguments to exist (a schema-less tool's callback gets
+      // only `extra`); the client metadata — locale, country, subject — comes
+      // from `extra` and is captured under the same flag whether or not the
+      // tool takes arguments.
       const captureInput = capture.inputValues && cbArgs[0] !== extra;
       const toolCallEvent = buildToolCallEvent(
         {
@@ -287,7 +291,7 @@ function wrapToolCallback(
           inputValues: captureInput ? extractInputValues(cbArgs[0], extra, capture.geo) : undefined,
           outputContent: capture.outputValues ? extractOutputContent(result) : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
-          clientMeta: captureInput ? extractClientMeta(extra, capture.geo) : undefined,
+          clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
         },
       );
       emit(toolCallEvent);
@@ -356,7 +360,7 @@ function wrapToolCallback(
             ? extractInputValues(cbArgs[0], extra, capture.geo)
             : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
-          clientMeta: captureInputOnError ? extractClientMeta(extra, capture.geo) : undefined,
+          clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
         },
       );
       emit(toolCallEvent);
@@ -388,7 +392,8 @@ export function createProxy<T extends McpServer>(
   transport: Transport,
   sdkVersion: string,
 ): T {
-  // Session state (set on connect, shared across all tool calls in this connection)
+  // Session state of the connection itself: set on connect, used for calls
+  // that carry no session key and for discovery events.
   let session: SessionState = {
     sessionId: generateSessionId(),
     userId: null,
@@ -499,7 +504,7 @@ export function createProxy<T extends McpServer>(
         inputValues: captureInput ? extractInputValues(args, extra, capture.geo) : undefined,
         outputContent: captureMessage ? extractOutputContent(result) : undefined,
         intentSignals: getCapturedIntent() ?? undefined,
-        clientMeta: captureInput ? extractClientMeta(extra, capture.geo) : undefined,
+        clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
       },
     );
   };
@@ -610,23 +615,52 @@ export function createProxy<T extends McpServer>(
   let currentMcpTransport: Record<string, unknown> | null = null;
 
   /**
+   * Sessions by their derived id, for a server that serves many conversations
+   * through one proxy (stateless transports, OpenAI's per-call reconnects):
+   * identify(), the traits and the step sequence belong to one conversation.
+   * One shared, mutated session object used to carry a user identified in
+   * conversation A onto conversation B's events, and two overlapping calls
+   * could swap session ids. Bounded; the least recently used goes first.
+   */
+  const MAX_SESSIONS = 1000;
+  const sessions = new Map<string, SessionState>();
+
+  /**
    * Resolve the session for the current tool call.
    *
    * If a session key is available (MCP session ID, OpenAI session, or transport
    * session ID), derives a deterministic Yavio session ID from it so that any
-   * server instance processing the same key produces the same ID.
+   * server instance processing the same key produces the same ID, and returns
+   * that conversation's own state. Without a key: the connection's session.
    */
-  const resolveSession = (sessionKey?: string) => {
+  const resolveSession = (sessionKey?: string): SessionState => {
     const key =
       sessionKey ??
       (currentMcpTransport && typeof currentMcpTransport.sessionId === "string"
         ? (currentMcpTransport.sessionId as string)
         : undefined);
+    if (!key) return session;
 
-    if (key) {
-      session.sessionId = deriveSessionId(key);
+    const sessionId = deriveSessionId(key);
+    const known = sessions.get(sessionId);
+    if (known) {
+      sessions.delete(sessionId); // re-insert: most recently used last
+      sessions.set(sessionId, known);
+      return known;
     }
-    return session;
+    const state: SessionState = {
+      sessionId,
+      userId: null,
+      userTraits: {},
+      platform: session.platform,
+      stepSequence: 0,
+    };
+    sessions.set(sessionId, state);
+    if (sessions.size > MAX_SESSIONS) {
+      const oldest = sessions.keys().next().value;
+      if (oldest !== undefined) sessions.delete(oldest);
+    }
+    return state;
   };
 
   const originalTool = server.tool.bind(server);

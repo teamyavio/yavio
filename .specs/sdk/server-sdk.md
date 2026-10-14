@@ -351,6 +351,8 @@ The generated or adopted `session_id` is stored in the `InstrumentationLayer` st
 | Multiple traces per session | Expected. A single MCP connection typically serves multiple tool invocations, each with its own `trace_id`. All traces within one connection share the same `session_id`. |
 | `userId` scope | Bound to the session. `.identify()` sets `user_id` for all subsequent events in the session. Cannot change within a session. |
 
+**Many conversations through one proxy (added 2026-10-14, 0.4.0).** Stateless transports and OpenAI's per-call reconnects serve every conversation through one `withYavio()` proxy. The proxy therefore keeps session state — `session_id`, `userId`, traits, the step sequence — **per derived session id** (from `extra.sessionId`, `_meta["openai/session"]` or the transport's session id), in a bounded map of 1,000 least-recently-used entries. Before, one shared session object was mutated per call: a user identified in conversation A appeared on conversation B's events, and two overlapping calls could swap session ids. Calls without any session key keep using the connection's session.
+
 ### 3.7.3 Widget Sessions
 
 Widget events share the **server session ID** (`ses_` prefix). The server's `session_id` is included in `window.__YAVIO__` alongside the `traceId` and widget JWT (see [Section 3.4.2](#342-injection)), and the widget SDK stamps all outgoing events with it. This means all events — server-side and widget-side — for a single MCP connection share the same `session_id`, and the `trace_id` handles the finer-grained binding of a specific tool call to the widget it spawned.

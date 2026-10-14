@@ -49,7 +49,7 @@ Live counts, tool_call events, 2026-08-26: `_requestId` on 497/497 (Commerce for
 
 - **Allow-list, not deny-list:** the reduced object is built, not copied-and-pruned, so a field the platform adds later (postal code, accuracy, …) cannot leak through.
 - **One country check** (`locationCountry()` in `proxy.ts`) feeds both the column and the `_meta` reduction, so they cannot disagree.
-- **Fails closed:** `resolveConfig()` accepts exactly `true`, `false`, `"country"`. Anything else — `"false"` from a hand-written `.yaviorc.json` is truthy — becomes `false` with one `YAVIO-1006` warning per process (stateless servers resolve the config per request).
+- **Fails closed:** `resolveConfig()` accepts exactly `true`, `false`, `"country"`. Anything else — `"false"` from a hand-written `.yaviorc.json` is truthy — becomes `false` with one `YAVIO-1006` warning per process (stateless servers resolve the config per request). **Extended 2026-10-14 (0.4.0 refinement):** the same for every capture flag — `inputValues`, `outputValues`, `tokens`, `retries` accept exactly `true`/`false`; one warning per flag and process.
 - Per-tool overrides stay without `geo`.
 
 ## Changes

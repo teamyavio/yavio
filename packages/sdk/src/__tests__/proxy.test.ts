@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BaseEvent } from "@yavio/shared/events";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { deriveSessionId } from "../core/ids.js";
 import type { CaptureConfig, YavioConfig } from "../core/types.js";
 import { createYavioContext } from "../server/context.js";
 import { _resetGlobalState, createProxy } from "../server/proxy.js";
@@ -2138,5 +2139,122 @@ describe("input_values extra fields (_-prefixed)", () => {
       "user-agent",
       "x-anthropic-client",
     ]);
+  });
+});
+
+describe("client metadata for schema-less tools", () => {
+  beforeEach(() => _resetGlobalState());
+
+  const extra = (meta: Record<string, unknown>) => ({
+    signal: new AbortController().signal,
+    requestId: "req-meta",
+    sendNotification: async () => {},
+    sendRequest: async () => ({}),
+    _meta: meta,
+  });
+
+  it("captures locale, country and subject for a tool without arguments", async () => {
+    // The callback of a schema-less tool receives only `extra`; the metadata
+    // lives there, not in the arguments, so it is captured all the same.
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("ping", () => ({ content: [{ type: "text", text: "pong" }] }));
+    await getRegisteredTool(server, "ping")?.handler(
+      extra({
+        "openai/locale": "de-DE",
+        "openai/subject": "v1/subject-7",
+        "openai/userLocation": { country: "DE", city: "Duisburg" },
+      }),
+    );
+
+    const [event] = transport.sent.flat().filter((e) => e.event_type === "tool_call") as Array<
+      Record<string, unknown>
+    >;
+    expect(event?.event_type).toBe("tool_call");
+    expect(event?.locale).toBe("de-DE");
+    expect(event?.country_code).toBe("DE");
+    expect(event?.subject_id).toBe("v1/subject-7");
+    expect(event?.input_values).toBeUndefined(); // there are no arguments
+  });
+
+  it("captures nothing of it under inputValues: false", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const config = { ...testConfig, capture: { ...testConfig.capture, inputValues: false } };
+    const proxy = createProxy(server, config, transport, "0.0.1");
+    proxy.tool("ping", () => ({ content: [{ type: "text", text: "pong" }] }));
+    await getRegisteredTool(server, "ping")?.handler(
+      extra({ "openai/locale": "de-DE", "openai/subject": "v1/subject-7" }),
+    );
+
+    const [event] = transport.sent.flat().filter((e) => e.event_type === "tool_call") as Array<
+      Record<string, unknown>
+    >;
+    expect(event?.locale).toBeUndefined();
+    expect(event?.subject_id).toBeUndefined();
+  });
+});
+
+describe("one proxy, many conversations", () => {
+  beforeEach(() => _resetGlobalState());
+
+  const extra = (conversation: string, requestId = "req") => ({
+    signal: new AbortController().signal,
+    requestId,
+    sendNotification: async () => {},
+    sendRequest: async () => ({}),
+    _meta: { "openai/session": conversation },
+  });
+
+  it("keeps identify() to its own conversation", async () => {
+    // Stateless transports serve every conversation through one proxy: a
+    // user identified in conversation A must not appear on B's events.
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    const yavio = createYavioContext();
+    proxy.tool("whoami", (ex) => {
+      const meta = (ex as { _meta?: Record<string, unknown> })._meta;
+      if (meta?.["openai/session"] === "conv-a") yavio.identify("anna");
+      return { content: [{ type: "text", text: "ok" }] };
+    });
+    const handler = getRegisteredTool(server, "whoami")?.handler;
+
+    await handler?.(extra("conv-a", "r1"));
+    await handler?.(extra("conv-b", "r2"));
+    await handler?.(extra("conv-a", "r3"));
+
+    const calls = transport.sent.flat().filter((e) => e.event_type === "tool_call") as Array<
+      Record<string, unknown>
+    >;
+    expect(calls.map((e) => e.user_id)).toEqual(["anna", undefined, "anna"]);
+    expect(calls[0]?.session_id).toBe(deriveSessionId("conv-a"));
+    expect(calls[1]?.session_id).toBe(deriveSessionId("conv-b"));
+  });
+
+  it("attributes overlapping calls from two conversations to their own sessions", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    proxy.tool("slow", async () => {
+      await gate;
+      return { content: [{ type: "text", text: "done" }] };
+    });
+    const handler = getRegisteredTool(server, "slow")?.handler;
+
+    const a = handler?.(extra("conv-a", "r1"));
+    const b = handler?.(extra("conv-b", "r2"));
+    release();
+    await Promise.all([a, b]);
+
+    const calls = transport.sent.flat().filter((e) => e.event_type === "tool_call");
+    expect(calls.map((e) => e.session_id).sort()).toEqual(
+      [deriveSessionId("conv-a"), deriveSessionId("conv-b")].sort(),
+    );
   });
 });
