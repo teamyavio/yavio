@@ -20,7 +20,49 @@ export async function authenticate(request: FastifyRequest): Promise<void> {
       401,
     );
   }
+  await authenticateToken(request, bearerToken(header));
+}
 
+/**
+ * The events route's preHandler: the Authorization header as everywhere, or —
+ * for widget beacons — a widget JWT in the body (#96). navigator.sendBeacon
+ * cannot set headers, so the widget sends `{ token, events, ... }`.
+ *
+ * - The header wins when both are present.
+ * - Only a widget JWT is accepted from the body; API keys belong to servers,
+ *   which can set headers.
+ * - The token is removed from the body once read, so nothing downstream can
+ *   store or log it.
+ */
+export async function authenticateHeaderOrBody(request: FastifyRequest): Promise<void> {
+  const body = request.body as Record<string, unknown> | null | undefined;
+  const bodyToken = body && typeof body === "object" ? body.token : undefined;
+  if (body && typeof body === "object" && "token" in body) {
+    Reflect.deleteProperty(body, "token");
+  }
+
+  if (request.headers.authorization) {
+    await authenticate(request);
+    return;
+  }
+  if (typeof bodyToken !== "string" || bodyToken === "") {
+    throw new YavioError(
+      ErrorCode.INGEST.MISSING_AUTH_HEADER,
+      "Authorization header (or, for widget beacons, a token in the body) is required",
+      401,
+    );
+  }
+  if (!bodyToken.startsWith(JWT_PREFIX)) {
+    throw new YavioError(
+      ErrorCode.INGEST.MALFORMED_BEARER_TOKEN,
+      "Only a widget token is accepted in the body; send API keys in the Authorization header",
+      401,
+    );
+  }
+  resolveJwt(request, bodyToken);
+}
+
+function bearerToken(header: string): string {
   const parts = header.split(" ");
   if (parts.length !== 2 || parts[0] !== "Bearer") {
     throw new YavioError(
@@ -29,9 +71,10 @@ export async function authenticate(request: FastifyRequest): Promise<void> {
       401,
     );
   }
+  return parts[1];
+}
 
-  const token = parts[1];
-
+async function authenticateToken(request: FastifyRequest, token: string): Promise<void> {
   if (token.startsWith(API_KEY_PREFIX)) {
     await resolveApiKey(request, token);
   } else if (token.startsWith(JWT_PREFIX)) {
