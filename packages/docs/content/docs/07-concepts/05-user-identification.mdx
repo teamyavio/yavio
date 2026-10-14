@@ -11,6 +11,8 @@ Yavio tracks user journeys through a combination of anonymous sessions and expli
 
 Every MCP connection creates a new session with a unique `session_id` (format: `ses_<nanoid>`). Events are tracked against this session immediately, even before you know who the user is.
 
+"Anonymous" here means *not identified yet*. A `session_id` is still a pseudonymous identifier, so it is personal data under the GDPR and kept only with the raw events: see [Data retention](/docs/07-concepts/06-data-retention).
+
 Anonymous sessions are useful for:
 - Measuring overall tool usage and latency
 - Tracking conversion funnels before login
@@ -91,7 +93,7 @@ Traits are included in `identify` events and used for cohort analysis in the das
 ## Retroactive stitching
 
 <Callout type="info">
-  Retroactive identity stitching is planned for a future release. Currently, events emitted before `.identify()` is called in a session remain anonymous.
+  Events emitted before `.identify()` keep no `user_id`. The dashboard's user metrics still count them for the right user when the platform sends a stable `subject_id` (ChatGPT does): a subject that was identified once is counted as that user, before and after. Writing the `user_id` back into stored events is planned for a future release.
 </Callout>
 
 In a future version, Yavio will support retroactive stitching — when `.identify()` is called, all prior events in the same session will be retroactively associated with the user ID. This enables accurate funnel analysis even when identity is established mid-session.

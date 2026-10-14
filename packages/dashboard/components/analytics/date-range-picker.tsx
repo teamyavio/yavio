@@ -3,18 +3,14 @@
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { DATE_PRESETS } from "@/lib/analytics/date-presets";
 import { cn } from "@/lib/utils";
 import { format } from "date-fns";
 import { CalendarIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { DateRange } from "react-day-picker";
 
-const PRESETS = [
-  { label: "24h", days: 1 },
-  { label: "7d", days: 7 },
-  { label: "30d", days: 30 },
-  { label: "3m", days: 90 },
-] as const;
+const PRESETS = DATE_PRESETS;
 
 interface DateRangePickerProps {
   from: Date;

@@ -41,7 +41,7 @@ Validates that the platform starts correctly from a clean state.
 |------|-----------|
 | Missing `NEXTAUTH_SECRET` | `docker-compose up` refuses to start (compose `?` syntax error) |
 | Default `POSTGRES_PASSWORD` | Services start with `yavio_dev` default in dev mode |
-| Custom `YAVIO_RETENTION_DAYS` | ClickHouse TTL reflects configured value |
+| Missing `CLICKHOUSE_ROLLUP_PASSWORD` | Ingest starts and logs an error naming it: no statistics, and per-project retention is not applied |
 
 ## Migration Tests
 
@@ -62,7 +62,7 @@ Validates that the platform starts correctly from a clean state.
 | Idempotent re-run | Re-running migration scripts produces no errors |
 | Schema validation | Column types match spec (JSON fields are `JSON`, LowCardinality applied, etc.) |
 | ORDER BY correctness | `events` table ordered by `(workspace_id, project_id, event_type, timestamp)` |
-| TTL configured | `SHOW CREATE TABLE events` includes TTL clause matching `YAVIO_RETENTION_DAYS` |
+| TTL configured | `events` TTL is `least(timestamp, ingested_at) + 13 MONTH`; the `stats_*` tables have none |
 
 ## Integration Tests (End-to-End Data Path)
 

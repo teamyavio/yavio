@@ -1,0 +1,80 @@
+---
+title: Data retention
+description: How long Yavio keeps what, the sentence for your privacy policy, and what counts as personal data
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+## For your privacy policy
+
+You can quote this sentence. It holds for every app on Yavio Cloud and for self-hosted Yavio with the default settings:
+
+> **English:** "Usage data is deleted automatically 13 months after collection. Only anonymous daily statistics without identifiers are kept beyond that."
+>
+> **German:** „Nutzungsdaten werden 13 Monate nach Erhebung automatisch gelöscht. Dauerhaft bleiben nur anonyme Statistiken auf Tagesbasis ohne Kennungen."
+
+If you set a shorter retention for a project (below), replace "13 months" with your value.
+
+## Two tiers
+
+| | Raw events | Anonymous statistics |
+|---|---|---|
+| **Contains** | every event with its identifiers and content: tool inputs and outputs (if captured), intents, errors, user traits, user agent | daily counts per tool, platform, country, language, conversion; active users; cohorts |
+| **Identifiers** | `user_id`, `subject_id`, `session_id` | none |
+| **Kept** | **13 months from collection**, or shorter per project | indefinitely |
+| **Detail** | full, down to the hour | per day |
+| **Used for** | all dashboard views | long-term trends (views beyond 13 months are planned) |
+
+**Raw events** are deleted row by row once they are 13 months old.
+- **Counted from collection**, per event. New activity does not extend it.
+- **Collection time** is the earlier of the event's own timestamp and the time Yavio received it, so a wrongly dated event cannot stay longer.
+- **Why 13 months:** a full year plus the current month, enough to compare a month with the same month a year ago.
+
+**Anonymous statistics** are computed once a day from the raw events while those still exist:
+- They hold counts, never identifiers. People are counted, but no id is stored.
+- Names are kept from a fixed vocabulary: your registered tools, and event names that enough different people used. Everything else becomes `(other)`.
+
+## A shorter retention per project
+
+In **Settings → Projects → Edit**, a project can keep its raw events for **2 to 13 months**. Older events are deleted once a day, after that day's statistics are computed.
+- **Why at least 2 months:** the statistics of the previous month are recomputed daily.
+- **Statistics that look back** cover only the retained window:
+  - monthly active users near the start of a month count only retained days;
+  - users per quarter or year, and cohorts, are left out where they would need deleted data. They are not estimated.
+
+<Callout type="warn">
+Shortening the retention permanently deletes older raw events at the next daily run.
+</Callout>
+
+## Which data is personal
+
+These identifiers are **pseudonymous personal data** under the GDPR. None of them names a person, but each one singles out a person or a conversation over time:
+
+| Identifier | What it is |
+|---|---|
+| `user_id` | the id you pass to `.identify()` |
+| `subject_id` | the AI platform's stable id for one user of one app, e.g. ChatGPT's `openai/subject` |
+| `session_id` | a SHA-256 hash of the platform's session key: the same conversation always gets the same id |
+
+They are stored only with the raw events and expire with them. The anonymous statistics contain none of them.
+
+## Deletion and backups
+
+Deleting a project, workspace or account erases its data from both tiers. If a database is unavailable at that moment, Yavio retries until every table is done.
+
+Data that was in the database before then remains in **backups** until they expire. On Yavio Cloud that is **up to 4 weeks**. Self-hosters set their own backup retention: see [Backups & Operations](/docs/04-self-hosting/06-operations).
+
+## Other retention periods
+
+| Data | Kept |
+|---|---|
+| Ingest request logs | no IP address, no query string, no headers. Rotated by size: 125 MB at most per service. |
+| Database query logs (ClickHouse system tables) | 30 days |
+| Server journal | 30 days |
+| Failed login attempts (email, IP) | 24 hours |
+| Expired sessions, used or expired tokens | deleted hourly |
+| Invitations | 1 day after they expire |
+| Revoked API keys | 1 year |
+| Backups (Yavio Cloud) | up to 4 weeks |
+
+How to configure these on your own servers: [Backups & Operations](/docs/04-self-hosting/06-operations).
