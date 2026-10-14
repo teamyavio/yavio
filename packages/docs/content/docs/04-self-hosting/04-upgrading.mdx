@@ -90,6 +90,16 @@ docker compose up -d
 
 Run the migration before starting the new dashboard, so the password is in place when the first deletion happens.
 
+### Only Yavio's roles can connect to Postgres
+
+Migration `0008` revokes `CONNECT` on the Yavio database from `PUBLIC` and grants it to `yavio_app` and `yavio_api`. Before, any role in the Postgres server could connect just by existing. Yavio's own services are unaffected, and so are the owner (`yavio_service`) and superusers.
+
+If a role of your own connects to the database, a read-only reporting user for example, grant it access after upgrading:
+
+```sql
+GRANT CONNECT ON DATABASE yavio TO my_reporting_role;
+```
+
 ## Rollback
 
 If an update causes issues, you can roll back to a specific image version by pinning the version in your `docker-compose.yml` or using a tagged image:
@@ -101,14 +111,12 @@ docker compose up -d dashboard
 
 ## Backup Before Upgrading
 
-For production deployments, take a backup before upgrading:
+For production deployments, take a backup before upgrading. With the backup scripts installed ([Backups & Operations](/docs/04-self-hosting/06-operations)), run them by hand:
 
 ```bash
-# PostgreSQL
-docker compose exec postgres pg_dump -U yavio_service yavio > backup.sql
-
-# ClickHouse
-docker compose exec clickhouse clickhouse-client \
-  --password "$CLICKHOUSE_PASSWORD" \
-  --query "SELECT * FROM yavio.events FORMAT Native" > events.native
+sudo /usr/local/bin/yavio-pg-backup.sh
+sudo /usr/local/bin/yavio-clickhouse-backup.sh
+sudo tail -2 /var/backups/yavio/backup.log   # two "ok" lines
 ```
+
+A `SELECT … FORMAT Native` export of the events table is not a backup. It loses the materialized views, the users and the row policies.

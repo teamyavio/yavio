@@ -33,5 +33,9 @@ export async function runStartupChecks(): Promise<void> {
   if (process.env.DATABASE_URL) {
     const { startErasureWorker } = await import("./erasure");
     startErasureWorker();
+    // Hourly Postgres housekeeping (#92): login attempts, expired sessions,
+    // tokens and invitations, long-revoked API keys.
+    const { startHousekeeping } = await import("./housekeeping");
+    startHousekeeping();
   }
 }

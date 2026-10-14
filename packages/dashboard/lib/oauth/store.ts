@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { getDb } from "@/lib/db";
+import type { Database } from "@yavio/db/client";
 import { oauthClients, oauthCodes, oauthTokens } from "@yavio/db/schema";
 import { and, eq, gt, isNull, or, sql } from "drizzle-orm";
 import {
@@ -378,9 +379,11 @@ export async function revokeToken(rawToken: string): Promise<void> {
   await revokeGrantFamily(rows[0].grantId);
 }
 
-/** Expired-row cleanup, called opportunistically from the token endpoint. */
-export async function pruneExpired(): Promise<void> {
-  const db = getDb();
+/**
+ * Expired-row cleanup, called opportunistically from the token endpoint and
+ * hourly by the housekeeping job (#92).
+ */
+export async function pruneExpired(db: Database = getDb()): Promise<void> {
   await db.delete(oauthCodes).where(sql`expires_at < now() - interval '1 day'`);
   await db
     .delete(oauthTokens)

@@ -89,7 +89,7 @@ export async function assertNoPasswordlessUsers(
   if (expectUsersToExist && authByUser.size === 0) {
     throw new YavioError(
       ErrorCode.DB.CH_MIGRATION_FAILED,
-      `Cannot verify ClickHouse credentials: migrations created ${MANAGED_USER_NAMES.join(", ")}, but none of them are visible in system.users. The migrating user most likely lacks SHOW USERS, which would make this check pass without inspecting anything.`,
+      `Cannot verify ClickHouse credentials: migrations created ${MANAGED_USER_NAMES.join(", ")}, but none of them are visible in system.users. Either the migrating user lacks SHOW USERS, which would make this check pass without inspecting anything, or this server lost them: a restore of the database onto a new server without its access entities brings back schema_migrations but not the users (docs: Self-Hosting → Backups & Operations).`,
       500,
       { users: MANAGED_USER_NAMES },
     );
