@@ -7,6 +7,7 @@ import {
   normalizeErrorMessage,
 } from "../core/events.js";
 import { deriveSessionId, generateSessionId, generateTraceId } from "../core/ids.js";
+import { LruMap } from "../core/lru.js";
 import { detectPlatform } from "../core/platform.js";
 import type { CaptureConfig, SessionState, YavioConfig } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
@@ -178,7 +179,7 @@ function openCallContext(
   // Deferred from connect() so that OpenAI's per-tool-call reconnects don't
   // spam a connection event for every tool call in the same conversation.
   if (!emittedConnections.has(session.sessionId)) {
-    emittedConnections.add(session.sessionId);
+    emittedConnections.set(session.sessionId, true);
     const connectionEvent = buildConnectionEvent(
       {
         traceId: generateTraceId(),
@@ -370,8 +371,18 @@ function wrapToolCallback(
   };
 }
 
-/** Tracks session IDs that have already emitted a connection event. */
-const emittedConnections = new Set<string>();
+/**
+ * Session ids that have already emitted a `connection` event. Module-level,
+ * because a server that builds a new McpServer and proxy per request still
+ * serves one ChatGPT conversation across many requests and must not emit a
+ * connection event per tool call. Bounded: it used to be a plain Set that
+ * kept one id per conversation for the life of the process (#120). A
+ * conversation that falls out — evicted here, or evicted from its proxy's
+ * session map — emits a fresh connection event on its next call, which also
+ * marks that its state (user, step sequence) started over.
+ */
+const MAX_EMITTED_CONNECTIONS = 10_000;
+const emittedConnections = new LruMap<string, true>(MAX_EMITTED_CONNECTIONS);
 
 /** Tracks tool names that have already emitted a tool_discovery event (global dedup). */
 const emittedToolDiscoveries = new Set<string>();
@@ -620,10 +631,14 @@ export function createProxy<T extends McpServer>(
    * identify(), the traits and the step sequence belong to one conversation.
    * One shared, mutated session object used to carry a user identified in
    * conversation A onto conversation B's events, and two overlapping calls
-   * could swap session ids. Bounded; the least recently used goes first.
+   * could swap session ids. Bounded; the least recently used goes first, and
+   * takes its connection-event mark with it so the conversation's next call,
+   * which starts a fresh state, emits a fresh connection event.
    */
   const MAX_SESSIONS = 1000;
-  const sessions = new Map<string, SessionState>();
+  const sessions = new LruMap<string, SessionState>(MAX_SESSIONS, (sessionId) =>
+    emittedConnections.delete(sessionId),
+  );
   /**
    * The session of the most recent tool call — what tool_discovery events
    * stamp, so a discovery emitted after a call carries that call's detected
@@ -652,10 +667,8 @@ export function createProxy<T extends McpServer>(
     }
 
     const sessionId = deriveSessionId(key);
-    const known = sessions.get(sessionId);
+    const known = sessions.get(sessionId); // a hit counts as use
     if (known) {
-      sessions.delete(sessionId); // re-insert: most recently used last
-      sessions.set(sessionId, known);
       activeSession = known;
       return known;
     }
@@ -667,10 +680,6 @@ export function createProxy<T extends McpServer>(
       stepSequence: 0,
     };
     sessions.set(sessionId, state);
-    if (sessions.size > MAX_SESSIONS) {
-      const oldest = sessions.keys().next().value;
-      if (oldest !== undefined) sessions.delete(oldest);
-    }
     activeSession = state;
     return state;
   };

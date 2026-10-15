@@ -2233,6 +2233,42 @@ describe("one proxy, many conversations", () => {
     expect(calls[1]?.session_id).toBe(deriveSessionId("conv-b"));
   });
 
+  it("emits a fresh connection event for a conversation that was evicted and returns", async () => {
+    // One proxy, 1,000-entry session map: after 1,000 other conversations the
+    // first one is rebuilt from scratch (no user, step sequence 0), and the
+    // connection-event mark goes with it so the discontinuity is visible.
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    const yavio = createYavioContext();
+    proxy.tool("whoami", (ex) => {
+      const meta = (ex as { _meta?: Record<string, unknown> })._meta;
+      if (meta?.["openai/session"] === "conv-0") {
+        yavio.identify("anna");
+        yavio.step("look");
+      }
+      return { content: [{ type: "text", text: "ok" }] };
+    });
+    const handler = getRegisteredTool(server, "whoami")?.handler;
+
+    await handler?.(extra("conv-0", "r0"));
+    await handler?.(extra("conv-0", "r0b")); // still known: no second connection event
+    for (let i = 1; i <= 1000; i += 1) await handler?.(extra(`conv-${i}`, `r${i}`));
+    await handler?.(extra("conv-0", "r0c"));
+
+    const first = deriveSessionId("conv-0");
+    const events = transport.sent.flat() as Array<Record<string, unknown>>;
+    const connections = events.filter(
+      (e) => e.event_type === "connection" && e.session_id === first,
+    );
+    expect(connections).toHaveLength(2);
+    const calls = events.filter((e) => e.event_type === "tool_call" && e.session_id === first);
+    expect(calls.map((e) => e.user_id)).toEqual(["anna", "anna", "anna"]);
+    // The step sequence restarting at 1 shows the state really started over.
+    const steps = events.filter((e) => e.event_type === "step" && e.session_id === first);
+    expect(steps.map((e) => e.step_sequence)).toEqual([1, 2, 1]);
+  });
+
   it("attributes overlapping calls from two conversations to their own sessions", async () => {
     const server = new McpServer({ name: "test", version: "1.0" });
     const transport = createMockTransport();
