@@ -32,16 +32,15 @@ import type { HandlerWrapper, RequestHandler } from "./protocol.js";
  * customer shape can throw ("Mixed Zod versions detected") and strict schemas
  * would reject the extra key. Everything happens at the protocol layer.
  *
- * Invocation source (#73): the same wrapper is the one place that knows
- * whether a call came from the model or from the app's own widget. A call
- * that carries `context` came from a model (a widget cannot know to send
- * it); a context-less call on a widget-invoked tool is the widget's own
- * machine traffic; a context-less call on an ordinary tool is the model's
- * (there is no widget to call it). The verdict rides on the tool_call event
- * as `invocation_source` so the dashboard can keep widget traffic out of the
- * intent coverage denominator. It is only knowable while intent capture is
- * on and the tool is eligible: with no `context` advertised, model and widget
- * calls look the same, and the field stays unset.
+ * Intent context per call (#73): the same wrapper records how `context` is
+ * advertised for the called tool — `required`, `optional` (widget-invoked
+ * tools, or `required: false` in the config) or `none` (the tool owns its
+ * own `context`, or has per-tool `intent: false`). That is a fact the SDK
+ * knows. Who made the call is not: on a widget-invoked tool a model call that
+ * skips the optional parameter looks exactly like the widget's own call, and
+ * models skip it often (Shipal, 2026-10: 57% of conversations' first calls).
+ * The dashboard computes Call Coverage over `required` calls and reports
+ * `optional` calls separately, instead of guessing who sent them.
  */
 
 /** Hard cap so the ingest field limit (2 KB) can never wipe the whole field. */
@@ -52,12 +51,12 @@ export interface CapturedIntent {
   source: "context_parameter" | "inferred";
 }
 
-/** Who called the tool: the model, or the app's own widget (see the header). */
-export type InvocationSource = "model" | "widget";
+/** How `context` is advertised for the called tool (see the header). */
+export type IntentContext = "required" | "optional" | "none";
 
 interface IntentStore {
   captured: CapturedIntent | null;
-  invocationSource: InvocationSource | null;
+  intentContext: IntentContext | null;
 }
 
 const intentStore = new AsyncLocalStorage<IntentStore>();
@@ -67,9 +66,9 @@ export function getCapturedIntent(): CapturedIntent | null {
   return intentStore.getStore()?.captured ?? null;
 }
 
-/** Read the invocation source of the current tool call, when it is knowable. */
-export function getInvocationSource(): InvocationSource | null {
-  return intentStore.getStore()?.invocationSource ?? null;
+/** Read how `context` was advertised for the current tool call's tool. */
+export function getIntentContext(): IntentContext | null {
+  return intentStore.getStore()?.intentContext ?? null;
 }
 
 /**
@@ -275,7 +274,7 @@ export function createIntentController(
   function wrapCallHandler(handler: RequestHandler): RequestHandler {
     return async (request, extra) => {
       let captured: CapturedIntent | null = null;
-      let invocationSource: InvocationSource | null = null;
+      let intentContext: IntentContext | null = null;
       let downstream = request;
       const req = request as RequestLike;
       const toolName = req?.params?.name;
@@ -284,30 +283,27 @@ export function createIntentController(
         // Per-tool intent: false — strip, but never read what was sent.
         const disabled = disabledTools.has(toolName);
         const args = req.params?.arguments;
-        const hasContext = !!args && typeof args === "object" && "context" in args;
         if (args && typeof args === "object") {
           if (!disabled) {
             const intent = normalizeIntent(args.context);
             if (intent) captured = { intent, source: "context_parameter" };
           }
-          if (hasContext) {
+          if ("context" in args) {
             const { context: _context, ...rest } = args;
             downstream = { ...req, params: { ...req.params, arguments: rest } };
           }
         }
-        // A sent `context` is the model's doing, whatever the tool. Without
-        // one: the widget's on a widget-invoked tool, the model's on an
-        // ordinary tool — unless `context` is not advertised for this tool
-        // (per-tool intent: false), where the two are indistinguishable.
-        if (hasContext) invocationSource = "model";
-        else if (isWidgetTool(toolName)) invocationSource = "widget";
-        else if (!disabled) invocationSource = "model";
+        // What tools/list advertises for this tool (injectIntoListedTool):
+        // nothing under per-tool intent: false; otherwise required, unless
+        // the config says optional or the app's widget invokes the tool.
+        const widget = isWidgetTool(toolName);
+        intentContext = disabled ? "none" : config.required && !widget ? "required" : "optional";
         // No fallback for context-less calls on widget-invoked tools: those
         // are presumptively the widget's own machine traffic (a 3s auto-
         // refresh, a filter-bar click), and inferring an intent for each would
         // record boilerplate "inferred" entries at machine frequency,
         // drowning the real intents the fallback exists to approximate.
-        if (!captured && !disabled && config.fallback && !isWidgetTool(toolName)) {
+        if (!captured && !disabled && config.fallback && !widget) {
           try {
             const inferred = normalizeIntent(await config.fallback(toolName, args));
             if (inferred) captured = { intent: inferred, source: "inferred" };
@@ -315,9 +311,15 @@ export function createIntentController(
             // A broken fallback must never break the tool call
           }
         }
+      } else if (
+        typeof toolName === "string" &&
+        (hasOwnContext.get(toolName) === true || liveOwnsContext(toolName) === true)
+      ) {
+        // The tool owns its `context`: the SDK advertises and captures nothing.
+        intentContext = "none";
       }
 
-      return intentStore.run({ captured, invocationSource }, () => handler(downstream, extra));
+      return intentStore.run({ captured, intentContext }, () => handler(downstream, extra));
     };
   }
 

@@ -16,7 +16,7 @@ import {
   type IntentController,
   createIntentController,
   getCapturedIntent,
-  getInvocationSource,
+  getIntentContext,
 } from "./intent.js";
 import {
   type CallContext,
@@ -300,7 +300,7 @@ function wrapToolCallback(
           inputValues: captureInput ? extractInputValues(cbArgs[0], extra, capture.geo) : undefined,
           outputContent: capture.outputValues ? extractOutputContent(result) : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
-          invocationSource: getInvocationSource() ?? undefined,
+          intentContext: getIntentContext() ?? undefined,
           clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
         },
       );
@@ -370,7 +370,7 @@ function wrapToolCallback(
             ? extractInputValues(cbArgs[0], extra, capture.geo)
             : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
-          invocationSource: getInvocationSource() ?? undefined,
+          intentContext: getIntentContext() ?? undefined,
           clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
         },
       );
@@ -531,7 +531,7 @@ export function createProxy<T extends McpServer>(
         inputValues: captureInput ? extractInputValues(args, extra, capture.geo) : undefined,
         outputContent: captureMessage ? extractOutputContent(result) : undefined,
         intentSignals: getCapturedIntent() ?? undefined,
-        invocationSource: getInvocationSource() ?? undefined,
+        intentContext: getIntentContext() ?? undefined,
         clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
       },
     );

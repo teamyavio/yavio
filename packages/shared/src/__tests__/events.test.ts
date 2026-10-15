@@ -191,20 +191,19 @@ describe("ToolCallEvent", () => {
     expect(result.error_category).toBe("tool_error");
   });
 
-  it("accepts invocation_source model/widget and rejects anything else", () => {
-    for (const source of ["model", "widget"] as const) {
+  it("accepts intent_context required/optional/none and rejects anything else", () => {
+    for (const value of ["required", "optional", "none"] as const) {
       const result = ToolCallEvent.parse(
-        base({ event_type: "tool_call", event_name: "refresh", invocation_source: source }),
+        base({ event_type: "tool_call", event_name: "refresh", intent_context: value }),
       );
-      expect(result.invocation_source).toBe(source);
+      expect(result.intent_context).toBe(value);
     }
     expect(
-      ToolCallEvent.parse(base({ event_type: "tool_call", event_name: "refresh" }))
-        .invocation_source,
+      ToolCallEvent.parse(base({ event_type: "tool_call", event_name: "refresh" })).intent_context,
     ).toBeUndefined();
     expect(() =>
       ToolCallEvent.parse(
-        base({ event_type: "tool_call", event_name: "refresh", invocation_source: "iframe" }),
+        base({ event_type: "tool_call", event_name: "refresh", intent_context: "widget" }),
       ),
     ).toThrow();
   });

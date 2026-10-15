@@ -17,6 +17,18 @@ import type { IntentFeedItem, IntentStatus, IntentsResponse } from "@/lib/querie
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+/**
+ * Column classes for the KPI row: Call Coverage is hidden when every call had
+ * optional context, and the optional-context share only shows when there are
+ * such calls (#73). Full class strings so Tailwind keeps them.
+ */
+function kpiGridCols(kpis: { coverage: number | null; optionalCoverage: number | null }): string {
+  const cards = 2 + (kpis.coverage !== null ? 1 : 0) + (kpis.optionalCoverage !== null ? 1 : 0);
+  if (cards === 4) return "sm:grid-cols-2 lg:grid-cols-4";
+  if (cards === 3) return "sm:grid-cols-3";
+  return "sm:grid-cols-2";
+}
+
 interface IntentsContentProps {
   projectId: string;
   workspaceSlug: string;
@@ -165,9 +177,18 @@ export function IntentsContent({ projectId, workspaceSlug, projectSlug }: Intent
         <EmptyState title={empty.title} description={empty.description} />
       ) : (
         <>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div className={`grid grid-cols-1 gap-4 ${kpiGridCols(data.kpis)}`}>
             <KPICard label="Intents Captured" value={data.kpis.captured} format="number" />
-            <KPICard label="Call Coverage" value={data.kpis.coverage} format="percent" />
+            {data.kpis.coverage !== null && (
+              <KPICard label="Call Coverage" value={data.kpis.coverage} format="percent" />
+            )}
+            {data.kpis.optionalCoverage !== null && (
+              <KPICard
+                label="Coverage, Optional Context"
+                value={data.kpis.optionalCoverage}
+                format="percent"
+              />
+            )}
             <KPICard
               label="Tools with Intents"
               value={data.kpis.toolsWithIntents}

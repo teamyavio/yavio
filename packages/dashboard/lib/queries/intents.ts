@@ -87,26 +87,38 @@ export async function queryIntentFeed(
  * what share of tool calls carried one, and how many distinct tools they
  * cover in the selected period.
  *
- * Coverage counts model calls only: a widget's own calls (invocation_source
- * 'widget', #73) carry no conversation to describe, and a 3 s auto-refresh
- * alone would otherwise drag the share down like a capture regression. Rows
- * without the column value (older SDKs, intent off) count as model calls.
+ * Coverage is split by how the SDK advertised `context` (intent_context,
+ * #73). Call Coverage counts calls where the model was required to state an
+ * intent, plus rows from SDKs before 0.4.0 (NULL), so history keeps the
+ * denominator it had. Optional-context calls — widget-invoked tools, whose
+ * own iframe calls cannot carry an intent, or `required: false` — get their
+ * own share: who made such a call is not knowable, so it is not guessed.
+ * `none` (per-tool intent: false, tool owns `context`) is in neither.
  */
 export async function queryIntentKPIs(ctx: QueryContext): Promise<IntentKPIs> {
   const pf = platformFilter(ctx.platform);
+  const hasIntent = "intent_signals != '{}' AND JSONExtractString(intent_signals, 'intent') != ''";
+  const required = "ifNull(intent_context, 'required') = 'required'";
+  const optional = "intent_context = 'optional'";
 
   const rows = await queryAnalytics<{
     captured: number;
-    totalCalls: number;
+    requiredCalls: number;
+    requiredCaptured: number;
+    optionalCalls: number;
+    optionalCaptured: number;
     toolsWithIntents: number;
   }>({
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
       SELECT
-        countDistinctIf(event_id, intent_signals != '{}' AND JSONExtractString(intent_signals, 'intent') != '') AS captured,
-        countDistinctIf(event_id, ifNull(invocation_source, '') != 'widget') AS totalCalls,
-        uniqExactIf(event_name, intent_signals != '{}' AND JSONExtractString(intent_signals, 'intent') != '') AS toolsWithIntents
+        countDistinctIf(event_id, ${hasIntent}) AS captured,
+        countDistinctIf(event_id, ${required}) AS requiredCalls,
+        countDistinctIf(event_id, ${required} AND ${hasIntent}) AS requiredCaptured,
+        countDistinctIf(event_id, ${optional}) AS optionalCalls,
+        countDistinctIf(event_id, ${optional} AND ${hasIntent}) AS optionalCaptured,
+        uniqExactIf(event_name, ${hasIntent}) AS toolsWithIntents
       FROM events
       WHERE project_id = {projectId:String}
         AND event_type = 'tool_call'
@@ -122,11 +134,19 @@ export async function queryIntentKPIs(ctx: QueryContext): Promise<IntentKPIs> {
   });
 
   const r = rows[0];
-  const captured = Number(r?.captured ?? 0);
-  const totalCalls = Number(r?.totalCalls ?? 0);
+  const requiredCalls = Number(r?.requiredCalls ?? 0);
+  const optionalCalls = Number(r?.optionalCalls ?? 0);
   return {
-    captured,
-    coverage: totalCalls > 0 ? captured / totalCalls : 0,
+    captured: Number(r?.captured ?? 0),
+    // Null only when every call in the period had optional context: 0/0 is
+    // not 0% coverage. With no calls at all it stays 0, as before.
+    coverage:
+      requiredCalls > 0
+        ? Number(r?.requiredCaptured ?? 0) / requiredCalls
+        : optionalCalls > 0
+          ? null
+          : 0,
+    optionalCoverage: optionalCalls > 0 ? Number(r?.optionalCaptured ?? 0) / optionalCalls : null,
     toolsWithIntents: Number(r?.toolsWithIntents ?? 0),
   };
 }

@@ -71,38 +71,68 @@ describe("intents queries", () => {
   });
 
   describe("queryIntentKPIs", () => {
-    it("computes coverage from captured over total calls", async () => {
+    const row = (r: Partial<Record<string, number | string>>) => ({
+      captured: 0,
+      requiredCalls: 0,
+      requiredCaptured: 0,
+      optionalCalls: 0,
+      optionalCaptured: 0,
+      toolsWithIntents: 0,
+      ...r,
+    });
+
+    it("computes coverage over required-context calls and optional ones separately (#73)", async () => {
       mockQueryAnalytics.mockResolvedValueOnce([
-        { captured: 30, totalCalls: 120, toolsWithIntents: 5 },
+        row({
+          captured: 35,
+          requiredCalls: 120,
+          requiredCaptured: 30,
+          optionalCalls: 200,
+          optionalCaptured: 5,
+          toolsWithIntents: 5,
+        }),
       ]);
 
       expect(await queryIntentKPIs(baseCtx)).toEqual({
-        captured: 30,
+        captured: 35,
         coverage: 0.25,
+        optionalCoverage: 0.025,
         toolsWithIntents: 5,
       });
     });
 
-    it("counts model calls only in the denominator (#73)", async () => {
-      mockQueryAnalytics.mockResolvedValueOnce([
-        { captured: 30, totalCalls: 120, toolsWithIntents: 5 },
-      ]);
+    it("splits by intent_context, NULL (older SDKs) counting as required", async () => {
+      mockQueryAnalytics.mockResolvedValueOnce([row({})]);
       await queryIntentKPIs(baseCtx);
-      const call = mockQueryAnalytics.mock.calls[0][0];
-      // NULL (older SDKs, intent off) counts as a model call; only 'widget' is out.
-      expect(call.query).toContain(
-        "countDistinctIf(event_id, ifNull(invocation_source, '') != 'widget') AS totalCalls",
+      const { query } = mockQueryAnalytics.mock.calls[0][0];
+      expect(query).toContain(
+        "countDistinctIf(event_id, ifNull(intent_context, 'required') = 'required') AS requiredCalls",
+      );
+      expect(query).toContain(
+        "countDistinctIf(event_id, intent_context = 'optional') AS optionalCalls",
       );
     });
 
-    it("returns zero coverage when there are no tool calls", async () => {
+    it("has no Call Coverage when every call had optional context (Shipal-shaped)", async () => {
       mockQueryAnalytics.mockResolvedValueOnce([
-        { captured: 0, totalCalls: 0, toolsWithIntents: 0 },
+        row({ captured: 22, optionalCalls: 100, optionalCaptured: 22, toolsWithIntents: 1 }),
       ]);
+
+      expect(await queryIntentKPIs(baseCtx)).toEqual({
+        captured: 22,
+        coverage: null,
+        optionalCoverage: 0.22,
+        toolsWithIntents: 1,
+      });
+    });
+
+    it("returns zero coverage when there are no tool calls", async () => {
+      mockQueryAnalytics.mockResolvedValueOnce([row({})]);
 
       expect(await queryIntentKPIs(baseCtx)).toEqual({
         captured: 0,
         coverage: 0,
+        optionalCoverage: null,
         toolsWithIntents: 0,
       });
     });
@@ -112,7 +142,7 @@ describe("intents queries", () => {
       // filter can be dropped and the headline numbers would silently disagree
       // with the (correctly filtered) feed below them.
       mockQueryAnalytics.mockResolvedValueOnce([
-        { captured: 3, totalCalls: 10, toolsWithIntents: 2 },
+        row({ captured: 3, requiredCalls: 10, requiredCaptured: 3, toolsWithIntents: 2 }),
       ]);
 
       await queryIntentKPIs({ ...baseCtx, platform: ["gemini"] });
@@ -123,12 +153,13 @@ describe("intents queries", () => {
 
     it("coerces ClickHouse string aggregates to numbers", async () => {
       mockQueryAnalytics.mockResolvedValueOnce([
-        { captured: "8", totalCalls: "16", toolsWithIntents: "3" },
+        row({ captured: "8", requiredCalls: "16", requiredCaptured: "8", toolsWithIntents: "3" }),
       ]);
 
       expect(await queryIntentKPIs(baseCtx)).toEqual({
         captured: 8,
         coverage: 0.5,
+        optionalCoverage: null,
         toolsWithIntents: 3,
       });
     });

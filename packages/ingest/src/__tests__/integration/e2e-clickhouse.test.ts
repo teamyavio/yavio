@@ -105,7 +105,7 @@ describe("E2E: Ingest API → ClickHouse", () => {
             input_keys: { query: true, limit: true },
             input_types: { query: "string", limit: "number" },
             intent_signals: { intent: "search" },
-            invocation_source: "widget",
+            intent_context: "optional",
             tokens_in: 120,
             tokens_out: 450,
             country_code: "DE",
@@ -145,7 +145,7 @@ describe("E2E: Ingest API → ClickHouse", () => {
     expect(inputTypes).toEqual({ query: "string", limit: "number" });
     const intentSignals = JSON.parse(row.intent_signals as string);
     expect(intentSignals).toEqual({ intent: "search" });
-    expect(row.invocation_source).toBe("widget"); // #73, migration 0019
+    expect(row.intent_context).toBe("optional"); // #73, migration 0019
 
     // Enrichment
     expect(row.ingested_at).toBeDefined();
