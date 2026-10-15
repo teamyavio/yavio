@@ -100,10 +100,12 @@ export interface CaptureConfig {
    * Argument values of a call rejected before the handler ran: arguments the
    * tool's schema rejected, an unknown or a disabled tool (#123).
    * - `false` (default): the event keeps `status`, `error_category:
-   *   "validation"`, the argument names and types (`input_keys`,
-   *   `input_types`), the `_`-prefixed request context in `input_values` and
-   *   the client metadata, but no argument values, no `error_message` and no
-   *   `output_content` — McpServer's error text can echo the rejected value.
+   *   "validation"`, the names and types (`input_keys`, `input_types`) of the
+   *   parameters the tool's schema declares, the `_`-prefixed request context
+   *   in `input_values`, the client metadata and a value-free reason in
+   *   `error_message` — but no argument values, no key the model invented and
+   *   no `output_content`. McpServer's error text can echo the rejected value,
+   *   so it is kept as-is only when it names nothing but the tool.
    *   A successful call only ever stores values the schema accepted, so a
    *   tool whose arguments are all enums stores only fixed values.
    * - `true`: the raw arguments and the error text are stored, to see what

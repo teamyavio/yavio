@@ -131,11 +131,13 @@ describe("protocol layer — failures before the handler", () => {
   });
 
   it.each([
-    ["country", "DE", { country: "DE" }],
-    [false, undefined, undefined],
+    ["country", "DE", { country: "DE" }, true],
+    [false, undefined, undefined, true],
+    ["country", "DE", { country: "DE" }, false],
+    [false, undefined, undefined, false],
   ] as const)(
-    "applies capture.geo: %s to the location on a validation event",
-    async (geo, countryCode, location) => {
+    "applies capture.geo: %s to the location on a validation event (rejectedInputValues: %s)",
+    async (geo, countryCode, location, rejectedInputValues) => {
       const h = await setup(
         (proxy) => {
           proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"));
@@ -147,7 +149,7 @@ describe("protocol layer — failures before the handler", () => {
             geo,
             tokens: true,
             retries: true,
-            rejectedInputValues: false,
+            rejectedInputValues,
           },
         },
       );
@@ -288,8 +290,11 @@ describe("protocol layer — failures before the handler", () => {
     expect(book.subject_id).toBeUndefined();
     expect(book.country_code).toBeUndefined();
     expect(JSON.stringify(book)).not.toContain("Duisburg");
-    // McpServer's validation text echoes the rejected arguments: input.
-    expect(book.error_message).toBeUndefined();
+    // McpServer's validation text echoes the rejected arguments: input. With
+    // the values off for the tool, only the value-free reason is stored.
+    expect(book.error_message).toBe(
+      "Input validation error: the arguments did not match the tool's schema (values not stored, see capture.rejectedInputValues)",
+    );
     expect(book.output_content).toBeUndefined();
 
     const quote = byName.quote as ToolCallEvent;
@@ -341,7 +346,8 @@ describe("protocol layer — failures before the handler", () => {
     expect(event?.event_name).toBe("book");
     expect(event?.error_category).toBe("validation");
     expect(event?.input_values).toBeUndefined();
-    expect(event?.error_message).toBeUndefined();
+    // "Tool book not found" names only the tool: value-free, so kept.
+    expect(event?.error_message).toContain("not found");
     expect(JSON.stringify(h.events)).not.toContain("DE89370400440532013000");
   });
 
@@ -570,6 +576,8 @@ describe("rejected calls without rejectedInputValues (the default, #123)", () =>
   beforeEach(() => _resetGlobalState());
 
   const SECRET = "premium, my wife is pregnant";
+  const FIXED_REASON =
+    "Input validation error: the arguments did not match the tool's schema (values not stored, see capture.rejectedInputValues)";
   const DEFAULT_CAPTURE = {
     inputValues: true,
     outputValues: true,
@@ -585,7 +593,6 @@ describe("rejected calls without rejectedInputValues (the default, #123)", () =>
     expect(event?.error_category).toBe("validation");
     expect(JSON.stringify(event)).not.toContain("pregnant");
     expect(JSON.stringify(event)).not.toContain("secret note");
-    expect(event?.error_message).toBeUndefined();
     expect(event?.output_content).toBeUndefined();
   }
 
@@ -614,8 +621,11 @@ describe("rejected calls without rejectedInputValues (the default, #123)", () =>
       const [event] = toolCalls(h.events);
       expectNoValues(event);
       // Names and types, including a key the model invented.
-      expect(event?.input_keys).toEqual({ plan: true, note: true });
-      expect(event?.input_types).toEqual({ plan: "string", note: "string" });
+      // Names and types of the declared parameters only: `note` was invented.
+      expect(event?.input_keys).toEqual({ plan: true });
+      expect(event?.input_types).toEqual({ plan: "string" });
+      // A value-free reason instead of McpServer's text.
+      expect(event?.error_message).toBe(FIXED_REASON);
       // input_values carries only the `_`-prefixed request context.
       expect(Object.keys(event?.input_values ?? {})).toEqual(["_meta"]);
       // Client metadata, as on a successful call.
@@ -638,12 +648,52 @@ describe("rejected calls without rejectedInputValues (the default, #123)", () =>
     await h.client.callTool({ name: "search", arguments: { query: SECRET } });
     await h.client.callTool({ name: "search_flights", arguments: { query: SECRET } });
 
-    const events = toolCalls(h.events);
-    expect(events.map((e) => e.event_name)).toEqual(["search", "search_flights"]);
-    for (const event of events) {
-      expectNoValues(event);
-      expect(event.input_keys).toEqual({ query: true });
-    }
+    const [disabled, unknown] = toolCalls(h.events);
+    expect([disabled?.event_name, unknown?.event_name]).toEqual(["search", "search_flights"]);
+    expectNoValues(disabled);
+    expectNoValues(unknown);
+    // The disabled tool still has a schema; the unknown one has none, so no names.
+    expect(disabled?.input_keys).toEqual({ query: true });
+    expect(unknown?.input_keys).toBeUndefined();
+    // These texts name only the tool: kept, so the cases stay apart.
+    expect(disabled?.error_message).toBe("MCP error -32602: Tool search disabled");
+    expect(unknown?.error_message).toBe("MCP error -32602: Tool search_flights not found");
+  });
+
+  it("stores no key name the schema does not declare: it can carry text as well", async () => {
+    const h = await setup(
+      (proxy) => {
+        proxy.registerTool("pick", { inputSchema: { plan: z.enum(["a"]) } }, async () => ok("x"));
+      },
+      { capture: DEFAULT_CAPTURE },
+    );
+
+    await h.client.callTool({ name: "pick", arguments: { [SECRET]: "x" } });
+
+    const [event] = toolCalls(h.events);
+    expectNoValues(event);
+    expect(event?.input_keys).toBeUndefined();
+  });
+
+  it("does not depend on `arguments` having been sent (it is optional in MCP)", async () => {
+    const register = (proxy: McpServer) => {
+      proxy.registerTool("pick", { inputSchema: { plan: z.enum(["a"]) } }, async () => ok("x"));
+    };
+    const off = await setup(register, { capture: DEFAULT_CAPTURE });
+    const on = await setup(register, {
+      capture: { ...DEFAULT_CAPTURE, rejectedInputValues: true },
+    });
+
+    await off.client.callTool({ name: "search_flights", _meta: CLIENT_META } as never);
+    await on.client.callTool({ name: "search_flights", _meta: CLIENT_META } as never);
+
+    const [offEvent] = toolCalls(off.events);
+    expect(offEvent?.error_message).toContain("not found");
+    expect(Object.keys(offEvent?.input_values ?? {})).toEqual(["_meta"]);
+    const [onEvent] = toolCalls(on.events);
+    expect(onEvent?.error_message).toContain("not found");
+    expect(onEvent?.output_content).toBeDefined();
+    expect(Object.keys(onEvent?.input_values ?? {})).toEqual(["_meta"]);
   });
 
   it("a per-tool override wins over the global flag, in both directions", async () => {

@@ -523,18 +523,18 @@ export function createProxy<T extends McpServer>(
     // no longer) registered, so an override still holds for a removed tool a
     // client calls from a cached schema.
     const capture = resolveToolCapture(config, toolName);
-    const captureInput = capture.inputValues && args !== undefined;
     // The VALUES of a rejected call are exactly what the schema refused:
     // whatever the model put into an enum field, free text from the
     // conversation included, while a successful call only ever stores what
-    // the schema accepted. Kept only with rejectedInputValues (#123); without
-    // it the event has names, types, the request context and the client
-    // metadata — what a successful call has — but no argument values.
-    const keepValues = captureInput && capture.rejectedInputValues;
-    // McpServer's text describes the arguments it rejected, and Zod 3 echoes
-    // the received value: it is input as much as output, stored only while
-    // the values themselves are.
-    const captureMessage = capture.outputValues && keepValues;
+    // the schema accepted. Kept only with rejectedInputValues (#123). Without
+    // it: the names and types of the parameters the tool's schema declares (a
+    // key the model invented can carry free text as well as a value can), the
+    // `_`-prefixed request context and the client metadata, and a value-free
+    // reason instead of McpServer's text. `arguments` is optional in MCP, so
+    // none of this depends on it having been sent.
+    const keepValues = capture.inputValues && capture.rejectedInputValues;
+    const declared = keepValues ? undefined : declaredParamNames(server, toolName);
+    const shownArgs = keepValues ? args : pickDeclared(args, declared);
     return buildToolCallEvent(
       {
         traceId: context.traceId,
@@ -547,15 +547,20 @@ export function createProxy<T extends McpServer>(
         toolName,
         status: "error",
         errorCategory: "validation",
-        errorMessage: captureMessage ? resultError.message : undefined,
-        inputKeys: captureInput ? extractInputKeys(args) : undefined,
-        inputTypes: captureInput ? extractInputTypes(args) : undefined,
-        inputValues: keepValues
-          ? extractInputValues(args, extra, capture.geo)
-          : captureInput
-            ? requestContextValues(extra, capture.geo)
-            : undefined,
-        outputContent: captureMessage ? extractOutputContent(result) : undefined,
+        // Result-derived text, so under outputValues; McpServer's text can
+        // echo the rejected value (Zod 3), so as-is only with the values.
+        errorMessage: !capture.outputValues
+          ? undefined
+          : keepValues
+            ? resultError.message
+            : valueFreeRejection(resultError.message, toolName),
+        inputKeys: capture.inputValues ? nonEmpty(extractInputKeys(shownArgs)) : undefined,
+        inputTypes: capture.inputValues ? nonEmpty(extractInputTypes(shownArgs)) : undefined,
+        inputValues: capture.inputValues
+          ? nonEmpty(extractInputValues(keepValues ? (args ?? {}) : {}, extra, capture.geo))
+          : undefined,
+        outputContent:
+          capture.outputValues && keepValues ? extractOutputContent(result) : undefined,
         intentSignals: getCapturedIntent() ?? undefined,
         intentContext: intentContextFor(config),
         clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
@@ -977,6 +982,87 @@ function listedInputSchema(schema: unknown): Record<string, unknown> | undefined
 }
 
 /** Extract top-level key names from tool args (values set to `true`). */
+/** `undefined` for a missing or empty object, so an event never carries `{}`. */
+function nonEmpty(value: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  return value && Object.keys(value).length > 0 ? value : undefined;
+}
+
+/**
+ * The parameter names a registered tool's input schema declares, for a
+ * rejected call whose values are not kept (#123). Undefined for an unknown
+ * tool or a schema whose top-level keys cannot be read (union, refine,
+ * passthrough-only): no names are stored then at all, since a key the model
+ * invented can carry free text as well as a value can. Reads McpServer's
+ * registry the way the intent controller does (shapeHasContext).
+ */
+function declaredParamNames(server: McpServer, toolName: string): Set<string> | undefined {
+  try {
+    const tools = (
+      server as unknown as { _registeredTools?: Record<string, { inputSchema?: unknown }> }
+    )._registeredTools;
+    if (!tools || !Object.hasOwn(tools, toolName)) return undefined;
+    const schema = tools[toolName]?.inputSchema;
+    if (!schema || typeof schema !== "object") return undefined;
+    const obj = schema as Record<string, unknown>;
+    if (obj.properties && typeof obj.properties === "object") {
+      return new Set(Object.keys(obj.properties as object)); // JSON Schema
+    }
+    if ("_def" in obj || "_zod" in obj) {
+      const raw =
+        obj.shape ??
+        (obj._zod as { def?: { shape?: unknown } } | undefined)?.def?.shape ??
+        (obj._def as { shape?: unknown } | undefined)?.shape;
+      const shape = typeof raw === "function" ? (raw as () => unknown)() : raw;
+      return shape && typeof shape === "object" ? new Set(Object.keys(shape as object)) : undefined;
+    }
+    // A raw Zod shape: every value is a Zod type.
+    const values = Object.values(obj);
+    const isShape =
+      values.length > 0 &&
+      values.every((v) => !!v && typeof v === "object" && ("_def" in v || "_zod" in v));
+    return isShape ? new Set(Object.keys(obj)) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Only the declared keys of `args` (their values are dropped by the callers). */
+function pickDeclared(args: unknown, names: Set<string> | undefined): Record<string, unknown> {
+  if (!names || !args || typeof args !== "object" || Array.isArray(args)) return {};
+  return Object.fromEntries(
+    Object.entries(args as Record<string, unknown>).filter(([key]) => names.has(key)),
+  );
+}
+
+/**
+ * McpServer's texts for a call rejected before the handler, kept without
+ * rejectedInputValues only when they hold nothing but the tool's own name
+ * (#123): unknown, disabled, task misconfiguration. An argument-validation
+ * text is replaced by a fixed reason, since Zod 3 echoes the rejected value
+ * into it. Anything else — a wording a later MCP SDK introduces — is
+ * dropped: fail closed.
+ */
+function valueFreeRejection(message: string | undefined, toolName: string): string | undefined {
+  if (!message) return undefined;
+  const text = message.replace(/^MCP error -?\d+: /, "");
+  const named = (suffix: RegExp) => {
+    const m = text.match(new RegExp(`^Tool (.+) (${suffix.source})$`));
+    return m !== null && m[1] === toolName;
+  };
+  if (
+    named(/not found/) ||
+    named(/disabled/) ||
+    named(/has taskSupport '\w+' but was not registered with registerToolTask/) ||
+    named(/requires task augmentation \(taskSupport: 'required'\)/)
+  ) {
+    return message;
+  }
+  if (text.startsWith("Input validation error:")) {
+    return "Input validation error: the arguments did not match the tool's schema (values not stored, see capture.rejectedInputValues)";
+  }
+  return undefined;
+}
+
 function extractInputKeys(args: unknown): Record<string, unknown> | undefined {
   if (args && typeof args === "object" && !Array.isArray(args)) {
     const keys: Record<string, unknown> = {};
@@ -1027,20 +1113,6 @@ function extractInputTypes(args: unknown): Record<string, unknown> | undefined {
  * fleet-wide (stateless transports), and exactly the kind of identifier an
  * app-store review flags.
  */
-/**
- * `input_values` without any argument: only the `_`-prefixed request context
- * (`_meta`, `_taskId`, `_requestInfo`) under the same rules as
- * extractInputValues. Used for a rejected call whose argument values are not
- * captured (#123). Undefined when there is no context either.
- */
-function requestContextValues(
-  extra: unknown,
-  geo: CaptureConfig["geo"],
-): Record<string, unknown> | undefined {
-  const values = extractInputValues({}, extra, geo);
-  return values && Object.keys(values).length > 0 ? values : undefined;
-}
-
 function extractInputValues(
   args: unknown,
   extra: unknown,
