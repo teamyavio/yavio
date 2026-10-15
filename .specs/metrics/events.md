@@ -25,6 +25,7 @@ Fires on every tool invocation. The core event.
 | input_values | TEXT (JSON) | Tool arguments plus, under `_`-prefixed keys, `_meta` (the request `_meta` verbatim; `openai/userLocation` reduced to `{ country }` with `capture.geo: "country"`, removed when it is off), `_taskId` and `_requestInfo` (five allow-listed headers + URL sans query). PII-stripped. See [sdk/input-values-extra-fields.md](../sdk/input-values-extra-fields.md) |
 | output_content | TEXT (JSON) | The CallToolResult (content with binary placeholders, structuredContent, isError, _meta before widget injection). PII-stripped |
 | intent_signals | TEXT (JSON) | `{ intent, source }` — the model's stated intent (see sdk/intent capture) |
+| invocation_source | TEXT | `model` or `widget` (#73). Decided by the SDK's intent layer per call: a sent `context` is the model's; a context-less call on a widget-invoked tool is the widget's; a context-less call on an ordinary tool is the model's. NULL when not knowable (intent off, tool owns its `context`, per-tool `intent: false` without a sent `context`, SDK < 0.4.0) — read as a model call. The dashboard's intent coverage denominator excludes `widget` rows. Migration `0019` |
 | tokens_in | INTEGER | Reserved — not set by the SDK today |
 | tokens_out | INTEGER | Reserved — not set by the SDK today |
 | country_code | TEXT | ISO 3166-1 alpha-2 from the platform's request `_meta` (`openai/userLocation.country`); omitted with `capture.geo: false` |

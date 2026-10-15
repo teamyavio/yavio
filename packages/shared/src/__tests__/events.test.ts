@@ -191,6 +191,24 @@ describe("ToolCallEvent", () => {
     expect(result.error_category).toBe("tool_error");
   });
 
+  it("accepts invocation_source model/widget and rejects anything else", () => {
+    for (const source of ["model", "widget"] as const) {
+      const result = ToolCallEvent.parse(
+        base({ event_type: "tool_call", event_name: "refresh", invocation_source: source }),
+      );
+      expect(result.invocation_source).toBe(source);
+    }
+    expect(
+      ToolCallEvent.parse(base({ event_type: "tool_call", event_name: "refresh" }))
+        .invocation_source,
+    ).toBeUndefined();
+    expect(() =>
+      ToolCallEvent.parse(
+        base({ event_type: "tool_call", event_name: "refresh", invocation_source: "iframe" }),
+      ),
+    ).toThrow();
+  });
+
   it("rejects invalid error_category", () => {
     expect(() =>
       ToolCallEvent.parse(

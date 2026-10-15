@@ -148,6 +148,12 @@ export interface ToolCallData {
   inputValues?: Record<string, unknown>;
   outputContent?: Record<string, unknown>;
   intentSignals?: { intent: string; source: "context_parameter" | "inferred" };
+  /**
+   * Who called the tool, when the intent layer could tell (#73): `model`, or
+   * `widget` for a context-less call on a widget-invoked tool. Unset while
+   * intent capture is off or the tool owns its own `context`.
+   */
+  invocationSource?: "model" | "widget";
   clientMeta?: ClientMeta;
 }
 
@@ -185,6 +191,7 @@ export function buildToolCallEvent(ctx: EventContext, data: ToolCallData): ToolC
     input_values: data.inputValues ? stripPii(data.inputValues) : undefined,
     output_content: data.outputContent ? stripPii(data.outputContent) : undefined,
     intent_signals: data.intentSignals ? stripPii({ ...data.intentSignals }) : undefined,
+    invocation_source: data.invocationSource,
     country_code: data.clientMeta?.countryCode,
     locale: data.clientMeta?.locale,
     end_user_agent: data.clientMeta?.endUserAgent,

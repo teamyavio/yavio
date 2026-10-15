@@ -12,7 +12,12 @@ import { detectPlatform } from "../core/platform.js";
 import type { CaptureConfig, SessionState, YavioConfig } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
 import { type RequestStore, runInContext } from "./context.js";
-import { type IntentController, createIntentController, getCapturedIntent } from "./intent.js";
+import {
+  type IntentController,
+  createIntentController,
+  getCapturedIntent,
+  getInvocationSource,
+} from "./intent.js";
 import {
   type CallContext,
   type CallFrame,
@@ -295,6 +300,7 @@ function wrapToolCallback(
           inputValues: captureInput ? extractInputValues(cbArgs[0], extra, capture.geo) : undefined,
           outputContent: capture.outputValues ? extractOutputContent(result) : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
+          invocationSource: getInvocationSource() ?? undefined,
           clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
         },
       );
@@ -364,6 +370,7 @@ function wrapToolCallback(
             ? extractInputValues(cbArgs[0], extra, capture.geo)
             : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
+          invocationSource: getInvocationSource() ?? undefined,
           clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
         },
       );
@@ -524,6 +531,7 @@ export function createProxy<T extends McpServer>(
         inputValues: captureInput ? extractInputValues(args, extra, capture.geo) : undefined,
         outputContent: captureMessage ? extractOutputContent(result) : undefined,
         intentSignals: getCapturedIntent() ?? undefined,
+        invocationSource: getInvocationSource() ?? undefined,
         clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
       },
     );

@@ -29,7 +29,9 @@ error_category ('tool_error' = the handler returned isError: true, 'unknown' = t
 handler threw; also 'auth'/'validation'/'timeout'/'rate_limit'/'server'),
 error_message (PII-stripped, <= 500 chars), is_retry (UInt8, always 0 today)
 Captured input/output (PII-stripped JSON strings): input_values, output_content,
-input_keys, input_types, intent_signals (JSON with 'intent' and 'source' keys)
+input_keys, input_types, intent_signals (JSON with 'intent' and 'source' keys);
+invocation_source (Nullable: 'model' or 'widget' = the app's own iframe called a
+widget-invoked tool; NULL = not knowable, treat as model)
 Tokens: tokens_in, tokens_out. Conversions: conversion_value, conversion_currency.
 Geo: country_code (Nullable). Connection: protocol_version, client_name,
 client_version, connection_duration_ms. SDK: sdk_version.

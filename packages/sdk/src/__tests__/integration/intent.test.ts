@@ -867,6 +867,51 @@ describe("intent capture — widget-invoked tools", () => {
     expect(tool.inputSchema.required).toContain("context");
   });
 
+  it("stamps invocation_source: widget on a context-less call, model when context is sent (#73)", async () => {
+    // The dashboard keeps widget traffic out of the intent coverage
+    // denominator; only this wrapper can tell the two apart.
+    const h = await setupWidget({ "openai/widgetAccessible": true });
+    await h.client.listTools();
+
+    await h.client.callTool({ name: "widget-refresh", arguments: { search_id: "abc123" } });
+    await h.client.callTool({
+      name: "widget-refresh",
+      arguments: { search_id: "abc123", context: "user asked for cheaper cars" },
+    });
+    // An ordinary tool has no widget: context-less or not, it is the model.
+    await h.client.callTool({ name: "search", arguments: { query: "boots", context: "boots" } });
+
+    expect(toolCallEvents(h.events).map((e) => e.invocation_source)).toEqual([
+      "widget",
+      "model",
+      "model",
+    ]);
+  });
+
+  it("leaves invocation_source unset when intent capture is off or the tool owns context", async () => {
+    // With no `context` advertised, model and widget calls look the same.
+    const off = await setupWidget(
+      { "openai/widgetAccessible": true },
+      { ...INTENT_ON, enabled: false },
+    );
+    await off.client.callTool({ name: "widget-refresh", arguments: { search_id: "abc123" } });
+    expect(toolCallEvents(off.events)[0]?.invocation_source).toBeUndefined();
+
+    const owns = await setup(INTENT_ON, (proxy) => {
+      proxy.registerTool(
+        "own-context",
+        {
+          inputSchema: { context: z.string(), q: z.string() },
+          _meta: { "openai/widgetAccessible": true },
+        },
+        async () => ok("x"),
+      );
+    });
+    await owns.client.listTools();
+    await owns.client.callTool({ name: "own-context", arguments: { context: "mine", q: "x" } });
+    expect(toolCallEvents(owns.events)[0]?.invocation_source).toBeUndefined();
+  });
+
   it("accepts a context-less widget call, records no intent, and skips the fallback", async () => {
     // The fallback exists to approximate intents for model calls that omit
     // context. Widget traffic (a 3s auto-refresh) is context-less by nature —
@@ -1011,6 +1056,38 @@ describe("intent capture — widget classification without listed _meta", () => 
     ]);
     const result = (await callList()) as { tools: Array<{ inputSchema: { required?: string[] } }> };
     expect(result.tools[0]?.inputSchema.required).toEqual(["query"]);
+  });
+});
+
+describe("invocation_source under per-tool intent: false (#73)", () => {
+  beforeEach(() => _resetGlobalState());
+
+  it("is model for a context a cached schema still sends, else unset (not widget-detectable)", async () => {
+    const h = await setup(
+      INTENT_ON,
+      (proxy) => {
+        proxy.registerTool(
+          "book",
+          { inputSchema: { iban: z.string() }, _meta: { "openai/widgetAccessible": true } },
+          async () => ok("x"),
+        );
+        proxy.registerTool("quote", { inputSchema: { q: z.string() } }, async () => ok("x"));
+      },
+      { book: { intent: false }, quote: { intent: false } },
+    );
+    await h.client.listTools();
+
+    await h.client.callTool({ name: "book", arguments: { iban: "DE00", context: "stale" } });
+    await h.client.callTool({ name: "book", arguments: { iban: "DE00" } });
+    await h.client.callTool({ name: "quote", arguments: { q: "x" } });
+
+    expect(toolCallEvents(h.events).map((e) => e.invocation_source)).toEqual([
+      "model",
+      "widget", // widget-invoked tool, no context: still the widget's traffic
+      undefined, // ordinary tool with context never advertised: unknowable
+    ]);
+    // intent: false never reads what was sent.
+    expect(toolCallEvents(h.events)[0]?.intent_signals).toBeUndefined();
   });
 });
 

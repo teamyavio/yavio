@@ -88,6 +88,12 @@ export const ToolCallEvent = BaseEvent.extend({
   input_values: z.record(z.unknown()).optional(),
   output_content: z.record(z.unknown()).optional(),
   intent_signals: z.record(z.unknown()).optional(),
+  // Who called the tool (#73): `model`, or `widget` for the app's own iframe
+  // calling a widget-invoked tool without `context`. Only the SDK's intent
+  // layer can tell, so the field is absent while intent capture is off, on
+  // tools that own their `context`, and on events from SDKs before 0.4.0.
+  // Absent means "count it as a model call".
+  invocation_source: z.enum(["model", "widget"]).optional(),
   tokens_in: z.number().int().optional(),
   tokens_out: z.number().int().optional(),
   country_code: z.string().length(2).optional(),

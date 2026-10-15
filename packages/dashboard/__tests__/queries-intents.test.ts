@@ -83,6 +83,18 @@ describe("intents queries", () => {
       });
     });
 
+    it("counts model calls only in the denominator (#73)", async () => {
+      mockQueryAnalytics.mockResolvedValueOnce([
+        { captured: 30, totalCalls: 120, toolsWithIntents: 5 },
+      ]);
+      await queryIntentKPIs(baseCtx);
+      const call = mockQueryAnalytics.mock.calls[0][0];
+      // NULL (older SDKs, intent off) counts as a model call; only 'widget' is out.
+      expect(call.query).toContain(
+        "countDistinctIf(event_id, ifNull(invocation_source, '') != 'widget') AS totalCalls",
+      );
+    });
+
     it("returns zero coverage when there are no tool calls", async () => {
       mockQueryAnalytics.mockResolvedValueOnce([
         { captured: 0, totalCalls: 0, toolsWithIntents: 0 },

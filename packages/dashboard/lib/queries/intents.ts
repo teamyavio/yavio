@@ -86,6 +86,11 @@ export async function queryIntentFeed(
  * Headline numbers for the intents page: how many intents were captured,
  * what share of tool calls carried one, and how many distinct tools they
  * cover in the selected period.
+ *
+ * Coverage counts model calls only: a widget's own calls (invocation_source
+ * 'widget', #73) carry no conversation to describe, and a 3 s auto-refresh
+ * alone would otherwise drag the share down like a capture regression. Rows
+ * without the column value (older SDKs, intent off) count as model calls.
  */
 export async function queryIntentKPIs(ctx: QueryContext): Promise<IntentKPIs> {
   const pf = platformFilter(ctx.platform);
@@ -100,7 +105,7 @@ export async function queryIntentKPIs(ctx: QueryContext): Promise<IntentKPIs> {
     query: `
       SELECT
         countDistinctIf(event_id, intent_signals != '{}' AND JSONExtractString(intent_signals, 'intent') != '') AS captured,
-        count(DISTINCT event_id) AS totalCalls,
+        countDistinctIf(event_id, ifNull(invocation_source, '') != 'widget') AS totalCalls,
         uniqExactIf(event_name, intent_signals != '{}' AND JSONExtractString(intent_signals, 'intent') != '') AS toolsWithIntents
       FROM events
       WHERE project_id = {projectId:String}
