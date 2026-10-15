@@ -242,13 +242,13 @@ describe("per-tool capture overrides (tools)", () => {
     });
   });
 
-  it("ignores unknown keys and non-boolean values from the config file", () => {
+  it("ignores unknown keys and non-object entries from the config file", () => {
     writeFileSync(
       join(tempDir, ".yaviorc.json"),
       JSON.stringify({
         apiKey: "file_key",
         tools: {
-          book: { inputValues: "false", geo: false, intent: false },
+          book: { geo: false, intent: false },
           bogus: "not an object",
           empty: { unknownKey: true },
         },
@@ -256,6 +256,31 @@ describe("per-tool capture overrides (tools)", () => {
     );
     const config = withCwd(tempDir, () => resolveConfig());
     expect(config?.tools).toEqual({ book: { intent: false } });
+  });
+
+  it('fails closed on a non-boolean override: "false" turns the tool\'s capture off', () => {
+    // Dropping the string would leave the tool on the global default — capture
+    // ON — for the one tool the integrator meant to protect.
+    _resetConfigWarnings();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeFileSync(
+        join(tempDir, ".yaviorc.json"),
+        JSON.stringify({
+          apiKey: "file_key",
+          tools: { book: { inputValues: "false", outputValues: 0, intent: "no" } },
+        }),
+      );
+      const config = withCwd(tempDir, () => resolveConfig());
+      expect(config?.tools).toEqual({
+        book: { inputValues: false, outputValues: false, intent: false },
+      });
+      expect(warn).toHaveBeenCalledTimes(3);
+      expect(warn.mock.calls[0][0]).toContain("YAVIO-1006");
+      expect(warn.mock.calls[0][0]).toContain("tools.book.inputValues");
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("treats __proto__ and constructor as tool names, never as the object's prototype", () => {
@@ -270,6 +295,58 @@ describe("per-tool capture overrides (tools)", () => {
     expect(config?.tools["__proto__"]).toEqual({ inputValues: false });
     expect(config?.tools.constructor).toEqual({ intent: false });
     expect(Object.hasOwn(config?.tools ?? {}, "inputValues")).toBe(false); // not poisoned
+  });
+});
+
+describe("boolean capture flags fail closed", () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    _resetConfigWarnings();
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  it.each(["inputValues", "outputValues", "tokens", "retries"] as const)(
+    'turns %s off on the string "false", with one YAVIO-1006 warning',
+    (flag) => {
+      // Hand-written JSON: "false" is truthy and used to keep capture ON.
+      const config = resolveConfig({ apiKey: "test", capture: { [flag]: "false" as never } });
+      expect(config?.capture[flag]).toBe(false);
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0][0]).toContain("YAVIO-1006");
+      expect(warn.mock.calls[0][0]).toContain(`capture.${flag}`);
+    },
+  );
+
+  it("passes booleans through and warns once per flag, not once overall", () => {
+    const config = resolveConfig({
+      apiKey: "test",
+      capture: { inputValues: "no" as never, outputValues: false, geo: "yes" as never },
+    });
+    expect(config?.capture.inputValues).toBe(false);
+    expect(config?.capture.outputValues).toBe(false);
+    expect(config?.capture.geo).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails closed on a hand-written "false" string for inputValues in .yaviorc.json', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "yavio-flags-test-"));
+    const originalCwd = process.cwd;
+    try {
+      writeFileSync(
+        join(tempDir, ".yaviorc.json"),
+        JSON.stringify({ apiKey: "file_key", capture: { inputValues: "false" } }),
+      );
+      process.cwd = () => tempDir;
+      expect(resolveConfig()?.capture.inputValues).toBe(false);
+    } finally {
+      process.cwd = originalCwd;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });
 
