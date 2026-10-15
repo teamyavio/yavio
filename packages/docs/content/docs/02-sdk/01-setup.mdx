@@ -44,7 +44,8 @@ const instrumented = withYavio(server, {
 | `capture.inputValues` | `boolean` | `true` | Capture tool input values, key names and types, plus client metadata |
 | `capture.outputValues` | `boolean` | `true` | Capture tool results |
 | `capture.geo` | `boolean \| "country"` | `true` | End-user location: `true` keeps it as sent, `"country"` keeps only the country, `false` drops it |
-| `tools` | `Record<string, ToolCaptureOverride>` | — | Per-tool overrides of the capture flags (`inputValues`, `outputValues`, `intent`) |
+| `capture.rejectedInputValues` | `boolean` | `false` | Store the argument values of calls rejected before the handler runs (by default only their names and types) |
+| `tools` | `Record<string, ToolCaptureOverride>` | — | Per-tool overrides of the capture flags (`inputValues`, `outputValues`, `rejectedInputValues`, `intent`) |
 
 See [Configuration](/docs/02-sdk/03-configuration) for the full precedence chain.
 

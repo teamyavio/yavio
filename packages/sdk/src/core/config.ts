@@ -20,6 +20,8 @@ const DEFAULT_CAPTURE: CaptureConfig = {
   geo: true,
   tokens: true,
   retries: true,
+  // Off: a rejected call must not store what the schema refused (#123).
+  rejectedInputValues: false,
 };
 
 /**
@@ -68,7 +70,12 @@ interface ConfigFile {
   tools?: Record<string, ToolCaptureOverride>;
 }
 
-const TOOL_OVERRIDE_KEYS = ["inputValues", "outputValues", "intent"] as const;
+const TOOL_OVERRIDE_KEYS = [
+  "inputValues",
+  "outputValues",
+  "intent",
+  "rejectedInputValues",
+] as const;
 
 /**
  * Merge per-tool overrides from the config file and the code options, field
@@ -128,7 +135,13 @@ function resolveGeo(value: unknown): CaptureConfig["geo"] {
   return false;
 }
 
-const BOOLEAN_CAPTURE_FLAGS = ["inputValues", "outputValues", "tokens", "retries"] as const;
+const BOOLEAN_CAPTURE_FLAGS = [
+  "inputValues",
+  "outputValues",
+  "tokens",
+  "retries",
+  "rejectedInputValues",
+] as const;
 
 /** `path` names the flag in the warning: `capture.inputValues`, `tools.book.intent`. */
 function resolveBooleanFlag(path: string, value: unknown): boolean {

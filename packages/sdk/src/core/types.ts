@@ -44,6 +44,12 @@ export interface ToolCaptureOverride {
    * effect while intent capture is off globally.
    */
   intent?: boolean;
+  /**
+   * `true`: a call rejected before the handler ran (arguments the schema
+   * rejected, unknown or disabled tool) keeps its argument values and
+   * McpServer's error text. Same semantics as the global flag (#123).
+   */
+  rejectedInputValues?: boolean;
 }
 
 /** Resolved user-intent capture configuration. */
@@ -90,6 +96,24 @@ export interface CaptureConfig {
   geo: boolean | "country";
   tokens: boolean;
   retries: boolean;
+  /**
+   * Argument values of a call rejected before the handler ran: arguments the
+   * tool's schema rejected, an unknown or a disabled tool (#123).
+   * - `false` (default): the event keeps `status`, `error_category:
+   *   "validation"`, the names and types (`input_keys`, `input_types`) of the
+   *   parameters the tool's schema declares, the `_`-prefixed request context
+   *   in `input_values`, the client metadata and a value-free reason in
+   *   `error_message` — but no argument values, no key the model invented and
+   *   no `output_content`. McpServer's error text can echo the rejected value,
+   *   so it is kept as-is only when it names nothing but the tool.
+   *   A successful call only ever stores values the schema accepted, so a
+   *   tool whose arguments are all enums stores only fixed values.
+   * - `true`: the raw arguments and the error text are stored, to see what
+   *   the model sent. Whatever the model put into a field is then kept,
+   *   free text from the conversation included.
+   * No effect while `inputValues` is off: nothing of the input is captured.
+   */
+  rejectedInputValues: boolean;
 }
 
 /** Options passed to `withYavio()`. */

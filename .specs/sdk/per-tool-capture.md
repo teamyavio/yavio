@@ -33,6 +33,7 @@ interface ToolCaptureOverride {
   inputValues?: boolean;   // false: no input_keys, input_types, input_values, client meta for this tool
   outputValues?: boolean;  // false: no output_content for this tool
   intent?: boolean;        // false: no `context` parameter advertised or captured for this tool
+  rejectedInputValues?: boolean; // true: a call rejected before the handler keeps its argument values (#123)
 }
 interface WithYavioOptions { …; tools?: Record<string, ToolCaptureOverride> }
 ```
@@ -43,6 +44,7 @@ interface WithYavioOptions { …; tools?: Record<string, ToolCaptureOverride> }
 | `inputValues: false` semantics | Identical to the global flag on that call: no `input_keys`, `input_types`, `input_values`, and no client meta (`locale`, `country_code`, `end_user_agent`, `subject_id`), on both the success and the throw path. One code path, no new semantics. **Changed 2026-10-13 (Marcel, after code review):** also no `error_message` on a throw — messages interpolate arguments (`IBAN ${iban} rejected`) and `stripPii` does not catch IBANs. |
 | `outputValues: false` | No `output_content`, and — once [tool-result-errors.md](./tool-result-errors.md) ships — no result-derived `error_message` either (that text is output). `status`/`error_category` stay. `error_message` on a throw is not gated by `outputValues` (developer-written) — but by `inputValues`, see above. |
 | `intent: false` | A **third state** in the intent controller (today `isEligible()` means strip *and* capture): never advertise `context` for the tool, never capture it, **still strip** it if a client sends one — a client with a cached schema keeps sending it, and a strict Zod schema would otherwise reject the call. Motivation: a model's intent sentence for a booking tool tends to contain the user's name. Scope: on/off per tool; per-tool *required/optional* (#73 item 2) stays open. |
+| `rejectedInputValues` | Added 2026-10-15 (#123), global and per tool, default `false`: a call rejected before the handler (schema-rejected arguments, unknown or disabled tool) stores the declared parameters' names and types, the request context, client meta and a value-free reason, but no argument values and no invented key names (second review, 2026-10-15). Details in [protocol-layer-status.md](./protocol-layer-status.md#fields-of-a-pre-handler-failure-event) |
 | Still emitted | `tool_discovery` (description + schema, no user data), `tool_call` with latency/status/intent (unless disabled), conversions/track/step/identify from inside the handler with full session context. |
 | Config sources | `withYavio()` options and `.yaviorc.json` (`"tools": {…}`). No env-var form (nested). |
 | Unknown tool names | Not validated — tools register after `withYavio()`. Documented. |

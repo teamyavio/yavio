@@ -54,6 +54,7 @@ withYavio(server, {
     inputValues: true,   // capture tool input values + client metadata (default: true)
     outputValues: true,  // capture tool output values (default: true)
     geo: true,           // location: true | "country" | false (default: true), see below
+    rejectedInputValues: false, // argument values of calls the schema rejected (default: false), see below
     tokens: true,        // reserved — no effect today
     retries: true,       // reserved — no effect today (is_retry is never set)
   },
@@ -85,6 +86,7 @@ withYavio(server, {
 | `inputValues` | No `input_keys`, `input_types`, `input_values`, no client metadata (`locale`, `country_code`, `end_user_agent`, `subject_id`) and no thrown error's message for this tool, on success and on error |
 | `outputValues` | No `output_content`, and no `error_message` taken from an `isError` result (that text is output). `status` and `error_category` are still recorded; a thrown error's message is (it is gated on `inputValues`, see below) |
 | `intent` | The `context` parameter is neither advertised nor captured for this tool. A `context` a client still sends from a cached schema is stripped before validation, so strict schemas keep accepting the call. No effect while intent capture is off globally |
+| `rejectedInputValues` | A call to this tool that is rejected before the handler runs stores no argument values, no invented key names and only a value-free reason. `true` keeps the raw arguments and McpServer's error text. Same as the global flag (below) |
 
 A key that is omitted inherits the global value, so an override can also switch a flag *on* for one tool. Names are not validated — tools register after `withYavio()` runs — so an override for a tool that never registers is simply unused. The tool still emits `tool_discovery` (description and schema, no user data) and `tool_call` with latency and status, and tracking calls from inside its handler carry the full session context.
 
@@ -124,7 +126,7 @@ A call is an error when the handler **throws** or when it **returns a result wit
 | `success` | — | The handler returned a result without `isError: true` |
 | `error` | `tool_error` | The handler returned a result with `isError: true` (an expired reference, an invalid postal code, a missing field) |
 | `error` | `unknown` | The handler threw |
-| `error` | `validation` | The call failed **before** the handler ran: unknown or disabled tool, or arguments the tool's schema rejected. No `latency_ms` (nothing executed); `input_values` holds the raw arguments the model sent |
+| `error` | `validation` | The call failed **before** the handler ran: unknown or disabled tool, or arguments the tool's schema rejected. No `latency_ms` (nothing executed). By default the event has the names and types (`input_keys`, `input_types`) of the parameters the tool's schema declares, the `_`-prefixed request context in `input_values`, the client metadata and a value-free reason in `error_message` (McpServer's text as-is when it names only the tool — unknown, disabled — otherwise a fixed "Input validation error" reason), but **no argument values**, no key the model invented and no `output_content`. `rejectedInputValues: true` stores the raw arguments and McpServer's error text, to see what the model sent |
 | `error` | `server` | The handler returned, but its result failed the tool's own `outputSchema` |
 
 Only the literal boolean `true` counts as `isError`. The client sees the same shape in all four error cases (the MCP SDK converts throws and pre-handler failures into `isError` results), so the distinction is server-side only.
@@ -146,6 +148,8 @@ With `inputValues` on, `input_values` holds the tool's arguments plus a few fiel
 | `_requestInfo` | The calling request's `user-agent`, `accept-language`, `x-anthropic-client`, `mcp-protocol-version` and `traceparent` headers, plus its URL without the query string. Every other header is dropped — `Authorization`, `Cookie`, `X-Api-Key` and the like never reach analytics, and no `X-Forwarded-For` means an event stays free of end-user IPs |
 
 **Disclose this.** With the defaults, every tool call from ChatGPT stores the user's approximate position including coordinates and the platform's stable user id. Name that collection in your privacy policy, or set `geo: "country"` (keeps only the country, drops city, region, timezone and coordinates), `geo: false` (drops the location) or `inputValues: false` (drops all of it; also per tool, see above).
+
+**Rejected arguments are not stored by default.** A successful call only ever stores values its schema accepted, so a tool whose arguments are all enums stores only those fixed values. A call the schema rejects would otherwise store whatever the model put into the field, free text from the conversation included. With `rejectedInputValues: false`, the default, such a call keeps only the names and types of the parameters the tool's schema declares, plus a value-free reason. No value and no key the model invented is stored. Set `rejectedInputValues: true` (globally or per tool) only if you want to see the values the model sent, and disclose it.
 
 All captured input and output is PII-stripped before it leaves the process, but the stripper only matches emails, Luhn-valid card numbers, US Social Security numbers and US-format phone numbers.
 

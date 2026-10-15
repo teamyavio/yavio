@@ -378,6 +378,6 @@ Session (ses_xxx) ← one MCP connection, shared by server + widget events
 ## Related specs (proposed 2026-08-26)
 
 - [Tool-result errors count as errors](./tool-result-errors.md) — `isError: true` results become `status: error` / `error_category: tool_error`.
-- [Per-tool capture overrides](./per-tool-capture.md) — `tools: { "<name>": { inputValues, outputValues, intent } }`, plus a warn-once for tracking calls outside a wrapped tool.
+- [Per-tool capture overrides](./per-tool-capture.md) — `tools: { "<name>": { inputValues, outputValues, rejectedInputValues, intent } }`, plus a warn-once for tracking calls outside a wrapped tool.
 - [`input_values` extra fields](./input-values-extra-fields.md) — what the `_`-prefixed fields are, which stay, which go.
 - [Status detection at the protocol layer](./protocol-layer-status.md) — calls the MCP SDK fails before the handler (unknown/disabled tool, argument validation) become `status: error` / `validation`; output-validation failures become `server`; one event per call.
