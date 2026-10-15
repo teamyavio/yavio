@@ -58,6 +58,7 @@ Place it in your project root or any parent directory. The nearest file wins.
 | `capture.inputValues` | `true` |
 | `capture.outputValues` | `true` |
 | `capture.geo` | `true` |
+| `capture.rejectedInputValues` | `false` |
 | `tools` | none |
 
 ## Capture options
@@ -79,12 +80,15 @@ withYavio(server, {
 | `inputValues` | No `input_keys`, `input_types`, `input_values`, no client metadata (`locale`, `country_code`, `end_user_agent`, `subject_id`), and no `error_message` from a thrown error (messages tend to interpolate the arguments) |
 | `outputValues` | No `output_content`. An `isError` result still sets `status` and `error_category`, but its text is not stored as `error_message` (it is output). A thrown error's message is still stored unless `inputValues` is off |
 | `geo` | No `country_code`, and no `openai/userLocation` inside the captured `_meta` |
+| `rejectedInputValues` | Off by default. A call rejected before the handler runs (arguments the schema refused, unknown or disabled tool) keeps the names and types of the arguments the model sent (`input_keys`, `input_types`), the `_`-prefixed request context in `input_values` and the client metadata, but **no argument values** and no `error_message` or `output_content` (McpServer's error text can echo the rejected value). On: the raw arguments and the error text are stored |
 
 `geo` also takes a third value, `"country"`: `country_code` is still set, and `openai/userLocation` in the captured `_meta` is replaced by `{ country }` — city, region, timezone, coordinates and any field the platform adds later are not stored. Use it when a privacy review asks for country-level analytics without precise location. `geo` has no per-tool override.
 
-Every capture flag fails closed, in `capture` and in a per-tool `tools` override alike: `inputValues`, `outputValues`, `tokens`, `retries` and the per-tool `intent` accept exactly `true` and `false`, `geo` accepts `true`, `false` and `"country"`. Any other value (for example the string `"false"` in `.yaviorc.json`, which is truthy) turns that capture **off** and logs `YAVIO-1006` once per flag and process.
+Every capture flag fails closed, in `capture` and in a per-tool `tools` override alike: `inputValues`, `outputValues`, `rejectedInputValues`, `tokens`, `retries` and the per-tool `intent` accept exactly `true` and `false`, `geo` accepts `true`, `false` and `"country"`. Any other value (for example the string `"false"` in `.yaviorc.json`, which is truthy) turns that capture **off** and logs `YAVIO-1006` once per flag and process.
 
 Client metadata (`locale`, `country_code`, `end_user_agent`, `subject_id`) is captured under `inputValues` for every tool, including tools that take no arguments.
+
+`rejectedInputValues` exists because a successful call only ever stores values the tool's schema accepted, while a rejected call would store whatever the model sent. With an enum field such as `plan: z.enum(["basic", "premium"])`, the model may send `"premium, my wife is pregnant"`; the schema rejects it, and with the flag on that sentence is stored. Leave it off if your privacy policy says only fixed values are collected. It has no effect while `inputValues` is off.
 
 `tokens` and `retries` are accepted but reserved — they have no effect today.
 
@@ -109,6 +113,8 @@ withYavio(server, {
 ```
 
 Use this for a tool whose input must never reach analytics — an IBAN, a message body, a birth date. The tool stays on the wrapped server, so it still produces `tool_call` events with latency and status, and `yavio.conversion()` and friends still work from inside its handler. Registering the tool on the unwrapped server instead loses all of that: no `tool_call` event, and tracking calls from the handler are dropped (see [Tracking API](/docs/02-sdk/02-tracking-api#outside-tool-handlers)).
+
+`rejectedInputValues` can be set per tool as well, in both directions.
 
 `intent: false` additionally keeps the tool out of [intent capture](/docs/02-sdk/07-intent-capture): the `context` parameter is neither advertised nor captured for it, and a `context` a client still sends from a cached schema is stripped before validation.
 

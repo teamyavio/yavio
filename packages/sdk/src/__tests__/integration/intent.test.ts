@@ -36,7 +36,14 @@ function makeConfig(intent: IntentConfig, tools: YavioConfig["tools"] = {}): Yav
   return {
     apiKey: "yav_test",
     endpoint: "http://localhost:9/v1/events",
-    capture: { inputValues: true, outputValues: true, geo: true, tokens: true, retries: true },
+    capture: {
+      inputValues: true,
+      outputValues: true,
+      geo: true,
+      tokens: true,
+      retries: true,
+      rejectedInputValues: false,
+    },
     // serverOnly skips widget-token minting so no network calls happen
     serverOnly: true,
     intent,

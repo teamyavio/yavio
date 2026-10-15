@@ -105,6 +105,9 @@ function resolveToolCapture(config: YavioConfig, toolName: string): CaptureConfi
     ...config.capture,
     ...(override.inputValues !== undefined ? { inputValues: override.inputValues } : {}),
     ...(override.outputValues !== undefined ? { outputValues: override.outputValues } : {}),
+    ...(override.rejectedInputValues !== undefined
+      ? { rejectedInputValues: override.rejectedInputValues }
+      : {}),
   };
 }
 
@@ -514,18 +517,24 @@ export function createProxy<T extends McpServer>(
 
     // Unknown tool, disabled tool, argument validation, task misconfiguration:
     // all InvalidParams-class failures of the request itself, handed over by
-    // McpServer as one isError text. `validation` for all four; the message
-    // says which. No latency — the handler never ran. Inputs are the RAW
-    // arguments (what did the model send?), under the tool's capture flags —
-    // resolved by name even when the tool is not (or no longer) registered,
-    // so an override still holds for a removed tool a client calls from a
-    // cached schema.
+    // McpServer as one isError text. `validation` for all four. No latency —
+    // the handler never ran. Inputs come from the RAW arguments, under the
+    // tool's capture flags — resolved by name even when the tool is not (or
+    // no longer) registered, so an override still holds for a removed tool a
+    // client calls from a cached schema.
     const capture = resolveToolCapture(config, toolName);
     const captureInput = capture.inputValues && args !== undefined;
-    // McpServer's text describes the arguments it rejected and Zod echoes the
-    // received values, so it is input as much as output: stored only while
-    // both are captured.
-    const captureMessage = capture.outputValues && capture.inputValues;
+    // The VALUES of a rejected call are exactly what the schema refused:
+    // whatever the model put into an enum field, free text from the
+    // conversation included, while a successful call only ever stores what
+    // the schema accepted. Kept only with rejectedInputValues (#123); without
+    // it the event has names, types, the request context and the client
+    // metadata — what a successful call has — but no argument values.
+    const keepValues = captureInput && capture.rejectedInputValues;
+    // McpServer's text describes the arguments it rejected, and Zod 3 echoes
+    // the received value: it is input as much as output, stored only while
+    // the values themselves are.
+    const captureMessage = capture.outputValues && keepValues;
     return buildToolCallEvent(
       {
         traceId: context.traceId,
@@ -541,7 +550,11 @@ export function createProxy<T extends McpServer>(
         errorMessage: captureMessage ? resultError.message : undefined,
         inputKeys: captureInput ? extractInputKeys(args) : undefined,
         inputTypes: captureInput ? extractInputTypes(args) : undefined,
-        inputValues: captureInput ? extractInputValues(args, extra, capture.geo) : undefined,
+        inputValues: keepValues
+          ? extractInputValues(args, extra, capture.geo)
+          : captureInput
+            ? requestContextValues(extra, capture.geo)
+            : undefined,
         outputContent: captureMessage ? extractOutputContent(result) : undefined,
         intentSignals: getCapturedIntent() ?? undefined,
         intentContext: intentContextFor(config),
@@ -1014,6 +1027,20 @@ function extractInputTypes(args: unknown): Record<string, unknown> | undefined {
  * fleet-wide (stateless transports), and exactly the kind of identifier an
  * app-store review flags.
  */
+/**
+ * `input_values` without any argument: only the `_`-prefixed request context
+ * (`_meta`, `_taskId`, `_requestInfo`) under the same rules as
+ * extractInputValues. Used for a rejected call whose argument values are not
+ * captured (#123). Undefined when there is no context either.
+ */
+function requestContextValues(
+  extra: unknown,
+  geo: CaptureConfig["geo"],
+): Record<string, unknown> | undefined {
+  const values = extractInputValues({}, extra, geo);
+  return values && Object.keys(values).length > 0 ? values : undefined;
+}
+
 function extractInputValues(
   args: unknown,
   extra: unknown,

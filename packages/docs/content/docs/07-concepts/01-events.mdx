@@ -36,7 +36,7 @@ Fires on every tool invocation. This is the core event that powers most analytic
 | `event_name` | Tool name |
 | `latency_ms` | Handler execution time in milliseconds. Absent when the handler never ran (see `validation`) |
 | `status` | `success` or `error`. A call is an error when the handler throws, returns a result with `isError: true`, or when the MCP SDK rejects the call before or after the handler (SDK 0.4.0 and later; earlier SDKs only count throws) |
-| `error_category` | `tool_error` — the handler returned `isError: true`; `unknown` — the handler threw; `validation` — the call failed before the handler ran (unknown or disabled tool, arguments the schema rejected); `server` — the result failed the tool's own `outputSchema`. The client sees the same shape in every case, so the distinction is server-side only. Reserved: `auth`, `timeout`, `rate_limit` |
+| `error_category` | `tool_error` — the handler returned `isError: true`; `unknown` — the handler threw; `validation` — the call failed before the handler ran (unknown or disabled tool, arguments the schema rejected; by default such an event has argument names and types but no values and no error text, see `capture.rejectedInputValues`); `server` — the result failed the tool's own `outputSchema`. The client sees the same shape in every case, so the distinction is server-side only. Reserved: `auth`, `timeout`, `rate_limit` |
 | `error_message` | The exception message, or the first text item of an `isError` result. PII-stripped, at most 500 characters. The result text is output, so it is only stored while `capture.outputValues` is on |
 | `is_retry` | Reserved. Not set by the SDK today — always `0` |
 | `input_keys` | Parameter key names (JSON) |

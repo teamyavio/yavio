@@ -60,6 +60,7 @@ describe("resolveConfig", () => {
       geo: true,
       tokens: true,
       retries: true,
+      rejectedInputValues: false,
     });
   });
 
@@ -74,6 +75,7 @@ describe("resolveConfig", () => {
       geo: true,
       tokens: true,
       retries: true,
+      rejectedInputValues: false,
     });
   });
 
@@ -310,7 +312,16 @@ describe("boolean capture flags fail closed", () => {
     warn.mockRestore();
   });
 
-  it.each(["inputValues", "outputValues", "tokens", "retries"] as const)(
+  it("leaves rejectedInputValues off by default and keeps a per-tool override (#123)", () => {
+    const config = resolveConfig({
+      apiKey: "test",
+      tools: { pick: { rejectedInputValues: true } },
+    });
+    expect(config?.capture.rejectedInputValues).toBe(false);
+    expect(config?.tools.pick).toEqual({ rejectedInputValues: true });
+  });
+
+  it.each(["inputValues", "outputValues", "tokens", "retries", "rejectedInputValues"] as const)(
     'turns %s off on the string "false", with one YAVIO-1006 warning',
     (flag) => {
       // Hand-written JSON: "false" is truthy and used to keep capture ON.

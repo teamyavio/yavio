@@ -38,6 +38,7 @@ const testConfig: YavioConfig = {
     geo: true,
     tokens: true,
     retries: true,
+    rejectedInputValues: false,
   } satisfies CaptureConfig,
   serverOnly: false,
   intent: { enabled: false, required: true, description: "test" },

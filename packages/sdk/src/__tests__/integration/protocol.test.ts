@@ -6,6 +6,7 @@ import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { BaseEvent, ToolCallEvent } from "@yavio/shared/events";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
+import { z as z3 } from "zod/v3";
 import type { IntentConfig, YavioConfig } from "../../core/types.js";
 import { createYavioContext } from "../../server/context.js";
 import { _resetGlobalState, createProxy } from "../../server/proxy.js";
@@ -34,11 +35,21 @@ function createMockTransport(): Transport & { sent: BaseEvent[][] } {
 const INTENT_OFF: IntentConfig = { enabled: false, required: true, description: "d" };
 const INTENT_ON: IntentConfig = { enabled: true, required: true, description: "why" };
 
+// The tests of the first describe block pin what a rejected call stores when
+// its values are kept (rejectedInputValues: true, opt-in since #123); the
+// default, false, has its own block at the end.
 function makeConfig(overrides: Partial<YavioConfig> = {}): YavioConfig {
   return {
     apiKey: "yav_test",
     endpoint: "http://localhost:9/v1/events",
-    capture: { inputValues: true, outputValues: true, geo: true, tokens: true, retries: true },
+    capture: {
+      inputValues: true,
+      outputValues: true,
+      geo: true,
+      tokens: true,
+      retries: true,
+      rejectedInputValues: true,
+    },
     serverOnly: true,
     intent: INTENT_OFF,
     tools: {},
@@ -129,7 +140,16 @@ describe("protocol layer — failures before the handler", () => {
         (proxy) => {
           proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"));
         },
-        { capture: { inputValues: true, outputValues: true, geo, tokens: true, retries: true } },
+        {
+          capture: {
+            inputValues: true,
+            outputValues: true,
+            geo,
+            tokens: true,
+            retries: true,
+            rejectedInputValues: false,
+          },
+        },
       );
 
       await h.client.callTool({ name: "search", arguments: { query: 42 }, _meta: CLIENT_META });
@@ -543,5 +563,154 @@ describe("protocol layer — one event per call once the handler ran", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.status).toBe("success");
     expect(calls[0]?.intent_signals?.intent).toBe("Finding boots for the user.");
+  });
+});
+
+describe("rejected calls without rejectedInputValues (the default, #123)", () => {
+  beforeEach(() => _resetGlobalState());
+
+  const SECRET = "premium, my wife is pregnant";
+  const DEFAULT_CAPTURE = {
+    inputValues: true,
+    outputValues: true,
+    geo: true,
+    tokens: true,
+    retries: true,
+    rejectedInputValues: false,
+  } as const;
+
+  /** The rejected value must not appear anywhere in the event. */
+  function expectNoValues(event: ToolCallEvent | undefined) {
+    expect(event?.status).toBe("error");
+    expect(event?.error_category).toBe("validation");
+    expect(JSON.stringify(event)).not.toContain("pregnant");
+    expect(JSON.stringify(event)).not.toContain("secret note");
+    expect(event?.error_message).toBeUndefined();
+    expect(event?.output_content).toBeUndefined();
+  }
+
+  it.each([
+    ["Zod 4", { plan: z.enum(["basic", "premium"]) }],
+    // Zod 3's enum error echoes the received value into McpServer's text.
+    ["Zod 3", { plan: z3.enum(["basic", "premium"]) }],
+  ] as const)(
+    "stores names, types, request context and client metadata, but no value (%s)",
+    async (_label, inputSchema) => {
+      const h = await setup(
+        (proxy) => {
+          (proxy.registerTool as (...a: unknown[]) => unknown)("pick", { inputSchema }, async () =>
+            ok("x"),
+          );
+        },
+        { capture: DEFAULT_CAPTURE },
+      );
+
+      await h.client.callTool({
+        name: "pick",
+        arguments: { plan: SECRET, note: "secret note" },
+        _meta: CLIENT_META,
+      });
+
+      const [event] = toolCalls(h.events);
+      expectNoValues(event);
+      // Names and types, including a key the model invented.
+      expect(event?.input_keys).toEqual({ plan: true, note: true });
+      expect(event?.input_types).toEqual({ plan: "string", note: "string" });
+      // input_values carries only the `_`-prefixed request context.
+      expect(Object.keys(event?.input_values ?? {})).toEqual(["_meta"]);
+      // Client metadata, as on a successful call.
+      expect(event?.locale).toBe("de-DE");
+      expect(event?.subject_id).toBe("v1/subject-1");
+      expect(event?.country_code).toBe("DE");
+    },
+  );
+
+  it("treats an unknown and a disabled tool like an argument-validation failure", async () => {
+    const h = await setup(
+      (proxy) => {
+        proxy
+          .registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"))
+          .disable();
+      },
+      { capture: DEFAULT_CAPTURE },
+    );
+
+    await h.client.callTool({ name: "search", arguments: { query: SECRET } });
+    await h.client.callTool({ name: "search_flights", arguments: { query: SECRET } });
+
+    const events = toolCalls(h.events);
+    expect(events.map((e) => e.event_name)).toEqual(["search", "search_flights"]);
+    for (const event of events) {
+      expectNoValues(event);
+      expect(event.input_keys).toEqual({ query: true });
+    }
+  });
+
+  it("a per-tool override wins over the global flag, in both directions", async () => {
+    const h = await setup(
+      (proxy) => {
+        proxy.registerTool("open", { inputSchema: { plan: z3.enum(["a"]) } }, async () => ok("x"));
+        proxy.registerTool("closed", { inputSchema: { plan: z3.enum(["a"]) } }, async () =>
+          ok("x"),
+        );
+      },
+      {
+        capture: { ...DEFAULT_CAPTURE, rejectedInputValues: true },
+        tools: { closed: { rejectedInputValues: false } },
+      },
+    );
+    const h2 = await setup(
+      (proxy) => {
+        proxy.registerTool("open", { inputSchema: { plan: z3.enum(["a"]) } }, async () => ok("x"));
+      },
+      { capture: DEFAULT_CAPTURE, tools: { open: { rejectedInputValues: true } } },
+    );
+
+    await h.client.callTool({ name: "open", arguments: { plan: SECRET } });
+    await h.client.callTool({ name: "closed", arguments: { plan: SECRET } });
+    await h2.client.callTool({ name: "open", arguments: { plan: SECRET } });
+
+    const byName = Object.fromEntries(toolCalls(h.events).map((e) => [e.event_name, e]));
+    expectNoValues(byName.closed);
+    for (const event of [byName.open, toolCalls(h2.events)[0]]) {
+      expect(event?.input_values).toMatchObject({ plan: SECRET });
+      expect(event?.error_message).toContain("pregnant");
+    }
+  });
+
+  it("has no effect while inputValues is off: nothing of the input is captured", async () => {
+    const h = await setup(
+      (proxy) => {
+        proxy.registerTool("pick", { inputSchema: { plan: z3.enum(["a"]) } }, async () => ok("x"));
+      },
+      { capture: { ...DEFAULT_CAPTURE, inputValues: false, rejectedInputValues: true } },
+    );
+
+    await h.client.callTool({ name: "pick", arguments: { plan: SECRET }, _meta: CLIENT_META });
+
+    const [event] = toolCalls(h.events);
+    expectNoValues(event);
+    expect(event?.input_keys).toBeUndefined();
+    expect(event?.input_values).toBeUndefined();
+    expect(event?.locale).toBeUndefined();
+  });
+
+  it("leaves a successful call unchanged: it stores the values the schema accepted", async () => {
+    const h = await setup(
+      (proxy) => {
+        proxy.registerTool(
+          "pick",
+          { inputSchema: { plan: z.enum(["basic", "premium"]) } },
+          async () => ok("x"),
+        );
+      },
+      { capture: DEFAULT_CAPTURE },
+    );
+
+    await h.client.callTool({ name: "pick", arguments: { plan: "premium" } });
+
+    const [event] = toolCalls(h.events);
+    expect(event?.status).toBe("success");
+    expect(event?.input_values).toMatchObject({ plan: "premium" });
   });
 });

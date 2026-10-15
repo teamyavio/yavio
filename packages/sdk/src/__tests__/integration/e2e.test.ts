@@ -83,7 +83,14 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     const config: YavioConfig = {
       apiKey: "yav_test_key",
       endpoint: mockUrl,
-      capture: { inputValues: true, outputValues: true, geo: true, tokens: true, retries: true },
+      capture: {
+        inputValues: true,
+        outputValues: true,
+        geo: true,
+        tokens: true,
+        retries: true,
+        rejectedInputValues: false,
+      },
       serverOnly: false,
       intent: { enabled: false, required: true, description: "test" },
       tools: {},
@@ -168,7 +175,14 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     const config: YavioConfig = {
       apiKey: "yav_test_key",
       endpoint: mockUrl,
-      capture: { inputValues: true, outputValues: true, geo: true, tokens: true, retries: true },
+      capture: {
+        inputValues: true,
+        outputValues: true,
+        geo: true,
+        tokens: true,
+        retries: true,
+        rejectedInputValues: false,
+      },
       serverOnly: false,
       intent: { enabled: false, required: true, description: "test" },
       tools: {},
@@ -219,7 +233,14 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     const config: YavioConfig = {
       apiKey: "yav_test_key",
       endpoint: mockUrl,
-      capture: { inputValues: true, outputValues: true, geo: true, tokens: true, retries: true },
+      capture: {
+        inputValues: true,
+        outputValues: true,
+        geo: true,
+        tokens: true,
+        retries: true,
+        rejectedInputValues: false,
+      },
       serverOnly: false,
       intent: { enabled: false, required: true, description: "test" },
       tools: {},
@@ -296,7 +317,14 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     const config: YavioConfig = {
       apiKey: "yav_test_key",
       endpoint: mockUrl,
-      capture: { inputValues: true, outputValues: true, geo: true, tokens: true, retries: true },
+      capture: {
+        inputValues: true,
+        outputValues: true,
+        geo: true,
+        tokens: true,
+        retries: true,
+        rejectedInputValues: false,
+      },
       serverOnly: false,
       intent: { enabled: false, required: true, description: "test" },
       tools: {},
