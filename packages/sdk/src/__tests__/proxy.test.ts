@@ -1100,6 +1100,12 @@ describe("createProxy — session reuse", () => {
     const secondSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
 
     expect(firstSessionId).toBe(secondSessionId);
+    // ...and one connection event for the conversation, not one per request:
+    // the dedup is module-level so it survives the per-request proxy.
+    const connections = (yavioTransport.sent.flat() as BaseEvent[]).filter(
+      (e) => e.event_type === "connection",
+    );
+    expect(connections).toHaveLength(1);
   });
 
   it("prefers extra.sessionId over _meta['openai/session']", async () => {
@@ -2231,6 +2237,80 @@ describe("one proxy, many conversations", () => {
     expect(calls.map((e) => e.user_id)).toEqual(["anna", undefined, "anna"]);
     expect(calls[0]?.session_id).toBe(deriveSessionId("conv-a"));
     expect(calls[1]?.session_id).toBe(deriveSessionId("conv-b"));
+  });
+
+  it("emits a fresh connection event for a conversation that was evicted and returns", async () => {
+    // One proxy, 1,000-entry session map: after 1,000 other conversations the
+    // first one is rebuilt from scratch (no user, step sequence 0), and the
+    // connection-event mark goes with it so the discontinuity is visible.
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    const yavio = createYavioContext();
+    proxy.tool("whoami", (ex) => {
+      const meta = (ex as { _meta?: Record<string, unknown> })._meta;
+      if (meta?.["openai/session"] === "conv-0") {
+        yavio.identify("anna");
+        yavio.step("look");
+      }
+      return { content: [{ type: "text", text: "ok" }] };
+    });
+    const handler = getRegisteredTool(server, "whoami")?.handler;
+
+    await handler?.(extra("conv-0", "r0"));
+    await handler?.(extra("conv-0", "r0b")); // still known: no second connection event
+    for (let i = 1; i <= 1000; i += 1) await handler?.(extra(`conv-${i}`, `r${i}`));
+    await handler?.(extra("conv-0", "r0c"));
+
+    const first = deriveSessionId("conv-0");
+    const events = transport.sent.flat() as Array<Record<string, unknown>>;
+    const connections = events.filter(
+      (e) => e.event_type === "connection" && e.session_id === first,
+    );
+    expect(connections).toHaveLength(2);
+    const calls = events.filter((e) => e.event_type === "tool_call" && e.session_id === first);
+    expect(calls.map((e) => e.user_id)).toEqual(["anna", "anna", "anna"]);
+    // The step sequence restarting at 1 shows the state really started over.
+    const steps = events.filter((e) => e.event_type === "step" && e.session_id === first);
+    expect(steps.map((e) => e.step_sequence)).toEqual([1, 2, 1]);
+  });
+
+  it("keeps an active conversation's connection-event mark while newer ones age out", async () => {
+    // The dedup map is bounded at 10,000. Keyless connects each mark a random
+    // session id that nothing ever deletes; a conversation that stays active
+    // throughout must keep its mark (a hit refreshes it) and not emit a second
+    // connection event once 10,000 newer marks have been inserted.
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("ping", () => ({ content: [{ type: "text", text: "ok" }] }));
+    const handler = getRegisteredTool(server, "ping")?.handler;
+    const keyless = (requestId: string) => ({
+      signal: new AbortController().signal,
+      requestId,
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+    });
+
+    await handler?.(extra("conv-0", "r0"));
+    for (let i = 1; i <= 10_100; i += 1) {
+      // A transport that reports its own close, so the server can reconnect.
+      const mcpTransport: { onclose?: () => void; [k: string]: unknown } = {
+        start: vi.fn(),
+        send: vi.fn(),
+        close: vi.fn(async () => mcpTransport.onclose?.()),
+      };
+      await proxy.connect(mcpTransport as never);
+      await handler?.(keyless(`k${i}`));
+      if (i % 100 === 0) await handler?.(extra("conv-0", `r0-${i}`));
+      await server.close();
+    }
+
+    const first = deriveSessionId("conv-0");
+    const connections = (transport.sent.flat() as Array<Record<string, unknown>>).filter(
+      (e) => e.event_type === "connection" && e.session_id === first,
+    );
+    expect(connections).toHaveLength(1);
   });
 
   it("attributes overlapping calls from two conversations to their own sessions", async () => {
