@@ -73,8 +73,10 @@ const TOOL_OVERRIDE_KEYS = ["inputValues", "outputValues", "intent"] as const;
 /**
  * Merge per-tool overrides from the config file and the code options, field
  * by field per tool (code wins), the same way `capture` merges. Only the known
- * keys with boolean values survive: the file is hand-written JSON, and an
- * unknown key or a `"false"` string must not become a silent override.
+ * keys survive (an unknown key is ignored), and like the global flags they
+ * fail closed: the file is hand-written JSON, and a `"false"` string must not
+ * silently drop the override and leave the tool on the global default — it
+ * becomes `false` with one warning.
  */
 function resolveTools(
   ...sources: Array<Record<string, ToolCaptureOverride> | undefined>
@@ -90,7 +92,8 @@ function resolveTools(
       const merged: ToolCaptureOverride = { ...(Object.hasOwn(tools, name) ? tools[name] : {}) };
       for (const key of TOOL_OVERRIDE_KEYS) {
         const value = (override as Record<string, unknown>)[key];
-        if (typeof value === "boolean") merged[key] = value;
+        if (value === undefined) continue;
+        merged[key] = resolveBooleanFlag(`tools.${name}.${key}`, value);
       }
       if (Object.keys(merged).length > 0) tools[name] = merged;
     }
@@ -111,25 +114,26 @@ export function _resetConfigWarnings(): void {
  * value it does not accept turns that capture off. Warn once per flag and
  * process; stateless servers resolve the config on every request.
  */
-function warnInvalidFlag(flag: string, accepted: string, value: unknown): void {
-  if (warnedInvalidFlags.has(flag)) return;
-  warnedInvalidFlags.add(flag);
+function warnInvalidFlag(path: string, accepted: string, value: unknown): void {
+  if (warnedInvalidFlags.has(path)) return;
+  warnedInvalidFlags.add(path);
   console.warn(
-    `[${ErrorCode.SDK.INVALID_CAPTURE_OPTION}] capture.${flag} must be ${accepted}, got ${JSON.stringify(value)} — treating it as false. Shown once per process.`,
+    `[${ErrorCode.SDK.INVALID_CAPTURE_OPTION}] ${path} must be ${accepted}, got ${JSON.stringify(value)} — treating it as false. Shown once per process.`,
   );
 }
 
 function resolveGeo(value: unknown): CaptureConfig["geo"] {
   if (value === true || value === false || value === "country") return value;
-  warnInvalidFlag("geo", 'true, false or "country"', value);
+  warnInvalidFlag("capture.geo", 'true, false or "country"', value);
   return false;
 }
 
 const BOOLEAN_CAPTURE_FLAGS = ["inputValues", "outputValues", "tokens", "retries"] as const;
 
-function resolveBooleanFlag(flag: (typeof BOOLEAN_CAPTURE_FLAGS)[number], value: unknown): boolean {
+/** `path` names the flag in the warning: `capture.inputValues`, `tools.book.intent`. */
+function resolveBooleanFlag(path: string, value: unknown): boolean {
   if (typeof value === "boolean") return value;
-  warnInvalidFlag(flag, "true or false", value);
+  warnInvalidFlag(path, "true or false", value);
   return false;
 }
 
@@ -194,7 +198,9 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
     ...defined(options?.capture),
   };
   capture.geo = resolveGeo(capture.geo);
-  for (const flag of BOOLEAN_CAPTURE_FLAGS) capture[flag] = resolveBooleanFlag(flag, capture[flag]);
+  for (const flag of BOOLEAN_CAPTURE_FLAGS) {
+    capture[flag] = resolveBooleanFlag(`capture.${flag}`, capture[flag]);
+  }
 
   const serverOnly =
     options?.serverOnly ??

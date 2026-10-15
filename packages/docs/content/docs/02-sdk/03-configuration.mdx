@@ -82,7 +82,7 @@ withYavio(server, {
 
 `geo` also takes a third value, `"country"`: `country_code` is still set, and `openai/userLocation` in the captured `_meta` is replaced by `{ country }` — city, region, timezone, coordinates and any field the platform adds later are not stored. Use it when a privacy review asks for country-level analytics without precise location. `geo` has no per-tool override.
 
-Every capture flag fails closed: `inputValues`, `outputValues`, `tokens` and `retries` accept exactly `true` and `false`, `geo` accepts `true`, `false` and `"country"`. Any other value (for example the string `"false"` in `.yaviorc.json`, which is truthy) turns that capture **off** and logs `YAVIO-1006` once per flag and process.
+Every capture flag fails closed, in `capture` and in a per-tool `tools` override alike: `inputValues`, `outputValues`, `tokens`, `retries` and the per-tool `intent` accept exactly `true` and `false`, `geo` accepts `true`, `false` and `"country"`. Any other value (for example the string `"false"` in `.yaviorc.json`, which is truthy) turns that capture **off** and logs `YAVIO-1006` once per flag and process.
 
 Client metadata (`locale`, `country_code`, `end_user_agent`, `subject_id`) is captured under `inputValues` for every tool, including tools that take no arguments.
 

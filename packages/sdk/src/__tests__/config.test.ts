@@ -242,13 +242,13 @@ describe("per-tool capture overrides (tools)", () => {
     });
   });
 
-  it("ignores unknown keys and non-boolean values from the config file", () => {
+  it("ignores unknown keys and non-object entries from the config file", () => {
     writeFileSync(
       join(tempDir, ".yaviorc.json"),
       JSON.stringify({
         apiKey: "file_key",
         tools: {
-          book: { inputValues: "false", geo: false, intent: false },
+          book: { geo: false, intent: false },
           bogus: "not an object",
           empty: { unknownKey: true },
         },
@@ -256,6 +256,31 @@ describe("per-tool capture overrides (tools)", () => {
     );
     const config = withCwd(tempDir, () => resolveConfig());
     expect(config?.tools).toEqual({ book: { intent: false } });
+  });
+
+  it('fails closed on a non-boolean override: "false" turns the tool\'s capture off', () => {
+    // Dropping the string would leave the tool on the global default — capture
+    // ON — for the one tool the integrator meant to protect.
+    _resetConfigWarnings();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeFileSync(
+        join(tempDir, ".yaviorc.json"),
+        JSON.stringify({
+          apiKey: "file_key",
+          tools: { book: { inputValues: "false", outputValues: 0, intent: "no" } },
+        }),
+      );
+      const config = withCwd(tempDir, () => resolveConfig());
+      expect(config?.tools).toEqual({
+        book: { inputValues: false, outputValues: false, intent: false },
+      });
+      expect(warn).toHaveBeenCalledTimes(3);
+      expect(warn.mock.calls[0][0]).toContain("YAVIO-1006");
+      expect(warn.mock.calls[0][0]).toContain("tools.book.inputValues");
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("treats __proto__ and constructor as tool names, never as the object's prototype", () => {

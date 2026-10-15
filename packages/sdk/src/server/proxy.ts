@@ -624,6 +624,13 @@ export function createProxy<T extends McpServer>(
    */
   const MAX_SESSIONS = 1000;
   const sessions = new Map<string, SessionState>();
+  /**
+   * The session of the most recent tool call — what tool_discovery events
+   * stamp, so a discovery emitted after a call carries that call's detected
+   * platform and session id, as it did when one session object served all
+   * calls. Reset on connect, like the connection session.
+   */
+  let activeSession: SessionState | null = null;
 
   /**
    * Resolve the session for the current tool call.
@@ -639,13 +646,17 @@ export function createProxy<T extends McpServer>(
       (currentMcpTransport && typeof currentMcpTransport.sessionId === "string"
         ? (currentMcpTransport.sessionId as string)
         : undefined);
-    if (!key) return session;
+    if (!key) {
+      activeSession = session;
+      return session;
+    }
 
     const sessionId = deriveSessionId(key);
     const known = sessions.get(sessionId);
     if (known) {
       sessions.delete(sessionId); // re-insert: most recently used last
       sessions.set(sessionId, known);
+      activeSession = known;
       return known;
     }
     const state: SessionState = {
@@ -660,6 +671,7 @@ export function createProxy<T extends McpServer>(
       const oldest = sessions.keys().next().value;
       if (oldest !== undefined) sessions.delete(oldest);
     }
+    activeSession = state;
     return state;
   };
 
@@ -694,9 +706,9 @@ export function createProxy<T extends McpServer>(
     buildToolDiscoveryEvent(
       {
         traceId: generateTraceId(),
-        sessionId: session.sessionId,
+        sessionId: (activeSession ?? session).sessionId,
         sdkVersion,
-        platform: session.platform,
+        platform: (activeSession ?? session).platform,
       },
       { toolName, description: description?.slice(0, MAX_DISCOVERY_DESCRIPTION), inputSchema },
     );
@@ -846,6 +858,7 @@ export function createProxy<T extends McpServer>(
             }),
             stepSequence: 0,
           };
+          activeSession = null;
           tokenCache.current = null;
 
           const result = await originalConnect(
