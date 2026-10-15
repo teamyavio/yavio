@@ -867,6 +867,70 @@ describe("intent capture — widget-invoked tools", () => {
     expect(tool.inputSchema.required).toContain("context");
   });
 
+  it("stamps intent_context as advertised: optional on a widget-invoked tool, required elsewhere (#73)", async () => {
+    // A fact the SDK knows. Who called is not: a model call that skips the
+    // optional parameter looks exactly like the widget's own call.
+    const h = await setupWidget({ "openai/widgetAccessible": true });
+    const list = await h.client.listTools();
+    expect(listedTool(list, "widget-refresh").inputSchema.required ?? []).not.toContain("context");
+    expect(listedTool(list, "search").inputSchema.required).toContain("context");
+
+    await h.client.callTool({ name: "widget-refresh", arguments: { search_id: "abc123" } });
+    await h.client.callTool({
+      name: "widget-refresh",
+      arguments: { search_id: "abc123", context: "user asked for cheaper cars" },
+    });
+    await h.client.callTool({ name: "search", arguments: { query: "boots", context: "boots" } });
+
+    expect(toolCallEvents(h.events).map((e) => e.intent_context)).toEqual([
+      "optional",
+      "optional",
+      "required",
+    ]);
+  });
+
+  it("stamps optional on every tool under required: false, and none while intent is off", async () => {
+    const opt = await setupWidget(
+      { "openai/widgetAccessible": true },
+      { ...INTENT_ON, required: false },
+    );
+    await opt.client.listTools();
+    await opt.client.callTool({ name: "search", arguments: { query: "boots" } });
+    expect(toolCallEvents(opt.events)[0]?.intent_context).toBe("optional");
+
+    const off = await setupWidget(
+      { "openai/widgetAccessible": true },
+      { ...INTENT_ON, enabled: false },
+    );
+    await off.client.callTool({ name: "widget-refresh", arguments: { search_id: "abc123" } });
+    // Nothing is advertised with intent off; NULL stays reserved for old SDKs.
+    expect(toolCallEvents(off.events)[0]?.intent_context).toBe("none");
+  });
+
+  it("stamps none on a call to an unknown tool", async () => {
+    // A host calling a removed tool from its cached schema: the call fails
+    // validation and can never carry an intent, so it must not land in Call
+    // Coverage's denominator as NULL (= required).
+    const h = await setupWidget({ "openai/widgetAccessible": true });
+    await h.client.listTools();
+    await h.client.callTool({ name: "no-such-tool", arguments: {} }).catch(() => undefined);
+    const event = toolCallEvents(h.events).find((e) => e.event_name === "no-such-tool");
+    expect(event?.intent_context).toBe("none");
+  });
+
+  it("stamps none on a tool that owns its context", async () => {
+    const owns = await setup(INTENT_ON, (proxy) => {
+      proxy.registerTool(
+        "own-context",
+        { inputSchema: { context: z.string(), q: z.string() } },
+        async () => ok("x"),
+      );
+    });
+    await owns.client.listTools();
+    await owns.client.callTool({ name: "own-context", arguments: { context: "mine", q: "x" } });
+    expect(toolCallEvents(owns.events)[0]?.intent_context).toBe("none");
+  });
+
   it("accepts a context-less widget call, records no intent, and skips the fallback", async () => {
     // The fallback exists to approximate intents for model calls that omit
     // context. Widget traffic (a 3s auto-refresh) is context-less by nature —
@@ -1011,6 +1075,34 @@ describe("intent capture — widget classification without listed _meta", () => 
     ]);
     const result = (await callList()) as { tools: Array<{ inputSchema: { required?: string[] } }> };
     expect(result.tools[0]?.inputSchema.required).toEqual(["query"]);
+  });
+});
+
+describe("intent_context under per-tool intent: false (#73)", () => {
+  beforeEach(() => _resetGlobalState());
+
+  it("is none on widget-invoked and ordinary tools alike, with or without a stale context", async () => {
+    const h = await setup(
+      INTENT_ON,
+      (proxy) => {
+        proxy.registerTool(
+          "book",
+          { inputSchema: { iban: z.string() }, _meta: { "openai/widgetAccessible": true } },
+          async () => ok("x"),
+        );
+        proxy.registerTool("quote", { inputSchema: { q: z.string() } }, async () => ok("x"));
+      },
+      { book: { intent: false }, quote: { intent: false } },
+    );
+    await h.client.listTools();
+
+    await h.client.callTool({ name: "book", arguments: { iban: "DE00", context: "stale" } });
+    await h.client.callTool({ name: "book", arguments: { iban: "DE00" } });
+    await h.client.callTool({ name: "quote", arguments: { q: "x" } });
+
+    expect(toolCallEvents(h.events).map((e) => e.intent_context)).toEqual(["none", "none", "none"]);
+    // intent: false never reads what was sent.
+    expect(toolCallEvents(h.events)[0]?.intent_signals).toBeUndefined();
   });
 });
 

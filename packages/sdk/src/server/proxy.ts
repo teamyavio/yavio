@@ -12,7 +12,13 @@ import { detectPlatform } from "../core/platform.js";
 import type { CaptureConfig, SessionState, YavioConfig } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
 import { type RequestStore, runInContext } from "./context.js";
-import { type IntentController, createIntentController, getCapturedIntent } from "./intent.js";
+import {
+  type IntentContext,
+  type IntentController,
+  createIntentController,
+  getCapturedIntent,
+  getIntentContext,
+} from "./intent.js";
 import {
   type CallContext,
   type CallFrame,
@@ -295,6 +301,7 @@ function wrapToolCallback(
           inputValues: captureInput ? extractInputValues(cbArgs[0], extra, capture.geo) : undefined,
           outputContent: capture.outputValues ? extractOutputContent(result) : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
+          intentContext: intentContextFor(config),
           clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
         },
       );
@@ -364,6 +371,7 @@ function wrapToolCallback(
             ? extractInputValues(cbArgs[0], extra, capture.geo)
             : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
+          intentContext: intentContextFor(config),
           clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
         },
       );
@@ -372,6 +380,18 @@ function wrapToolCallback(
       throw error;
     }
   };
+}
+
+/**
+ * intent_context for the current tool call (#73): what the intent layer
+ * recorded, or `none` while intent capture is off — nothing is advertised
+ * then, and NULL is left to mean "an SDK before 0.4.0". Unset only when
+ * capture is on but the call never passed the intent wrapper (the protocol
+ * layer could not be wrapped), where the advertisement is not known.
+ */
+function intentContextFor(config: YavioConfig): IntentContext | undefined {
+  if (!config.intent.enabled) return "none";
+  return getIntentContext() ?? undefined;
 }
 
 /**
@@ -524,6 +544,7 @@ export function createProxy<T extends McpServer>(
         inputValues: captureInput ? extractInputValues(args, extra, capture.geo) : undefined,
         outputContent: captureMessage ? extractOutputContent(result) : undefined,
         intentSignals: getCapturedIntent() ?? undefined,
+        intentContext: intentContextFor(config),
         clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
       },
     );

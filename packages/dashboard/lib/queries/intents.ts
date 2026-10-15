@@ -1,6 +1,10 @@
 import { queryAnalytics } from "@/lib/clickhouse/analytics-client";
 import type { IntentFeedItem, IntentKPIs } from "./types";
 
+/** A tool_call carried an intent. The one definition for every intent query. */
+export const HAS_INTENT_SQL =
+  "intent_signals != '{}' AND JSONExtractString(intent_signals, 'intent') != ''";
+
 interface QueryContext {
   workspaceId: string;
   projectId: string;
@@ -31,8 +35,7 @@ export async function queryIntentFeed(
   const baseWhere = `
       WHERE project_id = {projectId:String}
         AND event_type = 'tool_call'
-        AND intent_signals != '{}'
-        AND JSONExtractString(intent_signals, 'intent') != ''
+        AND ${HAS_INTENT_SQL}
         AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}
         ${pf}`;
 
@@ -86,22 +89,41 @@ export async function queryIntentFeed(
  * Headline numbers for the intents page: how many intents were captured,
  * what share of tool calls carried one, and how many distinct tools they
  * cover in the selected period.
+ *
+ * Coverage is split by how the SDK advertised `context` (intent_context,
+ * #73). Call Coverage counts calls where the model was required to state an
+ * intent, plus rows from SDKs before 0.4.0 (NULL), so history keeps the
+ * denominator it had. Optional-context calls — widget-invoked tools, whose
+ * own iframe calls cannot carry an intent, or `required: false` — get their
+ * own share: who made such a call is not knowable, so it is not guessed.
+ * `none` (nothing advertised: intent off, disabled or unextendable tools,
+ * unknown tools) is in neither. A range that spans a project's SDK upgrade
+ * still holds older NULL rows, counted the old way, until it rolls past.
  */
 export async function queryIntentKPIs(ctx: QueryContext): Promise<IntentKPIs> {
   const pf = platformFilter(ctx.platform);
+  const hasIntent = HAS_INTENT_SQL;
+  const required = "ifNull(intent_context, 'required') = 'required'";
+  const optional = "intent_context = 'optional'";
 
   const rows = await queryAnalytics<{
     captured: number;
-    totalCalls: number;
+    requiredCalls: number;
+    requiredCaptured: number;
+    optionalCalls: number;
+    optionalCaptured: number;
     toolsWithIntents: number;
   }>({
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
       SELECT
-        countDistinctIf(event_id, intent_signals != '{}' AND JSONExtractString(intent_signals, 'intent') != '') AS captured,
-        count(DISTINCT event_id) AS totalCalls,
-        uniqExactIf(event_name, intent_signals != '{}' AND JSONExtractString(intent_signals, 'intent') != '') AS toolsWithIntents
+        countDistinctIf(event_id, ${hasIntent}) AS captured,
+        countDistinctIf(event_id, ${required}) AS requiredCalls,
+        countDistinctIf(event_id, ${required} AND ${hasIntent}) AS requiredCaptured,
+        countDistinctIf(event_id, ${optional}) AS optionalCalls,
+        countDistinctIf(event_id, ${optional} AND ${hasIntent}) AS optionalCaptured,
+        uniqExactIf(event_name, ${hasIntent}) AS toolsWithIntents
       FROM events
       WHERE project_id = {projectId:String}
         AND event_type = 'tool_call'
@@ -117,11 +139,19 @@ export async function queryIntentKPIs(ctx: QueryContext): Promise<IntentKPIs> {
   });
 
   const r = rows[0];
-  const captured = Number(r?.captured ?? 0);
-  const totalCalls = Number(r?.totalCalls ?? 0);
+  const requiredCalls = Number(r?.requiredCalls ?? 0);
+  const optionalCalls = Number(r?.optionalCalls ?? 0);
   return {
-    captured,
-    coverage: totalCalls > 0 ? captured / totalCalls : 0,
+    captured: Number(r?.captured ?? 0),
+    // Null only when every call in the period had optional context: 0/0 is
+    // not 0% coverage. With no calls at all it stays 0, as before.
+    coverage:
+      requiredCalls > 0
+        ? Number(r?.requiredCaptured ?? 0) / requiredCalls
+        : optionalCalls > 0
+          ? null
+          : 0,
+    optionalCoverage: optionalCalls > 0 ? Number(r?.optionalCaptured ?? 0) / optionalCalls : null,
     toolsWithIntents: Number(r?.toolsWithIntents ?? 0),
   };
 }

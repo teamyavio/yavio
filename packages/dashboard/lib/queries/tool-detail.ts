@@ -2,6 +2,7 @@ import { fillTimeBuckets } from "@/lib/analytics/fill-buckets";
 import { granularityToFunction } from "@/lib/analytics/format";
 import type { Granularity } from "@/lib/analytics/validation";
 import { queryAnalytics } from "@/lib/clickhouse/analytics-client";
+import { HAS_INTENT_SQL } from "./intents";
 import type {
   CustomEventEntry,
   ErrorCategoryCount,
@@ -403,8 +404,7 @@ export async function queryToolRecentIntents(
       WHERE project_id = {projectId:String}
         AND event_type = 'tool_call'
         AND event_name = {tool:String}
-        AND intent_signals != '{}'
-        AND JSONExtractString(intent_signals, 'intent') != ''
+        AND ${HAS_INTENT_SQL}
         AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}
         ${pf}
       ORDER BY timestamp DESC, event_id DESC

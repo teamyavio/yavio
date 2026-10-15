@@ -154,8 +154,18 @@ export interface IntentFeedItem {
 /** Headline numbers for the intents page. */
 export interface IntentKPIs {
   captured: number;
-  /** Share of tool calls in the period that carried an intent (0..1). */
-  coverage: number;
+  /**
+   * Share of required-context calls (and calls from SDKs before 0.4.0) in the
+   * period that carried an intent (0..1). Null when every call had optional
+   * context, so there is nothing to measure it on.
+   */
+  coverage: number | null;
+  /**
+   * Share of optional-context calls (widget-invoked tools, or intent
+   * `required: false`) that carried an intent (0..1); null without such calls.
+   * The widget's own calls are in the denominator and cannot carry one.
+   */
+  optionalCoverage: number | null;
   toolsWithIntents: number;
 }
 

@@ -191,6 +191,23 @@ describe("ToolCallEvent", () => {
     expect(result.error_category).toBe("tool_error");
   });
 
+  it("accepts intent_context required/optional/none and rejects anything else", () => {
+    for (const value of ["required", "optional", "none"] as const) {
+      const result = ToolCallEvent.parse(
+        base({ event_type: "tool_call", event_name: "refresh", intent_context: value }),
+      );
+      expect(result.intent_context).toBe(value);
+    }
+    expect(
+      ToolCallEvent.parse(base({ event_type: "tool_call", event_name: "refresh" })).intent_context,
+    ).toBeUndefined();
+    expect(() =>
+      ToolCallEvent.parse(
+        base({ event_type: "tool_call", event_name: "refresh", intent_context: "widget" }),
+      ),
+    ).toThrow();
+  });
+
   it("rejects invalid error_category", () => {
     expect(() =>
       ToolCallEvent.parse(

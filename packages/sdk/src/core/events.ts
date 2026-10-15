@@ -148,6 +148,13 @@ export interface ToolCallData {
   inputValues?: Record<string, unknown>;
   outputContent?: Record<string, unknown>;
   intentSignals?: { intent: string; source: "context_parameter" | "inferred" };
+  /**
+   * How the intent `context` parameter is advertised for this tool (#73):
+   * `required`, `optional` (widget-invoked tool or `required: false`), or
+   * `none` (no `context` advertised: intent capture off, per-tool `intent: false`, a tool with its own `context` argument or a schema the SDK cannot extend (oneOf/anyOf/allOf, passthrough), or an unknown tool).
+   * Unset only when the protocol layer could not be wrapped.
+   */
+  intentContext?: "required" | "optional" | "none";
   clientMeta?: ClientMeta;
 }
 
@@ -185,6 +192,7 @@ export function buildToolCallEvent(ctx: EventContext, data: ToolCallData): ToolC
     input_values: data.inputValues ? stripPii(data.inputValues) : undefined,
     output_content: data.outputContent ? stripPii(data.outputContent) : undefined,
     intent_signals: data.intentSignals ? stripPii({ ...data.intentSignals }) : undefined,
+    intent_context: data.intentContext,
     country_code: data.clientMeta?.countryCode,
     locale: data.clientMeta?.locale,
     end_user_agent: data.clientMeta?.endUserAgent,
