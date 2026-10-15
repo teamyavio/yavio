@@ -21,7 +21,7 @@ Validates that the platform starts correctly from a clean state.
 |------|-----------|---------|
 | `docker-compose up` from scratch | All services healthy (`docker-compose ps` shows no unhealthy) | 60s |
 | ClickHouse readiness | `SELECT 1` succeeds on port 8123 | 15s |
-| PostgreSQL readiness | `pg_isready -U yavio` succeeds | 10s |
+| PostgreSQL readiness | `pg_isready -U yavio_service -d yavio` succeeds | 10s |
 | Ingest API readiness | `GET /health` returns 200 | 20s |
 | Dashboard readiness | `GET /api/health` returns 200 | 30s |
 | Service restart recovery | Kill ClickHouse → ingest health check fails → ClickHouse restarts → ingest recovers | 30s |
