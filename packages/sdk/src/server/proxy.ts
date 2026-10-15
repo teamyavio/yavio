@@ -142,8 +142,11 @@ function openCallContext(
   // Client identity from the MCP initialize handshake — available by the
   // time the first tool call arrives. Only fetched while still needed:
   // for the once-per-session connection event and unresolved platforms.
+  // `get`, not `has`: a hit refreshes the mark's recency, so an active
+  // conversation is never aged out of the dedup by newer ones.
+  const connectionEmitted = emittedConnections.get(session.sessionId) === true;
   let clientInfo: { name?: string; version?: string } | undefined;
-  if (session.platform === "unknown" || !emittedConnections.has(session.sessionId)) {
+  if (session.platform === "unknown" || !connectionEmitted) {
     try {
       clientInfo = (
         server.server as unknown as {
@@ -178,7 +181,7 @@ function openCallContext(
   // Emit deferred connection event on the first tool call for this session.
   // Deferred from connect() so that OpenAI's per-tool-call reconnects don't
   // spam a connection event for every tool call in the same conversation.
-  if (!emittedConnections.has(session.sessionId)) {
+  if (!connectionEmitted) {
     emittedConnections.set(session.sessionId, true);
     const connectionEvent = buildConnectionEvent(
       {
@@ -380,6 +383,12 @@ function wrapToolCallback(
  * conversation that falls out — evicted here, or evicted from its proxy's
  * session map — emits a fresh connection event on its next call, which also
  * marks that its state (user, step sequence) started over.
+ *
+ * Shared by every proxy in the process: if two long-lived instrumented
+ * servers in one process see the same conversation key, only the first to
+ * see it emits a connection event for it, and one's eviction can make the
+ * other emit a second one. Niche topology; keying by (apiKey, sessionId)
+ * would separate them if it ever matters.
  */
 const MAX_EMITTED_CONNECTIONS = 10_000;
 const emittedConnections = new LruMap<string, true>(MAX_EMITTED_CONNECTIONS);
