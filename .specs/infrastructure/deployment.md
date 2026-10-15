@@ -35,7 +35,7 @@ services:
     networks:
       - backend
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U yavio_service"]
+      test: ["CMD-SHELL", "pg_isready -U yavio_service -d yavio"]
       interval: 5s
       timeout: 5s
       retries: 5

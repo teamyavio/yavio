@@ -168,7 +168,7 @@ Health check endpoints are defined in the service specs and Docker Compose confi
 | `yavio-ingest` | `GET /health` | 10s | 5s | 3 | PostgreSQL connectivity, ClickHouse connectivity |
 | `yavio-dashboard` | `GET /api/health` | 10s | 5s | 3 | PostgreSQL connectivity, ClickHouse connectivity |
 | `clickhouse` | `clickhouse-client --query "SELECT 1"` | 5s | 5s | 5 | Process alive, can execute queries |
-| `postgres` | `pg_isready -U yavio` | 5s | 5s | 5 | Process alive, accepting connections |
+| `postgres` | `pg_isready -U yavio_service -d yavio` | 5s | 5s | 5 | Process alive, accepting connections |
 
 See [deployment.md §9.1](./deployment.md#91-self-hosted-deployment) for the full Docker Compose healthcheck configuration.
 

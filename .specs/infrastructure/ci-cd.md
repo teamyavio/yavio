@@ -171,7 +171,7 @@ integration-test:
       ports:
         - 5432:5432
       options: >-
-        --health-cmd "pg_isready -U yavio_service"
+        --health-cmd "pg_isready -U yavio_service -d yavio_test"
         --health-interval 5s
         --health-timeout 5s
         --health-retries 5
