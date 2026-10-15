@@ -32,8 +32,10 @@ Captured input/output (PII-stripped JSON strings): input_values, output_content,
 input_keys, input_types, intent_signals (JSON with 'intent' and 'source' keys);
 intent_context (Nullable: how the SDK advertised the intent 'context' parameter for
 the tool — 'required', 'optional' (widget-invoked tool or required:false; the widget's
-own calls land here and never carry an intent), 'none' (intent disabled for the tool);
-NULL = SDK < 0.4.0 or intent capture off)
+own calls land here and never carry an intent), 'none' (nothing advertised: intent
+capture off, intent disabled for the tool, the tool has its own 'context' argument or
+a schema the SDK cannot extend such as oneOf/anyOf/allOf or passthrough, or an unknown
+tool); NULL = SDK < 0.4.0. Coverage = intents / ('required' or NULL) calls)
 Tokens: tokens_in, tokens_out. Conversions: conversion_value, conversion_currency.
 Geo: country_code (Nullable). Connection: protocol_version, client_name,
 client_version, connection_duration_ms. SDK: sdk_version.

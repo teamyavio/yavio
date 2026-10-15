@@ -259,7 +259,7 @@ const handler = createMcpHandler(
       {
         title: "Recent user intents",
         description:
-          "What users were trying to do (captured intents) in a project, with coverage KPIs. Only meaningful where intent capture is enabled.",
+          "What users were trying to do (captured intents) in a project, with coverage KPIs. Only meaningful where intent capture is enabled. kpis.coverage: share of calls where the model was required to state an intent that carried one; null when every call in the period had optional context (no required calls to measure). kpis.optionalCoverage: the same share over optional-context calls (widget-invoked tools or required:false), null without such calls; it mixes the widget's own calls, which never carry an intent, with model calls that skipped the parameter, so it is not a model coverage figure.",
         inputSchema: {
           ...projectShape,
           limit: z.number().int().min(1).max(100).optional().describe("Max rows (default 25)"),

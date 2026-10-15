@@ -49,7 +49,7 @@ CREATE TABLE events (
   input_keys      JSON,                     -- array of parameter key names
   input_types     JSON,                     -- object: key → type
   intent_signals  JSON,                     -- array: ["intent:budget", ...]
-  intent_context  LowCardinality(Nullable(String)),   -- required | optional | none: how `context` was advertised (#73, migration 0019)
+  intent_context  LowCardinality(Nullable(String)),   -- required | optional | none: how `context` was advertised; NULL = SDK < 0.4.0 (#73, migration 0019)
 
   -- Token estimation
   tokens_in       Nullable(UInt32),

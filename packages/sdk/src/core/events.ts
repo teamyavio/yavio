@@ -151,8 +151,8 @@ export interface ToolCallData {
   /**
    * How the intent `context` parameter is advertised for this tool (#73):
    * `required`, `optional` (widget-invoked tool or `required: false`), or
-   * `none` (per-tool `intent: false`, or the tool owns `context`). Unset
-   * while intent capture is off.
+   * `none` (no `context` advertised: intent capture off, per-tool `intent: false`, a tool with its own `context` argument or a schema the SDK cannot extend (oneOf/anyOf/allOf, passthrough), or an unknown tool).
+   * Unset only when the protocol layer could not be wrapped.
    */
   intentContext?: "required" | "optional" | "none";
   clientMeta?: ClientMeta;

@@ -90,9 +90,10 @@ export const ToolCallEvent = BaseEvent.extend({
   intent_signals: z.record(z.unknown()).optional(),
   // How the SDK advertised the intent `context` parameter for this tool (#73):
   // `required`; `optional` (widget-invoked tools, whose own iframe calls
-  // cannot send it, or intent `required: false`); `none` (per-tool
-  // `intent: false`, or the tool owns a `context` argument). Absent while
-  // intent capture is off and on events from SDKs before 0.4.0.
+  // cannot send it, or intent `required: false`); `none` (nothing advertised:
+  // intent capture off, per-tool `intent: false`, a tool with its own
+  // `context` or an unextendable schema, an unknown tool). Absent on events
+  // from SDKs before 0.4.0.
   intent_context: z.enum(["required", "optional", "none"]).optional(),
   tokens_in: z.number().int().optional(),
   tokens_out: z.number().int().optional(),

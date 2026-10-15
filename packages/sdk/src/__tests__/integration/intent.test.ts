@@ -889,7 +889,7 @@ describe("intent capture — widget-invoked tools", () => {
     ]);
   });
 
-  it("stamps optional on every tool under required: false, and nothing while intent is off", async () => {
+  it("stamps optional on every tool under required: false, and none while intent is off", async () => {
     const opt = await setupWidget(
       { "openai/widgetAccessible": true },
       { ...INTENT_ON, required: false },
@@ -903,7 +903,19 @@ describe("intent capture — widget-invoked tools", () => {
       { ...INTENT_ON, enabled: false },
     );
     await off.client.callTool({ name: "widget-refresh", arguments: { search_id: "abc123" } });
-    expect(toolCallEvents(off.events)[0]?.intent_context).toBeUndefined();
+    // Nothing is advertised with intent off; NULL stays reserved for old SDKs.
+    expect(toolCallEvents(off.events)[0]?.intent_context).toBe("none");
+  });
+
+  it("stamps none on a call to an unknown tool", async () => {
+    // A host calling a removed tool from its cached schema: the call fails
+    // validation and can never carry an intent, so it must not land in Call
+    // Coverage's denominator as NULL (= required).
+    const h = await setupWidget({ "openai/widgetAccessible": true });
+    await h.client.listTools();
+    await h.client.callTool({ name: "no-such-tool", arguments: {} }).catch(() => undefined);
+    const event = toolCallEvents(h.events).find((e) => e.event_name === "no-such-tool");
+    expect(event?.intent_context).toBe("none");
   });
 
   it("stamps none on a tool that owns its context", async () => {

@@ -3,8 +3,13 @@
 --   'required'  the model is asked to state an intent on every call;
 --   'optional'  widget-invoked tools (the app's own iframe calls them and
 --               cannot send it) or intent `required: false`;
---   'none'      per-tool `intent: false`, or the tool owns a `context` argument.
--- NULL: intent capture off, or an SDK before 0.4.0.
+--   'none'      nothing advertised: intent capture off, per-tool `intent: false`,
+--               a tool with its own `context` or a schema the SDK cannot
+--               extend (oneOf/anyOf/allOf, passthrough), an unknown tool.
+-- NULL: an SDK before 0.4.0.
+--
+-- It is the server's advertisement at call time. A host that still shows the
+-- model a cached schema can differ until it refreshes.
 --
 -- Why not "who called" (model vs widget): on a widget-invoked tool a model
 -- call that skips the optional parameter looks exactly like the widget's own

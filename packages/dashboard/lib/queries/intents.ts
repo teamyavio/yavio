@@ -1,6 +1,10 @@
 import { queryAnalytics } from "@/lib/clickhouse/analytics-client";
 import type { IntentFeedItem, IntentKPIs } from "./types";
 
+/** A tool_call carried an intent. The one definition for every intent query. */
+export const HAS_INTENT_SQL =
+  "intent_signals != '{}' AND JSONExtractString(intent_signals, 'intent') != ''";
+
 interface QueryContext {
   workspaceId: string;
   projectId: string;
@@ -31,8 +35,7 @@ export async function queryIntentFeed(
   const baseWhere = `
       WHERE project_id = {projectId:String}
         AND event_type = 'tool_call'
-        AND intent_signals != '{}'
-        AND JSONExtractString(intent_signals, 'intent') != ''
+        AND ${HAS_INTENT_SQL}
         AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}
         ${pf}`;
 
@@ -93,11 +96,13 @@ export async function queryIntentFeed(
  * denominator it had. Optional-context calls — widget-invoked tools, whose
  * own iframe calls cannot carry an intent, or `required: false` — get their
  * own share: who made such a call is not knowable, so it is not guessed.
- * `none` (per-tool intent: false, tool owns `context`) is in neither.
+ * `none` (nothing advertised: intent off, disabled or unextendable tools,
+ * unknown tools) is in neither. A range that spans a project's SDK upgrade
+ * still holds older NULL rows, counted the old way, until it rolls past.
  */
 export async function queryIntentKPIs(ctx: QueryContext): Promise<IntentKPIs> {
   const pf = platformFilter(ctx.platform);
-  const hasIntent = "intent_signals != '{}' AND JSONExtractString(intent_signals, 'intent') != ''";
+  const hasIntent = HAS_INTENT_SQL;
   const required = "ifNull(intent_context, 'required') = 'required'";
   const optional = "intent_context = 'optional'";
 

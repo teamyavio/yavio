@@ -34,9 +34,12 @@ import type { HandlerWrapper, RequestHandler } from "./protocol.js";
  *
  * Intent context per call (#73): the same wrapper records how `context` is
  * advertised for the called tool — `required`, `optional` (widget-invoked
- * tools, or `required: false` in the config) or `none` (the tool owns its
- * own `context`, or has per-tool `intent: false`). That is a fact the SDK
- * knows. Who made the call is not: on a widget-invoked tool a model call that
+ * tools, or `required: false` in the config) or `none` (nothing advertised:
+ * per-tool `intent: false`, a tool with its own `context` or a schema the SDK
+ * cannot extend, an unknown tool; the proxy adds intent capture off). One
+ * rule, `advertisement()`, serves tools/list and the stamp. It is the
+ * server's current advertisement: a host that still shows a cached schema
+ * may differ until it refreshes. That much is a fact the SDK knows. Who made the call is not: on a widget-invoked tool a model call that
  * skips the optional parameter looks exactly like the widget's own call, and
  * models skip it often (Shipal, 2026-10: 57% of conversations' first calls).
  * The dashboard computes Call Coverage over `required` calls and reports
@@ -237,6 +240,18 @@ export function createIntentController(
   const isWidgetTool = (toolName: unknown): boolean =>
     typeof toolName === "string" && widgetInvoked.get(toolName) === true;
 
+  /**
+   * How `context` is advertised for an eligible tool — the one rule behind
+   * both tools/list (injectIntoListedTool) and the per-call intent_context
+   * stamp (wrapCallHandler), so the two cannot drift: nothing under per-tool
+   * `intent: false`; otherwise required, unless the config says optional or
+   * the app's widget invokes the tool (its own calls cannot send `context`).
+   */
+  const advertisement = (toolName: string | undefined, widget: boolean): IntentContext => {
+    if (toolName !== undefined && disabledTools.has(toolName)) return "none";
+    return config.required && !widget ? "required" : "optional";
+  };
+
   // Once per tool: config demanded required context, the widget exemption
   // overrode it. Without this line the override is indistinguishable from a
   // client that stopped filling the parameter.
@@ -293,11 +308,8 @@ export function createIntentController(
             downstream = { ...req, params: { ...req.params, arguments: rest } };
           }
         }
-        // What tools/list advertises for this tool (injectIntoListedTool):
-        // nothing under per-tool intent: false; otherwise required, unless
-        // the config says optional or the app's widget invokes the tool.
         const widget = isWidgetTool(toolName);
-        intentContext = disabled ? "none" : config.required && !widget ? "required" : "optional";
+        intentContext = advertisement(toolName, widget);
         // No fallback for context-less calls on widget-invoked tools: those
         // are presumptively the widget's own machine traffic (a 3s auto-
         // refresh, a filter-bar click), and inferring an intent for each would
@@ -311,11 +323,10 @@ export function createIntentController(
             // A broken fallback must never break the tool call
           }
         }
-      } else if (
-        typeof toolName === "string" &&
-        (hasOwnContext.get(toolName) === true || liveOwnsContext(toolName) === true)
-      ) {
-        // The tool owns its `context`: the SDK advertises and captures nothing.
+      } else if (typeof toolName === "string") {
+        // Not eligible: the tool owns its `context`, has a schema the SDK
+        // cannot extend, or is unknown (a host calling a removed tool from a
+        // cached schema). Nothing is advertised or captured for it.
         intentContext = "none";
       }
 
@@ -406,10 +417,20 @@ export function createIntentController(
     }
     if (name) hasOwnContext.set(name, false);
 
+    // Classify from the listed `_meta` when the MCP SDK forwarded one;
+    // otherwise fall back to what the registration-time config declared
+    // (pre-1.18 MCP SDKs drop `_meta` before it reaches tools/list).
+    const widget =
+      tool._meta !== undefined
+        ? metaIndicatesWidget(tool._meta)
+        : name !== undefined && widgetInvoked.get(name) === true;
+    if (name) widgetInvoked.set(name, widget);
+    const advertised = advertisement(name, widget);
+
     // Classified as eligible (so a sent `context` is still stripped at call
     // time), but never advertised: the per-tool `intent: false` third state.
     // Deliberately after the schema checks above so their vetoes still apply.
-    if (name && disabledTools.has(name)) return tool;
+    if (advertised === "none") return tool;
 
     const copy: Record<string, unknown> = schema
       ? (JSON.parse(JSON.stringify(schema)) as Record<string, unknown>)
@@ -420,15 +441,6 @@ export function createIntentController(
     const properties = isPlainObject(copy.properties) ? copy.properties : {};
     properties.context = { type: "string", description: config.description };
     copy.properties = properties;
-
-    // Classify from the listed `_meta` when the MCP SDK forwarded one;
-    // otherwise fall back to what the registration-time config declared
-    // (pre-1.18 MCP SDKs drop `_meta` before it reaches tools/list).
-    const widget =
-      tool._meta !== undefined
-        ? metaIndicatesWidget(tool._meta)
-        : name !== undefined && widgetInvoked.get(name) === true;
-    if (name) widgetInvoked.set(name, widget);
 
     // From here on the SDK owns the `context` key. A customer schema may
     // already name "context" in `required` without declaring the property
@@ -443,7 +455,7 @@ export function createIntentController(
     // Widget-invoked tools get `context` as optional regardless of config:
     // capture still works when a model call fills it, while the widget's own
     // context-less calls stay schema-valid. See metaIndicatesWidget.
-    if (config.required && !widget) {
+    if (advertised === "required") {
       const required = Array.isArray(copy.required) ? (copy.required as unknown[]) : [];
       if (!required.includes("context")) required.push("context");
       copy.required = required;
