@@ -7,7 +7,7 @@ import { z } from "zod";
 import { deriveSessionId } from "../core/ids.js";
 import type { CaptureConfig, YavioConfig } from "../core/types.js";
 import { createYavioContext } from "../server/context.js";
-import { _resetGlobalState, createProxy } from "../server/proxy.js";
+import { _resetGlobalState, createProxy, valueFreeRejection } from "../server/proxy.js";
 import { mintWidgetToken } from "../server/token.js";
 import type { Transport } from "../transport/types.js";
 
@@ -2337,5 +2337,41 @@ describe("one proxy, many conversations", () => {
     expect(calls.map((e) => e.session_id).sort()).toEqual(
       [deriveSessionId("conv-a"), deriveSessionId("conv-b")].sort(),
     );
+  });
+});
+
+describe("valueFreeRejection (#123): what a rejected call may keep as error_message", () => {
+  const REASON =
+    "Input validation error: the arguments did not match the tool's schema (values not stored, see capture.rejectedInputValues)";
+
+  it.each([
+    "MCP error -32602: Tool book not found",
+    "MCP error -32602: Tool book disabled",
+    "MCP error -32603: Tool book has taskSupport 'required' but was not registered with registerToolTask",
+    "MCP error -32601: Tool book requires task augmentation (taskSupport: 'required')",
+    "Tool book not found",
+  ])("keeps a text that names only the tool: %s", (message) => {
+    expect(valueFreeRejection(message, "book")).toBe(message);
+  });
+
+  it("replaces an argument-validation text, which can echo the value, by a fixed reason", () => {
+    const zod3 =
+      "MCP error -32602: Input validation error: Invalid arguments for tool book: Invalid enum value. Expected 'a', received 'my wife is pregnant' at plan";
+    expect(valueFreeRejection(zod3, "book")).toBe(REASON);
+  });
+
+  it("drops a known wording that names a different tool", () => {
+    expect(valueFreeRejection("MCP error -32602: Tool other not found", "book")).toBeUndefined();
+    // The name is compared, never used as a pattern.
+    expect(valueFreeRejection("MCP error -32602: Tool bxok not found", "b.ok")).toBeUndefined();
+  });
+
+  it("drops any wording outside the allowlist: fail closed for a later MCP SDK", () => {
+    expect(
+      valueFreeRejection("MCP error -32602: Tool book rejected 'my wife is pregnant'", "book"),
+    ).toBeUndefined();
+    expect(valueFreeRejection("Something else entirely", "book")).toBeUndefined();
+    expect(valueFreeRejection(undefined, "book")).toBeUndefined();
+    expect(valueFreeRejection("", "book")).toBeUndefined();
   });
 });

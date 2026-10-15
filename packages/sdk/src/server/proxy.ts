@@ -981,7 +981,6 @@ function listedInputSchema(schema: unknown): Record<string, unknown> | undefined
   return JSON.parse(json) as Record<string, unknown>;
 }
 
-/** Extract top-level key names from tool args (values set to `true`). */
 /** `undefined` for a missing or empty object, so an event never carries `{}`. */
 function nonEmpty(value: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
   return value && Object.keys(value).length > 0 ? value : undefined;
@@ -1041,8 +1040,13 @@ function pickDeclared(args: unknown, names: Set<string> | undefined): Record<str
  * text is replaced by a fixed reason, since Zod 3 echoes the rejected value
  * into it. Anything else — a wording a later MCP SDK introduces — is
  * dropped: fail closed.
+ *
+ * @internal Exported for its unit tests only; not part of the package API.
  */
-function valueFreeRejection(message: string | undefined, toolName: string): string | undefined {
+export function valueFreeRejection(
+  message: string | undefined,
+  toolName: string,
+): string | undefined {
   if (!message) return undefined;
   const text = message.replace(/^MCP error -?\d+: /, "");
   const named = (suffix: RegExp) => {
@@ -1063,6 +1067,7 @@ function valueFreeRejection(message: string | undefined, toolName: string): stri
   return undefined;
 }
 
+/** Extract top-level key names from tool args (values set to `true`). */
 function extractInputKeys(args: unknown): Record<string, unknown> | undefined {
   if (args && typeof args === "object" && !Array.isArray(args)) {
     const keys: Record<string, unknown> = {};
