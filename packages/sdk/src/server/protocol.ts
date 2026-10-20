@@ -1,7 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolCallEvent } from "@yavio/shared/events";
-import type { SessionState } from "../core/types.js";
+import type { McpServerLike, SessionState } from "../core/types.js";
 
 /**
  * The protocol layer: wrappers around the low-level server's `tools/call`
@@ -20,6 +19,12 @@ import type { SessionState } from "../core/types.js";
  * `setRequestHandler` patching, `_requestHandlers`). When that API is missing
  * the install reports false and the SDK degrades to callback-only
  * instrumentation — today's behaviour, never worse.
+ *
+ * Both MCP SDK generations are served (#133): v1 registers handlers as
+ * `setRequestHandler(zodSchema, handler)`, v2 (`@modelcontextprotocol/server`)
+ * as `setRequestHandler("tools/call", handler)` or
+ * `setRequestHandler(method, schemas, handler)`. The method is read from
+ * whichever form arrives and the last function argument is the handler.
  */
 
 export type RequestHandler = (request: unknown, extra: unknown) => Promise<unknown>;
@@ -57,12 +62,16 @@ export function runInCallFrame<T>(frame: CallFrame, fn: () => T): T {
 }
 
 interface LowLevelServerLike {
-  setRequestHandler?: (schema: unknown, handler: RequestHandler) => unknown;
+  setRequestHandler?: (...args: unknown[]) => unknown;
   _requestHandlers?: Map<string, RequestHandler>;
 }
 
-/** Extract the literal `method` value from a Zod request schema (v3 or v4). */
+/**
+ * The method a `setRequestHandler` call registers: the string itself (MCP SDK
+ * v2), or the literal `method` value of a Zod request schema (v1, Zod 3 or 4).
+ */
 export function requestMethod(schema: unknown): string | undefined {
+  if (typeof schema === "string") return schema;
   try {
     const shape = (schema as { shape?: Record<string, unknown> } | undefined)?.shape;
     const field = shape?.method;
@@ -102,7 +111,10 @@ export interface ProtocolWrappers {
  * setRequestHandler sees them; handlers already present are wrapped in place
  * through the handler map.
  */
-export function installProtocolWrappers(server: McpServer, wrappers: ProtocolWrappers): boolean {
+export function installProtocolWrappers(
+  server: McpServerLike,
+  wrappers: ProtocolWrappers,
+): boolean {
   try {
     const low = (server as unknown as { server?: LowLevelServerLike }).server;
     if (!low || typeof low.setRequestHandler !== "function") return false;
@@ -125,11 +137,19 @@ export function installProtocolWrappers(server: McpServer, wrappers: ProtocolWra
     };
 
     const originalSet = low.setRequestHandler.bind(low);
-    low.setRequestHandler = (schema: unknown, handler: RequestHandler) => {
-      const method = requestMethod(schema);
-      if (method === "tools/call") return originalSet(schema, compose(handler, wrappers.call));
-      if (method === "tools/list") return originalSet(schema, compose(handler, wrappers.list));
-      return originalSet(schema, handler);
+    low.setRequestHandler = (...args: unknown[]) => {
+      const method = requestMethod(args[0]);
+      const list =
+        method === "tools/call" ? wrappers.call : method === "tools/list" ? wrappers.list : null;
+      if (!list) return originalSet(...args);
+      // The handler is the last function argument in every form:
+      // (schema, handler), (method, handler), (method, schemas, handler).
+      const index = args.length - 1;
+      const handler = args[index];
+      if (typeof handler !== "function") return originalSet(...args);
+      const wrapped = [...args];
+      wrapped[index] = compose(handler as RequestHandler, list);
+      return originalSet(...wrapped);
     };
 
     const handlers = low._requestHandlers;

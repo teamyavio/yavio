@@ -1,4 +1,3 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolCallEvent, ToolDiscoveryEvent } from "@yavio/shared/events";
 import { normalizeRegionName } from "@yavio/shared/geo";
 import {
@@ -10,9 +9,10 @@ import {
 import { deriveSessionId, generateSessionId, generateTraceId } from "../core/ids.js";
 import { LruMap } from "../core/lru.js";
 import { detectPlatform } from "../core/platform.js";
-import type { CaptureConfig, SessionState, YavioConfig } from "../core/types.js";
+import type { CaptureConfig, McpServerLike, SessionState, YavioConfig } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
 import { type RequestStore, runInContext } from "./context.js";
+import { headerValue, readCallExtra } from "./extra.js";
 import {
   type IntentContext,
   type IntentController,
@@ -28,27 +28,16 @@ import {
   installProtocolWrappers,
   runInCallFrame,
 } from "./protocol.js";
+import {
+  type CachedWidgetToken,
+  type SharedSessions,
+  _resetSharedState,
+  createSharedSessions,
+} from "./shared.js";
 import { type MintResult, mintWidgetToken } from "./token.js";
-
-/** Cached widget token with parsed expiry for reuse across tool calls. */
-interface CachedWidgetToken {
-  token: string;
-  expiresAt: number;
-}
 
 function isMintResult(result: unknown): result is MintResult {
   return result !== null && typeof result === "object" && "token" in result;
-}
-
-/** Read a header from an IsomorphicHeaders-shaped record (string or string[]). */
-function headerValue(
-  headers: Record<string, unknown> | undefined,
-  name: string,
-): string | undefined {
-  const value = headers?.[name];
-  if (typeof value === "string") return value;
-  if (Array.isArray(value) && typeof value[0] === "string") return value[0];
-  return undefined;
 }
 
 /**
@@ -82,6 +71,22 @@ async function getWidgetToken(
  * floor this package supports predates the enum member.
  */
 const URL_ELICITATION_REQUIRED = -32042;
+
+/** JSON-RPC InvalidParams. */
+const INVALID_PARAMS = -32602;
+
+/**
+ * MCP SDK v2's refusal of a call to an unknown or disabled tool: a thrown
+ * InvalidParams error whose text names only the tool (`Tool X not found`,
+ * `Tool X disabled`) — the same wording v1 puts into an isError result.
+ */
+function isToolNotFoundError(error: unknown, toolName: string): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  if (code !== INVALID_PARAMS || typeof message !== "string") return false;
+  const text = message.replace(/^MCP error -?\d+: /, "");
+  return text === `Tool ${toolName} not found` || text === `Tool ${toolName} disabled`;
+}
 
 /** A URL elicitation is a protocol flow McpServer passes to the client unwrapped, not a failure. */
 function isUrlElicitationRequired(error: unknown): boolean {
@@ -122,65 +127,53 @@ function resolveToolCapture(config: YavioConfig, toolName: string): CaptureConfi
 function openCallContext(
   extra: unknown,
   resolveSession: (sessionKey?: string) => SessionState,
-  server: McpServer,
+  server: McpServerLike,
   config: YavioConfig,
   transport: Transport,
   sdkVersion: string,
 ): CallContext {
-  // Extract MCP session ID from the extra parameter (RequestHandlerExtra.sessionId)
-  // This is the most reliable correlation signal — set from the Mcp-Session-Id header
-  const mcpSessionId =
-    extra && typeof extra === "object" ? (extra as Record<string, unknown>).sessionId : undefined;
+  // Read once, by shape (v1 RequestHandlerExtra or v2 ctx — see extra.ts).
+  const ex = readCallExtra(extra);
 
-  // Fall back to OpenAI's conversation-scoped session from _meta
-  // OpenAI re-initializes MCP per tool call but sends a stable "openai/session" in _meta
-  const extraMeta =
-    extra && typeof extra === "object" ? (extra as Record<string, unknown>)._meta : undefined;
-  const openaiSessionId =
-    extraMeta && typeof extraMeta === "object"
-      ? (extraMeta as Record<string, unknown>)["openai/session"]
-      : undefined;
-
+  // The MCP session id (Mcp-Session-Id) is the most reliable correlation
+  // signal. Fall back to OpenAI's conversation-scoped session from _meta:
+  // OpenAI re-initializes MCP per tool call but sends a stable "openai/session".
+  const openaiSessionId = ex.meta?.["openai/session"];
   const sessionKey =
-    typeof mcpSessionId === "string"
-      ? mcpSessionId
-      : typeof openaiSessionId === "string"
-        ? openaiSessionId
-        : undefined;
+    ex.sessionId ?? (typeof openaiSessionId === "string" ? openaiSessionId : undefined);
   const session = resolveSession(sessionKey);
 
-  // Client identity from the MCP initialize handshake — available by the
-  // time the first tool call arrives. Only fetched while still needed:
+  // Client identity: on the 2026-07-28 protocol era every request carries it
+  // (v2 envelope); otherwise from the MCP initialize handshake, available by
+  // the time the first tool call arrives. Only fetched while still needed:
   // for the once-per-session connection event and unresolved platforms.
   // `get`, not `has`: a hit refreshes the mark's recency, so an active
   // conversation is never aged out of the dedup by newer ones.
   const connectionEmitted = emittedConnections.get(session.sessionId) === true;
   let clientInfo: { name?: string; version?: string } | undefined;
   if (session.platform === "unknown" || !connectionEmitted) {
-    try {
-      clientInfo = (
-        server.server as unknown as {
-          getClientVersion?: () => { name?: string; version?: string } | undefined;
-        }
-      ).getClientVersion?.();
-    } catch {
-      clientInfo = undefined;
+    clientInfo = ex.client;
+    if (!clientInfo?.name) {
+      try {
+        clientInfo =
+          (
+            server.server as {
+              getClientVersion?: () => { name?: string; version?: string } | undefined;
+            }
+          )?.getClientVersion?.() ?? clientInfo;
+      } catch {
+        // Keep whatever the envelope said.
+      }
     }
   }
 
   // Lazy platform detection — must run before the connection event is
   // built so the event carries the resolved platform, not "unknown".
-  // HTTP transports also expose request headers via extra.requestInfo,
-  // which cover clients whose handshake identity is unrecognised.
+  // HTTP transports also expose request headers (v1 extra.requestInfo, v2
+  // extra.http.req), which cover clients whose handshake identity is
+  // unrecognised.
   if (session.platform === "unknown") {
-    const requestInfo =
-      extra && typeof extra === "object"
-        ? (extra as Record<string, unknown>).requestInfo
-        : undefined;
-    const httpHeaders =
-      requestInfo && typeof requestInfo === "object"
-        ? ((requestInfo as Record<string, unknown>).headers as Record<string, unknown> | undefined)
-        : undefined;
+    const httpHeaders = ex.requestHeaders;
     const userAgent = headerValue(httpHeaders, "user-agent");
     const origin = headerValue(httpHeaders, "origin");
     if (clientInfo?.name || userAgent || origin) {
@@ -226,7 +219,7 @@ function wrapToolCallback(
   originalCb: (...cbArgs: unknown[]) => unknown,
   toolName: string,
   resolveSession: (sessionKey?: string) => SessionState,
-  server: McpServer,
+  server: McpServerLike,
   config: YavioConfig,
   capture: CaptureConfig,
   transport: Transport,
@@ -420,21 +413,34 @@ const emittedConnections = new LruMap<string, true>(MAX_EMITTED_CONNECTIONS);
 /** Tracks tool names that have already emitted a tool_discovery event (global dedup). */
 const emittedToolDiscoveries = new Set<string>();
 
-/** @internal Reset global dedup state — exposed for testing only. */
+/** Drop a session's connection-event mark (the shared session map's eviction hook). */
+export function releaseConnectionMark(sessionId: string): void {
+  emittedConnections.delete(sessionId);
+}
+
+/** @internal Reset global dedup state and the shared registry — exposed for testing only. */
 export function _resetGlobalState(): void {
   emittedConnections.clear();
   emittedToolDiscoveries.clear();
+  _resetSharedState();
 }
 
 /**
  * Create a Proxy around McpServer that intercepts tool()/registerTool() and connect()
  * to inject Yavio instrumentation transparently.
+ *
+ * `shared` is the session state that outlives this instance (#133): the
+ * sessions map and the widget token cache, owned by the process-level client
+ * so a per-request server instance finds the conversation state its
+ * predecessors built. Without it (tests building a proxy directly) the proxy
+ * gets a private one.
  */
-export function createProxy<T extends McpServer>(
+export function createProxy<T extends McpServerLike>(
   server: T,
   config: YavioConfig,
   transport: Transport,
   sdkVersion: string,
+  shared: SharedSessions = createSharedSessions(releaseConnectionMark),
 ): T {
   // Session state of the connection itself: set on connect, used for calls
   // that carry no session key and for discovery events.
@@ -446,8 +452,8 @@ export function createProxy<T extends McpServer>(
     stepSequence: 0,
   };
 
-  // Widget token cache — shared across tool calls, reset on reconnect
-  const tokenCache: { current: CachedWidgetToken | null } = { current: null };
+  // Widget token cache — shared across tool calls and server instances
+  const tokenCache: { current: CachedWidgetToken | null } = shared.tokenCache;
 
   // Intent capture operates at the protocol layer (wrapped tools/list and
   // tools/call handlers on the low-level server) — registered tool schemas
@@ -610,8 +616,21 @@ export function createProxy<T extends McpServer>(
       // A JSON-RPC error the proxy has no business classifying (today only
       // UrlElicitationRequired escapes McpServer's catch). The callback's own
       // event, if it produced one, still goes out.
+      //
+      // One exception: MCP SDK v2 throws InvalidParams for an unknown or
+      // disabled tool where v1 returns an isError result, and the model sees
+      // the same refusal either way. Counted as the validation failure it is
+      // (same table as protocol-layer-status.md), then re-thrown unchanged.
       try {
         if (frame.event) transport.send([frame.event]);
+        else if (isToolNotFoundError(error, toolName)) {
+          const rejection = {
+            isError: true,
+            content: [{ type: "text", text: (error as Error).message }],
+          };
+          const event = finalizeCallEvent(frame, params?.arguments, extra, rejection);
+          if (event) transport.send([event]);
+        }
       } catch {
         // Analytics never changes what the client gets.
       }
@@ -676,18 +695,14 @@ export function createProxy<T extends McpServer>(
 
   /**
    * Sessions by their derived id, for a server that serves many conversations
-   * through one proxy (stateless transports, OpenAI's per-call reconnects):
-   * identify(), the traits and the step sequence belong to one conversation.
-   * One shared, mutated session object used to carry a user identified in
-   * conversation A onto conversation B's events, and two overlapping calls
-   * could swap session ids. Bounded; the least recently used goes first, and
-   * takes its connection-event mark with it so the conversation's next call,
-   * which starts a fresh state, emits a fresh connection event.
+   * (stateless transports, OpenAI's per-call reconnects): identify(), the
+   * traits and the step sequence belong to one conversation. One shared,
+   * mutated session object used to carry a user identified in conversation A
+   * onto conversation B's events, and two overlapping calls could swap session
+   * ids. Shared across server instances through `shared` (#133); bounded,
+   * see shared.ts.
    */
-  const MAX_SESSIONS = 1000;
-  const sessions = new LruMap<string, SessionState>(MAX_SESSIONS, (sessionId) =>
-    emittedConnections.delete(sessionId),
-  );
+  const sessions = shared.sessions;
   /**
    * The session of the most recent tool call — what tool_discovery events
    * stamp, so a discovery emitted after a call carries that call's detected
@@ -733,9 +748,15 @@ export function createProxy<T extends McpServer>(
     return state;
   };
 
-  const originalTool = server.tool.bind(server);
-  const originalRegisterTool = server.registerTool.bind(server);
-  const originalConnect = server.connect.bind(server);
+  // `tool()` exists on MCP SDK v1 only; v2 (`@modelcontextprotocol/server`)
+  // has `registerTool()` alone, and binding a missing method was the crash
+  // every v2 integrator hit (#133).
+  const originalTool =
+    typeof server.tool === "function"
+      ? (server.tool as (...a: unknown[]) => unknown).bind(server)
+      : undefined;
+  const originalRegisterTool = (server.registerTool as (...a: unknown[]) => unknown).bind(server);
+  const originalConnect = (server.connect as (...a: unknown[]) => Promise<unknown>).bind(server);
 
   /**
    * Keep fluent chains on the proxy.
@@ -776,13 +797,64 @@ export function createProxy<T extends McpServer>(
     inputSchema: Record<string, unknown> | undefined,
   ) => transport.send([discoveryEvent(toolName, description, inputSchema)]);
 
+  /**
+   * Tools registered BEFORE the wrap (#133). A stateless host builds the
+   * server — tools included — and wraps the finished server, so the
+   * interceptors below never see those registrations. Instrument them in
+   * place through `RegisteredTool.update({ callback })`, public API on every
+   * supported MCP SDK (v1 since the floor, v2), exactly as the interceptors
+   * would have: same callback wrapper, same capture flags, same intent
+   * classification. Task tools (the handler is an object, not a function)
+   * stay out, as they do for the interceptors. A tool the integrator
+   * registers on the UNWRAPPED server after wrapping is still untracked.
+   */
+  const instrumentRegisteredTools = (): void => {
+    try {
+      const tools = (server as unknown as { _registeredTools?: Record<string, RegisteredToolLike> })
+        ._registeredTools;
+      if (!tools || typeof tools !== "object") return;
+      for (const name of Object.keys(tools)) {
+        const tool = tools[name];
+        if (!tool || typeof tool !== "object" || instrumentedTools.has(name)) continue;
+        const handler = tool.handler;
+        if (typeof handler !== "function" || typeof tool.update !== "function") continue;
+        intent?.noteToolRegistration(name, tool.inputSchema ? [tool.inputSchema] : [], tool._meta);
+        instrumentedTools.add(name);
+        tool.update({
+          callback: wrapToolCallback(
+            handler as (...cbArgs: unknown[]) => unknown,
+            name,
+            resolveSession,
+            server,
+            config,
+            resolveToolCapture(config, name),
+            transport,
+            sdkVersion,
+            tokenCache,
+          ),
+        });
+        if (!protocolInstalled && !emittedToolDiscoveries.has(name)) {
+          emittedToolDiscoveries.add(name);
+          emitDiscovery(
+            name,
+            typeof tool.description === "string" ? tool.description : undefined,
+            extractParamKeys(tool.inputSchema),
+          );
+        }
+      }
+    } catch {
+      // Registry unreadable: nothing to instrument, the interceptors still work.
+    }
+  };
+  instrumentRegisteredTools();
+
   return new Proxy<T>(server, {
     get(target, prop, receiver) {
-      if (prop === "tool") {
+      if (prop === "tool" && originalTool) {
         return (...args: unknown[]) => {
           const cbIndex = args.findIndex((a) => typeof a === "function");
           if (cbIndex === -1) {
-            return (originalTool as (...a: unknown[]) => unknown)(...args);
+            return originalTool(...args);
           }
 
           const originalCb = args[cbIndex] as (...cbArgs: unknown[]) => unknown;
@@ -804,7 +876,7 @@ export function createProxy<T extends McpServer>(
             tokenCache,
           );
 
-          const result = (originalTool as (...a: unknown[]) => unknown)(...args);
+          const result = originalTool(...args);
 
           // Fallback when tools/list could not be wrapped (see discoveryWrapper):
           // emit at registration, once per tool name, with property names only.
@@ -878,7 +950,7 @@ export function createProxy<T extends McpServer>(
             );
           }
 
-          const result = (originalRegisterTool as (...a: unknown[]) => unknown)(...args);
+          const result = originalRegisterTool(...args);
 
           // Fallback when tools/list could not be wrapped (see discoveryWrapper).
           // Property names only: the raw inputSchema is a Zod object, and
@@ -917,11 +989,11 @@ export function createProxy<T extends McpServer>(
             stepSequence: 0,
           };
           activeSession = null;
-          tokenCache.current = null;
+          // The widget token cache is NOT reset here: it is shared across
+          // server instances (#133), and a per-request host connects a new
+          // instance for every request. Expiry alone decides a re-mint.
 
-          const result = await originalConnect(
-            mcpTransport as Parameters<typeof originalConnect>[0],
-          );
+          const result = await originalConnect(mcpTransport);
 
           // Connection event is deferred to the first tool call (see wrapToolCallback)
           // so that OpenAI's per-tool-call reconnects don't produce duplicate events.
@@ -933,6 +1005,15 @@ export function createProxy<T extends McpServer>(
       return Reflect.get(target, prop, receiver);
     },
   });
+}
+
+/** The registry entry of an MCP SDK v1 or v2 tool, as far as the proxy reads it. */
+interface RegisteredToolLike {
+  handler?: unknown;
+  description?: unknown;
+  inputSchema?: unknown;
+  _meta?: unknown;
+  update?: (updates: { callback: unknown }) => unknown;
 }
 
 /**
@@ -995,7 +1076,7 @@ function nonEmpty(value: Record<string, unknown> | undefined): Record<string, un
  * invented can carry free text as well as a value can. Reads McpServer's
  * registry the way the intent controller does (shapeHasContext).
  */
-function declaredParamNames(server: McpServer, toolName: string): Set<string> | undefined {
+function declaredParamNames(server: McpServerLike, toolName: string): Set<string> | undefined {
   try {
     const tools = (
       server as unknown as { _registeredTools?: Record<string, { inputSchema?: unknown }> }
@@ -1131,24 +1212,22 @@ function extractInputValues(
   if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
   try {
     const clone = JSON.parse(JSON.stringify(args)) as Record<string, unknown>;
-    if (extra && typeof extra === "object") {
-      const ex = extra as Record<string, unknown>;
-      if (ex._meta != null) {
-        const meta = JSON.parse(JSON.stringify(ex._meta)) as unknown;
-        if (geo !== true && meta && typeof meta === "object" && !Array.isArray(meta)) {
-          const reduced = reduceMeta(meta as Record<string, unknown>, geo);
-          clone._meta = reduced.meta;
-          if (reduced.droppedKeys.length > 0) clone._metaDroppedKeys = reduced.droppedKeys;
-          if (reduced.droppedUnnamed > 0) clone._metaDroppedUnnamed = reduced.droppedUnnamed;
-        } else {
-          clone._meta = meta;
-        }
+    const ex = readCallExtra(extra);
+    if (ex.meta) {
+      const meta = JSON.parse(JSON.stringify(ex.meta)) as unknown;
+      if (geo !== true && meta && typeof meta === "object" && !Array.isArray(meta)) {
+        const reduced = reduceMeta(meta as Record<string, unknown>, geo);
+        clone._meta = reduced.meta;
+        if (reduced.droppedKeys.length > 0) clone._metaDroppedKeys = reduced.droppedKeys;
+        if (reduced.droppedUnnamed > 0) clone._metaDroppedUnnamed = reduced.droppedUnnamed;
+      } else {
+        clone._meta = meta;
       }
-      if (typeof ex.taskId === "string") clone._taskId = ex.taskId;
-      if (ex.requestInfo != null) {
-        const requestInfo = sanitizeRequestInfo(ex.requestInfo);
-        if (requestInfo) clone._requestInfo = requestInfo;
-      }
+    }
+    if (ex.taskId) clone._taskId = ex.taskId;
+    if (ex.requestHeaders || ex.requestUrl) {
+      const requestInfo = sanitizeRequestInfo(ex.requestHeaders, ex.requestUrl);
+      if (requestInfo) clone._requestInfo = requestInfo;
     }
     return clone;
   } catch {
@@ -1275,10 +1354,8 @@ function extractClientMeta(
   extra: unknown,
   geo: CaptureConfig["geo"],
 ): import("../core/events.js").ClientMeta | undefined {
-  if (!extra || typeof extra !== "object") return undefined;
-  const meta = (extra as Record<string, unknown>)._meta;
-  if (!meta || typeof meta !== "object") return undefined;
-  const m = meta as Record<string, unknown>;
+  const m = readCallExtra(extra).meta;
+  if (!m) return undefined;
 
   const str = (v: unknown, max: number): string | undefined =>
     typeof v === "string" && v.length > 0 ? v.slice(0, max) : undefined;
@@ -1327,20 +1404,22 @@ function locationRegion(location: unknown, country: string | undefined): string 
 }
 
 /**
- * Reduce `RequestHandlerExtra.requestInfo` to the parts that are safe to store:
- * allowlisted headers, and the URL without its query string (query params are a
- * common place for tokens).
+ * Reduce the HTTP request info (v1 `RequestHandlerExtra.requestInfo`, v2
+ * `ctx.http.req`, both read by extra.ts) to the parts that are safe to store:
+ * allowlisted headers, and the URL without its query string (query params are
+ * a common place for tokens).
  *
  * Returns undefined when nothing survives, so the event carries no empty shell.
  */
-function sanitizeRequestInfo(requestInfo: unknown): Record<string, unknown> | undefined {
-  if (!requestInfo || typeof requestInfo !== "object") return undefined;
-  const info = requestInfo as Record<string, unknown>;
+function sanitizeRequestInfo(
+  rawHeaders: Record<string, unknown> | undefined,
+  url: string | undefined,
+): Record<string, unknown> | undefined {
   const out: Record<string, unknown> = {};
 
-  if (info.headers && typeof info.headers === "object" && !Array.isArray(info.headers)) {
+  if (rawHeaders) {
     const headers: Record<string, unknown> = {};
-    for (const [name, value] of Object.entries(info.headers as Record<string, unknown>)) {
+    for (const [name, value] of Object.entries(rawHeaders)) {
       // Node lowercases incoming header names, but the shape is only typed as a
       // plain object — normalize so a hand-built `Authorization` cannot slip by.
       if (!CAPTURED_HEADERS.has(name.toLowerCase())) continue;
@@ -1350,8 +1429,8 @@ function sanitizeRequestInfo(requestInfo: unknown): Record<string, unknown> | un
     if (Object.keys(headers).length > 0) out.headers = headers;
   }
 
-  if (typeof info.url === "string") {
-    const [withoutFragment] = info.url.split("#");
+  if (typeof url === "string") {
+    const [withoutFragment] = url.split("#");
     const [withoutQuery] = withoutFragment.split("?");
     if (withoutQuery) out.url = withoutQuery;
   }

@@ -1,7 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { stripPii } from "../core/pii.js";
-import type { IntentConfig } from "../core/types.js";
+import type { IntentConfig, McpServerLike } from "../core/types.js";
 import type { HandlerWrapper, RequestHandler } from "./protocol.js";
 
 /**
@@ -207,7 +206,7 @@ export interface IntentController {
    * `wrapList` through the protocol layer (protocol.ts), which fixes their
    * order relative to the status wrapper.
    */
-  attach(server: McpServer): void;
+  attach(server: McpServerLike): void;
   /** tools/call wrapper: capture and strip `context`. */
   wrapCall: HandlerWrapper;
   /** tools/list wrapper: advertise `context`. */
