@@ -13,7 +13,14 @@ name: Release SDK
 # Release procedure:
 #   1. Land the version bump in packages/sdk/package.json on main.
 #   2. Tag that commit `sdk-v<version>` (e.g. sdk-v0.2.0) and push the tag.
-#   3. This workflow builds, tests, and publishes with provenance.
+#   3. `check` builds, tests and packs; `publish` uploads that exact tarball
+#      with provenance.
+#
+# Only `publish` can mint the OIDC token, and it runs nothing but npm on a
+# tarball `check` produced. `check` runs check-package.mjs, which installs
+# packages from npm and executes them; with id-token in the same job, a
+# compromised dependency could mint a publish token. The tarball and its
+# checksum leave `check` before that step runs.
 
 on:
   push:
@@ -22,11 +29,13 @@ on:
 
 permissions:
   contents: read
-  id-token: write # mint the OIDC token npm exchanges for publish access
 
 jobs:
-  publish:
+  check:
     runs-on: ubuntu-latest
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
+      sha512: ${{ steps.pack.outputs.sha512 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
@@ -50,8 +59,56 @@ jobs:
       - run: pnpm turbo build --filter=@yavio/sdk...
       - run: pnpm --filter @yavio/sdk exec vitest run
 
+      - name: Pack
+        id: pack
+        working-directory: packages/sdk
+        run: |
+          mkdir -p "$RUNNER_TEMP/package"
+          npm pack --json --pack-destination "$RUNNER_TEMP/package" > "$RUNNER_TEMP/pack.json"
+          tarball="$(node -p "require(process.argv[1])[0].filename" "$RUNNER_TEMP/pack.json")"
+          sha512="$(sha512sum "$RUNNER_TEMP/package/$tarball" | cut -d' ' -f1)"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          echo "sha512=$sha512" >> "$GITHUB_OUTPUT"
+          echo "$tarball sha512 $sha512"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sdk-tarball
+          path: ${{ runner.temp }}/package/${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+
+      # The tarball as an app sees it: types under ESM and CommonJS settings,
+      # require(), import and an exports-unaware resolver. Runs packages from
+      # npm, hence after the upload and in this job.
+      - run: node packages/sdk/scripts/check-package.mjs "$RUNNER_TEMP/package/${{ steps.pack.outputs.tarball }}"
+
+  publish:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # mint the OIDC token npm exchanges for publish access
+    steps:
+      # Token-free setup (no registry-url → no .npmrc, no NODE_AUTH_TOKEN)
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
       # Node 22 ships npm 10; OIDC trusted publishing needs npm >= 11.5.1
       - run: npm install -g npm@latest
+
+      - uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          name: sdk-tarball
+          path: ${{ runner.temp }}/package
+
+      - name: Verify the tarball is the one check produced
+        run: |
+          actual="$(sha512sum "$RUNNER_TEMP/package/${{ needs.check.outputs.tarball }}" | cut -d' ' -f1)"
+          if [ "$actual" != "${{ needs.check.outputs.sha512 }}" ]; then
+            echo "::error::tarball sha512 $actual, check packed ${{ needs.check.outputs.sha512 }}"
+            exit 1
+          fi
 
       - name: Publish diagnostics
         run: |
@@ -60,5 +117,4 @@ jobs:
           echo "NODE_AUTH_TOKEN present: ${NODE_AUTH_TOKEN:+yes}"
           echo "userconfig: $(npm config get userconfig)"
 
-      - run: npm publish --access public
-        working-directory: packages/sdk
+      - run: npm publish "$RUNNER_TEMP/package/${{ needs.check.outputs.tarball }}" --access public

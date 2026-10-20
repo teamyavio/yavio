@@ -126,8 +126,12 @@ test-sdk:
   steps:
     - uses: actions/checkout@v4
     - uses: ./.github/actions/setup
-    - run: pnpm --filter @yavio/sdk test
+    - run: pnpm turbo build --filter=@yavio/sdk...
+    - run: pnpm --filter @yavio/sdk exec vitest run --coverage
+    - run: pnpm --filter @yavio/sdk run check:package
 ```
+
+`check:package` (`packages/sdk/scripts/check-package.mjs`) builds (turbo, a cache hit after the build step) and packs the SDK, installs the tarball outside the repository and compiles a small app against it under four TypeScript setups (ESM with `nodenext` and `bundler`, CommonJS with `nodenext` and `node10`, all with `skipLibCheck` off), then loads both entry points with `require()`, `import` and an exports-unaware resolver. Given a tarball path it checks that file instead. The SDK's own typecheck cannot see what npm users get: up to 0.4.1 the declarations imported the unpublished `@yavio/shared` and `require()` was handed the ESM declarations, with every test green. The compat workflow runs it against the MCP SDK floor and the latest release, the release workflow against the tarball it publishes (3.1).
 
 Repeated for `ingest`, `dashboard`, and `cli` with their respective change detection gates.
 
@@ -219,35 +223,18 @@ Releases are triggered by pushing a version tag (`v*`). The release process is:
 3. Maintainer creates and pushes a git tag: `git tag v1.2.0 && git push origin v1.2.0`
 4. Tag push triggers the release workflows
 
-### 3.1 npm Publish (`release-npm.yml`)
+### 3.1 npm Publish — SDK (`release-sdk.yml`)
 
-**Trigger:** Push of a tag matching `v*`
+**Trigger:** Push of a tag matching `sdk-v*` (e.g. `sdk-v0.4.2`) on the commit that bumped `packages/sdk/package.json`.
 
-Publishes the SDK and CLI packages to the npm registry. Only runs when the tagged commit includes changes to publishable packages.
+Publishes `@yavio/sdk` through npm trusted publishing: npm trusts this workflow file and exchanges the job's OIDC token for publish access, so there is no npm token or secret, and every release carries a Sigstore provenance attestation. The setup must not configure registry auth (no `registry-url`, so not `./.github/actions/setup`); npm would prefer that over the OIDC exchange.
 
-```yaml
-release-npm:
-  runs-on: ubuntu-latest
-  permissions:
-    contents: read
-    id-token: write  # OIDC for npm provenance
-  steps:
-    - uses: actions/checkout@v4
-    - uses: ./.github/actions/setup
-    - run: pnpm --filter @yavio/shared build
-    - run: pnpm --filter @yavio/sdk build
-    - run: pnpm --filter @yavio/cli build
-    - run: pnpm --filter @yavio/sdk publish --provenance --access public --no-git-checks
-      env:
-        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-    - run: pnpm --filter @yavio/cli publish --provenance --access public --no-git-checks
-      env:
-        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-```
+Two jobs:
 
-**npm provenance:** Uses OIDC (`id-token: write`) to sign packages with Sigstore provenance attestations. This lets consumers verify that a published package was built from a specific commit in CI, not from a developer's machine.
+1. **`check`** (no `id-token`): verifies the tag matches the package version, builds, runs the tests, packs the tarball, uploads it as an artifact and records its sha512 as a job output, and only then runs `check-package.mjs` on it. That script installs packages from npm and executes them; in a job that can mint the OIDC token, a compromised dependency could publish.
+2. **`publish`** (`needs: check`, `id-token: write`): runs nothing but npm. It downloads the artifact, refuses to continue unless its sha512 matches `check`'s, and runs `npm publish <tarball> --access public`, so the bytes that reach npm are the bytes that were checked.
 
-**Scoped packages:** `@yavio/sdk` and `@yavio/cli` are published with `--access public` since scoped packages default to restricted on npm.
+**Scoped package:** `@yavio/sdk` is published with `--access public` since scoped packages default to restricted on npm. The CLI has no release workflow yet.
 
 ### 3.2 Docker Publish (`release-docker.yml`)
 

@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "paths": {
+      "@yavio/shared": ["../shared/src/index.ts"],
+      "@yavio/shared/*": ["../shared/src/*"]
+    }
+  }
+}

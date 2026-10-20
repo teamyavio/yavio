@@ -303,6 +303,9 @@ jobs:
       - uses: ./.github/actions/setup
       - run: pnpm turbo build --filter=@yavio/sdk...
       - run: pnpm --filter @yavio/sdk exec vitest run --coverage
+      # The packed tarball as an app sees it: types under ESM and CommonJS
+      # settings; require(), import and an exports-unaware resolver.
+      - run: pnpm --filter @yavio/sdk run check:package
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:

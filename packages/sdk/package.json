@@ -1,6 +1,6 @@
 {
   "name": "@yavio/sdk",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Yavio SDK for instrumenting MCP servers with analytics, session tracking, and a React widget",
   "type": "module",
   "license": "MIT",
@@ -25,27 +25,40 @@
   "engines": {
     "node": ">=20.0.0"
   },
-  "files": ["dist", "LICENSE", "README.md"],
+  "files": ["dist", "react/package.json", "LICENSE", "README.md"],
   "publishConfig": {
     "access": "public"
   },
+  "main": "./dist/index.cjs",
+  "types": "./dist/index.d.cts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./react": {
-      "types": "./dist/react.d.ts",
-      "import": "./dist/react.js",
-      "require": "./dist/react.cjs"
+      "import": {
+        "types": "./dist/react.d.ts",
+        "default": "./dist/react.js"
+      },
+      "require": {
+        "types": "./dist/react.d.cts",
+        "default": "./dist/react.cjs"
+      }
     }
   },
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "check:package": "node scripts/check-package.mjs"
   },
   "dependencies": {
     "nanoid": "^5.1.16"
