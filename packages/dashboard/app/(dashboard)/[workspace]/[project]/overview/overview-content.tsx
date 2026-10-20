@@ -139,7 +139,8 @@ export function OverviewContent({ projectId }: { projectId: string }) {
             </ChartPanel>
 
             <ChartPanel title="Locations">
-              <LocationTable data={data ? data.locations : NO_LOCATIONS} />
+              {/* A response without the key (an older API) counts as unavailable, not as a crash. */}
+              <LocationTable data={data ? (data.locations ?? null) : NO_LOCATIONS} />
             </ChartPanel>
           </div>
 

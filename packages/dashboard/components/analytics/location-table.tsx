@@ -33,12 +33,12 @@ function Message({ children }: { children: string }) {
   );
 }
 
-/** `data` null: the location query failed; the rest of the Overview still loaded. */
-export function LocationTable({ data }: { data: LocationBreakdown | null }) {
+/** `data` null or missing: the location query failed; the rest of the Overview still loaded. */
+export function LocationTable({ data }: { data: LocationBreakdown | null | undefined }) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [showAll, setShowAll] = useState(false);
 
-  if (data === null) return <Message>Locations are unavailable right now</Message>;
+  if (data == null) return <Message>Locations are unavailable right now</Message>;
   if (data.totalToolCalls === 0) return <Message>No data available</Message>;
 
   const toggle = (code: string) =>
