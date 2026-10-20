@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolCallEvent, ToolDiscoveryEvent } from "@yavio/shared/events";
+import { normalizeRegionName } from "@yavio/shared/geo";
 import {
   buildConnectionEvent,
   buildToolCallEvent,
@@ -1100,13 +1101,17 @@ function extractInputTypes(args: unknown): Record<string, unknown> | undefined {
  *   capabilities) and it is wanted as such — a product decision, 2026-08-26.
  *   It deliberately DUPLICATES what extractClientMeta lifts into the
  *   first-class `subject_id` / `locale` / `end_user_agent` / `country_code`
- *   columns; do not "deduplicate" either side away. With `capture.geo` off
- *   the `openai/userLocation` object (city, region, timezone, coordinates)
- *   is removed from the clone — a flag named geo must not leave coordinates
- *   in. With `"country"` it is replaced by a NEW `{ country }` object, built
- *   from an allow-list so a field the platform adds later cannot leak
- *   through, or removed when there is no valid country. The clone is what
- *   makes this safe: the handler's own `_meta` is never touched.
+ *   / `region` columns; do not "deduplicate" either side away. Every
+ *   `capture.geo` other than `true` is applied by reduceMeta: off, the
+ *   `openai/userLocation` object (city, region, timezone, coordinates) is
+ *   removed from the clone — a flag named geo must not leave coordinates
+ *   in; `"country"` / `"region"` replace it with a NEW `{ country }` /
+ *   `{ country, region }` object; and of the rest only the known keys stay
+ *   (KNOWN_META_KEYS). The clone is what makes this safe: the handler's own
+ *   `_meta` is never touched.
+ * - `_metaDroppedKeys` / `_metaDroppedUnnamed`: under a `geo` other than
+ *   `true`, the names (never the values) of the `_meta` keys reduceMeta
+ *   dropped, so a new key shows up, and the count of those it does not name.
  * - `_taskId`: MCP task id, for correlating task-based flows.
  * - `_requestInfo`: allow-listed headers and the URL sans query, see
  *   sanitizeRequestInfo.
@@ -1129,13 +1134,15 @@ function extractInputValues(
     if (extra && typeof extra === "object") {
       const ex = extra as Record<string, unknown>;
       if (ex._meta != null) {
-        let meta = JSON.parse(JSON.stringify(ex._meta)) as unknown;
+        const meta = JSON.parse(JSON.stringify(ex._meta)) as unknown;
         if (geo !== true && meta && typeof meta === "object" && !Array.isArray(meta)) {
-          const { "openai/userLocation": location, ...rest } = meta as Record<string, unknown>;
-          const country = geo === "country" ? locationCountry(location) : undefined;
-          meta = country ? { ...rest, "openai/userLocation": { country } } : rest;
+          const reduced = reduceMeta(meta as Record<string, unknown>, geo);
+          clone._meta = reduced.meta;
+          if (reduced.droppedKeys.length > 0) clone._metaDroppedKeys = reduced.droppedKeys;
+          if (reduced.droppedUnnamed > 0) clone._metaDroppedUnnamed = reduced.droppedUnnamed;
+        } else {
+          clone._meta = meta;
         }
-        clone._meta = meta;
       }
       if (typeof ex.taskId === "string") clone._taskId = ex.taskId;
       if (ex.requestInfo != null) {
@@ -1147,6 +1154,82 @@ function extractInputValues(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The top-level `_meta` keys kept under a `capture.geo` other than `true`,
+ * besides `openai/userLocation`, which is rebuilt. Everything else is dropped:
+ * the conversation and request ids ChatGPT sends (`sessionId`, `windowId`,
+ * `callId`, `itemId`, `openai/request_id`), `traceparent`,
+ * `openai/organization`, the client capabilities, the top-level `timezone`
+ * and `timezone_offset_minutes`, and any key the platform adds later.
+ *
+ * An allowlist, not a denylist (#127): ChatGPT added seven undocumented
+ * top-level keys between 2026-09 and 2026-10, one of them location data, and
+ * nothing makes the next one carry a recognisable name. The four kept here
+ * are the ones a "country"/"region"/false integration documents to its users:
+ * language, device, and the platform's pseudonymous user and conversation ids.
+ * The names of dropped keys are recorded (see reduceMeta), never their values.
+ */
+const KNOWN_META_KEYS = new Set([
+  "openai/locale",
+  "openai/userAgent",
+  "openai/subject",
+  "openai/session",
+]);
+
+/**
+ * A key name worth recording as dropped: the MCP `_meta` key format
+ * (optional dot-separated prefix and `/`, then a name of letters, digits and
+ * `._-`), at most 64 characters, and no run of 8 or more hex digits — such a
+ * name can carry an id or a token, so it is counted, not named.
+ */
+const RECORDABLE_KEY =
+  /^(?:[A-Za-z](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\/)?[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+const ID_LIKE_RUN = /[0-9A-Fa-f]{8,}/;
+const MAX_DROPPED_KEYS = 20;
+
+function recordable(key: string): boolean {
+  return key.length <= 64 && RECORDABLE_KEY.test(key) && !ID_LIKE_RUN.test(key);
+}
+
+/**
+ * The request `_meta` (a clone) under a `capture.geo` other than `true`.
+ *
+ * - `openai/userLocation` is rebuilt from an allow-list, so a field the
+ *   platform adds later cannot leak through: `{ country }` for `"country"`,
+ *   `{ country, region }` for `"region"` (`{ country }` when there is no
+ *   valid region), and removed for `false` or when there is no valid country.
+ * - Every other key is kept only if it is in KNOWN_META_KEYS.
+ * - `droppedKeys`: the names (never the values) of what went, sorted, at most
+ *   MAX_DROPPED_KEYS; `droppedUnnamed`: how many dropped keys are not named —
+ *   an id-like or malformed name, or one past the cap.
+ */
+function reduceMeta(
+  meta: Record<string, unknown>,
+  geo: "country" | "region" | false,
+): { meta: Record<string, unknown>; droppedKeys: string[]; droppedUnnamed: number } {
+  const kept: Record<string, unknown> = {};
+  const named: string[] = [];
+  let unnamed = 0;
+  for (const [key, value] of Object.entries(meta)) {
+    if (KNOWN_META_KEYS.has(key)) kept[key] = value;
+    else if (key === "openai/userLocation") continue;
+    else if (recordable(key)) named.push(key);
+    else unnamed++;
+  }
+  named.sort();
+  const location = meta["openai/userLocation"];
+  const country = geo === "country" || geo === "region" ? locationCountry(location) : undefined;
+  if (country) {
+    const region = geo === "region" ? locationRegion(location, country) : undefined;
+    kept["openai/userLocation"] = region ? { country, region } : { country };
+  }
+  return {
+    meta: kept,
+    droppedKeys: named.slice(0, MAX_DROPPED_KEYS),
+    droppedUnnamed: unnamed + Math.max(named.length - MAX_DROPPED_KEYS, 0),
+  };
 }
 
 /**
@@ -1182,10 +1265,11 @@ const CAPTURED_HEADERS = new Set([
  * sends all of these; platforms that send none produce undefined.
  *
  * The location part is gated behind `capture.geo` and reduced to the
- * 2-letter country code — city and coordinates are never lifted into a
- * first-class column. (They do travel inside the verbatim `_meta` clone in
- * `input_values` while `geo` is `true`; with `"country"` extractInputValues
- * reduces that object to the same country, with `false` it drops it.)
+ * 2-letter country code plus, with `true` or `"region"`, the region name —
+ * city, timezone and coordinates are never lifted into a first-class column.
+ * (They do travel inside the verbatim `_meta` clone in `input_values` while
+ * `geo` is `true`; otherwise reduceMeta cuts that object down to the same
+ * country and region, or drops it.)
  */
 function extractClientMeta(
   extra: unknown,
@@ -1199,9 +1283,14 @@ function extractClientMeta(
   const str = (v: unknown, max: number): string | undefined =>
     typeof v === "string" && v.length > 0 ? v.slice(0, max) : undefined;
 
+  const location = m["openai/userLocation"];
+  // Exact values, not truthiness: a geo that skipped resolveGeo (a string
+  // "false") must not count as on.
+  const countryCode =
+    geo === true || geo === "country" || geo === "region" ? locationCountry(location) : undefined;
   const out = {
-    countryCode:
-      geo === true || geo === "country" ? locationCountry(m["openai/userLocation"]) : undefined,
+    countryCode,
+    region: geo === true || geo === "region" ? locationRegion(location, countryCode) : undefined,
     locale: str(m["openai/locale"], 35),
     endUserAgent: str(m["openai/userAgent"], 512),
     subjectId: str(m["openai/subject"], 256),
@@ -1211,8 +1300,8 @@ function extractClientMeta(
 
 /**
  * The upper-cased ISO alpha-2 country of an `openai/userLocation` object, or
- * undefined. The single check behind both `country_code` and the `"country"`
- * reduction of `_meta`, so the two can never disagree.
+ * undefined. The single check behind both `country_code` and the
+ * `"country"` / `"region"` reduction of `_meta`, so the two can never disagree.
  */
 function locationCountry(location: unknown): string | undefined {
   if (!location || typeof location !== "object") return undefined;
@@ -1220,6 +1309,21 @@ function locationCountry(location: unknown): string | undefined {
   return typeof country === "string" && /^[A-Za-z]{2}$/.test(country)
     ? country.toUpperCase()
     : undefined;
+}
+
+/**
+ * The `region` of an `openai/userLocation` object through
+ * normalizeRegionName() — the rule ingest applies too (@yavio/shared/geo):
+ * NFC, apostrophes and dashes folded, at most 64 characters, letters and a
+ * little punctuation, no digits — or undefined. Only next to the valid
+ * country the caller has already checked: a region without its country says
+ * nothing. The single check behind both the `region` field and the
+ * `"region"` reduction of `_meta`. Not mapped to ISO 3166-2.
+ */
+function locationRegion(location: unknown, country: string | undefined): string | undefined {
+  if (!country || !location || typeof location !== "object") return undefined;
+  const region = (location as Record<string, unknown>).region;
+  return typeof region === "string" ? (normalizeRegionName(region) ?? undefined) : undefined;
 }
 
 /**

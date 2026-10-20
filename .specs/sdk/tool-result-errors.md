@@ -13,7 +13,7 @@ A tool that answers the model with `{ isError: true, content: [{ type: "text", t
 | handler returns (any result) | `status: "success"`, `isError` survives only inside `output_content` |
 | handler throws | `status: "error"`, `error_category: "unknown"`, `error_message` from the exception |
 
-Consequences, measured 2026-08-26: *Commerce for Agents* 497 tool_calls, 59 with `output_content.isError = true`, all `status = success`; *Preisvergleich Prod* 14 of 68 (a 21 % error rate shown as 0 %); *Shipal Prod* 4 542 calls with `outputValues: false`, where the flag is not even recorded today. Dashboard error rate **0 %** everywhere, `get_errors` empty. Every dashboard number derived from `status` (`lib/queries/overview.ts`, `tool-detail.ts`, `errors.ts`, MCP `get_errors`) is blind to the errors the model actually sees.
+Consequences, measured 2026-08-26: *an integration*: 497 tool_calls, 59 with `output_content.isError = true`, all `status = success`; *a second integration*: 14 of 68 (a 21 % error rate shown as 0 %); *a third integration*: 4 542 calls with `outputValues: false`, where the flag is not even recorded today. Dashboard error rate **0 %** everywhere, `get_errors` empty. Every dashboard number derived from `status` (`lib/queries/overview.ts`, `tool-detail.ts`, `errors.ts`, MCP `get_errors`) is blind to the errors the model actually sees.
 
 ## Decision
 
@@ -33,7 +33,7 @@ A result with `isError === true` is an error. It gets its own category so "the h
 
 Only the literal boolean `true` counts. `"true"`, `1` or a missing flag are not errors (MCP types `isError` as boolean; PostHog's `isToolResultError()` applies the same rule).
 
-`status` is derived from the result object regardless of `capture.outputValues`, so integrators with output capture off (Shipal) get a correct error rate too.
+`status` is derived from the result object regardless of `capture.outputValues`, so integrators with output capture off get a correct error rate too.
 
 **Interaction with per-tool overrides ([per-tool-capture.md](./per-tool-capture.md)):** for a tool with `outputValues: false`, keep `status` and `error_category` but do **not** store the result-derived `error_message` — that text is output, and a handler echoing "no tariff for customer number …" would leak exactly what the override hides. The thrown-path message is not gated on `outputValues` (developer-written) but on `inputValues` (it tends to interpolate the arguments) — decided 2026-10-13.
 

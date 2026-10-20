@@ -53,7 +53,7 @@ export function _resetContextWarnings(): void {
  * A `yavio.*` call with no request store is dropped — it has no trace or
  * session to attach to. That used to be silent, and the silence is how a
  * booking tool registered on the unwrapped server lost every conversion for
- * weeks without a hint (Commerce for Agents, 2026-08). Warn once per process.
+ * weeks without a hint (an integration, 2026-08). Warn once per process.
  */
 function droppedOutsideContext(method: string): void {
   if (!sdkActive || warnedOutsideContext) return;

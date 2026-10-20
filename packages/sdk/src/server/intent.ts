@@ -41,7 +41,7 @@ import type { HandlerWrapper, RequestHandler } from "./protocol.js";
  * server's current advertisement: a host that still shows a cached schema
  * may differ until it refreshes. That much is a fact the SDK knows. Who made the call is not: on a widget-invoked tool a model call that
  * skips the optional parameter looks exactly like the widget's own call, and
- * models skip it often (Shipal, 2026-10: 57% of conversations' first calls).
+ * models skip it often (an integration, 2026-10: 57% of conversations' first calls).
  * The dashboard computes Call Coverage over `required` calls and reports
  * `optional` calls separately, instead of guessing who sent them.
  */

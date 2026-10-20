@@ -87,7 +87,8 @@ const ok = (text: string) => ({ content: [{ type: "text" as const, text }] });
 const CLIENT_META = {
   "openai/locale": "de-DE",
   "openai/subject": "v1/subject-1",
-  "openai/userLocation": { country: "DE", city: "Duisburg" },
+  "openai/userLocation": { country: "DE", region: "North Rhine-Westphalia", city: "Duisburg" },
+  timezone: "Europe/Berlin",
 };
 
 describe("protocol layer — failures before the handler", () => {
@@ -130,14 +131,17 @@ describe("protocol layer — failures before the handler", () => {
     expect(typeof event.trace_id).toBe("string");
   });
 
+  const NRW = "North Rhine-Westphalia";
   it.each([
-    ["country", "DE", { country: "DE" }, true],
-    [false, undefined, undefined, true],
-    ["country", "DE", { country: "DE" }, false],
-    [false, undefined, undefined, false],
+    ["region", true, "DE", NRW, { country: "DE", region: NRW }],
+    ["country", true, "DE", undefined, { country: "DE" }],
+    [false, true, undefined, undefined, undefined],
+    ["region", false, "DE", NRW, { country: "DE", region: NRW }],
+    ["country", false, "DE", undefined, { country: "DE" }],
+    [false, false, undefined, undefined, undefined],
   ] as const)(
     "applies capture.geo: %s to the location on a validation event (rejectedInputValues: %s)",
-    async (geo, countryCode, location, rejectedInputValues) => {
+    async (geo, rejectedInputValues, countryCode, region, location) => {
       const h = await setup(
         (proxy) => {
           proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"));
@@ -159,10 +163,13 @@ describe("protocol layer — failures before the handler", () => {
       const [event] = toolCalls(h.events);
       expect(event?.error_category).toBe("validation");
       expect(event?.country_code).toBe(countryCode);
+      expect(event?.region).toBe(region);
       const meta = (event?.input_values as { _meta?: Record<string, unknown> })._meta;
       expect(meta?.["openai/userLocation"]).toEqual(location);
+      expect(meta).not.toHaveProperty("timezone");
       expect(meta?.["openai/locale"]).toBe("de-DE");
       expect(JSON.stringify(event)).not.toContain("Duisburg");
+      expect(JSON.stringify(event)).not.toContain("Europe/Berlin");
     },
   );
 

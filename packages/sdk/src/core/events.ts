@@ -161,12 +161,14 @@ export interface ToolCallData {
 /**
  * Client metadata relayed by the calling platform in request `_meta`.
  * Nothing here is requested from the client — these values arrive on every
- * call whether we look at them or not (ChatGPT sends all four; other
- * platforms may send none).
+ * call whether we look at them or not (ChatGPT sends them, the region not on
+ * every call; other platforms may send none).
  */
 export interface ClientMeta {
   /** ISO 3166-1 alpha-2, from `openai/userLocation.country`. */
   countryCode?: string;
+  /** State or province as the platform names it, from `openai/userLocation.region`. */
+  region?: string;
   /** BCP-47 tag, from `openai/locale`. */
   locale?: string;
   /** The end user's device/browser UA, from `openai/userAgent`. */
@@ -194,6 +196,7 @@ export function buildToolCallEvent(ctx: EventContext, data: ToolCallData): ToolC
     intent_signals: data.intentSignals ? stripPii({ ...data.intentSignals }) : undefined,
     intent_context: data.intentContext,
     country_code: data.clientMeta?.countryCode,
+    region: data.clientMeta?.region,
     locale: data.clientMeta?.locale,
     end_user_agent: data.clientMeta?.endUserAgent,
     subject_id: data.clientMeta?.subjectId,

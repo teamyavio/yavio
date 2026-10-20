@@ -373,10 +373,13 @@ describe("capture.geo validation", () => {
     warn.mockRestore();
   });
 
-  it.each([true, false, "country"] as const)("passes %s through without a warning", (geo) => {
-    expect(resolveConfig({ apiKey: "test", capture: { geo } })?.capture.geo).toBe(geo);
-    expect(warn).not.toHaveBeenCalled();
-  });
+  it.each([true, false, "country", "region"] as const)(
+    "passes %s through without a warning",
+    (geo) => {
+      expect(resolveConfig({ apiKey: "test", capture: { geo } })?.capture.geo).toBe(geo);
+      expect(warn).not.toHaveBeenCalled();
+    },
+  );
 
   it("leaves an undefined geo at the default, without a warning", () => {
     // A computed option: `geo: process.env.GEO_COUNTRY ? "country" : undefined`.
@@ -385,11 +388,32 @@ describe("capture.geo validation", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it.each(["false", "Country", 1, null])("fails closed on %j with one warning", (geo) => {
-    const config = resolveConfig({ apiKey: "test", capture: { geo: geo as never } });
-    expect(config?.capture.geo).toBe(false);
-    expect(warn).toHaveBeenCalledOnce();
-    expect(warn.mock.calls[0][0]).toContain("YAVIO-1006");
+  it.each(["false", "Country", "state", "Region", 1, null])(
+    "fails closed on %j with one warning",
+    (geo) => {
+      const config = resolveConfig({ apiKey: "test", capture: { geo: geo as never } });
+      expect(config?.capture.geo).toBe(false);
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0][0]).toContain("YAVIO-1006");
+      expect(warn.mock.calls[0][0]).toContain('true, false, "country" or "region"');
+    },
+  );
+
+  it('accepts "region" from .yaviorc.json', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "yavio-geo-test-"));
+    const originalCwd = process.cwd;
+    try {
+      writeFileSync(
+        join(tempDir, ".yaviorc.json"),
+        JSON.stringify({ apiKey: "file_key", capture: { geo: "region" } }),
+      );
+      process.cwd = () => tempDir;
+      expect(resolveConfig()?.capture.geo).toBe("region");
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      process.cwd = originalCwd;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("warns once per process, not once per resolution", () => {

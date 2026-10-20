@@ -25,7 +25,8 @@ export interface YavioConfig {
 export interface ToolCaptureOverride {
   /**
    * `false`: no `input_keys`, `input_types`, `input_values`, no client
-   * metadata (`locale`, `country_code`, `end_user_agent`, `subject_id`) and no
+   * metadata (`locale`, `country_code`, `region`, `end_user_agent`,
+   * `subject_id`) and no
    * thrown error's message (messages tend to interpolate the arguments) for
    * this tool, on success and on error. Same semantics as the global flag.
    */
@@ -86,14 +87,20 @@ export interface CaptureConfig {
   inputValues: boolean;
   outputValues: boolean;
   /**
-   * Location the platform relays in `_meta["openai/userLocation"]`.
-   * - `true` (default): `country_code` is set and `input_values._meta` keeps
-   *   the whole object (city, region, country, timezone, coordinates).
-   * - `"country"`: `country_code` is set and `input_values._meta` keeps only
-   *   `{ country }` — nothing else, including fields added later.
-   * - `false`: no `country_code`, and the object is removed from `_meta`.
+   * Location the platform relays in `_meta["openai/userLocation"]` (and, on
+   * ChatGPT, the IANA zone in the top-level `_meta.timezone`).
+   * - `true` (default): `country_code` and `region` are set and
+   *   `input_values._meta` stays whole (city, region, country, timezone,
+   *   coordinates).
+   * - `"region"`: `country_code` and `region` are set; `input_values._meta`
+   *   keeps only `{ country, region }` and loses `timezone` — nothing else,
+   *   including fields added later.
+   * - `"country"`: `country_code` is set; `input_values._meta` keeps only
+   *   `{ country }` and loses `timezone`.
+   * - `false`: neither field, and both the object and `timezone` are removed
+   *   from `_meta`.
    */
-  geo: boolean | "country";
+  geo: boolean | "country" | "region";
   tokens: boolean;
   retries: boolean;
   /**
