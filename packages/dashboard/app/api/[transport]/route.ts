@@ -24,8 +24,10 @@ import { queryErrorList } from "@/lib/queries/errors";
 import { queryIntentFeed, queryIntentKPIs } from "@/lib/queries/intents";
 import {
   queryInvocationsTimeSeries,
+  queryLocationBreakdownOrNull,
   queryOverviewKPIs,
   queryPlatformBreakdown,
+  topLocations,
 } from "@/lib/queries/overview";
 import {
   queryToolDetailKPIs,
@@ -135,7 +137,7 @@ const handler = createMcpHandler(
       {
         title: "Overview KPIs",
         description:
-          "Headline numbers for a project and date range: tool invocations, sessions, error rate, latency (with previous-period comparison) plus a platform breakdown. Same definitions as the dashboard.",
+          "Headline numbers for a project and date range: tool invocations, sessions, error rate, latency (with previous-period comparison), a platform breakdown, and locations: tool calls and users for the 10 largest countries with up to 5 regions each (region null = Unknown region; moreCountries / moreRegions count what was cut), unknown = calls without a country (null when there were none), plus totalToolCalls and locatedToolCalls. A location comes from the client platform (in practice ChatGPT) and only reaches apps that capture tool arguments, so unknown is often most calls. locations is null when that part of the query failed. Same definitions as the dashboard.",
         inputSchema: projectShape,
         annotations: readOnly,
       },
@@ -143,11 +145,17 @@ const handler = createMcpHandler(
         const auth = mcpAuthContext(extra.authInfo);
         return runTool(async () => {
           const ctx = await projectContext(auth, args);
-          const [kpis, platforms] = await Promise.all([
+          const [kpis, platforms, locations] = await Promise.all([
             queryOverviewKPIs(ctx),
             queryPlatformBreakdown(ctx),
+            queryLocationBreakdownOrNull(ctx),
           ]);
-          return toolText({ filters: appliedFilters(ctx), kpis, platforms });
+          return toolText({
+            filters: appliedFilters(ctx),
+            kpis,
+            platforms,
+            locations: locations && topLocations(locations),
+          });
         });
       },
     );

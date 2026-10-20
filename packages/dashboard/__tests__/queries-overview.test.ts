@@ -2,15 +2,20 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockQueryAnalytics = vi.fn();
 
-vi.mock("@/lib/clickhouse/analytics-client", () => ({
+vi.mock("@/lib/clickhouse/analytics-client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clickhouse/analytics-client")>()),
   queryAnalytics: (...args: unknown[]) => mockQueryAnalytics(...args),
 }));
 
+import { AnalyticsQueryError } from "@/lib/clickhouse/analytics-client";
 import {
   queryInvocationsTimeSeries,
+  queryLocationBreakdown,
+  queryLocationBreakdownOrNull,
   queryOverviewKPIs,
   queryPlatformBreakdown,
   queryTopTools,
+  topLocations,
 } from "@/lib/queries/overview";
 
 const baseCtx = {
@@ -99,6 +104,145 @@ describe("overview queries", () => {
       const call = mockQueryAnalytics.mock.calls[0][0];
       expect(call.query).toContain("platform IN");
       expect(call.params.platforms).toEqual(["cursor"]);
+    });
+  });
+
+  // The SQL runs on a real ClickHouse in queries-locations.test.ts; this pins
+  // the assembly of the rows it returns (#129).
+  describe("queryLocationBreakdown", () => {
+    it("coerces UInt64 strings and nests regions under their country", async () => {
+      mockQueryAnalytics.mockResolvedValue([
+        { is_country: "1", country: "", region_name: "", tool_calls: "7", users: "1" },
+        { is_country: "1", country: "DE", region_name: "", tool_calls: "3", users: "2" },
+        { is_country: 0, country: "DE", region_name: "", tool_calls: "1", users: "1" },
+        { is_country: 0, country: "DE", region_name: "Hesse", tool_calls: "2", users: "2" },
+      ]);
+
+      const result = await queryLocationBreakdown({ ...baseCtx, platform: ["chatgpt"] });
+      expect(result).toEqual({
+        totalToolCalls: 10,
+        locatedToolCalls: 3,
+        countries: [
+          {
+            countryCode: "DE",
+            toolCalls: 3,
+            users: 2,
+            regions: [
+              { region: "Hesse", toolCalls: 2, users: 2 },
+              { region: null, toolCalls: 1, users: 1 },
+            ],
+          },
+        ],
+        unknown: { toolCalls: 7, users: 1 },
+      });
+      const call = mockQueryAnalytics.mock.calls[0][0];
+      // One pass: the keyed CTE is inlined per reference, a UNION would scan twice.
+      expect(call.query).toContain("GROUPING SETS");
+      expect(call.query).not.toContain("UNION");
+      // Tool calls of the selected platforms are filtered inside keyed, before its join.
+      expect(call.query).toMatch(
+        /keyed AS \([\s\S]*AND e\.event_type = 'tool_call' AND e\.platform IN \(\{platforms:Array\(String\)\}\)[\s\S]*\)\s*SELECT grouping/,
+      );
+      expect(call.params.platforms).toEqual(["chatgpt"]);
+      expect(call.workspaceId).toBe("ws_1");
+      expect(call.projectId).toBe("proj_1");
+    });
+
+    it("has no Unknown bucket when every call had a country", async () => {
+      mockQueryAnalytics.mockResolvedValue([
+        { is_country: 1, country: "US", region_name: "", tool_calls: "2", users: "1" },
+      ]);
+      const result = await queryLocationBreakdown(baseCtx);
+      expect(result.unknown).toBeNull();
+      expect(result).toMatchObject({ totalToolCalls: 2, locatedToolCalls: 2 });
+    });
+  });
+
+  describe("queryLocationBreakdownOrNull", () => {
+    it("is null when ClickHouse fails the query, so only the card is lost", async () => {
+      mockQueryAnalytics.mockRejectedValue(
+        new AnalyticsQueryError("DASHBOARD_ANALYTICS_QUERY_FAILED", "Query failed", 500),
+      );
+      await expect(queryLocationBreakdownOrNull(baseCtx)).resolves.toBeNull();
+    });
+
+    it("still throws anything else", async () => {
+      mockQueryAnalytics.mockRejectedValue(new TypeError("bug"));
+      await expect(queryLocationBreakdownOrNull(baseCtx)).rejects.toThrow("bug");
+    });
+  });
+
+  describe("topLocations", () => {
+    it("keeps the largest countries and regions, marks every cut, keeps the totals", () => {
+      const country = (code: string, calls: number) => ({
+        countryCode: code,
+        toolCalls: calls,
+        users: 1,
+        regions: Array.from({ length: 7 }, (_, i) => ({
+          region: `R${i}`,
+          toolCalls: 1,
+          users: 1,
+        })),
+      });
+      const full = {
+        totalToolCalls: 100,
+        locatedToolCalls: 90,
+        countries: Array.from({ length: 12 }, (_, i) => country(`C${i}`, 12 - i)),
+        unknown: { toolCalls: 10, users: 0 },
+      };
+
+      const top = topLocations(full);
+      expect(top.countries.map((c) => c.countryCode)).toEqual(
+        full.countries.slice(0, 10).map((c) => c.countryCode),
+      );
+      expect(top.countries.every((c) => c.regions.length === 5 && c.moreRegions === 2)).toBe(true);
+      expect(top).toMatchObject({
+        totalToolCalls: 100,
+        locatedToolCalls: 90,
+        moreCountries: 2,
+        unknown: { toolCalls: 10, users: 0 },
+      });
+      expect(full.countries[0].regions).toHaveLength(7); // the input is not cut
+    });
+
+    it("keeps a country's Unknown region however many known regions are cut", () => {
+      const regions = [
+        ...Array.from({ length: 7 }, (_, i) => ({ region: `R${i}`, toolCalls: 1, users: 1 })),
+        { region: null, toolCalls: 60, users: 9 },
+      ];
+      const top = topLocations({
+        totalToolCalls: 67,
+        locatedToolCalls: 67,
+        countries: [{ countryCode: "DE", toolCalls: 67, users: 10, regions }],
+        unknown: null,
+      });
+      expect(top.countries[0].regions.map((r) => r.region)).toEqual([
+        "R0",
+        "R1",
+        "R2",
+        "R3",
+        "R4",
+        null,
+      ]);
+      expect(top.countries[0].moreRegions).toBe(2);
+    });
+
+    it("marks nothing when nothing was cut", () => {
+      const top = topLocations({
+        totalToolCalls: 1,
+        locatedToolCalls: 1,
+        countries: [
+          {
+            countryCode: "DE",
+            toolCalls: 1,
+            users: 1,
+            regions: [{ region: "Hesse", toolCalls: 1, users: 1 }],
+          },
+        ],
+        unknown: null,
+      });
+      expect(top).toMatchObject({ moreCountries: 0, unknown: null });
+      expect(top.countries[0].moreRegions).toBe(0);
     });
   });
 });

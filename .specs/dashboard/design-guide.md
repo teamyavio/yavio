@@ -323,6 +323,7 @@ Used in auth pages (login, register), workspace/project creation, settings, and 
 | Overview — Invocations over time | Area chart | `AreaChart` |
 | Overview — Platform breakdown | Donut chart | `PieChart` with inner radius |
 | Overview — Top tools | Horizontal bar chart | `BarChart` (layout=vertical) |
+| Overview — Locations | Table, country rows expand to region rows; a country with a single region bucket shows it inline | shadcn `Table` (no map) |
 | Overview — DAU/WAU/MAU | Line chart (multi-series) | `LineChart` |
 | Tool Explorer — Latency distribution | Histogram | `BarChart` |
 | Tool Explorer — Error rate over time | Area chart (stacked) | `AreaChart` |

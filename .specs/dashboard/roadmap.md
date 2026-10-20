@@ -23,7 +23,7 @@
 
 - ClickHouse query client setup in Next.js
 - Analytics query builders (project-scoped, time-filtered, paginated)
-- Overview page: KPIs, time-series charts, platform breakdown, DAU/WAU/MAU
+- Overview page: KPIs, time-series charts, platform breakdown, locations (country/region, #129), DAU/WAU/MAU
 - Tool Explorer page: per-tool metrics, latency distribution, error breakdown
 - Funnel View page: step progression, drop-off rates, example traces
 - Users page: user list, retention cohort matrix, DAU/WAU/MAU charts, stickiness, new vs returning, user detail timeline

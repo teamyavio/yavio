@@ -1,8 +1,17 @@
 import { fillTimeBuckets } from "@/lib/analytics/fill-buckets";
 import { granularityToFunction } from "@/lib/analytics/format";
 import type { Granularity } from "@/lib/analytics/validation";
-import { queryAnalytics } from "@/lib/clickhouse/analytics-client";
-import type { KPIResult, PlatformBreakdown, TimeSeriesPoint, ToolRanking } from "./types";
+import { AnalyticsQueryError, queryAnalytics } from "@/lib/clickhouse/analytics-client";
+import type {
+  KPIResult,
+  LocationBreakdown,
+  LocationCountry,
+  LocationTotals,
+  PlatformBreakdown,
+  TimeSeriesPoint,
+  ToolRanking,
+} from "./types";
+import { type TimeWindow, keyedEvents } from "./users";
 
 interface QueryContext {
   workspaceId: string;
@@ -12,9 +21,9 @@ interface QueryContext {
   platform?: string[];
 }
 
-function platformFilter(platform?: string[]): string {
+function platformFilter(platform?: string[], column = "platform"): string {
   if (!platform || platform.length === 0) return "";
-  return " AND platform IN ({platforms:Array(String)})";
+  return ` AND ${column} IN ({platforms:Array(String)})`;
 }
 
 function platformParams(platform?: string[]): Record<string, unknown> {
@@ -177,6 +186,143 @@ export async function queryPlatformBreakdown(ctx: QueryContext): Promise<Platfor
     count: Number(r.count),
     percentage: total > 0 ? Number(r.count) / total : 0,
   }));
+}
+
+/**
+ * Tool calls by country and region (#129), from raw events.
+ *
+ * Users are the Users page's key (keyedEvents, #89): user_id, else the
+ * user_id stitched to the subject_id, else subject_id — never session_id —
+ * stitched within the selected range like the windowed Users queries (#112).
+ * Calls without a key count as calls, not as users (uniqExact skips NULL).
+ *
+ * One pass with GROUPING SETS, not two aggregations under a UNION ALL: the
+ * keyed CTE is inlined per reference, so a UNION scanned events and built
+ * the stitch join twice. The country set and the (country, region) set are
+ * aggregated separately all the same — distinct users are not additive, so
+ * a person seen in two regions of one country is one user of the country.
+ * grouping(region_name) is 1 on the country rows (standard semantics,
+ * force_grouping_standard_compatibility, on by default).
+ *
+ * NULL country_code / region become '' in SQL and null (Unknown) in the
+ * result. Ingest stores a region only next to a valid country, so the
+ * Unknown country has no regions; its region rows are not selected.
+ */
+export async function queryLocationBreakdown(ctx: QueryContext): Promise<LocationBreakdown> {
+  // Inside keyed, before its join: only tool calls of the selected platforms
+  // are joined to the stitch map, not every event in the window.
+  const rows = `AND e.event_type = 'tool_call'${platformFilter(ctx.platform, "e.platform")}`;
+  const window: TimeWindow = { from: "{from:DateTime64(3)}", to: "{to:DateTime64(3)}" };
+
+  // Aliases differ from the columns on purpose: ClickHouse resolves an alias
+  // before a column of the same name (see users.ts).
+  const result = await queryAnalytics<{
+    is_country: number | string;
+    country: string;
+    region_name: string;
+    tool_calls: number | string;
+    users: number | string;
+  }>({
+    workspaceId: ctx.workspaceId,
+    projectId: ctx.projectId,
+    query: `
+      WITH ${keyedEvents({ events: window, stitch: window, rows })}
+      SELECT grouping(region_name) AS is_country,
+             ifNull(country_code, '') AS country,
+             ifNull(region, '') AS region_name,
+             count() AS tool_calls,
+             uniqExact(user_key) AS users
+      FROM keyed
+      GROUP BY GROUPING SETS ((country), (country, region_name))
+      HAVING is_country = 1 OR country != ''
+    `,
+    params: {
+      projectId: ctx.projectId,
+      from: ctx.from,
+      to: ctx.to,
+      ...platformParams(ctx.platform),
+    },
+  });
+
+  const countries = new Map<string, LocationCountry>();
+  let unknown: LocationTotals | null = null;
+  for (const r of result) {
+    if (Number(r.is_country) !== 1) continue;
+    const totals = { toolCalls: Number(r.tool_calls), users: Number(r.users) };
+    if (r.country === "") unknown = totals;
+    else countries.set(r.country, { countryCode: r.country, ...totals, regions: [] });
+  }
+  for (const r of result) {
+    if (Number(r.is_country) === 1) continue;
+    countries.get(r.country)?.regions.push({
+      region: r.region_name || null,
+      toolCalls: Number(r.tool_calls),
+      users: Number(r.users),
+    });
+  }
+
+  // By tool calls, ties by name; within a country the Unknown region last.
+  const list = [...countries.values()];
+  for (const c of list) {
+    c.regions.sort(
+      (a, b) =>
+        Number(a.region === null) - Number(b.region === null) ||
+        b.toolCalls - a.toolCalls ||
+        (a.region ?? "").localeCompare(b.region ?? ""),
+    );
+  }
+  list.sort((a, b) => b.toolCalls - a.toolCalls || a.countryCode.localeCompare(b.countryCode));
+
+  const locatedToolCalls = list.reduce((sum, c) => sum + c.toolCalls, 0);
+  return {
+    totalToolCalls: locatedToolCalls + (unknown?.toolCalls ?? 0),
+    locatedToolCalls,
+    countries: list,
+    unknown,
+  };
+}
+
+/**
+ * queryLocationBreakdown, or null when ClickHouse fails it (queryAnalytics
+ * has logged the error). The Overview and get_overview carry it next to the
+ * KPIs: a failure here — a dashboard running ahead of migration 0020 on a
+ * shared database, a timeout — must cost the Locations card, not the page.
+ */
+export async function queryLocationBreakdownOrNull(
+  ctx: QueryContext,
+): Promise<LocationBreakdown | null> {
+  try {
+    return await queryLocationBreakdown(ctx);
+  } catch (err) {
+    if (err instanceof AnalyticsQueryError) return null;
+    throw err;
+  }
+}
+
+/**
+ * The breakdown cut to its largest countries and, within each, its largest
+ * regions — for the MCP get_overview tool, whose answer lands in a model's
+ * context. Every cut is marked (moreCountries, moreRegions), so the answer
+ * never reads as complete when it is not; totals and Unknown are those of
+ * the full breakdown. A country's Unknown region is always kept, like the
+ * Unknown country: it sorts last but can hold most of the country's calls.
+ */
+export function topLocations(breakdown: LocationBreakdown, maxCountries = 10, maxRegions = 5) {
+  return {
+    totalToolCalls: breakdown.totalToolCalls,
+    locatedToolCalls: breakdown.locatedToolCalls,
+    countries: breakdown.countries.slice(0, maxCountries).map((c) => {
+      const known = c.regions.filter((r) => r.region !== null);
+      const unknown = c.regions.filter((r) => r.region === null);
+      return {
+        ...c,
+        regions: [...known.slice(0, maxRegions), ...unknown],
+        moreRegions: Math.max(known.length - maxRegions, 0),
+      };
+    }),
+    moreCountries: Math.max(breakdown.countries.length - maxCountries, 0),
+    unknown: breakdown.unknown,
+  };
 }
 
 export async function queryTopTools(ctx: QueryContext): Promise<ToolRanking[]> {

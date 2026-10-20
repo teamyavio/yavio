@@ -21,6 +21,20 @@ export function formatPercent(value: number, decimals = 1): string {
 }
 
 /**
+ * `part` of `total` as a percentage that never rounds to a bound it has not
+ * reached: "100%" and "0%" only when exact, "<0.1%" / ">99.9%" between — so
+ * a coverage line cannot claim 100% next to an Unknown row.
+ */
+export function formatShare(part: number, total: number): string {
+  if (total <= 0 || part <= 0) return "0%";
+  if (part >= total) return "100%";
+  const share = part / total;
+  if (share < 0.001) return "<0.1%";
+  if (share > 0.999) return ">99.9%";
+  return formatPercent(share);
+}
+
+/**
  * Format latency in milliseconds to human-readable.
  */
 export function formatLatency(ms: number): string {
@@ -45,6 +59,29 @@ export function formatCurrency(value: number, currency = "USD"): string {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   }).format(value);
+}
+
+const regionNames = (() => {
+  try {
+    return new Intl.DisplayNames(["en"], { type: "region" });
+  } catch {
+    return null;
+  }
+})();
+
+/**
+ * An ISO 3166-1 alpha-2 code as "Germany (DE)". The bare code when Intl has
+ * no name for it: `of()` then returns the code itself, or throws for a
+ * malformed one.
+ */
+export function formatCountry(code: string): string {
+  let name: string | undefined;
+  try {
+    name = regionNames?.of(code);
+  } catch {
+    name = undefined;
+  }
+  return name && name !== code ? `${name} (${code})` : code;
 }
 
 const MONTH_NAMES = [

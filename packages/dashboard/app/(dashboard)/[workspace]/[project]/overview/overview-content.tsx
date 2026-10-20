@@ -13,6 +13,7 @@ import { DonutWithLegend } from "@/components/analytics/donut-with-legend";
 import { EmptyState } from "@/components/analytics/empty-state";
 import { ErrorAlert } from "@/components/analytics/error-alert";
 import { KPICard } from "@/components/analytics/kpi-card";
+import { LocationTable } from "@/components/analytics/location-table";
 import { PageHeader } from "@/components/analytics/page-header";
 import { PlatformFilter } from "@/components/analytics/platform-filter";
 import { PLATFORM_META, platformLabel } from "@/components/analytics/platform-meta";
@@ -21,6 +22,7 @@ import { useAnalyticsQuery } from "@/hooks/use-analytics-query";
 import { formatBucketLabel, formatBucketTooltip, formatNumber } from "@/lib/analytics/format";
 import type {
   KPIResult,
+  LocationBreakdown,
   PlatformBreakdown,
   TimeSeriesPoint,
   ToolRanking,
@@ -43,7 +45,16 @@ interface OverviewData {
   timeSeries: TimeSeriesPoint[];
   platforms: PlatformBreakdown[];
   topTools: ToolRanking[];
+  /** null when the location query failed; the rest of the Overview still loaded. */
+  locations: LocationBreakdown | null;
 }
+
+const NO_LOCATIONS: LocationBreakdown = {
+  totalToolCalls: 0,
+  locatedToolCalls: 0,
+  countries: [],
+  unknown: null,
+};
 
 export function OverviewContent({ projectId }: { projectId: string }) {
   const { filters, setFilter, queryString } = useAnalyticsFilters();
@@ -88,34 +99,34 @@ export function OverviewContent({ projectId }: { projectId: string }) {
             ))}
           </div>
 
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <ChartPanel title="Invocations">
-              <ResponsiveContainer width="100%" height={256}>
-                <AreaChart data={data?.timeSeries ?? []} margin={{ right: 20 }}>
-                  <CartesianGrid {...COMMON_GRID_PROPS} />
-                  <XAxis
-                    dataKey="bucket"
-                    minTickGap={8}
-                    interval={timeTickInterval((data?.timeSeries ?? []).length)}
-                    tickFormatter={(v: string) => formatBucketLabel(v, filters.granularity)}
-                    {...COMMON_AXIS_PROPS}
-                  />
-                  <YAxis tickFormatter={(v: number) => formatNumber(v)} {...COMMON_AXIS_PROPS} />
-                  <Tooltip
-                    labelFormatter={(v) => formatBucketTooltip(String(v), filters.granularity)}
-                    formatter={(value?: number) => [(value ?? 0).toLocaleString(), "Invocations"]}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="value"
-                    stroke={CHART_COLORS[0]}
-                    fill={CHART_COLORS[0]}
-                    {...COMMON_CHART_PROPS}
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            </ChartPanel>
+          <ChartPanel title="Invocations">
+            <ResponsiveContainer width="100%" height={256}>
+              <AreaChart data={data?.timeSeries ?? []} margin={{ right: 20 }}>
+                <CartesianGrid {...COMMON_GRID_PROPS} />
+                <XAxis
+                  dataKey="bucket"
+                  minTickGap={8}
+                  interval={timeTickInterval((data?.timeSeries ?? []).length)}
+                  tickFormatter={(v: string) => formatBucketLabel(v, filters.granularity)}
+                  {...COMMON_AXIS_PROPS}
+                />
+                <YAxis tickFormatter={(v: number) => formatNumber(v)} {...COMMON_AXIS_PROPS} />
+                <Tooltip
+                  labelFormatter={(v) => formatBucketTooltip(String(v), filters.granularity)}
+                  formatter={(value?: number) => [(value ?? 0).toLocaleString(), "Invocations"]}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="value"
+                  stroke={CHART_COLORS[0]}
+                  fill={CHART_COLORS[0]}
+                  {...COMMON_CHART_PROPS}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          </ChartPanel>
 
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <ChartPanel title="Platform Breakdown">
               <DonutWithLegend
                 data={(data?.platforms ?? []).map((p) => ({
@@ -125,6 +136,11 @@ export function OverviewContent({ projectId }: { projectId: string }) {
                   icon: PLATFORM_META[p.platform as Platform]?.icon,
                 }))}
               />
+            </ChartPanel>
+
+            <ChartPanel title="Locations">
+              {/* A response without the key (an older API) counts as unavailable, not as a crash. */}
+              <LocationTable data={data ? (data.locations ?? null) : NO_LOCATIONS} />
             </ChartPanel>
           </div>
 

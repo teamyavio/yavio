@@ -13,6 +13,7 @@ export default function OverviewLoading() {
           <SkeletonKPI key={`kpi-${String(i)}`} />
         ))}
       </div>
+      <SkeletonChart />
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <SkeletonChart />
         <SkeletonChart />

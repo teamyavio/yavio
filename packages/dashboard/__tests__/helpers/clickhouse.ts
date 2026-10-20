@@ -58,6 +58,13 @@ export async function applyMigrations(admin: ClickHouseClient): Promise<void> {
   }
 }
 
+/**
+ * The yavio_dashboard password every real-ClickHouse query test sets. One
+ * value for all files: they run in parallel, and a file that set its own
+ * would lock the others out mid-run (#129).
+ */
+export const DASHBOARD_TEST_PASSWORD = "dash-test";
+
 export function adminClient(url: URL): ClickHouseClient {
   return createClient({ url: url.toString() });
 }

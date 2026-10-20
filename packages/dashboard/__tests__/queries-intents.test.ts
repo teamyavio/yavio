@@ -113,7 +113,7 @@ describe("intents queries", () => {
       );
     });
 
-    it("has no Call Coverage when every call had optional context (Shipal-shaped)", async () => {
+    it("has no Call Coverage when every call had optional context (an integration's shape)", async () => {
       mockQueryAnalytics.mockResolvedValueOnce([
         row({ captured: 22, optionalCalls: 100, optionalCaptured: 22, toolsWithIntents: 1 }),
       ]);

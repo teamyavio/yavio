@@ -1,11 +1,13 @@
 import {
   formatBucketLabel,
   formatBucketTooltip,
+  formatCountry,
   formatCurrency,
   formatLatency,
   formatNumber,
   formatPercent,
   formatRelativeTime,
+  formatShare,
   granularityToFunction,
 } from "@/lib/analytics/format";
 import { describe, expect, it } from "vitest";
@@ -27,6 +29,17 @@ describe("formatNumber", () => {
   });
 });
 
+describe("formatShare", () => {
+  it("is exact at the bounds and never rounds onto them", () => {
+    expect(formatShare(0, 10)).toBe("0%");
+    expect(formatShare(10, 10)).toBe("100%");
+    expect(formatShare(0, 0)).toBe("0%");
+    expect(formatShare(3, 100_000)).toBe("<0.1%");
+    expect(formatShare(9_996, 10_000)).toBe(">99.9%");
+    expect(formatShare(1, 3)).toBe("33.3%");
+  });
+});
+
 describe("formatPercent", () => {
   it("formats decimal as percentage", () => {
     expect(formatPercent(0.952)).toBe("95.2%");
@@ -36,6 +49,19 @@ describe("formatPercent", () => {
 
   it("respects decimal places", () => {
     expect(formatPercent(0.9523, 2)).toBe("95.23%");
+  });
+});
+
+describe("formatCountry", () => {
+  it("names the country and keeps the code (#129)", () => {
+    expect(formatCountry("DE")).toBe("Germany (DE)");
+    expect(formatCountry("US")).toBe("United States (US)");
+    expect(formatCountry("XK")).toBe("Kosovo (XK)");
+  });
+
+  it("falls back to the bare code when Intl has no name", () => {
+    expect(formatCountry("AA")).toBe("AA"); // of() returns the code itself
+    expect(formatCountry("D")).toBe("D"); // of() throws
   });
 });
 
