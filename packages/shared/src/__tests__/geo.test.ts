@@ -9,6 +9,10 @@ describe("normalizeRegionName (#127, #128)", () => {
     ["Baden-Württemberg", "Baden-Württemberg"],
     ["Côte d’Azur", "Côte d'Azur"],
     ["Côte d‘Azur", "Côte d'Azur"],
+    ["Côte d\u02bcAzur", "Côte d'Azur"], // modifier apostrophe
+    ["Côte d\u00b4Azur", "Côte d'Azur"], // acute accent
+    ["Côte d`Azur", "Côte d'Azur"],
+    ["Côte d\u2032Azur", "Côte d'Azur"], // prime
     ["Saxony‐Anhalt", "Saxony-Anhalt"],
     ["Saxony−Anhalt", "Saxony-Anhalt"],
     ["Trentino-Alto Adige/Südtirol", "Trentino-Alto Adige/Südtirol"],

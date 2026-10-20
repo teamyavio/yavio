@@ -22,9 +22,12 @@ const REGION_CHARS = /^[\p{L}\p{M} '.,()/&·-]+$/u;
  * The region name in canonical form, or null.
  *
  * - NFC, so an accent sent decomposed ("u" + U+0308) is the one letter it is;
- * - the typographic apostrophes (U+2018, U+2019) become `'` and the Unicode
- *   dashes (U+2010–U+2015, U+2212) become `-`, so "Côte d’Azur" and
- *   "Côte d'Azur" are one region, not two rows;
+ * - everything used as an apostrophe becomes `'` — the typographic quotes
+ *   (U+2018, U+2019), the modifier apostrophe (U+02BC), and the acute accent,
+ *   grave accent and prime that keyboards substitute (U+00B4, U+0060,
+ *   U+2032) — and the Unicode dashes (U+2010–U+2015, U+2212) become `-`, so
+ *   "Côte d’Azur", "Côte dʼAzur" and "Côte d'Azur" are one region, not three
+ *   rows. The okina (U+02BB, "Oʻahu") is a letter of its own and stays;
  * - runs of space separators become one space, and the ends are trimmed.
  *   A tab or line break is a control character and fails the check.
  *
@@ -37,8 +40,8 @@ export function normalizeRegionName(value: string): string | null {
   if (value.length > MAX_REGION_LENGTH * 4) return null;
   const name = value
     .normalize("NFC")
-    .replace(/[‘’]/g, "'")
-    .replace(/[‐-―−]/g, "-")
+    .replace(/[\u2018\u2019\u02bc\u00b4\u0060\u2032]/g, "'")
+    .replace(/[\u2010-\u2015\u2212]/g, "-")
     .replace(/\p{Zs}+/gu, " ")
     .replace(/^ | $/g, "");
   if (name.length === 0 || name.length > MAX_REGION_LENGTH) return null;
