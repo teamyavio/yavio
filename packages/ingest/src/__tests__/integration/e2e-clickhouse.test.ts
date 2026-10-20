@@ -109,6 +109,7 @@ describe("E2E: Ingest API → ClickHouse", () => {
             tokens_in: 120,
             tokens_out: 450,
             country_code: "DE",
+            region: "North Rhine-Westphalia",
             platform: "node",
             sdk_version: "1.2.3",
           }),
@@ -135,6 +136,7 @@ describe("E2E: Ingest API → ClickHouse", () => {
     expect(row.tokens_in).toBe(120);
     expect(row.tokens_out).toBe(450);
     expect(row.country_code).toBe("DE");
+    expect(row.region).toBe("North Rhine-Westphalia"); // #128, migration 0020
     expect(row.platform).toBe("node");
     expect(row.sdk_version).toBe("1.2.3");
 
@@ -149,6 +151,51 @@ describe("E2E: Ingest API → ClickHouse", () => {
 
     // Enrichment
     expect(row.ingested_at).toBeDefined();
+
+    await batchWriter.shutdown();
+  });
+
+  it("region: kept as sent, NULL when malformed, country-less or not sent (#128)", async () => {
+    await buildApp();
+    const ids = [
+      randomUUID(),
+      randomUUID(),
+      randomUUID(),
+      randomUUID(),
+      randomUUID(),
+      randomUUID(),
+    ];
+    const call = (i: number, extra: Record<string, unknown>) =>
+      makeEvent({ event_id: ids[i], event_type: "tool_call", event_name: "lookup", ...extra });
+
+    const r = await app.inject({
+      method: "POST",
+      url: "/v1/events",
+      headers: { authorization: `Bearer ${TEST_KEY}` },
+      payload: {
+        events: [
+          call(0, { country_code: "DE", region: "  State of Berlin " }),
+          call(1, { country_code: "DE", region: "x".repeat(65) }),
+          call(2, { region: "Hesse" }),
+          call(3, { country_code: "US" }), // an SDK that does not send the field
+          call(4, { country_code: "DE", region: null }),
+          call(5, { country_code: "DE", region: 42 }), // not a string
+        ],
+      },
+    });
+
+    // A malformed region nulls the field; it never costs the event.
+    expect(r.statusCode).toBe(200);
+    expect(r.json().accepted).toBe(6);
+    await batchWriter.flush();
+
+    const regionOf = async (id: string) => (await queryEvents(`event_id = '${id}'`))[0]?.region;
+    expect(await regionOf(ids[0])).toBe("State of Berlin");
+    expect(await regionOf(ids[1])).toBeNull();
+    expect(await regionOf(ids[2])).toBeNull();
+    expect(await regionOf(ids[3])).toBeNull();
+    expect(await regionOf(ids[4])).toBeNull();
+    expect(await regionOf(ids[5])).toBeNull();
 
     await batchWriter.shutdown();
   });

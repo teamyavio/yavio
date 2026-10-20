@@ -119,7 +119,7 @@ describe("ClickHouse migrations", () => {
       expect(await result.json()).toHaveLength(1);
     });
 
-    it("records all 19 migration versions", async () => {
+    it("records all 20 migration versions", async () => {
       const ch = getClient();
       const result = await ch.query({
         query: "SELECT version FROM schema_migrations ORDER BY version",
@@ -146,7 +146,48 @@ describe("ClickHouse migrations", () => {
         "0017",
         "0018",
         "0019",
+        "0020",
       ]);
+    });
+  });
+
+  describe("region column (#128, 0020)", () => {
+    // run_query reads events as yavio_dashboard under the row policies. A
+    // column the role cannot read would fail there, not in the SQL guard,
+    // which has no column list — so ask ClickHouse, as that role.
+    it("is readable by yavio_dashboard, the run_query role, within its project", async () => {
+      const ch = getClient();
+      await ch.command({ query: "ALTER USER yavio_dashboard IDENTIFIED BY 'region-test'" });
+      const timestamp = new Date().toISOString().replace("T", " ").replace("Z", "");
+      const row = (project: string, region: string) => ({
+        event_id: `region-${project}`,
+        workspace_id: "ws-region",
+        project_id: project,
+        trace_id: "t",
+        session_id: "s",
+        event_type: "tool_call",
+        timestamp,
+        source: "server",
+        country_code: "DE",
+        region,
+      });
+      await ch.insert({
+        table: "events",
+        values: [row("p-region", "Hesse"), row("p-other", "Bavaria")],
+        format: "JSONEachRow",
+      });
+
+      const res = await fetch(
+        `${CLICKHOUSE_HTTP}?SQL_workspace_id=ws-region&SQL_project_id=p-region`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Basic ${Buffer.from("yavio_dashboard:region-test").toString("base64")}`,
+          },
+          body: "SELECT country_code, region FROM events WHERE workspace_id = 'ws-region' FORMAT TSV",
+        },
+      );
+      expect(await res.text()).toBe("DE\tHesse\n");
     });
   });
 

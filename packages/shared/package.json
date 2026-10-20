@@ -33,6 +33,11 @@
       "types": "./dist/platform.d.ts",
       "import": "./dist/platform.js",
       "require": "./dist/platform.cjs"
+    },
+    "./geo": {
+      "types": "./dist/geo.d.ts",
+      "import": "./dist/geo.js",
+      "require": "./dist/geo.cjs"
     }
   },
   "scripts": {

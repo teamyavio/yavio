@@ -1,4 +1,5 @@
 import type { BaseEvent } from "@yavio/shared/events";
+import { normalizeRegionName } from "@yavio/shared/geo";
 import { COUNTRY_CODES, CURRENCY_CODES } from "./iso-codes.js";
 
 /**
@@ -30,6 +31,10 @@ export interface NormalizeResult {
  * - `country_code`: ISO 3166-1 alpha-2 or XK, upper-cased; else NULL.
  * - `conversion_currency`: ISO 4217, upper-cased; else NULL.
  * - `locale`: a BCP-47 tag in canonical form (Intl.getCanonicalLocales); else NULL.
+ * - `region` (#128): normalizeRegionName() from @yavio/shared/geo — the rule
+ *   the SDK applies too — and only next to a valid `country_code`: a region
+ *   without its country says nothing; else NULL. Not mapped to ISO 3166-2.
+ *   Checked last, so it sees the country as checked above.
  */
 export function normalizeEvents(events: BaseEvent[], now = Date.now()): NormalizeResult {
   let clampedTimestamps = 0;
@@ -52,6 +57,7 @@ export function normalizeEvents(events: BaseEvent[], now = Date.now()): Normaliz
         (v) => (CURRENCY_CODES.has(v.toUpperCase()) ? v.toUpperCase() : null),
       ],
       ["locale", canonicalLocale],
+      ["region", (v) => (typeof out.country_code === "string" ? normalizeRegionName(v) : null)],
     ];
     for (const [field, check] of checks) {
       const value = out[field];

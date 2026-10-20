@@ -65,6 +65,7 @@ CREATE TABLE events (
 
   -- Geographic
   country_code     LowCardinality(Nullable(String)),  -- ISO 3166-1 alpha-2
+  region           LowCardinality(Nullable(String)),  -- state/province as the platform names it, not ISO 3166-2; NULL without a valid country_code (#128, migration 0020)
 
   -- Connection/protocol fields
   protocol_version  Nullable(String),
