@@ -14,8 +14,11 @@ import { cn } from "@/lib/utils";
 import { ChevronRight } from "lucide-react";
 import { Fragment, useState } from "react";
 
-/** Countries shown before "Show all"; the Unknown row is always shown. */
-const INITIAL_COUNTRIES = 10;
+/**
+ * Countries shown before "Show all": with more, the card outgrows Platform
+ * Breakdown next to it, which stretches to match. The Unknown row is always shown.
+ */
+const INITIAL_COUNTRIES = 5;
 
 /** What the Region cell of a country row says: its one region, or how many. */
 function regionSummary(country: LocationCountry): string {
