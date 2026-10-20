@@ -21,9 +21,9 @@ interface QueryContext {
   platform?: string[];
 }
 
-function platformFilter(platform?: string[]): string {
+function platformFilter(platform?: string[], column = "platform"): string {
   if (!platform || platform.length === 0) return "";
-  return " AND platform IN ({platforms:Array(String)})";
+  return ` AND ${column} IN ({platforms:Array(String)})`;
 }
 
 function platformParams(platform?: string[]): Record<string, unknown> {
@@ -209,12 +209,14 @@ export async function queryPlatformBreakdown(ctx: QueryContext): Promise<Platfor
  * Unknown country has no regions; its region rows are not selected.
  */
 export async function queryLocationBreakdown(ctx: QueryContext): Promise<LocationBreakdown> {
-  const pf = platformFilter(ctx.platform);
+  // Inside keyed, before its join: only tool calls of the selected platforms
+  // are joined to the stitch map, not every event in the window.
+  const rows = `AND e.event_type = 'tool_call'${platformFilter(ctx.platform, "e.platform")}`;
   const window: TimeWindow = { from: "{from:DateTime64(3)}", to: "{to:DateTime64(3)}" };
 
   // Aliases differ from the columns on purpose: ClickHouse resolves an alias
   // before a column of the same name (see users.ts).
-  const rows = await queryAnalytics<{
+  const result = await queryAnalytics<{
     is_country: number | string;
     country: string;
     region_name: string;
@@ -224,14 +226,13 @@ export async function queryLocationBreakdown(ctx: QueryContext): Promise<Locatio
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
-      WITH ${keyedEvents({ events: window, stitch: window })}
+      WITH ${keyedEvents({ events: window, stitch: window, rows })}
       SELECT grouping(region_name) AS is_country,
              ifNull(country_code, '') AS country,
              ifNull(region, '') AS region_name,
              count() AS tool_calls,
              uniqExact(user_key) AS users
       FROM keyed
-      WHERE event_type = 'tool_call' ${pf}
       GROUP BY GROUPING SETS ((country), (country, region_name))
       HAVING is_country = 1 OR country != ''
     `,
@@ -245,13 +246,13 @@ export async function queryLocationBreakdown(ctx: QueryContext): Promise<Locatio
 
   const countries = new Map<string, LocationCountry>();
   let unknown: LocationTotals | null = null;
-  for (const r of rows) {
+  for (const r of result) {
     if (Number(r.is_country) !== 1) continue;
     const totals = { toolCalls: Number(r.tool_calls), users: Number(r.users) };
     if (r.country === "") unknown = totals;
     else countries.set(r.country, { countryCode: r.country, ...totals, regions: [] });
   }
-  for (const r of rows) {
+  for (const r of result) {
     if (Number(r.is_country) === 1) continue;
     countries.get(r.country)?.regions.push({
       region: r.region_name || null,
@@ -303,17 +304,22 @@ export async function queryLocationBreakdownOrNull(
  * regions — for the MCP get_overview tool, whose answer lands in a model's
  * context. Every cut is marked (moreCountries, moreRegions), so the answer
  * never reads as complete when it is not; totals and Unknown are those of
- * the full breakdown.
+ * the full breakdown. A country's Unknown region is always kept, like the
+ * Unknown country: it sorts last but can hold most of the country's calls.
  */
 export function topLocations(breakdown: LocationBreakdown, maxCountries = 10, maxRegions = 5) {
   return {
     totalToolCalls: breakdown.totalToolCalls,
     locatedToolCalls: breakdown.locatedToolCalls,
-    countries: breakdown.countries.slice(0, maxCountries).map((c) => ({
-      ...c,
-      regions: c.regions.slice(0, maxRegions),
-      moreRegions: Math.max(c.regions.length - maxRegions, 0),
-    })),
+    countries: breakdown.countries.slice(0, maxCountries).map((c) => {
+      const known = c.regions.filter((r) => r.region !== null);
+      const unknown = c.regions.filter((r) => r.region === null);
+      return {
+        ...c,
+        regions: [...known.slice(0, maxRegions), ...unknown],
+        moreRegions: Math.max(known.length - maxRegions, 0),
+      };
+    }),
     moreCountries: Math.max(breakdown.countries.length - maxCountries, 0),
     unknown: breakdown.unknown,
   };

@@ -58,10 +58,16 @@ export interface TimeWindow {
 const bound = (column: string, window?: TimeWindow): string =>
   window ? `AND ${column} >= ${window.from} AND ${column} < ${window.to}` : "";
 
+/**
+ * `rows`: an extra condition on the keyed rows, on `e.` columns (e.g.
+ * `AND e.event_type = 'tool_call'`), so a caller that needs only some rows
+ * joins only those — a filter outside the CTE runs after the join.
+ */
 export function keyedEvents({
   events,
   stitch,
-}: { events?: TimeWindow; stitch?: TimeWindow } = {}): string {
+  rows = "",
+}: { events?: TimeWindow; stitch?: TimeWindow; rows?: string } = {}): string {
   return `
       stitch AS (
         SELECT assumeNotNull(subject_id) AS stitched_subject,
@@ -78,7 +84,7 @@ export function keyedEvents({
                coalesce(nullIf(e.user_id, ''), nullIf(s.mapped_user_id, ''), nullIf(e.subject_id, '')) AS user_key
         FROM events AS e
         LEFT JOIN stitch AS s ON s.stitched_subject = ifNull(e.subject_id, '')
-        WHERE e.project_id = {projectId:String} ${bound("e.timestamp", events)}
+        WHERE e.project_id = {projectId:String} ${bound("e.timestamp", events)} ${rows}
       )`;
 }
 

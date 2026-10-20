@@ -139,6 +139,10 @@ describe("overview queries", () => {
       // One pass: the keyed CTE is inlined per reference, a UNION would scan twice.
       expect(call.query).toContain("GROUPING SETS");
       expect(call.query).not.toContain("UNION");
+      // Tool calls of the selected platforms are filtered inside keyed, before its join.
+      expect(call.query).toMatch(
+        /keyed AS \([\s\S]*AND e\.event_type = 'tool_call' AND e\.platform IN \(\{platforms:Array\(String\)\}\)[\s\S]*\)\s*SELECT grouping/,
+      );
       expect(call.params.platforms).toEqual(["chatgpt"]);
       expect(call.workspaceId).toBe("ws_1");
       expect(call.projectId).toBe("proj_1");
@@ -199,6 +203,28 @@ describe("overview queries", () => {
         unknown: { toolCalls: 10, users: 0 },
       });
       expect(full.countries[0].regions).toHaveLength(7); // the input is not cut
+    });
+
+    it("keeps a country's Unknown region however many known regions are cut", () => {
+      const regions = [
+        ...Array.from({ length: 7 }, (_, i) => ({ region: `R${i}`, toolCalls: 1, users: 1 })),
+        { region: null, toolCalls: 60, users: 9 },
+      ];
+      const top = topLocations({
+        totalToolCalls: 67,
+        locatedToolCalls: 67,
+        countries: [{ countryCode: "DE", toolCalls: 67, users: 10, regions }],
+        unknown: null,
+      });
+      expect(top.countries[0].regions.map((r) => r.region)).toEqual([
+        "R0",
+        "R1",
+        "R2",
+        "R3",
+        "R4",
+        null,
+      ]);
+      expect(top.countries[0].moreRegions).toBe(2);
     });
 
     it("marks nothing when nothing was cut", () => {
