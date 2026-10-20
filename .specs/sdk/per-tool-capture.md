@@ -13,7 +13,7 @@ Some tools take data that must never reach analytics — a booking tool with an 
 
 `stripPii()` is not a substitute: it matches emails, Luhn-valid card numbers, US SSNs and US phone formats — not IBANs, names, addresses or birth dates.
 
-Commerce for Agents runs the second option today, so its funnel ends at "compared" and the `booking_received` conversion never arrives (live 2026-08-26: 46 `switch_link_issued` conversions from the proxied tool, 0 `booking_received`; the switch-link tool has since been removed, which makes the booking the only conversion left).
+An integration runs the second option today, so its funnel ends at "compared" and the `booking_received` conversion never arrives (live 2026-08-26: 46 `switch_link_issued` conversions from the proxied tool, 0 `booking_received`; the switch-link tool has since been removed, which makes the booking the only conversion left).
 
 ## Decision
 
@@ -41,7 +41,7 @@ interface WithYavioOptions { …; tools?: Record<string, ToolCaptureOverride> }
 | Aspect | Decision |
 |--------|----------|
 | Resolution | `resolveToolCapture(name) = { ...config.capture, ...config.tools?.[name] }`, computed in both interceptors (`tool()` and `registerTool()`, MCP SDK and Skybridge calling conventions) and passed into `wrapToolCallback` as `capture` (replaces the `config.capture` reads inside). |
-| `inputValues: false` semantics | Identical to the global flag on that call: no `input_keys`, `input_types`, `input_values`, and no client meta (`locale`, `country_code`, `end_user_agent`, `subject_id`), on both the success and the throw path. One code path, no new semantics. **Changed 2026-10-13 (Marcel, after code review):** also no `error_message` on a throw — messages interpolate arguments (`IBAN ${iban} rejected`) and `stripPii` does not catch IBANs. |
+| `inputValues: false` semantics | Identical to the global flag on that call: no `input_keys`, `input_types`, `input_values`, and no client meta (`locale`, `country_code`, `region`, `end_user_agent`, `subject_id`), on both the success and the throw path. One code path, no new semantics. **Changed 2026-10-13 (Marcel, after code review):** also no `error_message` on a throw — messages interpolate arguments (`IBAN ${iban} rejected`) and `stripPii` does not catch IBANs. |
 | `outputValues: false` | No `output_content`, and — once [tool-result-errors.md](./tool-result-errors.md) ships — no result-derived `error_message` either (that text is output). `status`/`error_category` stay. `error_message` on a throw is not gated by `outputValues` (developer-written) — but by `inputValues`, see above. |
 | `intent: false` | A **third state** in the intent controller (today `isEligible()` means strip *and* capture): never advertise `context` for the tool, never capture it, **still strip** it if a client sends one — a client with a cached schema keeps sending it, and a strict Zod schema would otherwise reject the call. Motivation: a model's intent sentence for a booking tool tends to contain the user's name. Scope: on/off per tool; per-tool *required/optional* (#73 item 2) stays open. |
 | `rejectedInputValues` | Added 2026-10-15 (#123), global and per tool, default `false`: a call rejected before the handler (schema-rejected arguments, unknown or disabled tool) stores the declared parameters' names and types, the request context, client meta and a value-free reason, but no argument values and no invented key names (second review, 2026-10-15). Details in [protocol-layer-status.md](./protocol-layer-status.md#fields-of-a-pre-handler-failure-event) |
@@ -66,7 +66,7 @@ Reuse the existing, so far unused `SDK.CONTEXT_INJECTION_UNAVAILABLE = "YAVIO-11
 | shared | catalog text of `YAVIO-1105` corrected (event dropped, warn-once). |
 | specs / docs | `.specs/sdk/server-sdk.md` config table; `07_error-catalog.md` (1105 text); docs site SDK configuration page, `02-sdk/02-tracking-api.mdx` (no longer "silently ignored"), privacy guidance ("for tools with sensitive input use `tools` overrides, not unwrapped registration"). |
 
-### Migration: Commerce for Agents
+### Migration: an integration
 
 Register `book-contract` through the proxy with `tools: { "book-contract": { inputValues: false, outputValues: false, intent: false } }`, delete the "registered on the unwrapped server" invariant from `server.ts` and README, keep the explicit `yavio.conversion("booking_received")`. Verification: `scripts/analytics-funnel.mjs --book` against the capture harness → conversion present with the session's ids, PII grep 0 hits (IBAN, name, birth date, street, customer/meter number, email, phone).
 
@@ -83,5 +83,5 @@ Additive; no behaviour change without `tools`. Minor bump. The warn-once is new 
 
 ## Open Questions
 
-- Client meta (`subject_id`, `locale`, `country_code`, `end_user_agent`) stays coupled to `inputValues` **on purpose, not for tidiness**: decoupling would silently *start* collecting these fields for every existing integrator who set `inputValues: false` as their privacy posture (R+V, Shipal) — a collection expansion with app-store sensitivity (the session-id decline), which needs its own opt-in decision. It costs Commerce for Agents nothing: conversion events never carry `subject_id` (base fields have only `user_id`), and the session's other calls still carry it. Anyone touching this later should treat it as a policy change, not a refactor.
+- Client meta (`subject_id`, `locale`, `country_code`, `region`, `end_user_agent`) stays coupled to `inputValues` **on purpose, not for tidiness**: decoupling would silently *start* collecting these fields for every existing integrator who set `inputValues: false` as their privacy posture — a collection expansion with app-store sensitivity (the session-id decline), which needs its own opt-in decision. It costs the integration in the migration above nothing: conversion events never carry `subject_id` (base fields have only `user_id`), and the session's other calls still carry it. Anyone touching this later should treat it as a policy change, not a refactor.
 - Per-tool `capture.tokens` / `retries` — no use case, not included.

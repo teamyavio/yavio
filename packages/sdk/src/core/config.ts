@@ -130,8 +130,10 @@ function warnInvalidFlag(path: string, accepted: string, value: unknown): void {
 }
 
 function resolveGeo(value: unknown): CaptureConfig["geo"] {
-  if (value === true || value === false || value === "country") return value;
-  warnInvalidFlag("capture.geo", 'true, false or "country"', value);
+  if (value === true || value === false || value === "country" || value === "region") {
+    return value;
+  }
+  warnInvalidFlag("capture.geo", 'true, false, "country" or "region"', value);
   return false;
 }
 

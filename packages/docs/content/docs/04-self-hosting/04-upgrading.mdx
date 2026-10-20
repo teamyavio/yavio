@@ -38,6 +38,10 @@ Upgrade your self-hosted Yavio **before** you bump `@yavio/sdk` in your apps. A 
   `@yavio/sdk` 0.4.0 reports tool results with `isError: true` as `error_category: "tool_error"`. An ingest image from before that release rejects every one of those events — so on an old server, tool-reported failures disappear instead of being counted. It also sends `intent_context` on tool calls, which an older ingest silently drops, so the dashboard's coverage split stays empty. Pull the latest images first, then upgrade the SDK.
 </Callout>
 
+<Callout type="info">
+  `@yavio/sdk` 0.4.1 sends `region` (state or province) on tool calls with `capture.geo` `true` or `"region"`. An ingest image from before migration `0020` drops the field silently; the event itself is stored.
+</Callout>
+
 ## Checking for Updates
 
 Preview what would be pulled without making changes:

@@ -1453,6 +1453,9 @@ describe("client metadata capture", () => {
       latitude: "51.43247",
       longitude: "6.76516",
     },
+    // ChatGPT also sends the IANA zone at the top level, outside userLocation
+    // (seen on most located calls). Missing here, it hid a leak until 0.4.1.
+    timezone: "Europe/Berlin",
     "openai/session": "v1/49A5b4dMHXWnQuVmyqIS4O",
   };
 
@@ -1486,6 +1489,7 @@ describe("client metadata capture", () => {
     expect(event.locale).toBe("de-DE");
     expect(event.end_user_agent).toContain("Android 15");
     expect(event.subject_id).toBe("v1/2vDU0AOje8kKSAasHqXU4Y");
+    expect(event.region).toBe("North Rhine-Westphalia");
     // City and coordinates must never appear as structured fields
     expect(JSON.stringify({ ...event, input_values: undefined })).not.toContain("Duisburg");
     expect(JSON.stringify({ ...event, input_values: undefined })).not.toContain("51.43247");
@@ -1504,6 +1508,8 @@ describe("client metadata capture", () => {
     // while everything else in _meta stays.
     const meta = (event.input_values as Record<string, unknown>)._meta as Record<string, unknown>;
     expect(meta).not.toHaveProperty("openai/userLocation");
+    expect(meta).not.toHaveProperty("timezone");
+    expect(event.region).toBeUndefined();
     expect(meta["openai/locale"]).toBe("de-DE");
     expect(meta["openai/subject"]).toBe("v1/2vDU0AOje8kKSAasHqXU4Y");
     const serialized = JSON.stringify(event);
@@ -1524,6 +1530,13 @@ describe("client metadata capture", () => {
     }
   }
 
+  /** CHATGPT_META minus everything geo controls: userLocation and the top-level timezone. */
+  const {
+    "openai/userLocation": _location,
+    timezone: _timezone,
+    ...metaWithoutLocation
+  } = CHATGPT_META;
+
   it('keeps only the country when capture.geo is "country"', async () => {
     const event = await callWithMeta(countryOnly, CHATGPT_META);
     expect(event.country_code).toBe("DE");
@@ -1531,8 +1544,8 @@ describe("client metadata capture", () => {
     expect(event.subject_id).toBe("v1/2vDU0AOje8kKSAasHqXU4Y");
     const meta = (event.input_values as Record<string, unknown>)._meta as Record<string, unknown>;
     expect(meta["openai/userLocation"]).toEqual({ country: "DE" });
-    const { "openai/userLocation": _location, ...rest } = CHATGPT_META;
-    expect(meta).toEqual({ ...rest, "openai/userLocation": { country: "DE" } });
+    expect(meta).toEqual({ ...metaWithoutLocation, "openai/userLocation": { country: "DE" } });
+    expect(event.region).toBeUndefined();
     expectNoLocationDetail(event);
   });
 
@@ -1594,10 +1607,271 @@ describe("client metadata capture", () => {
   it("keeps the full userLocation in _meta while capture.geo is on (default)", async () => {
     const event = await callWithMeta(testConfig, CHATGPT_META);
     const meta = (event.input_values as Record<string, unknown>)._meta as Record<string, unknown>;
-    expect(meta["openai/userLocation"]).toEqual(CHATGPT_META["openai/userLocation"]);
+    expect(meta).toEqual(CHATGPT_META);
+    expect(event.country_code).toBe("DE");
+    expect(event.region).toBe("North Rhine-Westphalia");
   });
 
-  it.each([false, "country"] as const)(
+  describe('capture.geo "region" (#127)', () => {
+    const regionOnly: YavioConfig = {
+      ...testConfig,
+      capture: { ...testConfig.capture, geo: "region" },
+    };
+    const metaOf = (event: Record<string, unknown>) =>
+      (event.input_values as Record<string, unknown>)._meta as Record<string, unknown>;
+    const withLocation = (location: Record<string, unknown>) => ({
+      ...CHATGPT_META,
+      "openai/userLocation": location,
+    });
+
+    it("keeps exactly { country, region } and sets the region field", async () => {
+      const event = await callWithMeta(regionOnly, CHATGPT_META);
+      expect(event.country_code).toBe("DE");
+      expect(event.region).toBe("North Rhine-Westphalia");
+      expect(event.locale).toBe("de-DE");
+      expect(metaOf(event)).toEqual({
+        ...metaWithoutLocation,
+        "openai/userLocation": { country: "DE", region: "North Rhine-Westphalia" },
+      });
+      const serialized = JSON.stringify(event);
+      for (const leak of ["Duisburg", "Europe/Berlin", "51.43247", "6.76516"]) {
+        expect(serialized, leak).not.toContain(leak);
+      }
+    });
+
+    it("builds the location from an allow-list, so unknown fields never pass", async () => {
+      const event = await callWithMeta(
+        regionOnly,
+        withLocation({ ...CHATGPT_META["openai/userLocation"], postalCode: "47051" }),
+      );
+      expect(metaOf(event)["openai/userLocation"]).toEqual({
+        country: "DE",
+        region: "North Rhine-Westphalia",
+      });
+      expect(JSON.stringify(event)).not.toContain("47051");
+    });
+
+    it("keeps { country } and sets no region field when the platform sent none", async () => {
+      const { region: _region, ...noRegion } = CHATGPT_META["openai/userLocation"];
+      const event = await callWithMeta(regionOnly, withLocation(noRegion));
+      expect(event.country_code).toBe("DE");
+      expect(event.region).toBeUndefined();
+      expect(metaOf(event)["openai/userLocation"]).toEqual({ country: "DE" });
+    });
+
+    it("removes the location, country and region when the country is invalid", async () => {
+      const event = await callWithMeta(
+        regionOnly,
+        withLocation({ ...CHATGPT_META["openai/userLocation"], country: "Germany" }),
+      );
+      expect(event.country_code).toBeUndefined();
+      expect(event.region).toBeUndefined();
+      expect(metaOf(event)).not.toHaveProperty("openai/userLocation");
+      expect(metaOf(event)).not.toHaveProperty("timezone");
+      expect(JSON.stringify(event)).not.toContain("North Rhine-Westphalia");
+    });
+
+    it.each([
+      ["longer than 64 characters", "x".repeat(65)],
+      ["a non-string", 42],
+      ["a control character", "North\u0007Rhine"],
+      ["only spaces", "   "],
+      // the rule ingest applies too (@yavio/shared/geo): no postal code in a region
+      ["carrying digits", "Duisburg 47051"],
+      ["carrying an email", "me@example.com"],
+    ])("drops a region that is %s, keeps the country", async (_label, region) => {
+      const event = await callWithMeta(
+        regionOnly,
+        withLocation({ ...CHATGPT_META["openai/userLocation"], region }),
+      );
+      expect(event.country_code).toBe("DE");
+      expect(event.region).toBeUndefined();
+      expect(metaOf(event)["openai/userLocation"]).toEqual({ country: "DE" });
+    });
+
+    it("trims the region, the same in the field and in _meta", async () => {
+      const event = await callWithMeta(
+        regionOnly,
+        withLocation({ country: "DE", region: "  Hesse " }),
+      );
+      expect(event.region).toBe("Hesse");
+      expect(metaOf(event)["openai/userLocation"]).toEqual({ country: "DE", region: "Hesse" });
+    });
+
+    it("folds a typographic apostrophe, the same in the field and in _meta", async () => {
+      const event = await callWithMeta(
+        regionOnly,
+        withLocation({ country: "FR", region: "Provence-Alpes-C\u00f4te d\u2019Azur" }),
+      );
+      expect(event.region).toBe("Provence-Alpes-C\u00f4te d'Azur");
+      expect(metaOf(event)["openai/userLocation"]).toEqual({
+        country: "FR",
+        region: "Provence-Alpes-C\u00f4te d'Azur",
+      });
+    });
+
+    it("keeps exactly 64 characters", async () => {
+      const region = "x".repeat(64);
+      const event = await callWithMeta(regionOnly, withLocation({ country: "DE", region }));
+      expect(event.region).toBe(region);
+    });
+
+    it('sets no region under "country" or false', async () => {
+      for (const geo of ["country", false] as const) {
+        const event = await callWithMeta(
+          { ...testConfig, capture: { ...testConfig.capture, geo } },
+          CHATGPT_META,
+        );
+        expect(event.region, String(geo)).toBeUndefined();
+        expect(JSON.stringify(event), String(geo)).not.toContain("North Rhine-Westphalia");
+      }
+    });
+
+    it("applies on the error path too", async () => {
+      const server = new McpServer({ name: "test", version: "1.0" });
+      const transport = createMockTransport();
+      const proxy = createProxy(server, regionOnly, transport, "0.0.1");
+      proxy.tool("meta_tool", { q: z.string() }, () => {
+        throw new Error("boom");
+      });
+      await expect(
+        getRegisteredTool(server, "meta_tool")?.handler(
+          { q: "hello" },
+          {
+            signal: new AbortController().signal,
+            requestId: "req-cm-4",
+            sendNotification: async () => {},
+            sendRequest: async () => ({}),
+            _meta: CHATGPT_META,
+          },
+        ),
+      ).rejects.toThrow("boom");
+      const event = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+        string,
+        unknown
+      >;
+      expect(event.status).toBe("error");
+      expect(event.region).toBe("North Rhine-Westphalia");
+      expect(metaOf(event)["openai/userLocation"]).toEqual({
+        country: "DE",
+        region: "North Rhine-Westphalia",
+      });
+      expect(metaOf(event)).not.toHaveProperty("timezone");
+    });
+  });
+
+  it.each([false, "country", "region"] as const)(
+    "keeps only locale, user agent, subject and session under %s and names the rest",
+    async (geo) => {
+      // Shaped like what ChatGPT sends; every value is synthetic.
+      const dropped = {
+        sessionId: "session-test-0001",
+        windowId: "session-test-0001:0",
+        callId: "exec-test-0001",
+        itemId: "ctc_test_0001",
+        "openai/request_id": "request-test-0001",
+        "openai/organization": "v1/org-test",
+        traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+        progressToken: 1,
+        "io.modelcontextprotocol/clientCapabilities": { experimental: {} },
+        timezone_offset_minutes: -120,
+        tz: "America/Indiana/Knox",
+        "openai/postalCode": "00000",
+      };
+      const event = await callWithMeta(
+        { ...testConfig, capture: { ...testConfig.capture, geo } },
+        { ...CHATGPT_META, ...dropped },
+      );
+      const inputValues = event.input_values as Record<string, unknown>;
+      const meta = inputValues._meta as Record<string, unknown>;
+      expect(Object.keys(meta).sort()).toEqual(
+        [
+          "openai/locale",
+          "openai/session",
+          "openai/subject",
+          "openai/userAgent",
+          ...(geo === false ? [] : ["openai/userLocation"]),
+        ].sort(),
+      );
+      // Names only, sorted; values never.
+      expect(inputValues._metaDroppedKeys).toEqual([...Object.keys(dropped), "timezone"].sort());
+      expect(inputValues).not.toHaveProperty("_metaDroppedUnnamed");
+      const serialized = JSON.stringify(event);
+      for (const leak of [
+        "session-test-0001",
+        "exec-test",
+        "0af7651916cd43dd",
+        "Knox",
+        "00000",
+        "-120",
+      ]) {
+        expect(serialized, leak).not.toContain(leak);
+      }
+    },
+  );
+
+  it("counts, without naming, keys with an id-like run, a malformed name or past the cap", async () => {
+    const odd = {
+      "openai/sess_4f9c2a7b1e": 1, // 10 hex digits in a row: could be an id
+      "x-1234567890": 1,
+      "Berlin 10115": 1, // a space: not a key name
+      "@user": 1,
+      [`k${"x".repeat(64)}`]: 1,
+      ...Object.fromEntries(
+        Array.from({ length: 25 }, (_, i) => [`extra${String(i).padStart(2, "0")}`, i]),
+      ),
+    };
+    const event = await callWithMeta(
+      { ...testConfig, capture: { ...testConfig.capture, geo: "country" } },
+      { ...CHATGPT_META, ...odd },
+    );
+    const inputValues = event.input_values as Record<string, unknown>;
+    const named = inputValues._metaDroppedKeys as string[];
+    expect(named).toHaveLength(20);
+    expect(named.slice(0, 2)).toEqual(["extra00", "extra01"]);
+    for (const key of ["openai/sess_4f9c2a7b1e", "x-1234567890", "Berlin 10115", "@user"]) {
+      expect(named).not.toContain(key);
+    }
+    // 5 unnameable, plus the 6 named ones past the cap (extra20–24, timezone).
+    expect(inputValues._metaDroppedUnnamed).toBe(11);
+    expect(JSON.stringify(event)).not.toContain("4f9c2a7b1e");
+  });
+
+  it("adds neither field when every key is kept", async () => {
+    const { timezone: _tz, ...onlyKnown } = CHATGPT_META;
+    const event = await callWithMeta(
+      { ...testConfig, capture: { ...testConfig.capture, geo: "country" } },
+      onlyKnown,
+    );
+    const inputValues = event.input_values as Record<string, unknown>;
+    expect(inputValues).not.toHaveProperty("_metaDroppedKeys");
+    expect(inputValues).not.toHaveProperty("_metaDroppedUnnamed");
+  });
+
+  it("keeps every key, and records nothing, under geo: true", async () => {
+    const extra = { sessionId: "session-test-0001", timezone_offset_minutes: -300 };
+    const event = await callWithMeta(testConfig, { ...CHATGPT_META, ...extra });
+    const inputValues = event.input_values as Record<string, unknown>;
+    expect(inputValues._meta).toEqual({ ...CHATGPT_META, ...extra });
+    expect(inputValues).not.toHaveProperty("_metaDroppedKeys");
+    expect(inputValues).not.toHaveProperty("_metaDroppedUnnamed");
+  });
+
+  it("fails closed on a geo value that never went through resolveConfig", async () => {
+    // A hand-built config with the string "false": no country, no region,
+    // no location — not "truthy, so on".
+    const event = await callWithMeta(
+      { ...testConfig, capture: { ...testConfig.capture, geo: "false" as never } },
+      CHATGPT_META,
+    );
+    expect(event.country_code).toBeUndefined();
+    expect(event.region).toBeUndefined();
+    const meta = (event.input_values as Record<string, unknown>)._meta as Record<string, unknown>;
+    expect(meta).not.toHaveProperty("openai/userLocation");
+    expect(meta).not.toHaveProperty("timezone");
+  });
+
+  it.each([false, "country", "region"] as const)(
     "never mutates the _meta the handler receives when gating geo (%s)",
     async (geo) => {
       const server = new McpServer({ name: "test", version: "1.0" });
@@ -1635,6 +1909,7 @@ describe("client metadata capture", () => {
       CHATGPT_META,
     );
     expect(event.country_code).toBeUndefined();
+    expect(event.region).toBeUndefined();
     expect(event.locale).toBeUndefined();
     expect(event.end_user_agent).toBeUndefined();
     expect(event.subject_id).toBeUndefined();

@@ -112,7 +112,7 @@ Errors originating in the `@yavio/sdk` SDK (both server and widget entry points)
 | `YAVIO-1003` | info | Configuration loaded from .yaviorc.json | Config file discovered and parsed. Informational log, not an error. | N/A |
 | `YAVIO-1004` | warn | Malformed .yaviorc.json | Config file exists but cannot be parsed as JSON or is missing required fields. | Re-run `yavio init` or fix the file manually. |
 | `YAVIO-1005` | warn | Unsupported .yaviorc.json version | Config file `version` field is higher than the SDK supports. | Update the SDK to the latest version, or re-run `yavio init`. |
-| `YAVIO-1006` | warn | Invalid capture option | `capture.geo` is not exactly `true`, `false` or `"country"` (e.g. the string `"false"` from a hand-written `.yaviorc.json`). Fails closed: location capture is turned **off**. Logged once per process. | Use one of the three values. |
+| `YAVIO-1006` | warn | Invalid capture option | `capture.geo` is not exactly `true`, `false`, `"country"` or `"region"` (e.g. the string `"false"` from a hand-written `.yaviorc.json`). Fails closed: location capture is turned **off**. Logged once per process. | Use one of the four values. |
 
 ### Proxy & Instrumentation (1100&ndash;1199)
 

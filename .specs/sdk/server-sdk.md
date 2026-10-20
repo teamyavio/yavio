@@ -23,7 +23,7 @@ const instrumented = withYavio(server, {
   capture: {
     inputValues: true,  // full input values + client metadata (PII-stripped)
     outputValues: true, // full tool results
-    geo: true,         // country code
+    geo: true,         // true | "region" | "country" | false: country code, region, location in _meta
     tokens: true,      // reserved — no effect today
     retries: true,     // reserved — no effect today (is_retry is never set)
   },

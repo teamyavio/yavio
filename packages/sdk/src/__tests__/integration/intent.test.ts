@@ -801,7 +801,7 @@ describe("intent capture — widget-invoked tools", () => {
   // know to send `context`. Advertising `context` as REQUIRED on such a tool
   // makes the host refuse every widget call as schema-invalid — and only after
   // it refreshes cached schemas, so the widget breaks silently days later with
-  // no server-side trace. Incident: billiger-mietwagen, 2026-08-07 — the
+  // no server-side trace. Incident: an integration, 2026-08-07 — the
   // widget's 3s auto-refresh dropped from 83 calls/day to zero the moment the
   // connector re-fetched schemas. Hence: on widget-invoked tools `context` is
   // advertised as optional, while capture still applies when a model fills it.
