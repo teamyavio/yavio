@@ -3,7 +3,7 @@ import { parseAnalyticsParams } from "@/lib/analytics/validation";
 import { AnalyticsQueryError } from "@/lib/clickhouse/analytics-client";
 import {
   queryInvocationsTimeSeries,
-  queryLocationBreakdown,
+  queryLocationBreakdownOrNull,
   queryOverviewKPIs,
   queryPlatformBreakdown,
   queryTopTools,
@@ -54,7 +54,8 @@ export const GET = withAnalyticsAuth("viewer")(async (request, ctx) => {
       queryInvocationsTimeSeries(queryCtx, granularity),
       queryPlatformBreakdown(queryCtx),
       queryTopTools(queryCtx),
-      queryLocationBreakdown(queryCtx),
+      // null on a ClickHouse failure: the Locations card shows it, the rest stands.
+      queryLocationBreakdownOrNull(queryCtx),
     ]);
 
     return NextResponse.json({ kpis, timeSeries, platforms, topTools, locations });

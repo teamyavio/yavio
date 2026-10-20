@@ -114,11 +114,11 @@ describe.skipIf(!url)("location breakdown on a real ClickHouse (#129)", () => {
     }
   });
 
-  it("groups calls by country and region, Unknown buckets included, Unknown country last", async () => {
+  it("groups calls by country and region, Unknown buckets included", async () => {
     const r = await q.queryLocationBreakdown(ctx(day(-7), day(1)));
-    expect(r.countries.map((c) => c.countryCode)).toEqual(["DE", "US", "FR", null]);
+    expect(r.countries.map((c) => c.countryCode)).toEqual(["DE", "US", "FR"]);
 
-    const [deRow, us, fr, unknown] = r.countries;
+    const [deRow, us, fr] = r.countries;
     expect(deRow.toolCalls).toBe(6);
     expect(deRow.regions).toEqual([
       { region: "North Rhine-Westphalia", toolCalls: 3, users: 2 },
@@ -133,7 +133,7 @@ describe.skipIf(!url)("location breakdown on a real ClickHouse (#129)", () => {
     });
     expect(fr.regions).toEqual([{ region: "Île-de-France", toolCalls: 1, users: 1 }]);
     // Calls without a key count as calls, not as users; no regions without a country.
-    expect(unknown).toEqual({ countryCode: null, toolCalls: 4, users: 1, regions: [] });
+    expect(r.unknown).toEqual({ toolCalls: 4, users: 1 });
 
     expect(r.totalToolCalls).toBe(13);
     expect(r.locatedToolCalls).toBe(9);
@@ -155,17 +155,19 @@ describe.skipIf(!url)("location breakdown on a real ClickHouse (#129)", () => {
     expect(wide.totalToolCalls).toBe(14);
 
     const empty = await q.queryLocationBreakdown(ctx(day(-90), day(-60)));
-    expect(empty).toEqual({ totalToolCalls: 0, locatedToolCalls: 0, countries: [] });
+    expect(empty).toEqual({ totalToolCalls: 0, locatedToolCalls: 0, countries: [], unknown: null });
   });
 
   it("applies the platform filter", async () => {
     const r = await q.queryLocationBreakdown(ctx(day(-7), day(1), ["chatgpt"]));
-    expect(r.countries.map((c) => c.countryCode)).toEqual(["DE", "US", null]);
+    expect(r.countries.map((c) => c.countryCode)).toEqual(["DE", "US"]);
+    expect(r.unknown).toEqual({ toolCalls: 4, users: 1 });
     expect(r.totalToolCalls).toBe(12);
     expect(r.locatedToolCalls).toBe(8);
 
     const claude = await q.queryLocationBreakdown(ctx(day(-7), day(1), ["claude"]));
     expect(claude.countries.map((c) => c.countryCode)).toEqual(["FR"]);
+    expect(claude.unknown).toBeNull();
   });
 
   it("sees nothing of another project or workspace", async () => {

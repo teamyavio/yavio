@@ -17,7 +17,7 @@ The dashboard overview shows these high-level metrics:
 | Avg latency | Average `latency_ms` across all `tool_call` events |
 | Invocations over time | `tool_call` events grouped by time bucket (line chart) |
 | Platform breakdown | `tool_call` events grouped by `platform` (pie chart) |
-| Locations | `tool_call` events grouped by `country_code`, and within a country by `region` (table). Users are counted with the same key as the Users page, per country and per region, so a person seen in two regions is one user of the country. A call without a location is listed as Unknown: only ChatGPT sends one, and only to apps that capture tool arguments; the card shows the share of calls with a location |
+| Locations | `tool_call` events grouped by `country_code`, and within a country by `region` (table). Users are counted with the same key as the Users page, per country and per region, so a person seen in two regions is one user of the country. A call without a location is listed as Unknown: in practice only ChatGPT sends one, and only to apps that capture tool arguments; the card shows the share of calls with a location |
 | Top tools | `tool_call` events grouped by `event_name`, ordered by count |
 | Total conversions | Count of all `conversion` events |
 | Total revenue | Sum of `conversion_value` across all `conversion` events |

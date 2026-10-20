@@ -45,8 +45,16 @@ interface OverviewData {
   timeSeries: TimeSeriesPoint[];
   platforms: PlatformBreakdown[];
   topTools: ToolRanking[];
-  locations: LocationBreakdown;
+  /** null when the location query failed; the rest of the Overview still loaded. */
+  locations: LocationBreakdown | null;
 }
+
+const NO_LOCATIONS: LocationBreakdown = {
+  totalToolCalls: 0,
+  locatedToolCalls: 0,
+  countries: [],
+  unknown: null,
+};
 
 export function OverviewContent({ projectId }: { projectId: string }) {
   const { filters, setFilter, queryString } = useAnalyticsFilters();
@@ -131,9 +139,7 @@ export function OverviewContent({ projectId }: { projectId: string }) {
             </ChartPanel>
 
             <ChartPanel title="Locations">
-              <LocationTable
-                data={data?.locations ?? { totalToolCalls: 0, locatedToolCalls: 0, countries: [] }}
-              />
+              <LocationTable data={data ? data.locations : NO_LOCATIONS} />
             </ChartPanel>
           </div>
 

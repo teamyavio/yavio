@@ -7,6 +7,7 @@ import {
   formatNumber,
   formatPercent,
   formatRelativeTime,
+  formatShare,
   granularityToFunction,
 } from "@/lib/analytics/format";
 import { describe, expect, it } from "vitest";
@@ -25,6 +26,17 @@ describe("formatNumber", () => {
   it("formats millions with M suffix", () => {
     expect(formatNumber(1_500_000)).toBe("1.5M");
     expect(formatNumber(10_000_000)).toBe("10.0M");
+  });
+});
+
+describe("formatShare", () => {
+  it("is exact at the bounds and never rounds onto them", () => {
+    expect(formatShare(0, 10)).toBe("0%");
+    expect(formatShare(10, 10)).toBe("100%");
+    expect(formatShare(0, 0)).toBe("0%");
+    expect(formatShare(3, 100_000)).toBe("<0.1%");
+    expect(formatShare(9_996, 10_000)).toBe(">99.9%");
+    expect(formatShare(1, 3)).toBe("33.3%");
   });
 });
 

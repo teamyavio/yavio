@@ -24,7 +24,7 @@ import { queryErrorList } from "@/lib/queries/errors";
 import { queryIntentFeed, queryIntentKPIs } from "@/lib/queries/intents";
 import {
   queryInvocationsTimeSeries,
-  queryLocationBreakdown,
+  queryLocationBreakdownOrNull,
   queryOverviewKPIs,
   queryPlatformBreakdown,
   topLocations,
@@ -137,7 +137,7 @@ const handler = createMcpHandler(
       {
         title: "Overview KPIs",
         description:
-          "Headline numbers for a project and date range: tool invocations, sessions, error rate, latency (with previous-period comparison), a platform breakdown, and locations: tool calls and users for the 10 largest countries (countryCode null = Unknown) with up to 5 regions each (region null = Unknown), plus totalToolCalls and locatedToolCalls. Only ChatGPT sends a location, and only to apps that capture tool arguments, so Unknown is often most calls. Same definitions as the dashboard.",
+          "Headline numbers for a project and date range: tool invocations, sessions, error rate, latency (with previous-period comparison), a platform breakdown, and locations: tool calls and users for the 10 largest countries with up to 5 regions each (region null = Unknown region; moreCountries / moreRegions count what was cut), unknown = calls without a country (null when there were none), plus totalToolCalls and locatedToolCalls. A location comes from the client platform (in practice ChatGPT) and only reaches apps that capture tool arguments, so unknown is often most calls. locations is null when that part of the query failed. Same definitions as the dashboard.",
         inputSchema: projectShape,
         annotations: readOnly,
       },
@@ -148,13 +148,13 @@ const handler = createMcpHandler(
           const [kpis, platforms, locations] = await Promise.all([
             queryOverviewKPIs(ctx),
             queryPlatformBreakdown(ctx),
-            queryLocationBreakdown(ctx),
+            queryLocationBreakdownOrNull(ctx),
           ]);
           return toolText({
             filters: appliedFilters(ctx),
             kpis,
             platforms,
-            locations: topLocations(locations),
+            locations: locations && topLocations(locations),
           });
         });
       },
