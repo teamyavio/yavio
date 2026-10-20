@@ -24,7 +24,7 @@ export function getEnv() {
     SMTP_PORT: optionalEnv("SMTP_PORT", "587"),
     SMTP_USER: optionalEnv("SMTP_USER"),
     SMTP_PASSWORD: optionalEnv("SMTP_PASSWORD"),
-    SMTP_FROM: optionalEnv("SMTP_FROM", "noreply@yavio.dev"),
+    SMTP_FROM: optionalEnv("SMTP_FROM", "contact@yavio.ai"),
     API_KEY_HASH_SECRET: requireEnv("API_KEY_HASH_SECRET"),
     APP_URL: optionalEnv("APP_URL", "http://localhost:3000"),
   };

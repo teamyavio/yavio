@@ -465,7 +465,7 @@ All outbound email (verification, password reset, invitations, lockout notificat
 | `SMTP_PORT` | No | `587` | SMTP port (`587` for STARTTLS, `465` for TLS) |
 | `SMTP_USER` | No | - | SMTP authentication username |
 | `SMTP_PASSWORD` | No | - | SMTP authentication password |
-| `SMTP_FROM` | No | `noreply@localhost` | Default `From` address for outbound email |
+| `SMTP_FROM` | No | `contact@yavio.ai` | Default `From` address for outbound email |
 
 **When SMTP is not configured** (no `SMTP_HOST` set), the dashboard operates in **email-disabled mode**:
 - Registration skips the email verification step (accounts are immediately active)

@@ -18,7 +18,7 @@ We are committed to making participation in this project a welcoming and respect
 
 ## Enforcement
 
-Instances of unacceptable behavior may be reported to **conduct@yavio.ai**. All reports will be reviewed and handled confidentially. Maintainers reserve the right to remove, edit, or reject contributions that violate this Code of Conduct, and to temporarily or permanently ban contributors for repeated or severe violations.
+Instances of unacceptable behavior may be reported to **contact@yavio.ai**. All reports will be reviewed and handled confidentially. Maintainers reserve the right to remove, edit, or reject contributions that violate this Code of Conduct, and to temporarily or permanently ban contributors for repeated or severe violations.
 
 ## Attribution
 
