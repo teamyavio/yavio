@@ -6,7 +6,7 @@ If you discover a security vulnerability in Yavio, please report it responsibly.
 
 ### Contact
 
-Email: **security@yavio.ai**
+Email: **contact@yavio.ai**
 
 ### What to include
 
@@ -26,7 +26,7 @@ Email: **security@yavio.ai**
 
 ### Process
 
-1. Report the vulnerability via email to security@yavio.ai
+1. Report the vulnerability via email to contact@yavio.ai
 2. We will acknowledge receipt within 24 hours
 3. We will investigate and keep you updated on progress
 4. Once a fix is ready, we will coordinate disclosure with you

@@ -49,19 +49,19 @@ describe("sendEmail", () => {
 
   it("uses SMTP_FROM env var for from address", async () => {
     const originalFrom = process.env.SMTP_FROM;
-    process.env.SMTP_FROM = "custom@yavio.dev";
+    process.env.SMTP_FROM = "custom@example.com";
     mockSendMail.mockResolvedValue({});
     mockGetTransporter.mockReturnValue({ sendMail: mockSendMail });
 
     await sendEmail("to@test.com", "Test", "<p>Hi</p>");
     expect(mockSendMail).toHaveBeenCalledWith(
-      expect.objectContaining({ from: "custom@yavio.dev" }),
+      expect.objectContaining({ from: "custom@example.com" }),
     );
 
     process.env.SMTP_FROM = originalFrom;
   });
 
-  it("defaults from address to noreply@yavio.dev", async () => {
+  it("defaults from address to noreply@yavio.ai", async () => {
     const originalFrom = process.env.SMTP_FROM;
     Reflect.deleteProperty(process.env, "SMTP_FROM");
     mockSendMail.mockResolvedValue({});
@@ -69,7 +69,7 @@ describe("sendEmail", () => {
 
     await sendEmail("to@test.com", "Test", "<p>Hi</p>");
     expect(mockSendMail).toHaveBeenCalledWith(
-      expect.objectContaining({ from: "noreply@yavio.dev" }),
+      expect.objectContaining({ from: "noreply@yavio.ai" }),
     );
 
     process.env.SMTP_FROM = originalFrom;
