@@ -188,9 +188,12 @@ describe("ToolCallEvent", () => {
     expect(
       ToolCallEvent.parse(base({ event_type: "tool_call", event_name: "x" })).region,
     ).toBeUndefined();
-    expect(
-      ToolCallEvent.parse(base({ event_type: "tool_call", event_name: "x", region: null })).region,
-    ).toBeNull();
+    // Not a string either: the normalizer sets it to NULL, the event is kept.
+    for (const region of [null, 42, { name: "Hesse" }]) {
+      expect(
+        ToolCallEvent.parse(base({ event_type: "tool_call", event_name: "x", region })).region,
+      ).toEqual(region);
+    }
   });
 
   // The ingest validator is the only gate on this value: an SDK that emits a

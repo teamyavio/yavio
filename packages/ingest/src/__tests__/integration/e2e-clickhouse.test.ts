@@ -157,7 +157,14 @@ describe("E2E: Ingest API → ClickHouse", () => {
 
   it("region: kept as sent, NULL when malformed, country-less or not sent (#128)", async () => {
     await buildApp();
-    const ids = [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+    const ids = [
+      randomUUID(),
+      randomUUID(),
+      randomUUID(),
+      randomUUID(),
+      randomUUID(),
+      randomUUID(),
+    ];
     const call = (i: number, extra: Record<string, unknown>) =>
       makeEvent({ event_id: ids[i], event_type: "tool_call", event_name: "lookup", ...extra });
 
@@ -172,13 +179,14 @@ describe("E2E: Ingest API → ClickHouse", () => {
           call(2, { region: "Hesse" }),
           call(3, { country_code: "US" }), // an SDK that does not send the field
           call(4, { country_code: "DE", region: null }),
+          call(5, { country_code: "DE", region: 42 }), // not a string
         ],
       },
     });
 
     // A malformed region nulls the field; it never costs the event.
     expect(r.statusCode).toBe(200);
-    expect(r.json().accepted).toBe(5);
+    expect(r.json().accepted).toBe(6);
     await batchWriter.flush();
 
     const regionOf = async (id: string) => (await queryEvents(`event_id = '${id}'`))[0]?.region;
@@ -187,6 +195,7 @@ describe("E2E: Ingest API → ClickHouse", () => {
     expect(await regionOf(ids[2])).toBeNull();
     expect(await regionOf(ids[3])).toBeNull();
     expect(await regionOf(ids[4])).toBeNull();
+    expect(await regionOf(ids[5])).toBeNull();
 
     await batchWriter.shutdown();
   });
