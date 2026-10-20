@@ -415,10 +415,13 @@ describe("intent capture — enabled", () => {
     });
     expect(result.isError).toBeFalsy();
     expect(seenArgs).toEqual({ q: "x" });
-    // No tool_call event: callbacks registered before withYavio() are not
-    // instrumented (pre-existing proxy behavior). What matters here is that
-    // the advertised-required context did not break the strict schema.
-    expect(toolCallEvents(h.events)).toHaveLength(0);
+    // Callbacks registered before the wrap are instrumented in place (#133):
+    // one tool_call event, carrying the intent the wrapper captured.
+    const events = toolCallEvents(h.events);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.intent_signals?.intent).toBe(
+      "Calling on a fresh stateless instance for the user.",
+    );
   });
 
   it("never strips a genuine context argument even without a prior tools/list", async () => {

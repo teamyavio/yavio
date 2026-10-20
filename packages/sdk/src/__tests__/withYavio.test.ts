@@ -2,7 +2,9 @@ import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SDK_VERSION as REACT_SDK_VERSION } from "../react/constants.js";
-import { SDK_VERSION, withYavio, yavio } from "../server/index.js";
+import { SDK_VERSION, createYavio, withYavio, yavio } from "../server/index.js";
+import { _resetGlobalState } from "../server/proxy.js";
+import { _sharedStateCount } from "../server/shared.js";
 
 describe("withYavio", () => {
   const originalEnv = process.env;
@@ -39,6 +41,29 @@ describe("withYavio", () => {
     // But should still be usable as a McpServer
     expect(typeof result.tool).toBe("function");
     expect(typeof result.connect).toBe("function");
+  });
+
+  it("returns a value without registerTool() unwrapped, with one YAVIO-1107 error and no side effect", () => {
+    _resetGlobalState();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sigterm = process.listenerCount("SIGTERM");
+
+    const notAServer = { connect: async () => {} };
+    const result = withYavio(notAServer as unknown as McpServer, { apiKey: "yav_test" });
+    expect(result).toBe(notAServer);
+    const empty = withYavio({} as unknown as McpServer, { apiKey: "yav_test" });
+    expect(empty).toBe(empty);
+    expect(createYavio({ apiKey: "yav_unsupported" }).wrap({} as unknown as McpServer)).toEqual({});
+
+    // Once per process, however many unsupported values arrive.
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0]?.[0]).toContain("YAVIO-1107");
+    expect(errorSpy.mock.calls[0]?.[0]).toContain("registerTool");
+    // withYavio rejected before resolving anything: no transport, no listeners.
+    expect(process.listenerCount("SIGTERM")).toBe(sigterm + 1); // createYavio above made one
+    expect(_sharedStateCount()).toBe(1);
+    errorSpy.mockRestore();
+    _resetGlobalState();
   });
 
   it("uses API key from environment variable", () => {
