@@ -20,10 +20,16 @@ import { Fragment, useState } from "react";
  */
 const INITIAL_COUNTRIES = 5;
 
-/** What the Region cell of a country row says: its one region, or how many. */
-function regionSummary(country: LocationCountry): string {
+/**
+ * What the Region cell of a country row says: its one region, or how many
+ * known regions there are, plus "Unknown" when some calls had none — the
+ * Unknown bucket is not a region and must not be counted as one.
+ */
+export function regionSummary(country: LocationCountry): string {
   if (country.regions.length === 1) return country.regions[0].region ?? "Unknown";
-  return `${country.regions.length} regions`;
+  const known = country.regions.filter((r) => r.region !== null).length;
+  const label = `${known} ${known === 1 ? "region" : "regions"}`;
+  return known < country.regions.length ? `${label} + Unknown` : label;
 }
 
 const num = (value: number) => value.toLocaleString("en-US");
