@@ -48,6 +48,11 @@
     },
     "auditConfig": {
       "ignoreGhsas": ["GHSA-6qxp-vccf-f47h"]
+    },
+    "peerDependencyRules": {
+      "allowedVersions": {
+        "mcp-handler>@modelcontextprotocol/sdk": "1.32.1"
+      }
     }
   },
   "devDependencies": {
