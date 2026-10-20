@@ -11,6 +11,7 @@ import { mcpAuthContext, verifyMcpBearerToken } from "../lib/mcp/auth";
 import { McpToolError, runTool, toolError, toolText } from "../lib/mcp/errors";
 import { appliedFilters, resolveDateRange, resolvePlatforms } from "../lib/mcp/filters";
 import { requireProjectInWorkspace } from "../lib/mcp/project-access";
+import { SCHEMA_DOC } from "../lib/mcp/schema-doc";
 import { verifyAccessToken } from "../lib/oauth/store";
 
 const mockVerify = verifyAccessToken as ReturnType<typeof vi.fn>;
@@ -174,5 +175,14 @@ describe("date range + platform filters", () => {
         platform: ["chatgpt"],
       }),
     ).toEqual({ from: "F", to: "T", platform: ["chatgpt"] });
+  });
+});
+
+describe("get_schema doc", () => {
+  // The model only queries columns it is told about. That the dashboard role
+  // can read region is pinned against ClickHouse in packages/db (0020).
+  it("lists the geo columns with what region holds (#128)", () => {
+    expect(SCHEMA_DOC).toMatch(/Geo: country_code \(Nullable[^)]*\), region \(Nullable: state or/);
+    expect(SCHEMA_DOC).toContain("not ISO 3166-2");
   });
 });

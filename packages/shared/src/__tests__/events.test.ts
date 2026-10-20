@@ -188,6 +188,9 @@ describe("ToolCallEvent", () => {
     expect(
       ToolCallEvent.parse(base({ event_type: "tool_call", event_name: "x" })).region,
     ).toBeUndefined();
+    expect(
+      ToolCallEvent.parse(base({ event_type: "tool_call", event_name: "x", region: null })).region,
+    ).toBeNull();
   });
 
   // The ingest validator is the only gate on this value: an SDK that emits a

@@ -1,11 +1,7 @@
 import type { BaseEvent } from "@yavio/shared/events";
+import { MAX_REGION_LENGTH } from "@yavio/shared/geo";
 import { describe, expect, it } from "vitest";
-import {
-  MAX_FUTURE_MS,
-  MAX_PAST_MS,
-  MAX_REGION_LENGTH,
-  normalizeEvents,
-} from "../lib/event-normalizer.js";
+import { MAX_FUTURE_MS, MAX_PAST_MS, normalizeEvents } from "../lib/event-normalizer.js";
 import { COUNTRY_CODES, CURRENCY_CODES } from "../lib/iso-codes.js";
 
 const NOW = Date.parse("2026-10-14T12:00:00.000Z");
@@ -101,7 +97,11 @@ describe("region (#128) — a name next to a valid country, else NULL", () => {
     // sent decomposed (u + combining diaeresis): stored as the one letter
     ["Baden-Wu\u0308rttemberg", "Baden-W\u00fcrttemberg"],
     ["Provence-Alpes-C\u00f4te d'Azur", "Provence-Alpes-C\u00f4te d'Azur"],
-    ["Provence-Alpes-C\u00f4te d\u2019Azur", "Provence-Alpes-C\u00f4te d\u2019Azur"],
+    // one region, one spelling: typographic apostrophes and dashes are folded
+    ["Provence-Alpes-C\u00f4te d\u2019Azur", "Provence-Alpes-C\u00f4te d'Azur"],
+    ["Saxony\u2013Anhalt", "Saxony-Anhalt"],
+    ["Trentino-Alto Adige/S\u00fcdtirol", "Trentino-Alto Adige/S\u00fcdtirol"],
+    ["Saint Kitts & Nevis", "Saint Kitts & Nevis"],
     ["Washington, D.C.", "Washington, D.C."],
     ["Sakha (Yakutia)", "Sakha (Yakutia)"],
     ["  Hesse  ", "Hesse"],
@@ -153,6 +153,12 @@ describe("region (#128) — a name next to a valid country, else NULL", () => {
   it("keeps the region when the country only needed upper-casing", () => {
     const r = normalizeEvents([event({ country_code: "de", region: "Hesse" })], NOW);
     expect(r.events[0]).toMatchObject({ country_code: "DE", region: "Hesse" });
+    expect(r.invalidFields).toBe(0);
+  });
+
+  it("leaves a null region NULL and counts nothing — a client sending null meant none", () => {
+    const r = normalizeEvents([event({ country_code: "DE", region: null })], NOW);
+    expect((r.events[0] as Record<string, unknown>).region).toBeNull();
     expect(r.invalidFields).toBe(0);
   });
 

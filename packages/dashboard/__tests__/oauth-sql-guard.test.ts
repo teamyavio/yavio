@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { McpToolError } from "../lib/mcp/errors";
-import { SCHEMA_DOC } from "../lib/mcp/schema-doc";
 import { validateFreeQuery } from "../lib/mcp/sql-guard";
 
 function rejected(sql: string): string {
@@ -263,13 +262,6 @@ describe("run_query SQL guard — legitimate analytics queries pass", () => {
     validateFreeQuery("SELECT fromUnixTimestamp(1690000000) FROM events LIMIT 1");
     validateFreeQuery(
       "SELECT e.event_name FROM events AS e JOIN sessions_mv AS s ON e.session_id = s.session_id",
-    );
-  });
-
-  it("accepts the geo columns, which get_schema documents (#128)", () => {
-    expect(SCHEMA_DOC).toMatch(/Geo: country_code .*region \(Nullable/s);
-    validateFreeQuery(
-      "SELECT country_code, region, count() FROM events WHERE region IS NOT NULL GROUP BY country_code, region",
     );
   });
 

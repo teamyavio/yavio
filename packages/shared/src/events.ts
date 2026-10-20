@@ -102,8 +102,9 @@ export const ToolCallEvent = BaseEvent.extend({
   // openai/userLocation.region, e.g. "North Rhine-Westphalia"; not ISO
   // 3166-2). Sent with capture.geo true or "region" (#127). No length or
   // format bound here on purpose: a Zod failure rejects the whole event, so
-  // ingest's normalizer checks the format and sets a bad value to NULL (#128).
-  region: z.string().optional(),
+  // ingest's normalizer applies normalizeRegionName() (geo.ts) and sets a
+  // bad value to NULL (#128). Null is accepted for the same reason.
+  region: z.string().nullish(),
   // Client metadata relayed by the platform in request _meta (ChatGPT sends
   // these on every call; other platforms may not). All optional — absence
   // means the platform did not transmit them or the SDK's capture is off.
