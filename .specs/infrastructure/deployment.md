@@ -100,7 +100,7 @@ services:
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
-      SMTP_FROM: ${SMTP_FROM:-contact@yavio.ai}
+      SMTP_FROM: ${SMTP_FROM:-noreply@yavio.ai}
       PORT: 3000
     ports:
       - "3000:3000"
@@ -170,7 +170,7 @@ A `docker-compose.prod.yml` provides production-ready overrides:
 | `SMTP_PORT` | No | `587` | SMTP port (`587` for STARTTLS, `465` for TLS). |
 | `SMTP_USER` | No | - | SMTP authentication username. |
 | `SMTP_PASSWORD` | No | - | SMTP authentication password. |
-| `SMTP_FROM` | No | `contact@yavio.ai` | Default `From` address for outbound email. |
+| `SMTP_FROM` | No | `noreply@yavio.ai` | Default `From` address for outbound email. |
 | `GITHUB_CLIENT_ID` | No | - | GitHub OAuth (optional) |
 | `GITHUB_CLIENT_SECRET` | No | - | GitHub OAuth (optional) |
 | `GOOGLE_CLIENT_ID` | No | - | Google OAuth (optional) |
