@@ -14,6 +14,16 @@ import { COUNTRY_CODES, CURRENCY_CODES } from "./iso-codes.js";
 export const MAX_PAST_MS = 72 * 60 * 60 * 1000;
 /** How far a client timestamp may lie in the future before it is clamped. */
 export const MAX_FUTURE_MS = 5 * 60 * 1000;
+/** Longest region name kept, in UTF-16 code units; the SDK drops longer ones too (#127). */
+export const MAX_REGION_LENGTH = 64;
+
+/**
+ * A region name: letters (and combining marks), spaces and the punctuation
+ * real subdivision names use — hyphen, both apostrophes, period, comma,
+ * parentheses. No digits, `@` or control characters, so nothing that
+ * stripPii, which runs after this, could take for an email or a phone number.
+ */
+const REGION_CHARS = /^[\p{L}\p{M} '\u2019.,()-]+$/u;
 
 export interface NormalizeResult {
   events: BaseEvent[];
@@ -30,6 +40,9 @@ export interface NormalizeResult {
  * - `country_code`: ISO 3166-1 alpha-2 or XK, upper-cased; else NULL.
  * - `conversion_currency`: ISO 4217, upper-cased; else NULL.
  * - `locale`: a BCP-47 tag in canonical form (Intl.getCanonicalLocales); else NULL.
+ * - `region` (#128): a name per regionName(), and only next to a valid
+ *   `country_code` — a region without its country says nothing; else NULL.
+ *   Stored as sent ("State of Berlin"), not mapped to ISO 3166-2.
  */
 export function normalizeEvents(events: BaseEvent[], now = Date.now()): NormalizeResult {
   let clampedTimestamps = 0;
@@ -61,10 +74,36 @@ export function normalizeEvents(events: BaseEvent[], now = Date.now()): Normaliz
       out[field] = valid;
     }
 
+    // After the loop: the region needs the country as checked above.
+    if (out.region !== undefined && out.region !== null) {
+      const valid =
+        typeof out.region === "string" && typeof out.country_code === "string"
+          ? regionName(out.region)
+          : null;
+      if (valid === null) invalidFields++;
+      out.region = valid;
+    }
+
     return out as BaseEvent;
   });
 
   return { events: normalized, clampedTimestamps, invalidFields };
+}
+
+/**
+ * The region name in NFC with runs of spaces collapsed and the ends trimmed,
+ * or null: empty, longer than MAX_REGION_LENGTH, without a letter, or with a
+ * character outside REGION_CHARS. NFC first, so an accent sent decomposed
+ * ("u" + U+0308) is kept as the one letter it is. Only space separators are
+ * collapsed; a tab or line break is a control character and fails the check.
+ */
+function regionName(value: string): string | null {
+  const name = value
+    .normalize("NFC")
+    .replace(/\p{Zs}+/gu, " ")
+    .replace(/^ | $/g, "");
+  if (name.length === 0 || name.length > MAX_REGION_LENGTH) return null;
+  return REGION_CHARS.test(name) && /\p{L}/u.test(name) ? name : null;
 }
 
 /**

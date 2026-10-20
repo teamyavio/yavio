@@ -29,6 +29,7 @@ Fires on every tool invocation. The core event.
 | tokens_in | INTEGER | Reserved — not set by the SDK today |
 | tokens_out | INTEGER | Reserved — not set by the SDK today |
 | country_code | TEXT | ISO 3166-1 alpha-2 from the platform's request `_meta` (`openai/userLocation.country`); omitted with `capture.geo: false` |
+| region | TEXT | State or province from `openai/userLocation.region`, as the platform names it (ChatGPT: English, e.g. "North Rhine-Westphalia", "State of Berlin"; not ISO 3166-2). Sent by SDK 0.4.1+ with `capture.geo` `true` or `"region"` (#127). Ingest stores it NFC-normalised with spaces collapsed, at most 64 characters of letters, spaces and `-'’.,()`, and only next to a valid `country_code`; anything else becomes NULL and counts as an invalid field, the event is kept (#128). Raw events only, not in `stats_daily`. Migration `0020` |
 | locale / end_user_agent / subject_id | TEXT | Client metadata from the request `_meta` (`openai/locale`, `openai/userAgent`, `openai/subject`); captured only with `capture.inputValues` on. Intentionally duplicated inside `input_values._meta` |
 
 ### connection

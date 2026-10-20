@@ -37,8 +37,12 @@ capture off, intent disabled for the tool, the tool has its own 'context' argume
 a schema the SDK cannot extend such as oneOf/anyOf/allOf or passthrough, or an unknown
 tool); NULL = SDK < 0.4.0. Coverage = intents / ('required' or NULL) calls)
 Tokens: tokens_in, tokens_out. Conversions: conversion_value, conversion_currency.
-Geo: country_code (Nullable). Connection: protocol_version, client_name,
-client_version, connection_duration_ms. SDK: sdk_version.
+Geo: country_code (Nullable, ISO 3166-1 alpha-2), region (Nullable: state or
+province as the platform names it, e.g. 'North Rhine-Westphalia' or 'State of
+Berlin' — English, not ISO 3166-2; only set next to a country_code; NULL before
+SDK 0.4.1). Both come from ChatGPT's request _meta and need the app's argument
+capture on. Connection: protocol_version, client_name, client_version,
+connection_duration_ms. SDK: sdk_version.
 Widget: viewport_width/height, scroll_depth_pct, click_count, visible_duration_ms,
 field_name, nav_from, nav_to, device_touch, device_pixel_ratio, load_time_ms.
 

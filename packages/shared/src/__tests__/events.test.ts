@@ -176,6 +176,20 @@ describe("ToolCallEvent", () => {
     ).toThrow();
   });
 
+  // #128: a Zod failure would reject the whole event, so the schema takes any
+  // string and ingest's normalizer sets a malformed one to NULL.
+  it("accepts any region string, including one ingest will set to NULL", () => {
+    for (const region of ["North Rhine-Westphalia", "x".repeat(500), "District 9"]) {
+      const result = ToolCallEvent.parse(
+        base({ event_type: "tool_call", event_name: "x", country_code: "DE", region }),
+      );
+      expect(result.region).toBe(region);
+    }
+    expect(
+      ToolCallEvent.parse(base({ event_type: "tool_call", event_name: "x" })).region,
+    ).toBeUndefined();
+  });
+
   // The ingest validator is the only gate on this value: an SDK that emits a
   // category the shared enum lacks loses every such event (YAVIO-2100).
   it("accepts tool_error — the handler returned isError: true", () => {
