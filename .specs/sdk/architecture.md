@@ -17,7 +17,7 @@ The SDK ships as a single npm package with two entry points routed via the `pack
   "type": "module",
   "main": "./dist/index.cjs",
   "types": "./dist/index.d.cts",
-  "typesVersions": { "*": { "react": ["./dist/react.d.cts"] } },
+  "files": ["dist", "react/package.json", "LICENSE", "README.md"],
   "exports": {
     ".": {
       "import": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
@@ -32,13 +32,20 @@ The SDK ships as a single npm package with two entry points routed via the `pack
     "@modelcontextprotocol/sdk": ">=1.24.0",
     "react": ">=18.0.0",
     "react-dom": ">=18.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@modelcontextprotocol/sdk": { "optional": false },
+    "react": { "optional": true },
+    "react-dom": { "optional": true }
   }
 }
 ```
 
-Each condition carries its own declarations (0.4.2). With one `types` for both, TypeScript reads `index.d.ts` as ESM for a CommonJS app on `node16`/`nodenext`, whose `McpServer` is then the CommonJS class, and `withYavio(server)` does not compile. `main`, `types` and `typesVersions` serve `moduleResolution: node10`, which ignores `exports`.
+React is needed only for `@yavio/sdk/react`; a server-only integration installs the MCP SDK alone.
 
-`@yavio/shared` is not published. tsup bundles its code (`noExternal`) and, through a `paths` mapping in the declaration build, its types; before 0.4.2 `index.d.ts` imported `@yavio/shared/platform`, so `Platform` and `platformValues` were `any` or, with `skipLibCheck` off, the import failed. `scripts/check-package.mjs` (`check:package`, run in CI and before every publish) checks the packed tarball as an app consumes it.
+Each condition carries its own declarations (0.4.2). With one `types` for both, TypeScript reads `index.d.ts` as ESM for a CommonJS app on `node16`/`nodenext`, whose `McpServer` is then the CommonJS class, and `withYavio(server)` does not compile. Tools that ignore `exports` (TypeScript's `moduleResolution: node10`, Jest before 28, webpack 4) find the root through `main` and `types`, and `@yavio/sdk/react` through `react/package.json`, a stub whose `main`, `module` and `types` point into `dist/`.
+
+`@yavio/shared` is not published. tsup bundles its code (`noExternal`) and inlines its types; `tsconfig.build.json` maps `@yavio/shared` and `@yavio/shared/*` to `packages/shared/src` for both, so bundle and declarations come from the same files. Before 0.4.2 `index.d.ts` imported `@yavio/shared/platform`, so `Platform` and `platformValues` were `any` or, with `skipLibCheck` off, the import failed. `scripts/check-package.mjs` (`check:package`) checks the packed tarball as an app consumes it, in CI and in the release workflow before publishing (see `.specs/infrastructure/ci-cd.md`).
 
 ## Directory Layout
 

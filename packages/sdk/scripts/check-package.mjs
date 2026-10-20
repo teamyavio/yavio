@@ -1,5 +1,6 @@
 // Checks the packed SDK the way an app consumes it: compiled under the
-// TypeScript settings apps use, and loaded with require() and import.
+// TypeScript settings apps use, and loaded with require(), import and a
+// resolver that ignores `exports`.
 //
 // The SDK's own typecheck compiles its sources inside the monorepo, where
 // @yavio/shared resolves and everything is ESM, so it cannot see what an app
@@ -8,19 +9,28 @@
 // the unit tests were green throughout.
 //
 // Usage: node scripts/check-package.mjs [path/to/yavio-sdk-x.y.z.tgz]
-// Without an argument it packs this directory, so build first. The MCP SDK and
-// React are installed at the versions this package is tested with
-// (node_modules), so the compat workflow checks the MCP SDK floor and the
-// latest release too.
+// Given a tarball, it checks exactly that file. Without one it builds first
+// (turbo, so packages/shared too) and packs this directory, so a green run
+// never describes a stale dist/. The MCP SDK and React are installed at the
+// versions this package is tested with (node_modules), so the compat workflow
+// checks the MCP SDK floor and the latest release too.
+//
+// It installs packages from npm and runs them. Never run it where a publish
+// credential is reachable: the release workflow runs it in a job without
+// id-token permission.
 
-import { execFileSync } from "node:child_process";
+import { execFile as execFileCallback, execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
+import { availableParallelism, freemem, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+
+const execFile = promisify(execFileCallback);
 
 const sdkDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = resolve(sdkDir, "../..");
 const tsc = createRequire(join(sdkDir, "package.json")).resolve("typescript/bin/tsc");
 const installedVersion = (name) =>
   JSON.parse(readFileSync(join(sdkDir, "node_modules", name, "package.json"), "utf8")).version;
@@ -29,9 +39,11 @@ const reactVersion = installedVersion("react");
 
 // The settings apps actually use, with skipLibCheck off: on, an unresolvable
 // import in our declarations is silently `any` (the @ts-expect-error lines
-// below catch that too). Only errors in our declarations and the app's own
-// files count; other packages' declarations are not ours to fix (MCP SDK
-// 1.24.0's need @types/express and the optional @cfworker/json-schema).
+// below catch that too). Every error counts, in other packages' declarations
+// as well, since an unresolved import there degrades types to `any` and could
+// hide ours. The MCP SDK's declarations import express and the optional
+// @cfworker/json-schema (1.24.0 does), so the app installs their types, as an
+// app with skipLibCheck off has to.
 const CASES = [
   { name: "esm-nodenext", type: "module", module: "nodenext", moduleResolution: "nodenext" },
   { name: "esm-bundler", type: "module", module: "esnext", moduleResolution: "bundler" },
@@ -59,42 +71,66 @@ export const bogus: YavioWidget = 1;
 `,
 };
 
-// Each entry point, loaded both ways, must expose its API.
+// Each entry point must expose its API however it is loaded. "legacy" is an
+// exports-unaware resolver (resolve@1, as in Jest before 28 or webpack 4):
+// it finds the root through `main` and the subpath through react/package.json.
 const RUNTIME = [
   { entry: "@yavio/sdk", exports: ["withYavio", "yavio", "platformValues"] },
   { entry: "@yavio/sdk/react", exports: ["useYavio", "extractWidgetConfig"] },
 ];
 
-// Runs tsc and splits its diagnostics by where they are: in another package's
-// declarations, or anywhere else (ours, the app's files, the config).
-function typecheck(dir) {
-  let output = "";
-  try {
-    execFileSync(process.execPath, [tsc, "-p", dir, "--pretty", "false"], {
-      encoding: "utf8",
-      stdio: "pipe",
-    });
-  } catch (err) {
-    output = `${err.stdout}${err.stderr}`;
-    // Without a diagnostic to show, a failed run must not read as a pass.
-    if (output.trim() === "") output = `tsc exited with ${err.status ?? err.signal}`;
-  }
-  // A diagnostic starts at column 0; indented lines continue the previous one.
-  const diagnostics = output.split(/\n(?=\S)/).filter((d) => d.trim() !== "");
-  const isForeign = (d) => {
-    const file = d.split("(")[0];
-    return file.includes("/node_modules/") && !file.includes("/node_modules/@yavio/sdk/");
-  };
+function loaders(entry, exports) {
+  const id = JSON.stringify(entry);
+  const check = `const missing = ${JSON.stringify(exports)}.filter((n) => typeof m[n] === "undefined");
+if (missing.length > 0) throw new Error("missing exports: " + missing.join(", "));`;
   return {
-    ours: diagnostics.filter((d) => !isForeign(d)),
-    foreign: diagnostics.filter(isForeign).length,
+    require: ["-e", `const m = require(${id});\n${check}`],
+    import: ["--input-type=module", "-e", `const m = await import(${id});\n${check}`],
+    legacy: [
+      "-e",
+      `const m = require(require("resolve").sync(${id}, { basedir: process.cwd() }));\n${check}`,
+    ],
   };
+}
+
+// The checks are independent (one directory each), so they run side by side,
+// as many at once as there are CPUs and free gigabytes: a type check with
+// skipLibCheck off peaks at about 650 MB.
+async function runAll(tasks) {
+  const limit = Math.max(1, Math.min(availableParallelism(), Math.floor(freemem() / 1e9)));
+  const results = new Array(tasks.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < tasks.length) {
+      const i = next++;
+      results[i] = await tasks[i]();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
+  return results;
+}
+
+// Runs a command and returns its output on failure, or null on success. Every
+// failure yields text: a process that could not start has no stdout/stderr.
+async function failureOf(args, cwd) {
+  try {
+    await execFile(process.execPath, args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    return null;
+  } catch (err) {
+    const output = `${err.stdout ?? ""}${err.stderr ?? ""}`.trim();
+    return output || err.message || `exited with ${err.code ?? err.signal}`;
+  }
 }
 
 const work = mkdtempSync(join(tmpdir(), "yavio-check-package-"));
 try {
   let tarball = process.argv[2] && resolve(process.argv[2]);
   if (!tarball) {
+    execFileSync(
+      "pnpm",
+      ["turbo", "run", "build", "--filter=@yavio/sdk...", "--output-logs=errors-only"],
+      { cwd: repoRoot, stdio: "inherit" },
+    );
     const packed = execFileSync("npm", ["pack", "--json", "--pack-destination", work], {
       cwd: sdkDir,
       encoding: "utf8",
@@ -117,11 +153,14 @@ try {
       tarball,
       `@modelcontextprotocol/sdk@${mcpVersion}`,
       `react@${reactVersion}`,
+      "@types/express@^5",
+      "@cfworker/json-schema@^4.1.1",
+      "resolve@^1.22.0",
     ],
     { cwd: work, stdio: ["ignore", "ignore", "inherit"] },
   );
 
-  const failed = [];
+  const checks = [];
   for (const c of CASES) {
     const dir = join(work, c.name);
     mkdirSync(dir);
@@ -141,39 +180,27 @@ try {
       join(dir, "tsconfig.json"),
       JSON.stringify({ compilerOptions, files: Object.keys(SOURCES) }, null, 2),
     );
-    const { ours, foreign } = typecheck(dir);
-    const note =
-      foreign > 0 ? ` (${foreign} error(s) in other packages' declarations ignored)` : "";
-    if (ours.length === 0) {
-      console.log(`ok    ${c.name}${note}`);
-    } else {
-      console.log(`FAIL  ${c.name}${note}\n${ours.join("\n")}\n`);
-      failed.push(c.name);
-    }
+    checks.push({
+      name: c.name,
+      run: () => failureOf([tsc, "-p", dir, "--pretty", "false"], work),
+    });
   }
   for (const { entry, exports } of RUNTIME) {
-    const check = `const missing = ${JSON.stringify(exports)}.filter((n) => typeof m[n] === "undefined");
-if (missing.length > 0) throw new Error("missing exports: " + missing.join(", "));`;
-    const loaders = {
-      require: ["-e", `const m = require(${JSON.stringify(entry)});\n${check}`],
-      import: [
-        "--input-type=module",
-        "-e",
-        `const m = await import(${JSON.stringify(entry)});\n${check}`,
-      ],
-    };
-    for (const [how, args] of Object.entries(loaders)) {
-      const name = `${how} ${entry}`;
-      try {
-        execFileSync(process.execPath, args, { cwd: work, encoding: "utf8", stdio: "pipe" });
-        console.log(`ok    ${name}`);
-      } catch (err) {
-        console.log(`FAIL  ${name}\n${err.stderr}`);
-        failed.push(name);
-      }
+    for (const [how, args] of Object.entries(loaders(entry, exports))) {
+      checks.push({ name: `${how} ${entry}`, run: () => failureOf(args, work) });
     }
   }
 
+  const failures = await runAll(checks.map((c) => c.run));
+  const failed = [];
+  checks.forEach(({ name }, i) => {
+    if (failures[i] === null) {
+      console.log(`ok    ${name}`);
+    } else {
+      console.log(`FAIL  ${name}\n${failures[i]}\n`);
+      failed.push(name);
+    }
+  });
   if (failed.length > 0) {
     console.error(`${failed.length} check(s) failed: ${failed.join(", ")}`);
     process.exitCode = 1;
