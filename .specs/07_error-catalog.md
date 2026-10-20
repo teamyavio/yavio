@@ -125,6 +125,7 @@ Errors originating in the `@yavio/sdk` SDK (both server and widget entry points)
 | `YAVIO-1104` | warn | Widget config injection skipped | Response interception could not detect `_meta.ui.resourceUri` or injection failed. Widget operates without analytics. | Ensure tool response follows MCP widget response format. |
 | `YAVIO-1105` | warn | Context unavailable | A tracking call (`yavio.conversion()`, `track()`, `step()`, `identify()`) ran with no active `AsyncLocalStorage` request store — typically from a tool registered on the unwrapped server. The event has no `trace_id`/`session_id` to attach to and is **dropped**. Logged once per process; never in no-op mode. | Register the tool through `withYavio()`; use the `tools` overrides to limit what is captured for it instead of leaving it unwrapped. |
 | `YAVIO-1106` | warn | Tool response inspection failed | Error inspecting tool handler response for size, content type, or zero-result detection. Event captured without response metadata. | Report the bug. |
+| `YAVIO-1107` | error | Unsupported server | `withYavio()` / `yavio.wrap()` received a value with no `registerTool` function — not an MCP SDK v1 or v2 `McpServer`. The value is returned **unwrapped** (no instrumentation, no transport, no listeners), so the integrator's server keeps working. Logged once per process. | Pass the `McpServer` instance itself (`@modelcontextprotocol/sdk` ≥ 1.24.0 or `@modelcontextprotocol/server` 2.x), not a transport, a handler or a framework facade. |
 
 ### Transport & Delivery (1200&ndash;1299)
 
