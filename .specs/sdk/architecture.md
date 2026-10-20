@@ -30,18 +30,20 @@ The SDK ships as a single npm package with two entry points routed via the `pack
   },
   "peerDependencies": {
     "@modelcontextprotocol/sdk": ">=1.24.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "react": ">=18.0.0",
     "react-dom": ">=18.0.0"
   },
   "peerDependenciesMeta": {
-    "@modelcontextprotocol/sdk": { "optional": false },
+    "@modelcontextprotocol/sdk": { "optional": true },
+    "@modelcontextprotocol/server": { "optional": true },
     "react": { "optional": true },
     "react-dom": { "optional": true }
   }
 }
 ```
 
-React is needed only for `@yavio/sdk/react`; a server-only integration installs the MCP SDK alone.
+React is needed only for `@yavio/sdk/react`. The two MCP peers are both optional because an integration has one or the other (#133): MCP SDK v1 (`@modelcontextprotocol/sdk`) or v2 (`@modelcontextprotocol/server` and its family). The SDK imports neither at runtime — the wrapped server is typed by shape (`McpServerLike`) — so `tsup` lists both as externals only to be safe. See [per-request-servers.md](./per-request-servers.md).
 
 Each condition carries its own declarations (0.4.2). With one `types` for both, TypeScript reads `index.d.ts` as ESM for a CommonJS app on `node16`/`nodenext`, whose `McpServer` is then the CommonJS class, and `withYavio(server)` does not compile. Tools that ignore `exports` (TypeScript's `moduleResolution: node10`, Jest before 28, webpack 4) find the root through `main` and `types`, and `@yavio/sdk/react` through `react/package.json`, a stub whose `main`, `module` and `types` point into `dist/`.
 

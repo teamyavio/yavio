@@ -11,7 +11,9 @@ import { Callout } from "fumadocs-ui/components/callout";
 npm install @yavio/sdk
 ```
 
-The SDK requires `@modelcontextprotocol/sdk` >= 1.24.0 as a peer dependency.
+The SDK works with either MCP SDK generation as an optional peer dependency: `@modelcontextprotocol/sdk` >= 1.24.0, or `@modelcontextprotocol/server` 2.x.
+
+Hosts that build a new `McpServer` per request (stateless Streamable HTTP, `createMcpHandler`, `mcp-handler`, Skybridge 2) create the client once with `createYavio(options)` and call `yavio.wrap(server)` per request; see the package README's "Stateless / per-request servers" section.
 
 ## Wrapping your server
 

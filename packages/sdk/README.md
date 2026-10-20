@@ -8,7 +8,7 @@ Instrument [MCP](https://modelcontextprotocol.io/) servers with analytics, sessi
 npm install @yavio/sdk
 ```
 
-Requires `@modelcontextprotocol/sdk` >=1.24.0 as a peer dependency. CI tests that floor and the latest release weekly.
+Works with either MCP SDK generation, installed as an optional peer dependency: `@modelcontextprotocol/sdk` >=1.24.0 (v1) or `@modelcontextprotocol/server` 2.x (v2, the scoped package family). CI tests the v1 floor, the latest v1 release and the latest v2 release weekly.
 
 ## Quick Start
 
@@ -112,6 +112,44 @@ In this mode the SDK:
 - still supports the full `yavio.identify / step / track / conversion` API inside handlers.
 
 The React widget (`useYavio()`) auto-configures from `_meta.yavio`, so it will not connect on its own in server-only mode — pass config to the hook explicitly if you still want client-side tracking.
+
+### Stateless / per-request servers
+
+Stateless HTTP hosts build a new `McpServer` for every request (the MCP SDK's stateless Streamable HTTP pattern, v2 `createMcpHandler`, `mcp-handler`, Skybridge 2). Create the client once per process and wrap each server as it is built:
+
+```typescript
+import express from "express";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createYavio } from "@yavio/sdk";
+
+// Once per process: config, the HTTP transport to ingest, the shutdown hooks.
+const yavio = createYavio({ serverOnly: true, capture: { geo: "country" } });
+
+function buildServer() {
+  const server = new McpServer({ name: "example", version: "1.0.0" });
+  server.registerTool("get_price", { /* schemas, annotations, _meta */ }, handler);
+  return server;
+}
+
+const app = express().use(express.json());
+app.post("/mcp", async (req, res) => {
+  // Per request: cheap and synchronous, no new transport, listeners or session store.
+  const server = yavio.wrap(buildServer());
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+  res.on("close", () => { void transport.close(); void server.close(); });
+  await server.connect(transport);
+  await transport.handleRequest(req, res, req.body);
+});
+```
+
+On MCP SDK v2 only the imports differ: `McpServer` from `@modelcontextprotocol/server`, `NodeStreamableHTTPServerTransport` from `@modelcontextprotocol/node`, or `createMcpHandler((ctx) => yavio.wrap(buildServer()))`.
+
+What holds across instances: the same `session_id` and user for the same conversation (`Mcp-Session-Id` or ChatGPT's `openai/session`), one `connection` event per session, one `tool_discovery` per tool per process, and `yavio.identify()` on one request visible on the next. A client that sends neither session key gets one session per request. Tools registered before the wrap — as `buildServer()` does above — are instrumented like tools registered through the wrapped server.
+
+`withYavio(server, options)` is also safe to call per request: the transport, the session store and the shutdown hooks are shared per API key and endpoint. It resolves the configuration (environment, `.yaviorc.json`) on every call, which `createYavio()` does once. `yavio.shutdown()` drains the transport for hosts with their own lifecycle; the SDK also drains on `SIGTERM`/`SIGINT`.
+
+A value that is not an `McpServer` (no `registerTool`) comes back unwrapped with one `YAVIO-1107` error per process, so a mis-wired integration keeps serving.
 
 ## Captured data
 
