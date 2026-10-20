@@ -77,3 +77,5 @@ jobs:
 
       - run: pnpm turbo build --filter=@yavio/sdk...
       - run: pnpm --filter @yavio/sdk exec vitest run
+      # Installs the tarball next to this MCP SDK version.
+      - run: pnpm --filter @yavio/sdk run check:package

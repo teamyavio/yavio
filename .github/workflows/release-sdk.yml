@@ -49,6 +49,9 @@ jobs:
 
       - run: pnpm turbo build --filter=@yavio/sdk...
       - run: pnpm --filter @yavio/sdk exec vitest run
+      # The tarball npm publish is about to upload, compiled and loaded as an
+      # app would.
+      - run: pnpm --filter @yavio/sdk run check:package
 
       # Node 22 ships npm 10; OIDC trusted publishing needs npm >= 11.5.1
       - run: npm install -g npm@latest

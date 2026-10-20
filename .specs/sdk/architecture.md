@@ -6,37 +6,39 @@ The SDK ships as a single npm package with two entry points routed via the `pack
 
 | Import Path | Entry Point | Environment |
 |-------------|-------------|-------------|
-| `@yavio/sdk` | `./dist/server/index.mjs` | Node.js (MCP server process) |
-| `@yavio/sdk/react` | `./dist/react/index.mjs` | Browser (ChatGPT widget iframe) |
+| `@yavio/sdk` | `./dist/index.js` (ESM), `./dist/index.cjs` (CommonJS) | Node.js (MCP server process) |
+| `@yavio/sdk/react` | `./dist/react.js` (ESM), `./dist/react.cjs` (CommonJS) | Browser (ChatGPT widget iframe) |
 
 ## Exports Field
 
 ```json
-// package.json
+// package.json (excerpt)
 {
-  "name": "@yavio/sdk",
-  "version": "1.0.0",
-  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "types": "./dist/index.d.cts",
+  "typesVersions": { "*": { "react": ["./dist/react.d.cts"] } },
   "exports": {
     ".": {
-      "import": "./dist/server/index.mjs",
-      "require": "./dist/server/index.cjs",
-      "types": "./dist/server/index.d.ts"
+      "import": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+      "require": { "types": "./dist/index.d.cts", "default": "./dist/index.cjs" }
     },
     "./react": {
-      "import": "./dist/react/index.mjs",
-      "types": "./dist/react/index.d.ts"
+      "import": { "types": "./dist/react.d.ts", "default": "./dist/react.js" },
+      "require": { "types": "./dist/react.d.cts", "default": "./dist/react.cjs" }
     }
   },
   "peerDependencies": {
-    "@modelcontextprotocol/sdk": ">=1.0.0",
-    "react": ">=18.0.0"
-  },
-  "peerDependenciesMeta": {
-    "react": { "optional": true }
+    "@modelcontextprotocol/sdk": ">=1.24.0",
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0"
   }
 }
 ```
+
+Each condition carries its own declarations (0.4.2). With one `types` for both, TypeScript reads `index.d.ts` as ESM for a CommonJS app on `node16`/`nodenext`, whose `McpServer` is then the CommonJS class, and `withYavio(server)` does not compile. `main`, `types` and `typesVersions` serve `moduleResolution: node10`, which ignores `exports`.
+
+`@yavio/shared` is not published. tsup bundles its code (`noExternal`) and, through a `paths` mapping in the declaration build, its types; before 0.4.2 `index.d.ts` imported `@yavio/shared/platform`, so `Platform` and `platformValues` were `any` or, with `skipLibCheck` off, the import failed. `scripts/check-package.mjs` (`check:package`, run in CI and before every publish) checks the packed tarball as an app consumes it.
 
 ## Directory Layout
 

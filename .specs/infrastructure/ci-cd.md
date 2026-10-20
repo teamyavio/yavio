@@ -127,7 +127,10 @@ test-sdk:
     - uses: actions/checkout@v4
     - uses: ./.github/actions/setup
     - run: pnpm --filter @yavio/sdk test
+    - run: pnpm --filter @yavio/sdk run check:package
 ```
+
+`check:package` (`packages/sdk/scripts/check-package.mjs`) packs the SDK, installs the tarball outside the repository and compiles a small app against it under four TypeScript setups (ESM with `nodenext` and `bundler`, CommonJS with `nodenext` and `node10`), then loads both entry points with `require()` and `import`. The SDK's own typecheck cannot see what npm users get: up to 0.4.1 the declarations imported the unpublished `@yavio/shared` and `require()` was handed the ESM declarations, with every test green. The compat workflow and the release job run it too.
 
 Repeated for `ingest`, `dashboard`, and `cli` with their respective change detection gates.
 
