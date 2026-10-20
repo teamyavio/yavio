@@ -49,7 +49,7 @@ interface QueryContext {
  * — keep the full mapping, so the list and the detail agree on whose the
  * subject-only events are.
  */
-interface TimeWindow {
+export interface TimeWindow {
   /** SQL expressions; the window is [from, to). */
   from: string;
   to: string;
@@ -58,7 +58,7 @@ interface TimeWindow {
 const bound = (column: string, window?: TimeWindow): string =>
   window ? `AND ${column} >= ${window.from} AND ${column} < ${window.to}` : "";
 
-function keyedEvents({
+export function keyedEvents({
   events,
   stitch,
 }: { events?: TimeWindow; stitch?: TimeWindow } = {}): string {

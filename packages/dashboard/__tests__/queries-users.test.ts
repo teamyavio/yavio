@@ -3,7 +3,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ClickHouseClient } from "@clickhouse/client";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { adminClient, applyMigrations, clickhouseUrl } from "./helpers/clickhouse";
+import {
+  DASHBOARD_TEST_PASSWORD,
+  adminClient,
+  applyMigrations,
+  clickhouseUrl,
+} from "./helpers/clickhouse";
 
 // #89: every user query runs against a real ClickHouse, through the real
 // queryAnalytics — as yavio_dashboard, with the row policies — instead of
@@ -11,7 +16,7 @@ import { adminClient, applyMigrations, clickhouseUrl } from "./helpers/clickhous
 // passed CI while it failed to parse on every call.
 
 const url = clickhouseUrl();
-const DASH_PASSWORD = "dash-users-test";
+const DASH_PASSWORD = DASHBOARD_TEST_PASSWORD;
 
 type Users = typeof import("@/lib/queries/users");
 let q: Users;

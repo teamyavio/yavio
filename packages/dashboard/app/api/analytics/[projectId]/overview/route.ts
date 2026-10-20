@@ -3,6 +3,7 @@ import { parseAnalyticsParams } from "@/lib/analytics/validation";
 import { AnalyticsQueryError } from "@/lib/clickhouse/analytics-client";
 import {
   queryInvocationsTimeSeries,
+  queryLocationBreakdown,
   queryOverviewKPIs,
   queryPlatformBreakdown,
   queryTopTools,
@@ -48,14 +49,15 @@ export const GET = withAnalyticsAuth("viewer")(async (request, ctx) => {
   };
 
   try {
-    const [kpis, timeSeries, platforms, topTools] = await Promise.all([
+    const [kpis, timeSeries, platforms, topTools, locations] = await Promise.all([
       queryOverviewKPIs(queryCtx),
       queryInvocationsTimeSeries(queryCtx, granularity),
       queryPlatformBreakdown(queryCtx),
       queryTopTools(queryCtx),
+      queryLocationBreakdown(queryCtx),
     ]);
 
-    return NextResponse.json({ kpis, timeSeries, platforms, topTools });
+    return NextResponse.json({ kpis, timeSeries, platforms, topTools, locations });
   } catch (err) {
     if (err instanceof AnalyticsQueryError) {
       return err.toResponse();

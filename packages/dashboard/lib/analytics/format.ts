@@ -47,6 +47,29 @@ export function formatCurrency(value: number, currency = "USD"): string {
   }).format(value);
 }
 
+const regionNames = (() => {
+  try {
+    return new Intl.DisplayNames(["en"], { type: "region" });
+  } catch {
+    return null;
+  }
+})();
+
+/**
+ * An ISO 3166-1 alpha-2 code as "Germany (DE)". The bare code when Intl has
+ * no name for it: `of()` then returns the code itself, or throws for a
+ * malformed one.
+ */
+export function formatCountry(code: string): string {
+  let name: string | undefined;
+  try {
+    name = regionNames?.of(code);
+  } catch {
+    name = undefined;
+  }
+  return name && name !== code ? `${name} (${code})` : code;
+}
+
 const MONTH_NAMES = [
   "Jan",
   "Feb",

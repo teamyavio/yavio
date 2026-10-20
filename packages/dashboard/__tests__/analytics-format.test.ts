@@ -1,6 +1,7 @@
 import {
   formatBucketLabel,
   formatBucketTooltip,
+  formatCountry,
   formatCurrency,
   formatLatency,
   formatNumber,
@@ -36,6 +37,19 @@ describe("formatPercent", () => {
 
   it("respects decimal places", () => {
     expect(formatPercent(0.9523, 2)).toBe("95.23%");
+  });
+});
+
+describe("formatCountry", () => {
+  it("names the country and keeps the code (#129)", () => {
+    expect(formatCountry("DE")).toBe("Germany (DE)");
+    expect(formatCountry("US")).toBe("United States (US)");
+    expect(formatCountry("XK")).toBe("Kosovo (XK)");
+  });
+
+  it("falls back to the bare code when Intl has no name", () => {
+    expect(formatCountry("AA")).toBe("AA"); // of() returns the code itself
+    expect(formatCountry("D")).toBe("D"); // of() throws
   });
 });
 

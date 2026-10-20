@@ -26,6 +26,35 @@ export interface PlatformBreakdown {
   percentage: number;
 }
 
+/** One region of a country in the Locations breakdown (#129). `region` null = Unknown. */
+export interface LocationRegion {
+  region: string | null;
+  toolCalls: number;
+  users: number;
+}
+
+/**
+ * One country in the Locations breakdown (#129). `countryCode` null = Unknown:
+ * no location sent (only ChatGPT sends one, and only to apps that capture
+ * arguments). `users` is counted for the country itself, not summed from its
+ * regions — a person seen in two regions is one user of the country.
+ */
+export interface LocationCountry {
+  countryCode: string | null;
+  toolCalls: number;
+  users: number;
+  regions: LocationRegion[];
+}
+
+/** Locations card (#129): tool calls by country and region, plus how many had a location. */
+export interface LocationBreakdown {
+  totalToolCalls: number;
+  /** Tool calls with a country. */
+  locatedToolCalls: number;
+  /** Known countries by tool calls, the Unknown bucket last. */
+  countries: LocationCountry[];
+}
+
 /** Tool ranking row. */
 export interface ToolRanking {
   toolName: string;

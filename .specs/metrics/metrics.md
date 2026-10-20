@@ -14,6 +14,7 @@ All metrics computed at query time from captured events. Nothing in this file is
 | Avg latency | `AVG(latency_ms) WHERE event_type = 'tool_call'` | Overview |
 | Invocations over time | `tool_call` events grouped by time bucket | Overview (line chart) |
 | Platform breakdown | `tool_call` events grouped by `platform` | Overview (pie chart) |
+| Locations | `tool_call` events grouped by `country_code`, and by `(country_code, region)` (#129). Users = the Users-page key (`keyedEvents()`, stitched within the range), counted per country and per region, never summed from regions. NULL country or region = Unknown; Unknown country listed last. Coverage = calls with a country / all calls — only ChatGPT sends a location, and only with `capture.inputValues` on | Overview (table, countries expand to regions) |
 | Top tools by invocation | `tool_call` events grouped by `event_name` ORDER BY count | Overview |
 | Total conversions | `COUNT(*) WHERE event_type = 'conversion'` | Overview |
 | Total revenue | `SUM(conversion_value) WHERE event_type = 'conversion'` | Overview |

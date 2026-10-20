@@ -24,8 +24,10 @@ import { queryErrorList } from "@/lib/queries/errors";
 import { queryIntentFeed, queryIntentKPIs } from "@/lib/queries/intents";
 import {
   queryInvocationsTimeSeries,
+  queryLocationBreakdown,
   queryOverviewKPIs,
   queryPlatformBreakdown,
+  topLocations,
 } from "@/lib/queries/overview";
 import {
   queryToolDetailKPIs,
@@ -135,7 +137,7 @@ const handler = createMcpHandler(
       {
         title: "Overview KPIs",
         description:
-          "Headline numbers for a project and date range: tool invocations, sessions, error rate, latency (with previous-period comparison) plus a platform breakdown. Same definitions as the dashboard.",
+          "Headline numbers for a project and date range: tool invocations, sessions, error rate, latency (with previous-period comparison), a platform breakdown, and locations: tool calls and users for the 10 largest countries (countryCode null = Unknown) with up to 5 regions each (region null = Unknown), plus totalToolCalls and locatedToolCalls. Only ChatGPT sends a location, and only to apps that capture tool arguments, so Unknown is often most calls. Same definitions as the dashboard.",
         inputSchema: projectShape,
         annotations: readOnly,
       },
@@ -143,11 +145,17 @@ const handler = createMcpHandler(
         const auth = mcpAuthContext(extra.authInfo);
         return runTool(async () => {
           const ctx = await projectContext(auth, args);
-          const [kpis, platforms] = await Promise.all([
+          const [kpis, platforms, locations] = await Promise.all([
             queryOverviewKPIs(ctx),
             queryPlatformBreakdown(ctx),
+            queryLocationBreakdown(ctx),
           ]);
-          return toolText({ filters: appliedFilters(ctx), kpis, platforms });
+          return toolText({
+            filters: appliedFilters(ctx),
+            kpis,
+            platforms,
+            locations: topLocations(locations),
+          });
         });
       },
     );

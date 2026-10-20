@@ -8,9 +8,11 @@ vi.mock("@/lib/clickhouse/analytics-client", () => ({
 
 import {
   queryInvocationsTimeSeries,
+  queryLocationBreakdown,
   queryOverviewKPIs,
   queryPlatformBreakdown,
   queryTopTools,
+  topLocations,
 } from "@/lib/queries/overview";
 
 const baseCtx = {
@@ -99,6 +101,72 @@ describe("overview queries", () => {
       const call = mockQueryAnalytics.mock.calls[0][0];
       expect(call.query).toContain("platform IN");
       expect(call.params.platforms).toEqual(["cursor"]);
+    });
+  });
+
+  // The SQL runs on a real ClickHouse in queries-locations.test.ts; this pins
+  // the assembly of the rows it returns (#129).
+  describe("queryLocationBreakdown", () => {
+    it("coerces UInt64 strings and nests regions under their country", async () => {
+      mockQueryAnalytics.mockResolvedValue([
+        { level: "country", country: "", region_name: "", tool_calls: "7", users: "1" },
+        { level: "country", country: "DE", region_name: "", tool_calls: "3", users: "2" },
+        { level: "region", country: "DE", region_name: "", tool_calls: "1", users: "1" },
+        { level: "region", country: "DE", region_name: "Hesse", tool_calls: "2", users: "2" },
+      ]);
+
+      const result = await queryLocationBreakdown({ ...baseCtx, platform: ["chatgpt"] });
+      expect(result).toEqual({
+        totalToolCalls: 10,
+        locatedToolCalls: 3,
+        countries: [
+          {
+            countryCode: "DE",
+            toolCalls: 3,
+            users: 2,
+            regions: [
+              { region: "Hesse", toolCalls: 2, users: 2 },
+              { region: null, toolCalls: 1, users: 1 },
+            ],
+          },
+          { countryCode: null, toolCalls: 7, users: 1, regions: [] },
+        ],
+      });
+      const call = mockQueryAnalytics.mock.calls[0][0];
+      expect(call.params.platforms).toEqual(["chatgpt"]);
+      expect(call.workspaceId).toBe("ws_1");
+      expect(call.projectId).toBe("proj_1");
+    });
+  });
+
+  describe("topLocations", () => {
+    it("keeps the largest countries and regions, and the full totals", () => {
+      const country = (code: string, calls: number) => ({
+        countryCode: code,
+        toolCalls: calls,
+        users: 1,
+        regions: Array.from({ length: 7 }, (_, i) => ({
+          region: `R${i}`,
+          toolCalls: 1,
+          users: 1,
+        })),
+      });
+      const unknown = { countryCode: null, toolCalls: 10, users: 0, regions: [] };
+      const full = {
+        totalToolCalls: 100,
+        locatedToolCalls: 90,
+        countries: [...Array.from({ length: 12 }, (_, i) => country(`C${i}`, 12 - i)), unknown],
+      };
+
+      const top = topLocations(full);
+      // The Unknown bucket sorts last and is kept even though it is the 13th.
+      expect(top.countries.map((c) => c.countryCode)).toEqual([
+        ...full.countries.slice(0, 10).map((c) => c.countryCode),
+        null,
+      ]);
+      expect(top.countries.slice(0, 10).every((c) => c.regions.length === 5)).toBe(true);
+      expect(top).toMatchObject({ totalToolCalls: 100, locatedToolCalls: 90, moreCountries: 2 });
+      expect(full.countries[0].regions).toHaveLength(7); // the input is not cut
     });
   });
 });

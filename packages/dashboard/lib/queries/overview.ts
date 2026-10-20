@@ -2,7 +2,15 @@ import { fillTimeBuckets } from "@/lib/analytics/fill-buckets";
 import { granularityToFunction } from "@/lib/analytics/format";
 import type { Granularity } from "@/lib/analytics/validation";
 import { queryAnalytics } from "@/lib/clickhouse/analytics-client";
-import type { KPIResult, PlatformBreakdown, TimeSeriesPoint, ToolRanking } from "./types";
+import type {
+  KPIResult,
+  LocationBreakdown,
+  LocationCountry,
+  PlatformBreakdown,
+  TimeSeriesPoint,
+  ToolRanking,
+} from "./types";
+import { keyedEvents } from "./users";
 
 interface QueryContext {
   workspaceId: string;
@@ -177,6 +185,130 @@ export async function queryPlatformBreakdown(ctx: QueryContext): Promise<Platfor
     count: Number(r.count),
     percentage: total > 0 ? Number(r.count) / total : 0,
   }));
+}
+
+/**
+ * Tool calls by country and region (#129), from raw events.
+ *
+ * Users are the Users page's key (keyedEvents, #89): user_id, else the
+ * user_id stitched to the subject_id, else subject_id — never session_id —
+ * stitched within the selected range like the windowed Users queries (#112).
+ * Calls without a key count as calls, not as users.
+ *
+ * Two aggregations instead of summing regions: distinct users are not
+ * additive, so a person seen in two regions of one country would count twice
+ * in a country total built from its region rows.
+ *
+ * NULL country_code / region become '' here and null (Unknown) in the
+ * result. Ingest stores a region only next to a valid country, so the
+ * Unknown country has no regions.
+ */
+export async function queryLocationBreakdown(ctx: QueryContext): Promise<LocationBreakdown> {
+  const pf = platformFilter(ctx.platform);
+  const window = { from: "{from:DateTime64(3)}", to: "{to:DateTime64(3)}" };
+
+  // Aliases differ from the columns on purpose: ClickHouse resolves an alias
+  // before a column of the same name (see users.ts).
+  const rows = await queryAnalytics<{
+    level: "country" | "region";
+    country: string;
+    region_name: string;
+    tool_calls: number | string;
+    users: number | string;
+  }>({
+    workspaceId: ctx.workspaceId,
+    projectId: ctx.projectId,
+    query: `
+      WITH ${keyedEvents({ events: window, stitch: window })},
+      located AS (
+        SELECT ifNull(country_code, '') AS country, ifNull(region, '') AS region_name, user_key
+        FROM keyed
+        WHERE event_type = 'tool_call' ${pf}
+      )
+      SELECT 'country' AS level, country, '' AS region_name,
+             count() AS tool_calls, uniqExactIf(user_key, user_key IS NOT NULL) AS users
+      FROM located
+      GROUP BY country
+      UNION ALL
+      SELECT 'region' AS level, country, region_name,
+             count() AS tool_calls, uniqExactIf(user_key, user_key IS NOT NULL) AS users
+      FROM located
+      WHERE country != ''
+      GROUP BY country, region_name
+    `,
+    params: {
+      projectId: ctx.projectId,
+      from: ctx.from,
+      to: ctx.to,
+      ...platformParams(ctx.platform),
+    },
+  });
+
+  // Known first by tool calls (ties by name), the Unknown bucket last.
+  const byCalls = <T extends { toolCalls: number }>(key: (row: T) => string | null) => {
+    return (a: T, b: T): number => {
+      const ka = key(a);
+      const kb = key(b);
+      if ((ka === null) !== (kb === null)) return ka === null ? 1 : -1;
+      return b.toolCalls - a.toolCalls || (ka ?? "").localeCompare(kb ?? "");
+    };
+  };
+
+  const countries = new Map<string, LocationCountry>();
+  for (const r of rows) {
+    if (r.level !== "country") continue;
+    countries.set(r.country, {
+      countryCode: r.country || null,
+      toolCalls: Number(r.tool_calls),
+      users: Number(r.users),
+      regions: [],
+    });
+  }
+  for (const r of rows) {
+    if (r.level !== "region") continue;
+    countries.get(r.country)?.regions.push({
+      region: r.region_name || null,
+      toolCalls: Number(r.tool_calls),
+      users: Number(r.users),
+    });
+  }
+
+  const list = [...countries.values()];
+  for (const c of list) c.regions.sort(byCalls((x) => x.region));
+  list.sort(byCalls((x) => x.countryCode));
+
+  const totalToolCalls = list.reduce((sum, c) => sum + c.toolCalls, 0);
+  const locatedToolCalls = list.reduce(
+    (sum, c) => sum + (c.countryCode === null ? 0 : c.toolCalls),
+    0,
+  );
+  return { totalToolCalls, locatedToolCalls, countries: list };
+}
+
+/**
+ * The breakdown cut to its largest known countries and, within each, its
+ * largest regions — for the MCP get_overview tool, whose answer lands in a
+ * model's context. The Unknown country is always kept (it sorts last and is
+ * often most calls); the totals are those of the full breakdown.
+ */
+export function topLocations(
+  breakdown: LocationBreakdown,
+  maxCountries = 10,
+  maxRegions = 5,
+): LocationBreakdown & { moreCountries: number } {
+  const known = breakdown.countries.filter((c) => c.countryCode !== null);
+  const unknown = breakdown.countries.filter((c) => c.countryCode === null);
+  return {
+    totalToolCalls: breakdown.totalToolCalls,
+    locatedToolCalls: breakdown.locatedToolCalls,
+    countries: [
+      ...known
+        .slice(0, maxCountries)
+        .map((c) => ({ ...c, regions: c.regions.slice(0, maxRegions) })),
+      ...unknown,
+    ],
+    moreCountries: Math.max(known.length - maxCountries, 0),
+  };
 }
 
 export async function queryTopTools(ctx: QueryContext): Promise<ToolRanking[]> {
