@@ -344,6 +344,32 @@ describe("per-request servers share one process-level state", () => {
     expect(toolCallEvents()).toEqual([]);
   });
 
+  it("a differing capture override on a re-wrap warns once (YAVIO-1108) and the first wrap's capture keeps applying", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const raw = new McpServer({ name: "pay-raw", version: "1.0" });
+    const first = withYavio(raw, { apiKey: "yav_fp", endpoint, serverOnly: true });
+    first.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => ok("x"));
+    // Same key and endpoint; only a per-tool override differs.
+    const again = withYavio(raw, {
+      apiKey: "yav_fp",
+      endpoint,
+      serverOnly: true,
+      tools: { get_price: { inputValues: false } },
+    });
+    expect(again).toBe(first);
+    // The same options in another key order: no warning.
+    expect(withYavio(raw, { serverOnly: true, endpoint, apiKey: "yav_fp" })).toBe(first);
+    await callOnce(first);
+    await createYavio({ apiKey: "yav_fp", endpoint, serverOnly: true }).shutdown();
+
+    const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("YAVIO-1108"));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("withYavio()");
+    // First wrap wins: inputs are still captured.
+    const [call] = toolCallEvents();
+    expect(call?.input_values).toMatchObject({ q: "x" });
+  });
+
   it("shutdown() of a holder that is not the last drains everything it queued, beyond one batch", async () => {
     const a = createYavio({ apiKey: "yav_drain", endpoint, serverOnly: true });
     const b = createYavio({ apiKey: "yav_drain", endpoint, serverOnly: true });

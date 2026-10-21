@@ -9,7 +9,7 @@ import type {
 } from "../core/types.js";
 import { SDK_VERSION } from "../core/version.js";
 import { createYavioContext, markSdkActive } from "./context.js";
-import { createProxy, existingProxy, releaseConnectionMark } from "./proxy.js";
+import { configFingerprint, createProxy, existingProxy, releaseConnectionMark } from "./proxy.js";
 import {
   type SharedHold,
   type SharedState,
@@ -99,9 +99,10 @@ const evictionHookFor =
  * comes back as the existing proxy: a host that wraps the same long-lived
  * server on every request must not stack a callback wrapper per request
  * (N wraps, N `tool_call` events per call). The first wrap wins: a later
- * call with another endpoint or key, or one that would instrument the
- * pre-registered tools where the first did not, gets the existing proxy and
- * one `YAVIO-1108` warning per process.
+ * call with any differing resolved option — endpoint, key, capture flags,
+ * `tools` overrides, `serverOnly`, intent, or one that would instrument the
+ * pre-registered tools where the first did not — gets the existing proxy
+ * unchanged and one `YAVIO-1108` warning per process.
  */
 function wrapServer<T extends McpServerLike>(
   server: T,
@@ -119,11 +120,12 @@ function wrapServer<T extends McpServerLike>(
     const differs =
       existing.endpoint !== config.endpoint ||
       existing.apiKey !== config.apiKey ||
+      existing.fingerprint !== configFingerprint(config) ||
       (instrumentExisting && !existing.instrumentExisting);
     if (differs) {
       logOnce(ErrorCode.SDK.REWRAP_OPTIONS_IGNORED, () =>
         console.warn(
-          `[${ErrorCode.SDK.REWRAP_OPTIONS_IGNORED}] ${entry} called on a server that is already wrapped with other options — the first wrap wins: its endpoint and API key stay, and tools registered before that first wrap are instrumented only if it was createYavio().wrap(). Returned the existing proxy. Shown once per process.`,
+          `[${ErrorCode.SDK.REWRAP_OPTIONS_IGNORED}] ${entry} called on a server that is already wrapped with other options — the first wrap wins: its endpoint, API key, capture flags, tools overrides, serverOnly and intent settings stay, and tools registered before that first wrap are instrumented only if it was createYavio().wrap(). Returned the existing proxy. Shown once per process.`,
         ),
       );
     } else {
@@ -159,7 +161,7 @@ function wrapServer<T extends McpServerLike>(
  * `buildServer()` registered before the wrap — unlike `withYavio()`, which
  * tracks only tools registered through the proxy it returns. A server that
  * is already wrapped comes back as its existing proxy: the first wrap wins,
- * later options are ignored (`YAVIO-1108` once when they differ).
+ * later options are ignored (`YAVIO-1108` once when any of them differs).
  *
  * If no API key is found, `wrap()` returns every server unchanged
  * (transparent no-op) and `shutdown()` does nothing.

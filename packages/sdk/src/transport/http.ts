@@ -99,22 +99,40 @@ export class HttpTransport implements Transport {
   /**
    * Deliver everything queued so far: every batch, after any send already in
    * flight, without stopping the transport. Bounded by the buffer cap, so a
-   * producer that keeps queueing cannot make it loop forever. What a holder's
-   * `shutdown()` does while other holders keep the transport (see shared.ts).
+   * producer that keeps queueing cannot make it loop forever, and by
+   * `shutdownTimeoutMs` like `shutdown()`: against a hanging ingest it gives
+   * up draining at the deadline, leaves what is queued for the timer flush
+   * and does not stop the transport. What a holder's `shutdown()` does while
+   * other holders keep the transport (see shared.ts).
    */
   async drain(): Promise<void> {
-    const rounds = Math.ceil(this.maxBufferSize / this.maxBatchSize) + 1;
-    for (let i = 0; i < rounds && !this.stopped; i++) {
-      if (this.inflight) {
-        await this.inflight.catch(() => {});
-        continue;
+    let expired = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        expired = true;
+        resolve();
+      }, this.shutdownTimeoutMs);
+    });
+    const loop = async () => {
+      const rounds = Math.ceil(this.maxBufferSize / this.maxBatchSize) + 1;
+      for (let i = 0; i < rounds && !this.stopped && !expired; i++) {
+        if (this.inflight) {
+          await this.inflight.catch(() => {});
+          continue;
+        }
+        if (this.buffer.length === 0) return;
+        try {
+          await this.flush();
+        } catch {
+          // sendBatch has already logged; the next batch still goes out.
+        }
       }
-      if (this.buffer.length === 0) return;
-      try {
-        await this.flush();
-      } catch {
-        // sendBatch has already logged; the next batch still goes out.
-      }
+    };
+    try {
+      await Promise.race([loop(), deadline]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 

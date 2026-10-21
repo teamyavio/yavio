@@ -412,6 +412,38 @@ export interface ExistingProxy<T = object> {
   endpoint: string;
   apiKey: string;
   instrumentExisting: boolean;
+  /** `configFingerprint()` of the config the proxy was built with. */
+  fingerprint: string;
+}
+
+/**
+ * The resolved options that shape what a proxy captures — everything but the
+ * endpoint and key, which are compared on their own — as stable JSON (keys
+ * sorted at every level), so two wraps with the same options agree whatever
+ * the order they were written in. A function option (`intent.fallback`) is
+ * reduced to its presence.
+ */
+export function configFingerprint(config: YavioConfig): string {
+  const stable = (value: unknown): unknown => {
+    if (typeof value === "function") return "[function]";
+    if (Array.isArray(value)) return value.map(stable);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.keys(value as Record<string, unknown>)
+          .sort()
+          .map((key) => [key, stable((value as Record<string, unknown>)[key])]),
+      );
+    }
+    return value;
+  };
+  return JSON.stringify(
+    stable({
+      capture: config.capture,
+      tools: config.tools,
+      serverOnly: config.serverOnly,
+      intent: config.intent,
+    }),
+  );
 }
 
 /** Every proxy createProxy built, by the server it wraps, and by the proxy itself. */
@@ -1047,6 +1079,7 @@ export function createProxy<T extends McpServerLike>(
     endpoint: config.endpoint,
     apiKey: config.apiKey,
     instrumentExisting: options.instrumentExisting === true,
+    fingerprint: configFingerprint(config),
   };
   proxiesByServer.set(server, record);
   proxiesByServer.set(proxy, record);
