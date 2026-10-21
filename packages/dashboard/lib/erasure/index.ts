@@ -1,5 +1,6 @@
 import { getMutatingClickHouseClient } from "@/lib/clickhouse";
 import { getDb } from "@/lib/db";
+import { erasureWorkerEnabled } from "./switch";
 import { ErasureWorker } from "./worker";
 
 let worker: ErasureWorker | null = null;
@@ -20,13 +21,19 @@ export function getErasureWorker(): ErasureWorker {
   return worker;
 }
 
-/** Process the queue now; called after a deletion queued a request. */
+/**
+ * Process the queue now; called after a deletion queued a request. With
+ * `ERASURE_WORKER=off` (see switch.ts) the request stays queued: nothing here
+ * may touch ClickHouse.
+ */
 export function kickErasure(): void {
+  if (!erasureWorkerEnabled()) return;
   getErasureWorker().kick();
 }
 
 /** Called once at server start: periodic retries, plus anything left over. */
 export function startErasureWorker(): void {
+  if (!erasureWorkerEnabled()) return;
   const w = getErasureWorker();
   w.start();
   w.kick();

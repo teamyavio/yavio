@@ -1,4 +1,5 @@
 import { requireEraserPassword } from "./clickhouse";
+import { ERASURE_WORKER_OFF_NOTICE, erasureWorkerEnabled } from "./erasure/switch";
 
 /**
  * Configuration the dashboard cannot run correctly without, checked once when
@@ -19,12 +20,19 @@ export async function runStartupChecks(): Promise<void> {
   // environments (CI, Cloud Build) hold no runtime secrets and must not need them.
   if (process.env.NEXT_PHASE === "phase-production-build") return;
 
+  // ERASURE_WORKER=off (erasure/switch.ts): a non-production copy that shares
+  // a production ClickHouse boots without the eraser credential and never
+  // executes a deletion. Any other value than on/off is a misconfiguration.
+  let erasure: boolean;
   try {
-    requireEraserPassword();
+    erasure = erasureWorkerEnabled();
+    if (erasure) requireEraserPassword();
   } catch (err) {
     console.error(`[startup] ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
+    return;
   }
+  if (!erasure) console.warn(ERASURE_WORKER_OFF_NOTICE);
 
   // The erasure queue's worker (#91 part 2): retries every queued deletion
   // until each ClickHouse table is done, including requests left over from
