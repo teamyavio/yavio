@@ -516,14 +516,14 @@ describe("HttpTransport.drain()", () => {
 });
 
 describe("HttpTransport.shutdown() is idempotent (#142)", () => {
-  /** A fetch that answers after a real delay, resolving `settled` when it did. */
+  /** A fetch that answers after a real delay; `settled()` counts the fetches answered so far. */
   function slowFetch(delayMs: number) {
-    let settled = false;
+    let settled = 0;
     const fetch = vi.fn().mockImplementation(
       () =>
         new Promise((resolve) =>
           setTimeout(() => {
-            settled = true;
+            settled++;
             resolve({ status: 200, headers: { get: () => null }, json: () => ({}) });
           }, delayMs),
         ),
@@ -544,7 +544,7 @@ describe("HttpTransport.shutdown() is idempotent (#142)", () => {
     transport.send([fakeEvent()]);
     const first = transport.shutdown().then(() => settled());
     const second = transport.shutdown().then(() => settled());
-    expect(await Promise.all([first, second])).toEqual([true, true]);
+    expect(await Promise.all([first, second])).toEqual([1, 1]);
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -561,7 +561,7 @@ describe("HttpTransport.shutdown() is idempotent (#142)", () => {
     transport.send([fakeEvent()]);
     const closing = transport.shutdown();
     await transport.drain();
-    expect(settled()).toBe(true);
+    expect(settled()).toBe(1);
     await closing;
     expect(fetch).toHaveBeenCalledTimes(1);
   });
@@ -582,7 +582,9 @@ describe("HttpTransport.shutdown() is idempotent (#142)", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     const closing = transport.shutdown(); // takes over the second batch
     await draining;
-    expect(settled()).toBe(true);
+    // Both batches answered when drain() resolves — not just the first,
+    // with the second still on its way out under the shutdown.
+    expect(settled()).toBe(2);
     expect(fetch).toHaveBeenCalledTimes(2);
     await closing;
   });

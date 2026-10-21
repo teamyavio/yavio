@@ -274,6 +274,12 @@ describe("shutdown() during the signal drain (#142)", () => {
 
   it("a post-signal transport is reused by the next wrap, not orphaned: both calls are delivered", async () => {
     await withoutOtherListeners("SIGTERM", async () => {
+      // The old proxy's batch is answered last: with a fresh transport per
+      // wrap (the orphaning bug) it leaves first and would be answered first
+      // under a uniform delay, so a uniform delay cannot tell the two apart.
+      const q = (batch: { events: Array<Record<string, unknown>> }) =>
+        batch.events.map((e) => (e.input_values as { q?: string } | undefined)?.q);
+      ingest.respondAfterMs = (batch) => (q(batch).includes("old-proxy") ? 400 : 50);
       const { client, raw } = build("yav_142_reuse");
       await callTool(raw, "get_price", { q: "before" });
       process.emit("SIGTERM", "SIGTERM");
@@ -284,9 +290,12 @@ describe("shutdown() during the signal drain (#142)", () => {
       const next = new McpServer({ name: "next", version: "1.0" });
       client.wrap(next).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
       await callTool(next, "get_price", { q: "new-proxy" });
-      await client.shutdown();
+      const atResolve = await client
+        .shutdown()
+        .then(() => ({ answered: ingest.responded, batches: ingest.batches.length }));
 
-      expect(allAnswered()).toBe(true);
+      // Every batch — the old proxy's slow one included — was answered before shutdown() resolved.
+      expect(atResolve).toEqual({ answered: 3, batches: 3 });
       expect(toolCalls().map((e) => (e.input_values as { q: string }).q)).toEqual([
         "before",
         "old-proxy",
@@ -311,22 +320,31 @@ describe("shutdown() during the signal drain (#142)", () => {
     expect(toolCalls()).toHaveLength(1);
   });
 
-  it("a later shutdown() after the first delivered waits for what was sent in between", async () => {
-    const { client, raw } = build("yav_142_again");
+  it("a second shutdown() with no hold and no signal still delivers what the key's transport carries", async () => {
+    // A withYavio() host with the recipe's shutdown client, created at
+    // startup and never wrapping anything: its first shutdown() releases its
+    // hold (the pin keeps the transport); the second has no hold to release
+    // and no signal drain to wait for — the settleShared() path — and must
+    // still deliver what the pinned proxy sent in between.
+    const apiKey = "yav_142_again";
+    const analytics = createYavio({ apiKey, endpoint: ingest.endpoint, serverOnly: true });
+    const raw = new McpServer({ name: "app", version: "1.0" });
+    withYavio(raw, { apiKey, endpoint: ingest.endpoint, serverOnly: true }).registerTool(
+      "get_price",
+      { inputSchema: { q: z.string() } },
+      ok,
+    );
     await callTool(raw, "get_price", { q: "first" });
-    await client.shutdown();
-    expect(allAnswered()).toBe(true);
-    // The process keeps serving on the existing proxy (no re-wrap): its next
-    // event re-acquires nothing — a second shutdown() still delivers it.
-    const next = new McpServer({ name: "next", version: "1.0" });
-    client.wrap(next).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
-    await callTool(next, "get_price", { q: "second" });
-    await client.shutdown();
-    expect(allAnswered()).toBe(true);
+    expect(await analytics.shutdown().then(allAnswered)).toBe(true);
+    expect(_sharedStateCount()).toBe(1); // pinned: still live
+
+    await callTool(raw, "get_price", { q: "second" }); // buffered for the 10 s timer
+    expect(await analytics.shutdown().then(allAnswered)).toBe(true);
     expect(toolCalls().map((e) => (e.input_values as { q: string }).q)).toEqual([
       "first",
       "second",
     ]);
+    expect(process.listenerCount("SIGTERM")).toBeGreaterThan(0); // no signal happened
   });
 
   it("against an ingest that never answers, shutdown() resolves at shutdownTimeoutMs", async () => {
