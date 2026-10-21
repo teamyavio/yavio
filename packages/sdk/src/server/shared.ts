@@ -17,7 +17,9 @@ import type { Transport } from "../transport/types.js";
  *   sequence of a conversation, found again by the next instance that serves
  *   the same `Mcp-Session-Id` or `openai/session`;
  * - exactly one SIGTERM/SIGINT handler pair for the whole process, which
- *   drains every transport in the registry.
+ *   drains every transport in the registry and then hands the signal back:
+ *   the listeners are removed and, if nothing else listens, the signal is
+ *   re-raised so Node's default exit runs (#138).
  *
  * Not shared, on purpose: the widget token. Ingest binds a widget JWT to the
  * trace id of the call that minted it (`WIDGET_TRACE_ID_MISMATCH` for any
@@ -127,15 +129,70 @@ function noteDraining(): void {
 }
 
 let signalHandlersInstalled = false;
-const shutdownHandler = (): void => {
-  beginProcessShutdown().catch(() => {});
+/** A signal is being handled: a second one means "stop waiting". */
+let signalInFlight = false;
+
+/**
+ * Re-raise a signal once the SDK's listener is gone, so Node's default action
+ * runs: exit with 128 + the signal number, terminal mode reset (#138). Any
+ * listener on a signal — ours included — replaces that default, which is why
+ * an app with no handler of its own kept running after Ctrl-C or
+ * `docker stop` once the SDK had drained. Replaceable for tests only.
+ */
+const defaultReraise = (signal: NodeJS.Signals): void => {
+  try {
+    process.kill(process.pid, signal);
+  } catch {
+    process.exit(signal === "SIGINT" ? 130 : 143);
+  }
 };
+let reraise = defaultReraise;
+
+/**
+ * Node passes the signal's name to its listeners. The first signal drains the
+ * registry, then hands the signal back (`finishSignal`); a second one while
+ * that is still running hands it back at once, so a second Ctrl-C still ends
+ * the process the way it does without the SDK.
+ */
+const shutdownHandler = (signal: NodeJS.Signals): void => {
+  if (signalInFlight) {
+    finishSignal(signal);
+    return;
+  }
+  signalInFlight = true;
+  beginProcessShutdown()
+    .catch(() => {})
+    .then(() => finishSignal(signal));
+};
+
+/**
+ * The SDK's listeners are only there to drain; once that is done they are
+ * removed. If nothing else listens for this signal, the app relied on Node's
+ * default exit, which our listener had suppressed: re-raise so it happens
+ * now. An app with its own listener keeps control of what happens next.
+ */
+function finishSignal(signal: NodeJS.Signals): void {
+  removeSignalHandlers();
+  if (process.listenerCount(signal) === 0) reraise(signal);
+}
 
 function installSignalHandlers(): void {
   if (signalHandlersInstalled) return;
   signalHandlersInstalled = true;
   process.on("SIGTERM", shutdownHandler);
   process.on("SIGINT", shutdownHandler);
+}
+
+function removeSignalHandlers(): void {
+  if (!signalHandlersInstalled) return;
+  signalHandlersInstalled = false;
+  process.off("SIGTERM", shutdownHandler);
+  process.off("SIGINT", shutdownHandler);
+}
+
+/** @internal Replace (or with `null` restore) the re-raise — exposed for testing only. */
+export function _setSignalReraise(fn: ((signal: NodeJS.Signals) => void) | null): void {
+  reraise = fn ?? defaultReraise;
 }
 
 function newTransport(config: Key, sdkVersion: string): HttpTransport {
@@ -307,10 +364,8 @@ export function _resetSharedState(): void {
   registry.clear();
   slots.clear();
   draining = false;
+  signalInFlight = false;
+  reraise = defaultReraise;
   loggedOnce.clear();
-  if (signalHandlersInstalled) {
-    process.off("SIGTERM", shutdownHandler);
-    process.off("SIGINT", shutdownHandler);
-    signalHandlersInstalled = false;
-  }
+  removeSignalHandlers();
 }
