@@ -284,6 +284,8 @@ export interface ToolInvocation {
   platform: string | null;
   errorCategory: string | null;
   errorMessage: string | null;
+  /** From the client platform's location (#47); null when not captured. */
+  countryCode: string | null;
   isRetry: number;
   inputValues: string | null;
   outputContent: string | null;

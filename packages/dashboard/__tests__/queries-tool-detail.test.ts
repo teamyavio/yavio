@@ -196,6 +196,8 @@ describe("tool detail queries", () => {
       expect(result.invocations).toHaveLength(1);
       expect(result.invocations[0].customEvents).toEqual([]);
       expect(result.total).toBe(100);
+      // #47: the country column travels with each invocation.
+      expect(mockQueryAnalytics.mock.calls[0][0].query).toContain("country_code AS countryCode");
     });
 
     it("joins custom track events onto invocations by trace id", async () => {

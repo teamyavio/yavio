@@ -277,6 +277,7 @@ export async function queryToolRecentInvocations(
         coalesce(platform, 'unknown') AS platform,
         error_category AS errorCategory,
         error_message AS errorMessage,
+        country_code AS countryCode,
         is_retry AS isRetry,
         input_values AS inputValues,
         output_content AS outputContent,

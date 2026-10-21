@@ -44,6 +44,7 @@ import { useAnalyticsQuery } from "@/hooks/use-analytics-query";
 import {
   formatBucketLabel,
   formatBucketTooltip,
+  formatCountry,
   formatLatency,
   formatNumber,
   formatPercent,
@@ -129,6 +130,12 @@ const invocationColumns: Column<ToolInvocation>[] = [
     key: "platform",
     label: "Platform",
     render: (row: ToolInvocation) => platformLabel(row.platform ?? "unknown"),
+  },
+  {
+    key: "countryCode",
+    label: "Country",
+    render: (row: ToolInvocation) =>
+      row.countryCode ? <span title={formatCountry(row.countryCode)}>{row.countryCode}</span> : "-",
   },
   {
     key: "userId",
