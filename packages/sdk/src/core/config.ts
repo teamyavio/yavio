@@ -63,6 +63,15 @@ const CONFIG_FILENAME = ".yaviorc.json";
 
 /** The drain deadline when nothing configures one (#142). */
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
+/**
+ * The range `shutdownTimeoutMs` accepts (#142 review): below 100 ms a
+ * seconds-for-milliseconds slip (`YAVIO_SHUTDOWN_TIMEOUT_MS=10`) would drop
+ * nearly everything; above 2^31-1 Node clamps `setTimeout` to 1 ms with a
+ * TimeoutOverflowWarning, so a "no deadline" value such as
+ * `Number.MAX_SAFE_INTEGER` would do the same.
+ */
+export const MIN_SHUTDOWN_TIMEOUT_MS = 100;
+export const MAX_SHUTDOWN_TIMEOUT_MS = 2_147_483_647;
 
 interface ConfigFile {
   apiKey?: string;
@@ -194,11 +203,12 @@ function resolveBooleanFlag(path: string, value: unknown): boolean {
 }
 
 /**
- * `shutdownTimeoutMs`: a positive, finite number of milliseconds — from code
- * (a number), the env var (a numeric string) or the file (a number). An
- * unset or empty value falls through to the next source; anything else is
- * one `YAVIO-1006` warning and the default, because a typo must not turn
- * into a deadline of zero that drops every event on shutdown.
+ * `shutdownTimeoutMs`: an integer number of milliseconds in
+ * [`MIN_SHUTDOWN_TIMEOUT_MS`, `MAX_SHUTDOWN_TIMEOUT_MS`] — from code (a
+ * number), the env var (a numeric string) or the file (a number). An unset
+ * or empty value falls through to the next source; anything else is one
+ * `YAVIO-1006` warning and the default, because a typo must not turn into a
+ * deadline that drops every event on shutdown.
  */
 function resolveShutdownTimeout(...sources: unknown[]): number {
   for (const value of sources) {
@@ -206,11 +216,13 @@ function resolveShutdownTimeout(...sources: unknown[]): number {
     if (typeof value === "string" && value.trim() === "") continue;
     const ms =
       typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
-    if (Number.isFinite(ms) && ms > 0) return ms;
+    if (Number.isInteger(ms) && ms >= MIN_SHUTDOWN_TIMEOUT_MS && ms <= MAX_SHUTDOWN_TIMEOUT_MS) {
+      return ms;
+    }
     if (!warnedInvalidFlags.has("shutdownTimeoutMs")) {
       warnedInvalidFlags.add("shutdownTimeoutMs");
       console.warn(
-        `[${ErrorCode.SDK.INVALID_CAPTURE_OPTION}] shutdownTimeoutMs must be a positive number of milliseconds, got ${JSON.stringify(value)} — using ${DEFAULT_SHUTDOWN_TIMEOUT_MS}. Shown once per process.`,
+        `[${ErrorCode.SDK.INVALID_CAPTURE_OPTION}] shutdownTimeoutMs must be an integer between ${MIN_SHUTDOWN_TIMEOUT_MS} and ${MAX_SHUTDOWN_TIMEOUT_MS} milliseconds, got ${JSON.stringify(value)} — using ${DEFAULT_SHUTDOWN_TIMEOUT_MS}. Shown once per process.`,
       );
     }
     return DEFAULT_SHUTDOWN_TIMEOUT_MS;

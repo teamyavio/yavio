@@ -35,8 +35,11 @@ const instrumented = withYavio(server, {
   },
 
   // Optional: the deadline for delivering queued events on shutdown (#142).
-  // Bounds shutdown() and the SDK's own SIGTERM/SIGINT drain. Default 10 s;
-  // env YAVIO_SHUTDOWN_TIMEOUT_MS; also readable from .yaviorc.json.
+  // An integer in [100, 2147483647] ms, default 10 s; env
+  // YAVIO_SHUTDOWN_TIMEOUT_MS; also readable from .yaviorc.json. Anything
+  // outside the range is one YAVIO-1006 warning and the default. Bounds
+  // this client's shutdown(); the SDK's own SIGTERM/SIGINT drain uses the
+  // value of the client or withYavio() call that created the key's transport.
   shutdownTimeoutMs: 10_000,
 });
 ```

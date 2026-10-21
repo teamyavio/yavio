@@ -532,7 +532,20 @@ describe("shutdownTimeoutMs (#142)", () => {
     expect(resolveConfig()?.shutdownTimeoutMs).toBe(10_000);
   });
 
-  it.each(["0", "-1", "soon", "NaN"])(
+  it("accepts both bounds: 100 and 2147483647", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(resolveConfig({ shutdownTimeoutMs: 100 })?.shutdownTimeoutMs).toBe(100);
+    expect(resolveConfig({ shutdownTimeoutMs: 2_147_483_647 })?.shutdownTimeoutMs).toBe(
+      2_147_483_647,
+    );
+    process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "100";
+    expect(resolveConfig()?.shutdownTimeoutMs).toBe(100);
+    process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "2147483647";
+    expect(resolveConfig()?.shutdownTimeoutMs).toBe(2_147_483_647);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each(["0", "-1", "soon", "NaN", "99", "2147483648", "9007199254740991", "Infinity", "1500.5"])(
     "rejects %s with one warning and uses the default",
     (value) => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -551,5 +564,15 @@ describe("shutdownTimeoutMs (#142)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     expect(resolveConfig({ shutdownTimeoutMs: 0 })?.shutdownTimeoutMs).toBe(10_000);
     expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain("between 100 and 2147483647");
   });
+
+  it.each([99, 2_147_483_648, Number.MAX_SAFE_INTEGER, Number.POSITIVE_INFINITY, 0.5, 250.25])(
+    "rejects the out-of-range or non-integer code option %s",
+    (value) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      expect(resolveConfig({ shutdownTimeoutMs: value })?.shutdownTimeoutMs).toBe(10_000);
+      expect(warn).toHaveBeenCalledTimes(1);
+    },
+  );
 });
