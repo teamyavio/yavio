@@ -99,7 +99,7 @@ The SDK batches events and flushes them to the ingestion API efficiently:
 - **Buffer cap:** 10,000 events (oldest events are dropped when full)
 - **Retry:** up to 5 attempts with exponential backoff (starting at 1 second)
 - **Request timeout:** 30 seconds per HTTP request
-- **Shutdown:** SIGTERM/SIGINT handlers drain remaining events (10-second timeout), then hand the signal back: the SDK removes its listeners and, if the app has no handler of its own, re-raises the signal so the process exits the way it would without the SDK (code 130 or 143). An app with its own handler keeps control; a second Ctrl-C while draining ends the wait
+- **Shutdown:** SIGTERM/SIGINT handlers drain remaining events (10-second timeout), then hand the signal back: the SDK removes its listeners and, if it was the only listener when the signal arrived, re-raises the signal so the process exits the way it would without the SDK (128 + the signal number: 130 after Ctrl-C, 143 after SIGTERM). An app with its own handler keeps control; a second Ctrl-C while draining ends the wait. A library that also waits to be the last listener (signal-exit, used by execa and ora) does not get its turn, so handle the signal yourself in that case
 
 ## PII stripping
 
