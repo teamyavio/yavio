@@ -1,3 +1,4 @@
+import os from "node:os";
 import { LruMap } from "../core/lru.js";
 import type { SessionState, YavioConfig } from "../core/types.js";
 import { HttpTransport } from "../transport/http.js";
@@ -128,70 +129,91 @@ function noteDraining(): void {
   );
 }
 
-let signalHandlersInstalled = false;
-/** A signal is being handled: a second one means "stop waiting". */
-let signalInFlight = false;
+const SIGNALS = ["SIGTERM", "SIGINT"] as const;
+type HandledSignal = (typeof SIGNALS)[number];
+
+/** The SDK's listener per signal, bound to its name — `process.emit("SIGINT")` without an argument is common in harnesses. */
+let signalListeners: Map<HandledSignal, () => void> | null = null;
+/**
+ * The signal being handled, with whether the SDK was the only listener when
+ * it arrived. A second signal while this is set means "stop waiting".
+ */
+let signalInFlight: { signal: HandledSignal; sole: boolean } | null = null;
 
 /**
  * Re-raise a signal once the SDK's listener is gone, so Node's default action
  * runs: exit with 128 + the signal number, terminal mode reset (#138). Any
  * listener on a signal — ours included — replaces that default, which is why
  * an app with no handler of its own kept running after Ctrl-C or
- * `docker stop` once the SDK had drained. Replaceable for tests only.
+ * `docker stop` once the SDK had drained. On Windows `process.kill` with a
+ * signal is a plain TerminateProcess (exit code 1), so the exit code is set by
+ * hand there. Replaceable for tests only.
  */
-const defaultReraise = (signal: NodeJS.Signals): void => {
+const defaultReraise = (signal: HandledSignal): void => {
+  const code = 128 + (os.constants.signals[signal] ?? (signal === "SIGINT" ? 2 : 15));
+  if (process.platform === "win32") process.exit(code);
   try {
     process.kill(process.pid, signal);
   } catch {
-    process.exit(signal === "SIGINT" ? 130 : 143);
+    process.exit(code);
   }
 };
-let reraise = defaultReraise;
+let reraise: (signal: HandledSignal) => void = defaultReraise;
 
 /**
- * Node passes the signal's name to its listeners. The first signal drains the
- * registry, then hands the signal back (`finishSignal`); a second one while
- * that is still running hands it back at once, so a second Ctrl-C still ends
- * the process the way it does without the SDK.
+ * The first signal drains the registry, then hands the signal back
+ * (`finishSignal`); a second one while that is still running hands it back
+ * at once, so a second Ctrl-C still ends the process the way it does without
+ * the SDK. Whether to re-raise is decided when the signal ARRIVES: an app
+ * listener registered with `process.once` is gone by the time the drain is
+ * done, and that app must not be killed in the middle of its own shutdown.
  */
-const shutdownHandler = (signal: NodeJS.Signals): void => {
+function onSignal(signal: HandledSignal): void {
   if (signalInFlight) {
-    finishSignal(signal);
+    finishSignal();
     return;
   }
-  signalInFlight = true;
+  signalInFlight = { signal, sole: process.listenerCount(signal) === 1 };
   beginProcessShutdown()
     .catch(() => {})
-    .then(() => finishSignal(signal));
-};
+    .then(finishSignal);
+}
 
 /**
  * The SDK's listeners are only there to drain; once that is done they are
- * removed. If nothing else listens for this signal, the app relied on Node's
- * default exit, which our listener had suppressed: re-raise so it happens
- * now. An app with its own listener keeps control of what happens next.
+ * removed. If the SDK was the only listener when the signal arrived, the app
+ * relied on Node's default exit, which our listener had suppressed: re-raise
+ * so it happens now. An app with its own listener keeps control of what
+ * happens next (its listener already ran). Known limit: a library that also
+ * only re-raises when it is the last listener (signal-exit, used by execa and
+ * ora) does not get its turn either — that app must handle the signal itself.
  */
-function finishSignal(signal: NodeJS.Signals): void {
+function finishSignal(): void {
+  const inFlight = signalInFlight;
+  signalInFlight = null;
   removeSignalHandlers();
-  if (process.listenerCount(signal) === 0) reraise(signal);
+  if (inFlight?.sole) reraise(inFlight.signal);
 }
 
+/**
+ * Prepended, so the SDK's listener runs before the app's and counts them all
+ * when the signal arrives — a `process.once` listener registered earlier
+ * would otherwise already be gone by the time ours runs.
+ */
 function installSignalHandlers(): void {
-  if (signalHandlersInstalled) return;
-  signalHandlersInstalled = true;
-  process.on("SIGTERM", shutdownHandler);
-  process.on("SIGINT", shutdownHandler);
+  if (signalListeners) return;
+  signalListeners = new Map(SIGNALS.map((signal) => [signal, () => onSignal(signal)]));
+  for (const [signal, listener] of signalListeners) process.prependListener(signal, listener);
 }
 
 function removeSignalHandlers(): void {
-  if (!signalHandlersInstalled) return;
-  signalHandlersInstalled = false;
-  process.off("SIGTERM", shutdownHandler);
-  process.off("SIGINT", shutdownHandler);
+  if (!signalListeners) return;
+  for (const [signal, listener] of signalListeners) process.off(signal, listener);
+  signalListeners = null;
 }
 
 /** @internal Replace (or with `null` restore) the re-raise — exposed for testing only. */
-export function _setSignalReraise(fn: ((signal: NodeJS.Signals) => void) | null): void {
+export function _setSignalReraise(fn: ((signal: "SIGTERM" | "SIGINT") => void) | null): void {
   reraise = fn ?? defaultReraise;
 }
 
@@ -364,8 +386,8 @@ export function _resetSharedState(): void {
   registry.clear();
   slots.clear();
   draining = false;
-  signalInFlight = false;
-  reraise = defaultReraise;
+  signalInFlight = null;
+  _setSignalReraise(null);
   loggedOnce.clear();
   removeSignalHandlers();
 }
