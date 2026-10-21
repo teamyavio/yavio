@@ -75,7 +75,8 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
   const batches: ReceivedBatch[] = [];
   const events: Event[] = [];
   const mints: string[] = [];
-  const pending = new Set<ReturnType<typeof setTimeout>>();
+  /** Batches a delayed responder still holds, by their timer: answered on `close()`. */
+  const pending = new Map<ReturnType<typeof setTimeout>, () => void>();
   const hung: Array<() => void> = [];
   const ingest: MockIngest = {
     endpoint: "",
@@ -93,13 +94,18 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
       // Let the responses reach the client before the caller closes the server.
       await new Promise((resolve) => setTimeout(resolve, 20));
     },
-    close: () =>
-      new Promise<void>((resolve) => {
-        for (const timer of pending) clearTimeout(timer);
-        pending.clear();
-        server.closeAllConnections();
-        server.close(() => resolve());
-      }),
+    close: async () => {
+      // A batch still held by a delayed responder is answered with 200 now,
+      // like `answerHung()`, so the SDK's fetch settles instead of failing
+      // when the sockets are cut (a failed fetch retries, `YAVIO-1200`).
+      const late = [...pending.values()];
+      for (const timer of pending.keys()) clearTimeout(timer);
+      pending.clear();
+      for (const respond of late) respond();
+      if (late.length > 0) await new Promise((resolve) => setTimeout(resolve, 20));
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
   };
   const server = createServer((req, res) => {
     // Only the two routes the SDK may call; anything else is a regression, not a batch.
@@ -164,7 +170,7 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
         pending.delete(timer);
         respond();
       }, delay);
-      pending.add(timer);
+      pending.set(timer, respond);
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
