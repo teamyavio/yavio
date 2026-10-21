@@ -42,4 +42,12 @@
   body {
     @apply bg-background text-foreground;
   }
+
+  /* Recharts 3 makes every chart surface focusable (tabindex="0",
+     role="application") for its keyboard accessibility layer, so a mouse
+     click leaves the browser's focus ring around the chart (#52). Hide it
+     for pointer focus only; keyboard focus keeps the indicator. */
+  .recharts-surface:focus:not(:focus-visible) {
+    outline: none;
+  }
 }
