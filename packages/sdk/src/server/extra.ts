@@ -177,16 +177,20 @@ const GENERIC_AGENTS = new Set([
 ]);
 
 /**
- * The first product token of a User-Agent, as `name/version`, both
- * constrained to what a product token holds. Only the first token: whatever
- * follows is the library or platform the client runs on (`Python/3.12
- * aiohttp/3.9.5` starts with the runtime). The version is required: a bare
- * first word — `node`, or `Visual` from `Visual Studio Code/1.95` — is a
- * runtime or a product whose name has spaces, not a client identifying
- * itself as `name/version`. A token on the generic list yields nothing
- * (#142).
+ * The first product token of a User-Agent, `name/version` or a bare
+ * `name`, both parts constrained to what a product token holds. Only the
+ * first token: whatever follows is the library or platform the client runs
+ * on (`Python/3.12 aiohttp/3.9.5` starts with the runtime). A bare token
+ * counts only when it is the whole User-Agent (`Claude-User`): a bare
+ * first word followed by more — `Visual` from `Visual Studio Code/1.95`,
+ * `Faraday` from `Faraday v2.7.4` — is a product whose name has spaces,
+ * not a client identifying itself. A version must hold at least one digit
+ * (`OpenAI/Python 1.40.0` is the SDK's name and its language, not a
+ * version). A token on the generic list yields nothing (#142, review
+ * round 2).
  */
-const PRODUCT_TOKEN = /^([A-Za-z][A-Za-z0-9._-]{0,63})\/([0-9A-Za-z][0-9A-Za-z.+_-]{0,31})(?=\s|$)/;
+const PRODUCT_TOKEN =
+  /^([A-Za-z][A-Za-z0-9._-]{0,63})(?:\/([0-9A-Za-z][0-9A-Za-z.+_-]{0,31}))?(?=\s|$)/;
 
 /**
  * The MCP client's own identity from its User-Agent, for a stateless host
@@ -199,11 +203,14 @@ const PRODUCT_TOKEN = /^([A-Za-z][A-Za-z0-9._-]{0,63})\/([0-9A-Za-z][0-9A-Za-z.+
  */
 export function clientFromUserAgent(
   userAgent: string | undefined,
-): { name: string; version: string } | undefined {
+): { name: string; version: string | undefined } | undefined {
   if (typeof userAgent !== "string") return undefined;
-  const match = PRODUCT_TOKEN.exec(userAgent.trim());
+  const trimmed = userAgent.trim();
+  const match = PRODUCT_TOKEN.exec(trimmed);
   if (!match || GENERIC_AGENTS.has(match[1].toLowerCase())) return undefined;
-  return { name: match[1], version: match[2] };
+  const [token, name, version] = match;
+  if (version === undefined) return token === trimmed ? { name, version: undefined } : undefined;
+  return /[0-9]/.test(version) ? { name, version } : undefined;
 }
 
 /** Read a header from a record whose values are strings or string arrays. */

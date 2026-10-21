@@ -3,8 +3,9 @@ import { clientFromUserAgent } from "../server/extra.js";
 
 /**
  * The User-Agent fallback for the connection's client identity (#142): the
- * first product token only, as `name/version` — a bare token is never a
- * client — and never an HTTP library, runtime or browser.
+ * first product token only, as `name/version` with a digit in the version,
+ * or a bare `name` when that is the whole User-Agent — and never an HTTP
+ * library, runtime or browser.
  */
 describe("clientFromUserAgent", () => {
   it.each([
@@ -17,17 +18,25 @@ describe("clientFromUserAgent", () => {
     ["my_client/2.0.0-beta.1+build.7", { name: "my_client", version: "2.0.0-beta.1+build.7" }],
     ["some-client/1.2 node-fetch/3.0", { name: "some-client", version: "1.2" }],
     ["client/v1 extra", { name: "client", version: "v1" }],
+    // A bare token that is the whole User-Agent (review round 2).
+    ["Claude-User", { name: "Claude-User", version: undefined }],
+    ["claude-ai", { name: "claude-ai", version: undefined }],
+    ["  Claude-User  ", { name: "Claude-User", version: undefined }],
   ])("%s → %o", (userAgent, expected) => {
     expect(clientFromUserAgent(userAgent)).toEqual(expected);
   });
 
   it.each([
-    // A bare first token, whatever it is: no `/version`, no client (review 2).
+    // A bare first token followed by more: a product whose name has spaces,
+    // not a client (review 2); a bare runtime stays on the generic list.
     "node",
-    "claude-ai",
     "Python",
     "Visual Studio Code/1.95",
     "Faraday v2.7.4",
+    "Claude-User (bot)",
+    // A version without a digit: a language, not a version (review round 2).
+    "OpenAI/Python 1.40.0",
+    "client/beta",
     // Libraries, runtimes and browsers that put their own name first.
     "node-fetch/3.3.2",
     "undici",
