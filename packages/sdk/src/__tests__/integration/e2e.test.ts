@@ -1,5 +1,3 @@
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -7,65 +5,18 @@ import type { YavioConfig } from "../../core/types.js";
 import { createYavioContext } from "../../server/context.js";
 import { _resetGlobalState, createProxy } from "../../server/proxy.js";
 import { HttpTransport } from "../../transport/http.js";
-
-interface ReceivedBatch {
-  events: Array<Record<string, unknown>>;
-  sdk_version: string;
-  sent_at: string;
-}
-
-/** Access the internal _registeredTools object on McpServer. */
-function getRegisteredTool(
-  server: McpServer,
-  name: string,
-): { handler: (...args: unknown[]) => unknown } | undefined {
-  const tools = (server as unknown as Record<string, Record<string, unknown>>)._registeredTools;
-  if (!tools || !(name in tools)) return undefined;
-  return tools[name] as { handler: (...args: unknown[]) => unknown };
-}
+import { type MockIngest, callTool, registeredTool, startMockIngest, v1Extra } from "./helpers.js";
 
 describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", () => {
-  let mockServer: ReturnType<typeof createServer>;
-  let mockUrl: string;
-  const receivedBatches: ReceivedBatch[] = [];
+  // One ingest for the whole file: the tests slice its batches by count.
+  let ingest: MockIngest;
 
   beforeAll(async () => {
-    mockServer = createServer((req, res) => {
-      if (req.method === "POST" && req.url === "/v1/events") {
-        let body = "";
-        req.on("data", (chunk) => {
-          body += chunk;
-        });
-        req.on("end", () => {
-          try {
-            const batch = JSON.parse(body) as ReceivedBatch;
-            receivedBatches.push(batch);
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ accepted: batch.events.length, rejected: 0 }));
-          } catch {
-            res.writeHead(400);
-            res.end();
-          }
-        });
-        return;
-      }
-      res.writeHead(404);
-      res.end();
-    });
-
-    await new Promise<void>((resolve) => {
-      mockServer.listen(0, "127.0.0.1", () => {
-        const addr = mockServer.address() as AddressInfo;
-        mockUrl = `http://127.0.0.1:${addr.port}/v1/events`;
-        resolve();
-      });
-    });
+    ingest = await startMockIngest();
   });
 
   afterAll(async () => {
-    await new Promise<void>((resolve) => {
-      mockServer.close(() => resolve());
-    });
+    await ingest.close();
   });
 
   beforeEach(() => {
@@ -74,7 +25,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
 
   it("sends tool_call events to the ingest API on tool invocation", async () => {
     const transport = new HttpTransport({
-      endpoint: mockUrl,
+      endpoint: ingest.endpoint,
       apiKey: "yav_test_key",
       sdkVersion: "0.0.1",
     });
@@ -82,7 +33,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     const server = new McpServer({ name: "test-app", version: "1.0" });
     const config: YavioConfig = {
       apiKey: "yav_test_key",
-      endpoint: mockUrl,
+      endpoint: ingest.endpoint,
       capture: {
         inputValues: true,
         outputValues: true,
@@ -109,25 +60,21 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
       return { content: [{ type: "text" as const, text: "Found 3 rooms" }] };
     });
 
-    const tool = getRegisteredTool(server, "search_rooms");
-    expect(tool).toBeDefined();
-
-    const mockExtra = {
-      signal: new AbortController().signal,
-      sessionId: "test-session",
-      requestId: "req-1",
-      sendNotification: async () => {},
-      sendRequest: async () => ({}),
-    };
-    await tool?.handler({ query: "beachfront" }, mockExtra);
+    expect(registeredTool(server, "search_rooms")).toBeDefined();
+    await callTool(
+      server,
+      "search_rooms",
+      { query: "beachfront" },
+      v1Extra({ sessionId: "test-session", requestId: "req-1" }),
+    );
 
     // Force flush via shutdown
     await transport.shutdown();
 
     expect(handlerExecuted).toBe(true);
-    expect(receivedBatches.length).toBeGreaterThan(0);
+    expect(ingest.batches.length).toBeGreaterThan(0);
 
-    const allEvents = receivedBatches.flatMap((b) => b.events);
+    const allEvents = ingest.batches.flatMap((b) => b.events);
 
     const eventTypes = allEvents.map((e) => e.event_type);
     expect(eventTypes).toContain("identify");
@@ -163,10 +110,10 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
   });
 
   it("handles tool errors gracefully", async () => {
-    const initialBatchCount = receivedBatches.length;
+    const initialBatchCount = ingest.batches.length;
 
     const transport = new HttpTransport({
-      endpoint: mockUrl,
+      endpoint: ingest.endpoint,
       apiKey: "yav_test_key",
       sdkVersion: "0.0.1",
     });
@@ -174,7 +121,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     const server = new McpServer({ name: "test-app", version: "1.0" });
     const config: YavioConfig = {
       apiKey: "yav_test_key",
-      endpoint: mockUrl,
+      endpoint: ingest.endpoint,
       capture: {
         inputValues: true,
         outputValues: true,
@@ -193,25 +140,21 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
       throw new Error("Something went wrong");
     });
 
-    const tool = getRegisteredTool(server, "failing_tool");
-    expect(tool).toBeDefined();
-
-    const mockExtra = {
-      signal: new AbortController().signal,
-      requestId: "req-2",
-      sendNotification: async () => {},
-      sendRequest: async () => ({}),
-    };
-
+    expect(registeredTool(server, "failing_tool")).toBeDefined();
     try {
-      await tool?.handler(mockExtra);
+      await callTool(
+        server,
+        "failing_tool",
+        undefined,
+        v1Extra({ requestId: "req-2", sessionId: undefined }),
+      );
     } catch {
       // Expected error
     }
 
     await transport.shutdown();
 
-    const newBatches = receivedBatches.slice(initialBatchCount);
+    const newBatches = ingest.batches.slice(initialBatchCount);
     expect(newBatches.length).toBeGreaterThan(0);
 
     const allEvents = newBatches.flatMap((b) => b.events);
@@ -221,10 +164,10 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
   });
 
   it("sends tool_call events via registerTool", async () => {
-    const batchCountBefore = receivedBatches.length;
+    const batchCountBefore = ingest.batches.length;
 
     const transport = new HttpTransport({
-      endpoint: mockUrl,
+      endpoint: ingest.endpoint,
       apiKey: "yav_test_key",
       sdkVersion: "0.0.1",
     });
@@ -232,7 +175,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     const server = new McpServer({ name: "test-app", version: "1.0" });
     const config: YavioConfig = {
       apiKey: "yav_test_key",
-      endpoint: mockUrl,
+      endpoint: ingest.endpoint,
       capture: {
         inputValues: true,
         outputValues: true,
@@ -266,23 +209,19 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
       },
     );
 
-    const tool = getRegisteredTool(server, "search_hotels");
-    expect(tool).toBeDefined();
-
-    const mockExtra = {
-      signal: new AbortController().signal,
-      sessionId: "test-session",
-      requestId: "req-rt-1",
-      sendNotification: async () => {},
-      sendRequest: async () => ({}),
-    };
-    await tool?.handler({ query: "downtown" }, mockExtra);
+    expect(registeredTool(server, "search_hotels")).toBeDefined();
+    await callTool(
+      server,
+      "search_hotels",
+      { query: "downtown" },
+      v1Extra({ sessionId: "test-session", requestId: "req-rt-1" }),
+    );
 
     await transport.shutdown();
 
     expect(handlerExecuted).toBe(true);
 
-    const newBatches = receivedBatches.slice(batchCountBefore);
+    const newBatches = ingest.batches.slice(batchCountBefore);
     expect(newBatches.length).toBeGreaterThan(0);
 
     const allEvents = newBatches.flatMap((b) => b.events);
@@ -305,10 +244,10 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
   });
 
   it("strips PII from event metadata before sending", async () => {
-    const batchCountBefore = receivedBatches.length;
+    const batchCountBefore = ingest.batches.length;
 
     const transport = new HttpTransport({
-      endpoint: mockUrl,
+      endpoint: ingest.endpoint,
       apiKey: "yav_test_key",
       sdkVersion: "0.0.1",
     });
@@ -316,7 +255,7 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
     const server = new McpServer({ name: "test-app", version: "1.0" });
     const config: YavioConfig = {
       apiKey: "yav_test_key",
-      endpoint: mockUrl,
+      endpoint: ingest.endpoint,
       capture: {
         inputValues: true,
         outputValues: true,
@@ -337,17 +276,15 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
       return { content: [{ type: "text" as const, text: "ok" }] };
     });
 
-    const tool = getRegisteredTool(server, "contact_tool");
-    const mockExtra = {
-      signal: new AbortController().signal,
-      requestId: "req-3",
-      sendNotification: async () => {},
-      sendRequest: async () => ({}),
-    };
-    await tool?.handler(mockExtra);
+    await callTool(
+      server,
+      "contact_tool",
+      undefined,
+      v1Extra({ requestId: "req-3", sessionId: undefined }),
+    );
     await transport.shutdown();
 
-    const newBatches = receivedBatches.slice(batchCountBefore);
+    const newBatches = ingest.batches.slice(batchCountBefore);
     const allEvents = newBatches.flatMap((b) => b.events);
     const trackEvent = allEvents.find((e) => e.event_type === "track");
     expect(trackEvent).toBeDefined();

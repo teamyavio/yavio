@@ -27,6 +27,7 @@ import { createYavio, withYavio } from "../../server/index.js";
 import { _resetGlobalState, createProxy } from "../../server/proxy.js";
 import { _sharedStateCount } from "../../server/shared.js";
 import type { Transport } from "../../transport/types.js";
+import { type MockIngest, startMockIngest } from "./helpers.js";
 
 function createMockTransport(): Transport & { sent: BaseEvent[][] } {
   const sent: BaseEvent[][] = [];
@@ -369,38 +370,18 @@ describe("MCP SDK v2 — legacy era over InMemoryTransport", () => {
 });
 
 describe("MCP SDK v2 — 2026-07-28 era over Streamable HTTP, a new server per request", () => {
-  interface ReceivedBatch {
-    events: Array<Record<string, unknown>>;
-  }
-  const received: ReceivedBatch[] = [];
-  let ingest: ReturnType<typeof createServer>;
+  let ingest: MockIngest;
   let ingestUrl: string;
   let mcp: ReturnType<typeof createServer> | undefined;
 
   beforeEach(async () => {
     _resetGlobalState();
-    received.length = 0;
-    ingest = createServer((req, res) => {
-      let body = "";
-      req.on("data", (chunk) => {
-        body += chunk;
-      });
-      req.on("end", () => {
-        received.push(JSON.parse(body) as ReceivedBatch);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ accepted: 1, rejected: 0 }));
-      });
-    });
-    await new Promise<void>((resolve) => {
-      ingest.listen(0, "127.0.0.1", () => {
-        ingestUrl = `http://127.0.0.1:${(ingest.address() as AddressInfo).port}/v1/events`;
-        resolve();
-      });
-    });
+    ingest = await startMockIngest();
+    ingestUrl = ingest.endpoint;
   });
 
   afterEach(async () => {
-    await new Promise<void>((resolve) => ingest.close(() => resolve()));
+    await ingest.close();
     if (mcp) await new Promise<void>((resolve) => mcp?.close(() => resolve()));
     mcp = undefined;
   });
@@ -450,7 +431,7 @@ describe("MCP SDK v2 — 2026-07-28 era over Streamable HTTP, a new server per r
     expect(_sharedStateCount()).toBe(1);
 
     await yavio.shutdown();
-    const events = received.flatMap((b) => b.events);
+    const events = ingest.events;
     const calls = events.filter((e) => e.event_type === "tool_call");
     const conns = events.filter((e) => e.event_type === "connection");
     const discs = events.filter((e) => e.event_type === "tool_discovery");
