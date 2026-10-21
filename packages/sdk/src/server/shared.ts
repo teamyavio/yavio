@@ -118,10 +118,12 @@ const registry = new Map<string, Entry>();
 let generations = 0;
 
 /**
- * What the registry needs of a config: the key, and the drain deadline the
- * transport is created with. The first client or `withYavio()` call to
- * create a key's transport sets that transport's deadline; `client.shutdown()`
- * applies its own config's deadline per call on top.
+ * What the registry needs of a config: the key, and the drain deadline. The
+ * first client or `withYavio()` call to create a key's transport sets the
+ * transport's own deadline, which the SDK's signal drain uses; a
+ * `client.shutdown()` passes its own config's deadline into every release,
+ * drain and transport shutdown it causes, so a client always gets the
+ * deadline it configured (#142 review).
  */
 type Key = Pick<YavioConfig, "endpoint" | "apiKey"> &
   Partial<Pick<YavioConfig, "shutdownTimeoutMs">>;
@@ -273,8 +275,8 @@ function slotFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string) 
         slot.live?.send(events);
       },
       flush: () => slot.live?.flush() ?? Promise.resolve(),
-      drain: () => drainTransport(slot.live),
-      shutdown: () => slot.live?.shutdown() ?? Promise.resolve(),
+      drain: (deadlineMs) => drainTransport(slot.live, deadlineMs),
+      shutdown: (deadlineMs) => slot.live?.shutdown(deadlineMs) ?? Promise.resolve(),
     },
   };
   slots.set(key, slot);
@@ -299,10 +301,13 @@ function entryFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string)
   return entry;
 }
 
-/** Everything queued, every batch; a transport without `drain` is flushed once. */
-async function drainTransport(transport: Transport | null): Promise<void> {
+/**
+ * Everything queued, every batch, giving up at `deadlineMs` (the transport's
+ * own when omitted); a transport without `drain` is flushed once.
+ */
+async function drainTransport(transport: Transport | null, deadlineMs?: number): Promise<void> {
   if (!transport) return;
-  if (transport.drain) await transport.drain();
+  if (transport.drain) await transport.drain(deadlineMs);
   else await transport.flush();
 }
 
@@ -350,25 +355,28 @@ export function isLiveHold(config: Key, hold: SharedHold): boolean {
  * the signal sent its events (#142). The transport stops — so a later wrap
  * starts afresh — only when no client holds it and no `withYavio()` call
  * pinned it; otherwise the other holders keep delivering through it, with
- * everything this client queued delivered first.
+ * everything this client queued delivered first. Every drain or stop this
+ * causes runs under the releasing config's own `shutdownTimeoutMs`, not the
+ * transport creator's.
  */
 export async function releaseShared(config: Key, hold: SharedHold): Promise<void> {
   const key = keyOf(config);
+  const deadlineMs = config.shutdownTimeoutMs;
   if (signalDrain) await signalDrain;
   const entry = registry.get(key);
   if (!entry || entry.generation !== hold.generation) {
-    await drainTransport(slots.get(key)?.live ?? null);
+    await drainTransport(slots.get(key)?.live ?? null, deadlineMs);
     return;
   }
   entry.holders = Math.max(0, entry.holders - 1);
   if (entry.holders > 0 || entry.pinned) {
-    await drainTransport(entry.slot.live);
+    await drainTransport(entry.slot.live, deadlineMs);
     return;
   }
   registry.delete(key);
   const live = entry.slot.live;
   entry.slot.live = null;
-  if (live) await live.shutdown();
+  if (live) await live.shutdown(deadlineMs);
 }
 
 /**
@@ -378,14 +386,16 @@ export async function releaseShared(config: Key, hold: SharedHold): Promise<void
  */
 export async function settleShared(config: Key): Promise<void> {
   if (signalDrain) await signalDrain;
-  await drainTransport(slots.get(keyOf(config))?.live ?? null);
+  await drainTransport(slots.get(keyOf(config))?.live ?? null, config.shutdownTimeoutMs);
 }
 
 /**
  * What the SIGTERM/SIGINT handler does: mark the process as draining, so
  * everything created or sent from now on goes out at once, then drain every
- * transport in the registry. The drain is kept in `signalDrain` for every
- * release that follows; the returned promise is this signal's drain alone.
+ * transport in the registry — each under its own `shutdownTimeoutMs`, the
+ * value of the client or `withYavio()` call that created it. The drain is
+ * kept in `signalDrain` for every release that follows; the returned
+ * promise is this signal's drain alone.
  */
 export function beginProcessShutdown(): Promise<void> {
   draining = true;

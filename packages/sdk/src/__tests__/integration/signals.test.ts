@@ -347,6 +347,47 @@ describe("shutdown() during the signal drain (#142)", () => {
     }
   });
 
+  it("two clients, one key: each shutdown() runs under its own shutdownTimeoutMs, not the transport creator's", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      ingest.respondAfterMs = 800;
+      // A creates the key's transport with a 300 ms deadline; B holds it too, with 3 s.
+      const a = createYavio({
+        apiKey: "yav_142_two",
+        endpoint: ingest.endpoint,
+        serverOnly: true,
+        shutdownTimeoutMs: 300,
+      });
+      const b = createYavio({
+        apiKey: "yav_142_two",
+        endpoint: ingest.endpoint,
+        serverOnly: true,
+        shutdownTimeoutMs: 3_000,
+      });
+      const raw = new McpServer({ name: "app", version: "1.0" });
+      a.wrap(raw).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+      await callTool(raw, "get_price", { q: "x" });
+
+      // A gives up at its own 300 ms, with the batch still on its way.
+      const startedA = Date.now();
+      await a.shutdown();
+      expect(Date.now() - startedA).toBeLessThan(700);
+      expect(allAnswered()).toBe(false);
+
+      // B is the last holder: the transport's shutdown runs under B's 3 s,
+      // so it waits for the answer instead of dropping the buffer at 300 ms.
+      const answeredOnResolve = await b.shutdown().then(allAnswered);
+      expect(answeredOnResolve).toBe(true);
+      expect(toolCalls()).toHaveLength(1);
+      expect(warn.mock.calls.map((c) => String(c[0]))).not.toContainEqual(
+        expect.stringContaining("YAVIO-1205"),
+      );
+      expect(_sharedStateCount()).toBe(0);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("withYavio() hosts: a createYavio() client with the same key awaits the signal drain", async () => {
     await withoutOtherListeners("SIGTERM", async () => {
       const raw = new McpServer({ name: "app", version: "1.0" });

@@ -20,13 +20,18 @@ export interface ReceivedBatch {
   sent_at?: string;
 }
 
+/** How long to wait before answering a batch: a fixed delay, or one decided per batch. */
+export type RespondAfter = number | ((batch: ReceivedBatch) => number);
+
 export interface MockIngestOptions {
   /**
    * Answer every event batch this long after receiving it: a slow or remote
    * ingest, so a shutdown() that resolves before the response is told from
-   * one that waits for it (#142). Events are recorded on receipt.
+   * one that waits for it (#142). A function decides per batch, so one
+   * batch can be answered later than the rest. Events are recorded on
+   * receipt. Changeable afterwards through `ingest.respondAfterMs`.
    */
-  respondAfterMs?: number;
+  respondAfterMs?: RespondAfter;
 }
 
 export interface MockIngest {
@@ -44,6 +49,8 @@ export interface MockIngest {
   hangEvents: boolean;
   /** Event batches answered so far (a batch counts once its response was written). */
   responded: number;
+  /** The delay before a batch is answered, as given to `startMockIngest`; may be changed per test. */
+  respondAfterMs: RespondAfter | undefined;
   /** Events of one type, in order. */
   ofType(eventType: string): Event[];
   /** Cut every open connection, e.g. to fail a pending mint now. */
@@ -68,6 +75,7 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
     hangMints: false,
     hangEvents: false,
     responded: 0,
+    respondAfterMs: options.respondAfterMs,
     ofType: (eventType) => events.filter((e) => e.event_type === eventType),
     dropConnections: () => server.closeAllConnections(),
     close: () =>
@@ -120,14 +128,19 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ accepted: batch.events.length, rejected: 0 }));
       };
-      if (!options.respondAfterMs) {
+      const received = batches[batches.length - 1] as ReceivedBatch;
+      const delay =
+        typeof ingest.respondAfterMs === "function"
+          ? ingest.respondAfterMs(received)
+          : ingest.respondAfterMs;
+      if (!delay) {
         respond();
         return;
       }
       const timer = setTimeout(() => {
         pending.delete(timer);
         respond();
-      }, options.respondAfterMs);
+      }, delay);
       pending.add(timer);
     });
   });

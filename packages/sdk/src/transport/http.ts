@@ -120,19 +120,20 @@ export class HttpTransport implements Transport {
    * Deliver everything queued so far: every batch, after any send already in
    * flight, without stopping the transport. Bounded by the buffer cap, so a
    * producer that keeps queueing cannot make it loop forever, and by
-   * `shutdownTimeoutMs` like `shutdown()`: against a hanging ingest it gives
-   * up draining at the deadline, leaves what is queued for the timer flush
-   * and does not stop the transport. What a holder's `shutdown()` does while
+   * `deadlineMs` — the caller's own `shutdownTimeoutMs`, or this transport's
+   * when omitted — like `shutdown()`: against a hanging ingest it gives up
+   * draining at the deadline, leaves what is queued for the timer flush and
+   * does not stop the transport. What a holder's `shutdown()` does while
    * other holders keep the transport (see shared.ts).
    */
-  async drain(): Promise<void> {
+  async drain(deadlineMs: number = this.shutdownTimeoutMs): Promise<void> {
     let expired = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<void>((resolve) => {
       timer = setTimeout(() => {
         expired = true;
         resolve();
-      }, this.shutdownTimeoutMs);
+      }, deadlineMs);
     });
     const loop = async () => {
       const rounds = Math.ceil(this.maxBufferSize / this.maxBatchSize) + 1;
@@ -164,17 +165,21 @@ export class HttpTransport implements Transport {
   }
 
   /**
-   * Stop the timer and deliver everything queued, bounded by
-   * `shutdownTimeoutMs`. Idempotent: every call resolves with the one
-   * shutdown that is running, so two holders — or the signal handler and the
-   * app's handler — never see "done" with a batch still in flight.
+   * Stop the timer and deliver everything queued, bounded by `deadlineMs`:
+   * the caller's own `shutdownTimeoutMs` (a `createYavio().shutdown()`
+   * passes the deadline its client was configured with), or this
+   * transport's — the value of whoever created it — when omitted, as the
+   * SDK's signal drain does. Idempotent: every call resolves with the one
+   * shutdown that is running, under the deadline of the call that started
+   * it, so two holders — or the signal handler and the app's handler — never
+   * see "done" with a batch still in flight (#142).
    */
-  shutdown(): Promise<void> {
-    if (!this.closing) this.closing = this.runShutdown();
+  shutdown(deadlineMs: number = this.shutdownTimeoutMs): Promise<void> {
+    if (!this.closing) this.closing = this.runShutdown(deadlineMs);
     return this.closing;
   }
 
-  private async runShutdown(): Promise<void> {
+  private async runShutdown(deadlineMs: number): Promise<void> {
     this.stopped = true;
     if (this.timer) {
       clearInterval(this.timer);
@@ -216,7 +221,7 @@ export class HttpTransport implements Transport {
           this.buffer.length = 0;
         }
         resolve();
-      }, this.shutdownTimeoutMs);
+      }, deadlineMs);
       if (timer && typeof timer === "object" && "unref" in timer) timer.unref();
     });
 

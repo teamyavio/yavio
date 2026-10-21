@@ -7,10 +7,14 @@ export interface Transport {
   flush(): Promise<void>;
   /**
    * Deliver everything queued so far — every batch, waiting for a flush
-   * already in flight — without stopping. Optional: a transport without it
-   * is flushed once instead.
+   * already in flight — without stopping, giving up at `deadlineMs` (the
+   * transport's own `shutdownTimeoutMs` when omitted). Optional: a
+   * transport without it is flushed once instead.
    */
-  drain?(): Promise<void>;
-  /** Stop the timer and flush remaining events. */
-  shutdown(): Promise<void>;
+  drain?(deadlineMs?: number): Promise<void>;
+  /**
+   * Stop the timer and flush remaining events, giving up at `deadlineMs`
+   * (the transport's own `shutdownTimeoutMs` when omitted).
+   */
+  shutdown(deadlineMs?: number): Promise<void>;
 }

@@ -14,9 +14,10 @@ export interface YavioConfig {
   /** Per-tool overrides of the capture flags, keyed by tool name. Empty when none. */
   tools: Record<string, ToolCaptureOverride>;
   /**
-   * How long a drain may take, in milliseconds: `shutdown()`, the signal
-   * handlers and the transport's own shutdown give up at this deadline
-   * (#142). Resolved once per process-level state, not per proxy.
+   * How long a drain may take, in milliseconds: this client's `shutdown()`
+   * gives up at this deadline, and so does the SDK's signal drain of a
+   * transport this configuration created (#142). Resolved once per client,
+   * not per proxy.
    */
   shutdownTimeoutMs: number;
 }
@@ -171,11 +172,17 @@ export interface WithYavioOptions {
    */
   tools?: Record<string, ToolCaptureOverride>;
   /**
-   * The deadline for delivering what is queued when the process shuts down,
-   * in milliseconds (default 10 000; env `YAVIO_SHUTDOWN_TIMEOUT_MS`). It
-   * bounds `shutdown()` and the SDK's own `SIGTERM`/`SIGINT` drain. Set it
-   * below the grace period of the platform the server runs on: Cloud Run
-   * allows 10 s after `SIGTERM` in total, Fly.io 5 s by default.
+   * The deadline for delivering what is queued when the process shuts down:
+   * an integer number of milliseconds in [100, 2147483647] (default 10 000;
+   * env `YAVIO_SHUTDOWN_TIMEOUT_MS`; anything else logs `YAVIO-1006` once
+   * and uses the default). It bounds this client's `shutdown()`: every call
+   * gets the deadline its own client was configured with, whichever client
+   * or `withYavio()` call created the shared transport. The SDK's own
+   * `SIGTERM`/`SIGINT` drain uses the value of the client or `withYavio()`
+   * call that created the key's transport. Size it so that the time your
+   * handler spends closing the HTTP server plus this deadline stays under
+   * the platform's grace period: Cloud Run allows 10 s after `SIGTERM` in
+   * total, Fly.io 5 s by default.
    */
   shutdownTimeoutMs?: number;
 }
@@ -219,10 +226,13 @@ export interface YavioClient {
    * including what the SDK's own `SIGTERM`/`SIGINT` listener is still
    * draining when the call is made from the app's signal handler, and what a
    * request finishing after the signal sent (#142). A second or concurrent
-   * call waits for the first. Bounded by `shutdownTimeoutMs` per call. The
-   * transport stops only when no other client with the same configuration
-   * holds it and no `withYavio()` call pinned it; a later wrap by this client
-   * holds it again, or starts a fresh one.
+   * call waits for the first. Bounded by this client's own
+   * `shutdownTimeoutMs` per call — the drain and the transport stop it
+   * causes run under that deadline too, not under the deadline of whoever
+   * created the shared transport. The transport stops only when no other
+   * client with the same configuration holds it and no `withYavio()` call
+   * pinned it; a later wrap by this client holds it again, or starts a
+   * fresh one.
    */
   shutdown(): Promise<void>;
 }
