@@ -27,16 +27,17 @@ export { SDK_VERSION };
 
 /**
  * Can this value be instrumented? MCP SDK v1 and v2 `McpServer` both register
- * tools through `registerTool()`; a transport, a handler or a framework facade
- * does not. Decided before any side effect, so an unsupported value costs
- * nothing: no transport, no listeners, no log besides the one error.
+ * tools through `registerTool()` and attach a transport through `connect()`
+ * — the two methods the proxy binds; a transport, a handler or a framework
+ * facade has neither. Decided before any side effect, so an unsupported
+ * value costs nothing: no transport, no listeners, no log besides the one
+ * error. Checked in both entry points and in no-op mode too, as
+ * `YavioClient.wrap()` promises.
  */
 function isSupportedServer(server: unknown): server is McpServerLike {
-  return (
-    typeof server === "object" &&
-    server !== null &&
-    typeof (server as { registerTool?: unknown }).registerTool === "function"
-  );
+  if (typeof server !== "object" || server === null) return false;
+  const { registerTool, connect } = server as { registerTool?: unknown; connect?: unknown };
+  return typeof registerTool === "function" && typeof connect === "function";
 }
 
 /** The two entry points, named in messages so a log line says which one was called. */
@@ -51,7 +52,7 @@ function rejectUnsupported(server: unknown, entry: EntryPoint): void {
           ? typeof server
           : (server as { constructor?: { name?: string } }).constructor?.name || "object";
     console.error(
-      `[${ErrorCode.SDK.UNSUPPORTED_SERVER}] ${entry} expects an McpServer (@modelcontextprotocol/sdk >=1.24.0 or @modelcontextprotocol/server 2.x) and got ${shape} without registerTool() — returned unwrapped, nothing is instrumented. Shown once per process.`,
+      `[${ErrorCode.SDK.UNSUPPORTED_SERVER}] ${entry} expects an McpServer (@modelcontextprotocol/sdk >=1.24.0 or @modelcontextprotocol/server 2.x) and got ${shape} without registerTool() and connect() — returned unwrapped, nothing is instrumented. Shown once per process.`,
     );
   });
 }
@@ -172,7 +173,10 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
   if (!config) {
     warnNoApiKey();
     return {
-      wrap: (server) => server,
+      wrap: (server) => {
+        if (!isSupportedServer(server)) rejectUnsupported(server, "createYavio().wrap()");
+        return server;
+      },
       shutdown: async () => {},
     };
   }
@@ -197,8 +201,15 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
   state();
 
   return {
-    wrap: <T extends McpServerLike>(server: T): T =>
-      wrapServer(server, config, state(), true, "createYavio().wrap()"),
+    wrap: <T extends McpServerLike>(server: T): T => {
+      // Shape first: an unsupported value after shutdown() must not
+      // re-acquire a transport that nothing releases.
+      if (!isSupportedServer(server)) {
+        rejectUnsupported(server, "createYavio().wrap()");
+        return server;
+      }
+      return wrapServer(server, config, state(), true, "createYavio().wrap()");
+    },
     shutdown: async () => {
       if (!hold) return;
       const released = hold;

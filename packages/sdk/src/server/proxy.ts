@@ -255,6 +255,15 @@ function wrapToolCallback(
       sdkVersion,
     };
 
+    // The widget token's round trip hides behind the handler: started now
+    // (trace and session are known), awaited once the result is in hand. A
+    // mint whose result goes unused (non-object result, handler threw) is
+    // dropped — mintCallToken never rejects. Server-only mode mints nothing
+    // so the tool result is forwarded to the MCP client byte-for-byte.
+    const mint = config.serverOnly
+      ? null
+      : mintCallToken(config, store.traceId, store.session.sessionId);
+
     const startTime = performance.now();
     try {
       const result = await runInContext(store, () => originalCb(...cbArgs));
@@ -300,11 +309,9 @@ function wrapToolCallback(
       );
       emit(toolCallEvent);
 
-      // Server-only mode skips widget token minting and _meta.yavio injection
-      // so the tool result is forwarded to the MCP client byte-for-byte.
-      if (!config.serverOnly && result && typeof result === "object") {
+      if (mint && result && typeof result === "object") {
         try {
-          const token = await mintCallToken(config, store.traceId, store.session.sessionId);
+          const token = await mint;
           if (token) {
             const res = result as Record<string, unknown>;
             if (!res._meta || typeof res._meta !== "object") {
@@ -423,7 +430,13 @@ export interface ExistingProxy<T = object> {
  * the order they were written in. A function option (`intent.fallback`) is
  * reduced to its presence.
  */
+const fingerprints = new WeakMap<YavioConfig, string>();
+
 export function configFingerprint(config: YavioConfig): string {
+  // Once per resolved config object: createYavio() resolves once per client
+  // and every wrap() compares and records the same string.
+  const known = fingerprints.get(config);
+  if (known !== undefined) return known;
   const stable = (value: unknown): unknown => {
     if (typeof value === "function") return "[function]";
     if (Array.isArray(value)) return value.map(stable);
@@ -436,7 +449,7 @@ export function configFingerprint(config: YavioConfig): string {
     }
     return value;
   };
-  return JSON.stringify(
+  const fingerprint = JSON.stringify(
     stable({
       capture: config.capture,
       tools: config.tools,
@@ -444,6 +457,8 @@ export function configFingerprint(config: YavioConfig): string {
       intent: config.intent,
     }),
   );
+  fingerprints.set(config, fingerprint);
+  return fingerprint;
 }
 
 /** Every proxy createProxy built, by the server it wraps, and by the proxy itself. */
@@ -553,6 +568,30 @@ export function createProxy<T extends McpServerLike>(
    * Decide what the frame sends once McpServer's tools/call handler is done.
    * See protocol-layer-status.md for the table this implements.
    */
+  /**
+   * The callback's event, corrected for a failure that happened after the
+   * handler returned a good-looking result: McpServer's output validation
+   * (v1 and v2, surfaced as an isError result) or v2's wire validation of
+   * the result (a thrown ProtocolError). A server bug the model saw as an
+   * error. Keeps the handler's latency and captured output; corrects the
+   * verdict. An event that already says error is left alone.
+   */
+  const postHandlerFailure = (
+    event: ToolCallEvent,
+    toolName: string,
+    message: string | undefined,
+  ): ToolCallEvent => {
+    if (event.status !== "success") return event;
+    const capture = resolveToolCapture(config, toolName);
+    return {
+      ...event,
+      status: "error",
+      error_category: "server",
+      error_message:
+        capture.outputValues && message !== undefined ? normalizeErrorMessage(message) : undefined,
+    };
+  };
+
   const finalizeCallEvent = (
     frame: CallFrame,
     args: unknown,
@@ -563,22 +602,9 @@ export function createProxy<T extends McpServerLike>(
     const resultError = toolResultError(result);
 
     if (frame.event) {
-      if (resultError && frame.event.status === "success") {
-        // The handler returned a good-looking result and McpServer's output
-        // validation rejected it afterwards (declared outputSchema, mismatching
-        // structuredContent): a server bug the model saw as an error. Keep the
-        // handler's latency and captured output; correct the verdict.
-        const capture = resolveToolCapture(config, toolName);
-        return {
-          ...frame.event,
-          status: "error",
-          error_category: "server",
-          error_message: capture.outputValues
-            ? normalizeErrorMessage(resultError.message)
-            : undefined,
-        };
-      }
-      return frame.event;
+      return resultError
+        ? postHandlerFailure(frame.event, toolName, resultError.message)
+        : frame.event;
     }
 
     // The callback never ran. Only a failure is worth an event. (Registered
@@ -684,9 +710,21 @@ export function createProxy<T extends McpServerLike>(
       // disabled tool where v1 returns an isError result, and the model sees
       // the same refusal either way. Counted as the validation failure it is
       // (same table as protocol-layer-status.md), then re-thrown unchanged.
+      //
+      // And one more: a throw AFTER the callback ran. McpServer converts a
+      // handler's own throw into an isError result, so a throw that reaches
+      // here with the callback's event in hand came from the layer above the
+      // handler — v2's wire validation of the result (`Invalid tools/call
+      // result: …`), which the client sees as a JSON-RPC error. The same
+      // verdict as v1's output-schema failure: status error, category server.
       try {
-        if (frame.event) transport.send([frame.event]);
-        else if (isToolNotFoundError(error, toolName)) {
+        if (frame.event) {
+          transport.send([
+            isUrlElicitationRequired(error)
+              ? frame.event
+              : postHandlerFailure(frame.event, toolName, (error as Error)?.message),
+          ]);
+        } else if (isToolNotFoundError(error, toolName)) {
           const rejection = {
             isError: true,
             content: [{ type: "text", text: (error as Error).message }],
@@ -905,8 +943,9 @@ export function createProxy<T extends McpServerLike>(
         });
         // Only once the wrapper is in place: a tool whose update threw must
         // not count as instrumented (a frame would then be opened for it).
+        // Intent classification of these tools was seeded by intent.attach()
+        // from the same registry entries; nothing to note here.
         instrumentedTools.add(name);
-        intent?.noteToolRegistration(name, tool.inputSchema ? [tool.inputSchema] : [], tool._meta);
         if (!protocolInstalled && !discoveryEmitted(name)) {
           markDiscovery(name);
           emitDiscovery(

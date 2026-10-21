@@ -109,9 +109,26 @@ type Key = Pick<YavioConfig, "endpoint" | "apiKey">;
 
 const keyOf = (config: Key): string => `${config.endpoint}\n${config.apiKey}`;
 
+/**
+ * Set by the signal handler, never cleared (outside tests): the process is
+ * on its way out. A transport created from now on sends on every `send()`
+ * — no timer will fire for it and no shutdown will drain it — so events
+ * from requests still served during the graceful-shutdown window go out
+ * best effort, bounded by the fetch timeout and the buffer cap.
+ */
+let draining = false;
+
+function noteDraining(): void {
+  logOnce("draining", () =>
+    console.info(
+      "[yavio] Shutdown signal received — events from requests served from now on are sent at once, best effort.",
+    ),
+  );
+}
+
 let signalHandlersInstalled = false;
 const shutdownHandler = (): void => {
-  shutdownAllShared().catch(() => {});
+  beginProcessShutdown().catch(() => {});
 };
 
 function installSignalHandlers(): void {
@@ -121,16 +138,34 @@ function installSignalHandlers(): void {
   process.on("SIGINT", shutdownHandler);
 }
 
-function slotFor(key: string, onEvict?: (sessionId: string) => void): Slot {
+function newTransport(config: Key, sdkVersion: string): HttpTransport {
+  const transport = new HttpTransport({
+    endpoint: config.endpoint,
+    apiKey: config.apiKey,
+    sdkVersion,
+    immediate: draining,
+  });
+  if (draining) noteDraining();
+  else transport.start();
+  return transport;
+}
+
+function slotFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string) => void): Slot {
+  const key = keyOf(config);
   const existing = slots.get(key);
   if (existing) return existing;
   const slot: Slot = {
     ...createSharedSessions(onEvict),
     live: null,
     transport: {
-      // Nothing live (every holder released, or a signal drained it): the
-      // event has nowhere to go, as with a stopped transport.
-      send: (events) => slot.live?.send(events),
+      send: (events) => {
+        // Nothing live: every holder released (the event has nowhere to go,
+        // as with a stopped transport) — or a signal drained it, and a
+        // request still being served sends best effort through an immediate
+        // transport, like a wrap after the signal would get.
+        if (!slot.live && draining) slot.live = newTransport(config, sdkVersion);
+        slot.live?.send(events);
+      },
       flush: () => slot.live?.flush() ?? Promise.resolve(),
       drain: () => drainTransport(slot.live),
       shutdown: () => slot.live?.shutdown() ?? Promise.resolve(),
@@ -145,13 +180,8 @@ function entryFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string)
   const existing = registry.get(key);
   if (existing) return existing;
 
-  const slot = slotFor(key, onEvict);
-  const transport = new HttpTransport({
-    endpoint: config.endpoint,
-    apiKey: config.apiKey,
-    sdkVersion,
-  });
-  transport.start();
+  const slot = slotFor(config, sdkVersion, onEvict);
+  const transport = newTransport(config, sdkVersion);
   slot.live = transport;
   const entry: Entry = { slot, holders: 0, pinned: false, generation: ++generations };
   registry.set(key, entry);
@@ -224,7 +254,17 @@ export async function releaseShared(config: Key, hold: SharedHold): Promise<void
   if (live) await live.shutdown();
 }
 
-/** Drain every transport in the registry (the signal handlers' job). */
+/**
+ * What the SIGTERM/SIGINT handler does: mark the process as draining, so
+ * everything created or sent from now on goes out at once, then drain every
+ * transport in the registry.
+ */
+export async function beginProcessShutdown(): Promise<void> {
+  draining = true;
+  await shutdownAllShared();
+}
+
+/** Drain every transport in the registry (`beginProcessShutdown`, tests). */
 export async function shutdownAllShared(): Promise<void> {
   const entries = [...registry.values()];
   registry.clear();
@@ -266,6 +306,7 @@ export function _resetSharedState(): void {
   }
   registry.clear();
   slots.clear();
+  draining = false;
   loggedOnce.clear();
   if (signalHandlersInstalled) {
     process.off("SIGTERM", shutdownHandler);

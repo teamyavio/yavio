@@ -13,6 +13,12 @@ export interface HttpTransportOptions {
   fetchTimeoutMs?: number;
   shutdownTimeoutMs?: number;
   fetch?: typeof globalThis.fetch;
+  /**
+   * Send on every `send()` instead of on the timer: for a transport created
+   * after the process began shutting down, when no timer will fire and no
+   * shutdown will drain it (see shared.ts). Still batched by the buffer cap.
+   */
+  immediate?: boolean;
 }
 
 const DEFAULT_FLUSH_INTERVAL_MS = 10_000;
@@ -40,8 +46,10 @@ export class HttpTransport implements Transport {
   private readonly fetchTimeoutMs: number;
   private readonly shutdownTimeoutMs: number;
   private readonly _fetch: typeof globalThis.fetch;
+  private readonly immediate: boolean;
 
   constructor(options: HttpTransportOptions) {
+    this.immediate = options.immediate === true;
     this.endpoint = options.endpoint;
     this.apiKey = options.apiKey;
     this.sdkVersion = options.sdkVersion;
@@ -78,8 +86,9 @@ export class HttpTransport implements Transport {
       console.warn(`[${ErrorCode.SDK.BUFFER_OVERFLOW}] Dropped ${dropped} oldest events`);
     }
 
-    // Early flush if batch size reached
-    if (this.buffer.length >= this.maxBatchSize) {
+    // Early flush if batch size reached — or at once for an immediate
+    // transport (events queued during a send go with the next one).
+    if (this.immediate || this.buffer.length >= this.maxBatchSize) {
       this.flush().catch(() => {});
     }
   }
@@ -92,6 +101,11 @@ export class HttpTransport implements Transport {
     this.buffer = this.buffer.slice(this.maxBatchSize);
     this.inflight = this.sendBatch(batch).finally(() => {
       this.inflight = null;
+      // An immediate transport has no timer to pick up what was queued
+      // while this batch was out: send it now.
+      if (this.immediate && !this.stopped && this.buffer.length > 0) {
+        this.flush().catch(() => {});
+      }
     });
     await this.inflight;
   }
@@ -143,9 +157,12 @@ export class HttpTransport implements Transport {
       this.timer = null;
     }
 
-    // Race the drain loop against a total shutdown timeout
+    // Race the drain loop against a total shutdown timeout. The batch already
+    // in flight first: resolving mid-send would let the process exit with a
+    // request half-way out.
     let drained = false;
     const drain = async () => {
+      if (this.inflight) await this.inflight.catch(() => {});
       while (this.buffer.length > 0) {
         const batch = this.buffer.splice(0, this.maxBatchSize);
         try {
