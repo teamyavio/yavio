@@ -93,6 +93,40 @@ describe("mintWidgetToken", () => {
     expect(url).not.toContain("/v1/events");
   });
 
+  it("gives up after the timeout: a hanging endpoint yields null, the fetch is aborted", async () => {
+    // Resolves only when its signal fires — a mint endpoint that never answers.
+    const hangingFetch = vi.fn().mockImplementation(
+      (_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+        }),
+    );
+    const started = Date.now();
+    const result = await mintWidgetToken(
+      "http://localhost:3001/v1/events",
+      "yav_test",
+      "tr_123",
+      "ses_456",
+      hangingFetch,
+      25,
+    );
+    expect(result).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1_000);
+    const [, init] = hangingFetch.mock.calls[0] as [string, RequestInit];
+    expect(init.signal?.aborted).toBe(true);
+  });
+
+  it("sends an abort signal with the default 2 s timeout", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ token: "jwt", expiresAt: "2026-01-01T00:15:00Z" }),
+    });
+    await mintWidgetToken("http://localhost:3001/v1/events", "yav_test", "tr", "ses", mockFetch);
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.signal?.aborted).toBe(false);
+  });
+
   it("returns null on network error", async () => {
     const mockFetch = vi.fn().mockRejectedValue(new Error("Network error"));
     const result = await mintWidgetToken(

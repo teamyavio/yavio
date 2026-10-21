@@ -380,3 +380,63 @@ describe("HttpTransport", () => {
     warnSpy.mockRestore();
   });
 });
+
+describe("HttpTransport.drain()", () => {
+  it("delivers every queued batch without stopping, waiting for a send already in flight", async () => {
+    const batches: number[] = [];
+    let release: (() => void) | undefined;
+    const fetch = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      const count = (JSON.parse(init.body as string).events as unknown[]).length;
+      // The first batch hangs until the test releases it — a timer flush in flight.
+      if (batches.length === 0)
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      batches.push(count);
+      return { status: 200, headers: { get: () => null }, json: () => ({}) };
+    });
+    const transport = new HttpTransport({
+      endpoint: "http://test/v1/events",
+      apiKey: "yav_test",
+      sdkVersion: "0.0.1",
+      maxBatchSize: 100,
+      flushIntervalMs: 60_000,
+      fetch,
+    });
+    transport.start();
+    for (let i = 0; i < 250; i++) transport.send([fakeEvent()]);
+    // The early flush at 100 is in flight and blocked; flush() alone returns at once.
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await transport.flush();
+    expect(batches).toEqual([]);
+
+    const drained = transport.drain();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    release?.();
+    await drained;
+
+    expect(batches).toEqual([100, 100, 50]);
+    // Not stopped: later events still go out.
+    transport.send([fakeEvent()]);
+    await transport.flush();
+    expect(batches).toEqual([100, 100, 50, 1]);
+    await transport.shutdown();
+  });
+
+  it("is bounded: a batch that keeps failing does not loop forever", async () => {
+    const fetch = vi.fn().mockRejectedValue(new Error("down"));
+    const transport = new HttpTransport({
+      endpoint: "http://test/v1/events",
+      apiKey: "yav_test",
+      sdkVersion: "0.0.1",
+      maxBatchSize: 2,
+      maxBufferSize: 6,
+      maxRetries: 0,
+      flushIntervalMs: 60_000,
+      fetch,
+    });
+    for (let i = 0; i < 6; i++) transport.send([fakeEvent()]);
+    await expect(transport.drain()).resolves.toBeUndefined();
+    expect(fetch.mock.calls.length).toBeLessThanOrEqual(6 / 2 + 1);
+  });
+});

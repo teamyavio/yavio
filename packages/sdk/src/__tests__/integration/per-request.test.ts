@@ -13,7 +13,7 @@ import { z } from "zod";
 import { deriveSessionId } from "../../core/ids.js";
 import { createYavio, withYavio, yavio } from "../../server/index.js";
 import { _resetGlobalState } from "../../server/proxy.js";
-import { _sharedStateCount } from "../../server/shared.js";
+import { _sharedStateCount, shutdownAllShared } from "../../server/shared.js";
 import { HttpTransport } from "../../transport/http.js";
 
 interface ReceivedBatch {
@@ -27,6 +27,8 @@ describe("per-request servers share one process-level state", () => {
   const received: ReceivedBatch[] = [];
   /** The trace ids the widget-token endpoint was asked to bind, in order. */
   const mints: string[] = [];
+  /** When set, the widget-token endpoint never answers. */
+  let hangMints = false;
   let ingest: ReturnType<typeof createServer>;
   let endpoint: string;
 
@@ -34,6 +36,7 @@ describe("per-request servers share one process-level state", () => {
     _resetGlobalState();
     received.length = 0;
     mints.length = 0;
+    hangMints = false;
     ingest = createServer((req, res) => {
       let body = "";
       req.on("data", (chunk) => {
@@ -43,6 +46,7 @@ describe("per-request servers share one process-level state", () => {
         if (req.url === "/v1/widget-tokens") {
           const { traceId } = JSON.parse(body) as { traceId: string };
           mints.push(traceId);
+          if (hangMints) return;
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
@@ -71,9 +75,26 @@ describe("per-request servers share one process-level state", () => {
 
   afterEach(async () => {
     _resetGlobalState();
+    ingest.closeAllConnections();
     await new Promise<void>((resolve) => ingest.close(() => resolve()));
     vi.restoreAllMocks();
   });
+
+  const callOnce = async (wrapped: McpServer, meta?: Record<string, unknown>) => {
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await wrapped.connect(st);
+    const mcpClient = new Client({ name: "c", version: "1.0" });
+    await mcpClient.connect(ct);
+    const result = await mcpClient.callTool({
+      name: "get_price",
+      arguments: { q: "x" },
+      _meta: meta,
+    });
+    await mcpClient.close();
+    return result;
+  };
+  const toolCallEvents = () =>
+    received.flatMap((b) => b.events).filter((e) => e.event_type === "tool_call");
 
   it("wrapping 1,000 servers creates one transport and at most one signal handler pair, with no MaxListenersExceededWarning", async () => {
     const warnings: Error[] = [];
@@ -253,6 +274,117 @@ describe("per-request servers share one process-level state", () => {
     const lines = info.mock.calls.map((c) => String(c[0]));
     expect(lines.filter((l) => l.includes("Server-only mode"))).toHaveLength(1);
     expect(lines.filter((l) => l.includes("Intent capture enabled"))).toHaveLength(1);
+  });
+
+  it("a hanging widget-token endpoint delays the tool result by the mint timeout at most, with one YAVIO-1103 warning", async () => {
+    hangMints = true;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const client = createYavio({ apiKey: "yav_hang", endpoint, serverOnly: false });
+    const wrapped = client.wrap(new McpServer({ name: "w", version: "1.0" }));
+    wrapped.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => ok("x"));
+    const started = Date.now();
+    const first = (await callOnce(wrapped)) as { content: unknown; _meta?: unknown };
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(1_900);
+    expect(elapsed).toBeLessThan(3_500);
+    // Result untouched: the content is there, no _meta.yavio.
+    expect(first.content).toEqual([{ type: "text", text: "x" }]);
+    expect(first._meta).toBeUndefined();
+    await callOnce(wrapped);
+    await client.shutdown();
+    expect(mints).toHaveLength(2);
+    const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("YAVIO-1103"));
+    expect(lines).toHaveLength(1);
+    expect(toolCallEvents()).toHaveLength(2);
+  }, 10_000);
+
+  it("a wrap after the last holder's shutdown() sends through the fresh transport — also for the existing proxy", async () => {
+    const client = createYavio({ apiKey: "yav_again", endpoint, serverOnly: true });
+    const raw = new McpServer({ name: "long-lived", version: "1.0" });
+    const wrapped = client.wrap(raw);
+    wrapped.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => ok("x"));
+    await client.shutdown();
+    expect(_sharedStateCount()).toBe(0);
+
+    // Re-wrapping the same server returns the existing proxy; its transport
+    // must be the one this wrap just started, not the stopped one.
+    expect(client.wrap(raw)).toBe(wrapped);
+    expect(_sharedStateCount()).toBe(1);
+    await callOnce(wrapped, { "openai/session": "conv-again" });
+    await client.shutdown();
+    expect(toolCallEvents()).toHaveLength(1);
+
+    // The same through withYavio() after the client is gone.
+    expect(withYavio(raw, { apiKey: "yav_again", endpoint, serverOnly: true })).toBe(wrapped);
+    await callOnce(wrapped, { "openai/session": "conv-again" });
+    const again = createYavio({ apiKey: "yav_again", endpoint, serverOnly: true });
+    await again.shutdown(); // drains the pinned transport
+    expect(toolCallEvents()).toHaveLength(2);
+  });
+
+  it("the first wrap wins: another key, endpoint or wrap() after withYavio() warns once (YAVIO-1108) and keeps the existing proxy", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const raw = new McpServer({ name: "shared-raw", version: "1.0" });
+    raw.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => ok("x"));
+    const first = withYavio(raw, { apiKey: "yav_first", endpoint, serverOnly: true });
+    // Another key: the first key's proxy, and a warning.
+    expect(createYavio({ apiKey: "yav_second", endpoint, serverOnly: true }).wrap(raw)).toBe(first);
+    // Same key, but wrap() would instrument the pre-registered tool where
+    // withYavio() did not: still the first proxy, the tool stays untracked.
+    const same = createYavio({ apiKey: "yav_first", endpoint, serverOnly: true });
+    expect(same.wrap(raw)).toBe(first);
+    // Same options again: no warning, the debug line only.
+    expect(withYavio(raw, { apiKey: "yav_first", endpoint, serverOnly: true })).toBe(first);
+    await callOnce(first);
+    await same.shutdown();
+
+    const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("YAVIO-1108"));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("createYavio().wrap()");
+    expect(toolCallEvents()).toEqual([]);
+  });
+
+  it("shutdown() of a holder that is not the last drains everything it queued, beyond one batch", async () => {
+    const a = createYavio({ apiKey: "yav_drain", endpoint, serverOnly: true });
+    const b = createYavio({ apiKey: "yav_drain", endpoint, serverOnly: true });
+    const wrapped = a.wrap(new McpServer({ name: "busy", version: "1.0" }));
+    wrapped.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => {
+      for (let i = 0; i < 250; i++) yavio.track("tick", { i });
+      return ok("x");
+    });
+    await callOnce(wrapped);
+    await a.shutdown();
+    // Delivered before shutdown() resolved: 250 track + 1 tool_call (+ connection).
+    const events = received.flatMap((batch) => batch.events);
+    expect(events.filter((e) => e.event_type === "track")).toHaveLength(250);
+    expect(events.filter((e) => e.event_type === "tool_call")).toHaveLength(1);
+    expect(_sharedStateCount()).toBe(1);
+    await b.shutdown();
+    expect(_sharedStateCount()).toBe(0);
+  });
+
+  it("after a signal drained everything, re-wrapping clients hold the new transport: one shutdown() does not stop the other", async () => {
+    const a = createYavio({ apiKey: "yav_signal", endpoint, serverOnly: true });
+    const b = createYavio({ apiKey: "yav_signal", endpoint, serverOnly: true });
+    await shutdownAllShared(); // what SIGTERM does
+    expect(_sharedStateCount()).toBe(0);
+
+    const viaA = a.wrap(new McpServer({ name: "a", version: "1.0" }));
+    const viaB = b.wrap(new McpServer({ name: "b", version: "1.0" }));
+    viaA.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => ok("a"));
+    viaB.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => ok("b"));
+    expect(_sharedStateCount()).toBe(1);
+    await callOnce(viaA);
+    await a.shutdown();
+    // b still holds the new transport.
+    expect(_sharedStateCount()).toBe(1);
+    await callOnce(viaB);
+    await b.shutdown();
+    expect(_sharedStateCount()).toBe(0);
+    const outputs = toolCallEvents().map(
+      (e) => (e.output_content as { content: Array<{ text: string }> }).content[0]?.text,
+    );
+    expect(outputs).toEqual(["a", "b"]);
   });
 
   it("shutdown() drains and forgets the state; a later wrap starts afresh", async () => {

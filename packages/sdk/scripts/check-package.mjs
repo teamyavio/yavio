@@ -20,7 +20,7 @@
 // id-token permission.
 
 import { execFile as execFileCallback, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { availableParallelism, freemem, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -193,6 +193,9 @@ try {
       "--no-package-lock",
       tarball,
       `@modelcontextprotocol/server@${mcpV2Version}`,
+      // The v2 declarations use Buffer; with skipLibCheck off the consumer
+      // needs Node's types, as a real app does.
+      "@types/node@^24",
     ],
     { cwd: workV2, stdio: ["ignore", "ignore", "inherit"] },
   );
@@ -233,10 +236,12 @@ try {
       moduleResolution: "nodenext",
       strict: true,
       esModuleInterop: true,
-      // The v2 package's own declarations are not under test here.
-      skipLibCheck: true,
+      // Off, as in the other cases: with it on, a `@modelcontextprotocol/sdk`
+      // import in our declarations would be silently `any` here, where that
+      // package is not installed.
+      skipLibCheck: false,
       noEmit: true,
-      types: [],
+      types: ["node"],
     };
     writeFileSync(
       join(dir, "tsconfig.json"),
@@ -252,6 +257,25 @@ try {
       checks.push({ name: `${how} ${entry}`, run: () => failureOf(args, work) });
     }
   }
+  // The bundle and the typings must not import either MCP package: both are
+  // optional peers, read by shape (#133). A type-only import in a .d.ts
+  // would fail every app that installs only the other generation.
+  checks.push({
+    name: "dist imports no @modelcontextprotocol package",
+    run: async () => {
+      const dist = join(work, "node_modules", "@yavio", "sdk", "dist");
+      const offenders = readdirSync(dist)
+        .filter((f) => /\.(d\.ts|d\.cts|d\.mts|js|cjs|mjs)$/.test(f))
+        .filter((f) =>
+          /(from\s*["']@modelcontextprotocol\/|require\(\s*["']@modelcontextprotocol\/|import\(\s*["']@modelcontextprotocol\/)/.test(
+            readFileSync(join(dist, f), "utf8"),
+          ),
+        );
+      return offenders.length === 0
+        ? null
+        : `imports @modelcontextprotocol: ${offenders.join(", ")}`;
+    },
+  });
 
   const failures = await runAll(checks.map((c) => c.run));
   const failed = [];
