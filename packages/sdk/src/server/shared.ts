@@ -42,14 +42,18 @@ import type { Transport } from "../transport/types.js";
  * state object outlives its transports: proxies keep it, and a re-acquire
  * after a stop puts a fresh transport behind the same facade.
  *
- * Shutdown from a signal handler (#142). The SDK's listener runs first and
- * drains the registry; the app's handler then calls `client.shutdown()`,
- * whose hold the signal already cleared. Every release therefore awaits the
- * process-level `signalDrain` first, and a stale hold then drains the key's
- * current transport — the immediate one a request finishing after the
- * signal sent through — instead of returning. So `shutdown()` resolves only
- * once everything queued before it reached ingest, however the handlers are
- * ordered, and `process.exit()` after the await exits with nothing in flight.
+ * Shutdown from a signal handler (#142). The SDK's listener is prepended,
+ * so it runs first and drains the registry; the app's handler then calls
+ * `client.shutdown()`, whose hold the signal already cleared. Every release
+ * therefore awaits the process-level `signalDrain` first, and a stale hold
+ * then drains the key's current transport — the immediate one a request
+ * finishing after the signal sent through — instead of returning. So
+ * `shutdown()` resolves only once everything queued before it reached
+ * ingest, and `process.exit()` after the await exits with nothing in
+ * flight. The one order this does not cover is the documented #140
+ * exception: an app listener added with `prependOnceListener` after the
+ * SDK installed its own runs before ours and is gone when we count, so the
+ * SDK takes itself for the only listener and re-raises after the drain.
  */
 
 export interface SharedSessions {

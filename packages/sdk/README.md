@@ -61,7 +61,7 @@ withYavio(server, {
   tools: {               // per-tool overrides of the capture flags (default: none)
     "book-contract": { inputValues: false, outputValues: false, intent: false },
   },
-  shutdownTimeoutMs: 10_000, // deadline for delivering queued events on shutdown (default: 10 s), see Stateless
+  shutdownTimeoutMs: 10_000, // deadline for delivering queued events on shutdown: an integer in [100, 2147483647] ms (default: 10 s), see Stateless
 });
 ```
 
@@ -163,7 +163,15 @@ process.on("SIGTERM", async () => {
 });
 ```
 
-`http.close()`'s callback also waits for idle keep-alive sockets to go away (a fetch-based client holds them for a few seconds); call `http.closeIdleConnections()` first if that matters. `analytics.shutdown()` delivers everything queued before the call — including what the SDK's own signal listener is already draining and what a request that finished after the signal sent — releases this client's hold on the shared transport, and resolves only once ingest answered, or at `shutdownTimeoutMs` (default 10 s; env `YAVIO_SHUTDOWN_TIMEOUT_MS`), whichever comes first. Set the deadline below your platform's grace period (Cloud Run allows 10 s after `SIGTERM` in total, Fly.io 5 s by default). A second or concurrent `shutdown()` — a framework hook and your handler — waits for the first. The transport stops once no client with the same key holds it (a `withYavio()` call never releases). A `withYavio()` host has no client to call: create one for the same key and endpoint and await its `shutdown()`, which waits for the same drain — `await createYavio({ apiKey, endpoint }).shutdown()`.
+On Node 20 and later `http.close()` already closes idle keep-alive sockets; what its callback waits for is the socket of the request in flight at close time, which a fetch-based client keeps open for a few seconds after the response. An app that needs a fast close can send `Connection: close` on its responses once shutdown has begun; otherwise expect a few seconds here. `analytics.shutdown()` delivers everything queued before the call — including what the SDK's own signal listener is already draining and what a request that finished after the signal sent — releases this client's hold on the shared transport, and resolves only once ingest answered, or at this client's `shutdownTimeoutMs` (an integer in [100, 2147483647] milliseconds, default 10 s; env `YAVIO_SHUTDOWN_TIMEOUT_MS`; anything else logs `YAVIO-1006` once and uses the default), whichever comes first. The deadline is per call: a client always gets the deadline it configured, whichever client or `withYavio()` call created the shared transport; only the SDK's own signal drain uses the creator's value. It starts after `http.close()`, so the close time plus `shutdownTimeoutMs` must stay under the platform's grace period (Cloud Run allows 10 s after `SIGTERM` in total, Fly.io 5 s by default). A second or concurrent `shutdown()` — a framework hook and your handler — waits for the first. The transport stops once no client with the same key holds it (a `withYavio()` call never releases). A `withYavio()` host has no client to call: create one once at startup, next to the `withYavio()` calls and for the same key and endpoint, and use it only for `shutdown()`:
+
+```typescript
+const analytics = createYavio({ apiKey, endpoint }); // once, at startup; shutdown() only
+withYavio(server, { apiKey, endpoint });               // per server, as before
+// in the handler, as above: await analytics.shutdown();
+```
+
+Created inside the handler instead, after the SDK handed the signal back, it would install the SDK's signal listeners again and they would stay.
 
 Without a handler the SDK drains everything on `SIGTERM`/`SIGINT`, then hands the signal back: it removes its own listeners and, if it was the only listener when the signal arrived, re-raises the signal so Node's default exit runs (128 + the signal number: 130 after Ctrl-C, 143 after `SIGTERM`; set by hand on Windows) — an app with its own handler keeps control, and a second Ctrl-C while draining ends the wait. A library that also waits to be the last listener (signal-exit, used by execa and ora) does not get its turn, so an app that depends on it should handle the signal itself. A `401` from ingest stops delivery for that key process-wide (`YAVIO-1203`): every wrap sharing the key is affected, which is what an invalid key means.
 
