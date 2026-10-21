@@ -248,10 +248,10 @@ export interface YavioClient {
    * causes run under that deadline too, not under the deadline of whoever
    * created the shared transport; the drain the SDK started on a signal,
    * which this call awaits first, runs under the smallest
-   * `shutdownTimeoutMs` set explicitly for the key (10 s when none is). The transport stops only when no other
-   * client with the same configuration holds it and no `withYavio()` call
-   * pinned it; a later wrap by this client holds it again, or starts a
-   * fresh one.
+   * `shutdownTimeoutMs` set explicitly for the key (10 s when none is). The
+   * transport stops only when no other client with the same configuration
+   * holds it and no `withYavio()` call pinned it; a later wrap by this
+   * client holds it again, or starts a fresh one.
    */
   shutdown(): Promise<void>;
 }
