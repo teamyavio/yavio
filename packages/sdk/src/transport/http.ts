@@ -168,8 +168,9 @@ export class HttpTransport implements Transport {
    * Stop the timer and deliver everything queued, bounded by `deadlineMs`:
    * the caller's own `shutdownTimeoutMs` (a `createYavio().shutdown()`
    * passes the deadline its client was configured with), or this
-   * transport's — the value of whoever created it — when omitted, as the
-   * SDK's signal drain does. Idempotent: every call resolves with the one
+   * transport's — the value of whoever created it — when omitted; the
+   * SDK's signal drain passes the smallest value the key's holders and
+   * `withYavio()` pins configured. Idempotent: every call resolves with the one
    * shutdown that is running, under the deadline of the call that started
    * it, so two holders — or the signal handler and the app's handler — never
    * see "done" with a batch still in flight (#142).

@@ -175,14 +175,16 @@ export interface WithYavioOptions {
    * The deadline for delivering what is queued when the process shuts down:
    * an integer number of milliseconds in [100, 2147483647] (default 10 000;
    * env `YAVIO_SHUTDOWN_TIMEOUT_MS`; anything else logs `YAVIO-1006` once
-   * and uses the default). It bounds this client's `shutdown()`: every call
-   * gets the deadline its own client was configured with, whichever client
-   * or `withYavio()` call created the shared transport. The SDK's own
-   * `SIGTERM`/`SIGINT` drain uses the value of the client or `withYavio()`
-   * call that created the key's transport. Size it so that the time your
-   * handler spends closing the HTTP server plus this deadline stays under
-   * the platform's grace period: Cloud Run allows 10 s after `SIGTERM` in
-   * total, Fly.io 5 s by default.
+   * and uses the default). Outside a signal it bounds this client's
+   * `shutdown()`, each call under its own client's value. The drain the SDK
+   * starts on `SIGTERM`/`SIGINT` is bounded by the smallest value configured
+   * for the key — every `createYavio()` client holding it and every
+   * `withYavio()` call — so a handler's `shutdown()`, which awaits that
+   * drain, sees that bound: the grace period is per process, so the
+   * strictest bound wins. `YAVIO_SHUTDOWN_TIMEOUT_MS` sets one value for the
+   * whole process. Size it so that the time your handler spends closing the
+   * HTTP server plus this deadline stays under the platform's grace period:
+   * Cloud Run allows 10 s after `SIGTERM` in total, Fly.io 5 s by default.
    */
   shutdownTimeoutMs?: number;
 }
@@ -229,7 +231,9 @@ export interface YavioClient {
    * call waits for the first. Bounded by this client's own
    * `shutdownTimeoutMs` per call — the drain and the transport stop it
    * causes run under that deadline too, not under the deadline of whoever
-   * created the shared transport. The transport stops only when no other
+   * created the shared transport; the drain the SDK started on a signal,
+   * which this call awaits first, runs under the smallest
+   * `shutdownTimeoutMs` configured for the key. The transport stops only when no other
    * client with the same configuration holds it and no `withYavio()` call
    * pinned it; a later wrap by this client holds it again, or starts a
    * fresh one.

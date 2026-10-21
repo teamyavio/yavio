@@ -54,6 +54,15 @@ import type { Transport } from "../transport/types.js";
  * exception: an app listener added with `prependOnceListener` after the
  * SDK installed its own runs before ours and is gone when we count, so the
  * SDK takes itself for the only listener and re-raises after the drain.
+ *
+ * Deadlines. Outside a signal every `client.shutdown()` is bounded by its
+ * own client's `shutdownTimeoutMs`. The drain a signal starts is bounded by
+ * the smallest value configured for the key — every `createYavio()` hold
+ * and every `withYavio()` pin — because the deadline exists to stay under
+ * the platform's grace period, which is per process, so the strictest
+ * bound wins; a handler's `shutdown()` awaits that drain and so sees that
+ * bound (#142 review round 2). `YAVIO_SHUTDOWN_TIMEOUT_MS` sets one value
+ * for the whole process.
  */
 
 export interface SharedSessions {
@@ -109,12 +118,22 @@ interface Entry {
   pinned: boolean;
   /** Distinct per transport: a hold on a cleared or stopped one must not release the next. */
   generation: number;
+  /**
+   * The `shutdownTimeoutMs` of every live hold, one per hold (a client
+   * configured without one adds nothing), and the smallest among the
+   * `withYavio()` pins: the signal drain runs under the smallest of them
+   * all, the transport's own when there is none.
+   */
+  holdDeadlines: number[];
+  pinDeadline: number | undefined;
 }
 
 /** A hold on a key's live transport, released by `releaseShared(config, hold)`. */
 export interface SharedHold {
   state: SharedState;
   generation: number;
+  /** The holder's `shutdownTimeoutMs` as registered, removed from the entry on release. */
+  deadlineMs: number | undefined;
 }
 
 const slots = new Map<string, Slot>();
@@ -124,10 +143,10 @@ let generations = 0;
 /**
  * What the registry needs of a config: the key, and the drain deadline. The
  * first client or `withYavio()` call to create a key's transport sets the
- * transport's own deadline, which the SDK's signal drain uses; a
- * `client.shutdown()` passes its own config's deadline into every release,
- * drain and transport shutdown it causes, so a client always gets the
- * deadline it configured (#142 review).
+ * transport's own deadline (the fallback); a `client.shutdown()` outside a
+ * signal passes its own config's deadline into every release, drain and
+ * transport shutdown it causes; the signal drain uses the smallest deadline
+ * registered for the key by its holders and pins (#142 review).
  */
 type Key = Pick<YavioConfig, "endpoint" | "apiKey"> &
   Partial<Pick<YavioConfig, "shutdownTimeoutMs">>;
@@ -299,7 +318,14 @@ function entryFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string)
   // would orphan it mid-send (#142).
   const transport = slot.live ?? newTransport(config, sdkVersion);
   slot.live = transport;
-  const entry: Entry = { slot, holders: 0, pinned: false, generation: ++generations };
+  const entry: Entry = {
+    slot,
+    holders: 0,
+    pinned: false,
+    generation: ++generations,
+    holdDeadlines: [],
+    pinDeadline: undefined,
+  };
   registry.set(key, entry);
   installSignalHandlers();
   return entry;
@@ -328,7 +354,21 @@ export function pinShared(
 ): SharedState {
   const entry = entryFor(config, sdkVersion, onEvict);
   entry.pinned = true;
+  entry.pinDeadline = minDeadline(entry.pinDeadline, config.shutdownTimeoutMs);
   return entry.slot;
+}
+
+const minDeadline = (a: number | undefined, b: number | undefined): number | undefined =>
+  a === undefined ? b : b === undefined ? a : Math.min(a, b);
+
+/**
+ * The deadline of a key's signal drain: the smallest `shutdownTimeoutMs`
+ * among its holders and pins, or undefined (the transport's own) when none
+ * registered one. The deadline exists to stay under the platform's grace
+ * period, which is per process, so the strictest configured bound wins.
+ */
+function signalDeadline(entry: Entry): number | undefined {
+  return entry.holdDeadlines.reduce<number | undefined>(minDeadline, entry.pinDeadline);
 }
 
 /**
@@ -342,7 +382,9 @@ export function acquireShared(
 ): SharedHold {
   const entry = entryFor(config, sdkVersion, onEvict);
   entry.holders++;
-  return { state: entry.slot, generation: entry.generation };
+  const deadlineMs = config.shutdownTimeoutMs;
+  if (deadlineMs !== undefined) entry.holdDeadlines.push(deadlineMs);
+  return { state: entry.slot, generation: entry.generation, deadlineMs };
 }
 
 /** Is this hold on the transport that is live for its config right now? */
@@ -361,7 +403,8 @@ export function isLiveHold(config: Key, hold: SharedHold): boolean {
  * pinned it; otherwise the other holders keep delivering through it, with
  * everything this client queued delivered first. Every drain or stop this
  * causes runs under the releasing config's own `shutdownTimeoutMs`, not the
- * transport creator's.
+ * transport creator's — except the signal drain it awaits first, which runs
+ * under the smallest deadline registered for the key.
  */
 export async function releaseShared(config: Key, hold: SharedHold): Promise<void> {
   const key = keyOf(config);
@@ -373,6 +416,10 @@ export async function releaseShared(config: Key, hold: SharedHold): Promise<void
     return;
   }
   entry.holders = Math.max(0, entry.holders - 1);
+  if (hold.deadlineMs !== undefined) {
+    const at = entry.holdDeadlines.indexOf(hold.deadlineMs);
+    if (at >= 0) entry.holdDeadlines.splice(at, 1);
+  }
   if (entry.holders > 0 || entry.pinned) {
     await drainTransport(entry.slot.live, deadlineMs);
     return;
@@ -396,10 +443,11 @@ export async function settleShared(config: Key): Promise<void> {
 /**
  * What the SIGTERM/SIGINT handler does: mark the process as draining, so
  * everything created or sent from now on goes out at once, then drain every
- * transport in the registry — each under its own `shutdownTimeoutMs`, the
- * value of the client or `withYavio()` call that created it. The drain is
- * kept in `signalDrain` for every release that follows; the returned
- * promise is this signal's drain alone.
+ * transport in the registry — each under the smallest `shutdownTimeoutMs`
+ * its holders and `withYavio()` pins configured (`signalDeadline`), the
+ * transport's own value when none did. The drain is kept in `signalDrain`
+ * for every release that follows; the returned promise is this signal's
+ * drain alone.
  */
 export function beginProcessShutdown(): Promise<void> {
   draining = true;
@@ -409,7 +457,10 @@ export function beginProcessShutdown(): Promise<void> {
   return run;
 }
 
-/** Drain every transport in the registry (`beginProcessShutdown`, tests). */
+/**
+ * Drain every transport in the registry (`beginProcessShutdown`, tests),
+ * each under the smallest deadline its holders and pins configured.
+ */
 export async function shutdownAllShared(): Promise<void> {
   const entries = [...registry.values()];
   registry.clear();
@@ -417,7 +468,7 @@ export async function shutdownAllShared(): Promise<void> {
     entries.map((entry) => {
       const live = entry.slot.live;
       entry.slot.live = null;
-      return live?.shutdown().catch(() => {});
+      return live?.shutdown(signalDeadline(entry)).catch(() => {});
     }),
   );
 }

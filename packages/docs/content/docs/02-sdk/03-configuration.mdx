@@ -25,7 +25,7 @@ Code options → Environment variables → .yaviorc.json → Defaults → No-op
 |----------|-------------|---------|
 | `YAVIO_API_KEY` | Project API key | `yav_abc123...` |
 | `YAVIO_ENDPOINT` | Ingestion API URL. Defaults to `https://ingest.yavio.ai/v1/events`; only set it to point at a self-hosted ingest. Empty counts as unset. A value that is not an `http(s)://` URL (a missing scheme, a typo) puts the SDK in no-op mode with one `YAVIO-1002` error — it never falls back to the hosted endpoint. | `https://ingest.yavio.ai/v1/events` |
-| `YAVIO_SHUTDOWN_TIMEOUT_MS` | Deadline for delivering queued events on shutdown, an integer number of milliseconds in [100, 2147483647]. Empty counts as unset. Anything else logs `YAVIO-1006` once and the default 10 s applies. The code option `shutdownTimeoutMs` wins over it, the file's `shutdownTimeoutMs` comes after it. See [Setup](/docs/02-sdk/01-setup#options) for what it bounds. | `5000` |
+| `YAVIO_SHUTDOWN_TIMEOUT_MS` | Deadline for delivering queued events on shutdown, an integer number of milliseconds in [100, 2147483647]. Empty counts as unset. Anything else logs `YAVIO-1006` once and the default 10 s applies. The code option `shutdownTimeoutMs` wins over it, the file's `shutdownTimeoutMs` comes after it. The way to set one value for the whole process: the SDK's `SIGTERM`/`SIGINT` drain runs under the smallest value configured for a key, by any of its clients or `withYavio()` calls. See [Setup](/docs/02-sdk/01-setup#options) for what it bounds. | `5000` |
 
 ```bash title=".env"
 YAVIO_API_KEY=yav_abc123...
