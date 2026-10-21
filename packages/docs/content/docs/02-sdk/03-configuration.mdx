@@ -24,7 +24,7 @@ Code options → Environment variables → .yaviorc.json → Defaults → No-op
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `YAVIO_API_KEY` | Project API key | `yav_abc123...` |
-| `YAVIO_ENDPOINT` | Ingestion API URL. Defaults to `https://ingest.yavio.ai/v1/events`; only set it to point at a self-hosted ingest. | `https://ingest.yavio.ai/v1/events` |
+| `YAVIO_ENDPOINT` | Ingestion API URL. Defaults to `https://ingest.yavio.ai/v1/events`; only set it to point at a self-hosted ingest. Empty counts as unset. A value that is not an `http(s)://` URL (a missing scheme, a typo) puts the SDK in no-op mode with one `YAVIO-1002` error — it never falls back to the hosted endpoint. | `https://ingest.yavio.ai/v1/events` |
 
 ```bash title=".env"
 YAVIO_API_KEY=yav_abc123...
@@ -119,7 +119,7 @@ withYavio(server, {
 }
 ```
 
-Use this for a tool whose input must never reach analytics — an IBAN, a message body, a birth date. The tool stays on the wrapped server, so it still produces `tool_call` events with latency and status, and `yavio.conversion()` and friends still work from inside its handler. Registering the tool on the unwrapped server instead loses all of that: no `tool_call` event, and tracking calls from the handler are dropped (see [Tracking API](/docs/02-sdk/02-tracking-api#outside-tool-handlers)).
+Use this for a tool whose input must never reach analytics — an IBAN, a message body, a birth date. The tool stays on the wrapped server, so it still produces `tool_call` events with latency and status, and `yavio.conversion()` and friends still work from inside its handler. Registering the tool on the unwrapped server instead loses all of that under `withYavio()`: no `tool_call` event, and tracking calls from the handler are dropped (see [Tracking API](/docs/02-sdk/02-tracking-api#outside-tool-handlers)). Under `createYavio().wrap()` it does not even keep the input out: `wrap()` instruments every tool on the server, so the override is the only way.
 
 `rejectedInputValues` can be set per tool as well, in both directions.
 

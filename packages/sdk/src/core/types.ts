@@ -166,6 +166,49 @@ export interface WithYavioOptions {
   tools?: Record<string, ToolCaptureOverride>;
 }
 
+/**
+ * An MCP server the SDK can instrument, by shape (#133): the MCP SDK v1
+ * `McpServer` (`@modelcontextprotocol/sdk`) and the v2 `McpServer`
+ * (`@modelcontextprotocol/server`) both satisfy it. `registerTool` and
+ * `connect` are the two methods every supported generation has; `tool()`
+ * exists on v1 only and is intercepted when present; `server` is the
+ * low-level server the protocol layer patches when it can.
+ *
+ * Structural on purpose: the SDK has no runtime import of either MCP package,
+ * and a nominal type would tie an integrator to one of them.
+ */
+export interface McpServerLike {
+  registerTool: (...args: never[]) => unknown;
+  connect: (...args: never[]) => Promise<unknown>;
+  tool?: (...args: never[]) => unknown;
+  server?: unknown;
+}
+
+/**
+ * A configured Yavio client: the process-level half of the SDK (resolved
+ * config, the HTTP transport to ingest, the shared session store, the
+ * shutdown hooks). `wrap()` is the per-server half, cheap enough to run on
+ * every request of a stateless host. See `createYavio()`.
+ */
+export interface YavioClient {
+  /**
+   * Instrument a server: every tool on it, including those registered before
+   * the wrap. Synchronous. Returns the server unchanged in no-op mode (no API
+   * key) and for a server shape the SDK does not support (`YAVIO-1107`,
+   * logged once per process), and the existing proxy for a server that is
+   * already wrapped.
+   */
+  wrap<T extends McpServerLike>(server: T): T;
+  /**
+   * Drain (every queued batch, bounded by the transport's shutdown timeout),
+   * then release this client's hold on the shared transport. The
+   * transport stops only when no other client with the same configuration
+   * holds it and no `withYavio()` call pinned it; a later wrap by this client
+   * holds it again, or starts a fresh one.
+   */
+  shutdown(): Promise<void>;
+}
+
 /** The tracking context available via the `yavio` singleton. */
 export interface YavioContext {
   identify(userId: string, traits?: Record<string, unknown>): void;

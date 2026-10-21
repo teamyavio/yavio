@@ -1,8 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { stripPii } from "../core/pii.js";
-import type { IntentConfig } from "../core/types.js";
+import type { IntentConfig, McpServerLike } from "../core/types.js";
 import type { HandlerWrapper, RequestHandler } from "./protocol.js";
+import { logOnce } from "./shared.js";
 
 /**
  * User intent capture.
@@ -207,7 +207,7 @@ export interface IntentController {
    * `wrapList` through the protocol layer (protocol.ts), which fixes their
    * order relative to the status wrapper.
    */
-  attach(server: McpServer): void;
+  attach(server: McpServerLike): void;
   /** tools/call wrapper: capture and strip `context`. */
   wrapCall: HandlerWrapper;
   /** tools/list wrapper: advertise `context`. */
@@ -252,10 +252,10 @@ export function createIntentController(
     return config.required && !widget ? "required" : "optional";
   };
 
-  // Once per tool: config demanded required context, the widget exemption
-  // overrode it. Without this line the override is indistinguishable from a
-  // client that stopped filling the parameter.
-  const loggedWidgetOverride = new Set<string>();
+  // Once per tool per process (not per controller: a per-request host builds
+  // one controller per request): config demanded required context, the
+  // widget exemption overrode it. Without this line the override is
+  // indistinguishable from a client that stopped filling the parameter.
 
   // The McpServer this controller is installed on — used to consult the LIVE
   // registered schema at call time, so RegisteredTool.update() and tools
@@ -460,10 +460,11 @@ export function createIntentController(
       if (!required.includes("context")) required.push("context");
       copy.required = required;
     }
-    if (widget && config.required && name && !loggedWidgetOverride.has(name)) {
-      loggedWidgetOverride.add(name);
-      console.info(
-        `[yavio] Intent context advertised as OPTIONAL on widget-invoked tool "${name}" (a required parameter would make the host refuse the widget's own calls). Model calls that fill it are still captured.`,
+    if (widget && config.required && name) {
+      logOnce(`intent-widget-override:${name}`, () =>
+        console.info(
+          `[yavio] Intent context advertised as OPTIONAL on widget-invoked tool "${name}" (a required parameter would make the host refuse the widget's own calls). Model calls that fill it are still captured.`,
+        ),
       );
     }
     return { ...tool, inputSchema: copy };

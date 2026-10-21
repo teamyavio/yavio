@@ -13,6 +13,12 @@ export interface HttpTransportOptions {
   fetchTimeoutMs?: number;
   shutdownTimeoutMs?: number;
   fetch?: typeof globalThis.fetch;
+  /**
+   * Send on every `send()` instead of on the timer: for a transport created
+   * after the process began shutting down, when no timer will fire and no
+   * shutdown will drain it (see shared.ts). Still batched by the buffer cap.
+   */
+  immediate?: boolean;
 }
 
 const DEFAULT_FLUSH_INTERVAL_MS = 10_000;
@@ -26,7 +32,8 @@ const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
 export class HttpTransport implements Transport {
   private buffer: BaseEvent[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
-  private flushing = false;
+  /** The batch send in flight, if any (one at a time). */
+  private inflight: Promise<void> | null = null;
   private stopped = false;
 
   private readonly endpoint: string;
@@ -39,8 +46,10 @@ export class HttpTransport implements Transport {
   private readonly fetchTimeoutMs: number;
   private readonly shutdownTimeoutMs: number;
   private readonly _fetch: typeof globalThis.fetch;
+  private readonly immediate: boolean;
 
   constructor(options: HttpTransportOptions) {
+    this.immediate = options.immediate === true;
     this.endpoint = options.endpoint;
     this.apiKey = options.apiKey;
     this.sdkVersion = options.sdkVersion;
@@ -77,23 +86,67 @@ export class HttpTransport implements Transport {
       console.warn(`[${ErrorCode.SDK.BUFFER_OVERFLOW}] Dropped ${dropped} oldest events`);
     }
 
-    // Early flush if batch size reached
-    if (this.buffer.length >= this.maxBatchSize) {
+    // Early flush if batch size reached — or at once for an immediate
+    // transport (events queued during a send go with the next one).
+    if (this.immediate || this.buffer.length >= this.maxBatchSize) {
       this.flush().catch(() => {});
     }
   }
 
   async flush(): Promise<void> {
-    if (this.stopped || this.flushing || this.buffer.length === 0) return;
+    if (this.stopped || this.inflight || this.buffer.length === 0) return;
 
-    this.flushing = true;
+    // Atomic swap: take the batch and leave any concurrently-added events
+    const batch = this.buffer.slice(0, this.maxBatchSize);
+    this.buffer = this.buffer.slice(this.maxBatchSize);
+    this.inflight = this.sendBatch(batch).finally(() => {
+      this.inflight = null;
+      // An immediate transport has no timer to pick up what was queued
+      // while this batch was out: send it now.
+      if (this.immediate && !this.stopped && this.buffer.length > 0) {
+        this.flush().catch(() => {});
+      }
+    });
+    await this.inflight;
+  }
+
+  /**
+   * Deliver everything queued so far: every batch, after any send already in
+   * flight, without stopping the transport. Bounded by the buffer cap, so a
+   * producer that keeps queueing cannot make it loop forever, and by
+   * `shutdownTimeoutMs` like `shutdown()`: against a hanging ingest it gives
+   * up draining at the deadline, leaves what is queued for the timer flush
+   * and does not stop the transport. What a holder's `shutdown()` does while
+   * other holders keep the transport (see shared.ts).
+   */
+  async drain(): Promise<void> {
+    let expired = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        expired = true;
+        resolve();
+      }, this.shutdownTimeoutMs);
+    });
+    const loop = async () => {
+      const rounds = Math.ceil(this.maxBufferSize / this.maxBatchSize) + 1;
+      for (let i = 0; i < rounds && !this.stopped && !expired; i++) {
+        if (this.inflight) {
+          await this.inflight.catch(() => {});
+          continue;
+        }
+        if (this.buffer.length === 0) return;
+        try {
+          await this.flush();
+        } catch {
+          // sendBatch has already logged; the next batch still goes out.
+        }
+      }
+    };
     try {
-      // Atomic swap: take the batch and leave any concurrently-added events
-      const batch = this.buffer.slice(0, this.maxBatchSize);
-      this.buffer = this.buffer.slice(this.maxBatchSize);
-      await this.sendBatch(batch);
+      await Promise.race([loop(), deadline]);
     } finally {
-      this.flushing = false;
+      clearTimeout(timer);
     }
   }
 
@@ -104,9 +157,12 @@ export class HttpTransport implements Transport {
       this.timer = null;
     }
 
-    // Race the drain loop against a total shutdown timeout
+    // Race the drain loop against a total shutdown timeout. The batch already
+    // in flight first: resolving mid-send would let the process exit with a
+    // request half-way out.
     let drained = false;
     const drain = async () => {
+      if (this.inflight) await this.inflight.catch(() => {});
       while (this.buffer.length > 0) {
         const batch = this.buffer.splice(0, this.maxBatchSize);
         try {
@@ -120,8 +176,11 @@ export class HttpTransport implements Transport {
       drained = true;
     };
 
+    // The timer must not outlive the drain: a host that awaits shutdown()
+    // and exits would otherwise stay up for the whole timeout.
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<void>((resolve) => {
-      setTimeout(() => {
+      timer = setTimeout(() => {
         if (!drained) {
           console.warn(
             `[${ErrorCode.SDK.SHUTDOWN_FLUSH_FAILED}] Shutdown timeout — events may have been dropped`,
@@ -130,9 +189,14 @@ export class HttpTransport implements Transport {
         }
         resolve();
       }, this.shutdownTimeoutMs);
+      if (timer && typeof timer === "object" && "unref" in timer) timer.unref();
     });
 
-    await Promise.race([drain(), timeout]);
+    try {
+      await Promise.race([drain(), timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async sendBatch(batch: BaseEvent[]): Promise<void> {

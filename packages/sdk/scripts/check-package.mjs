@@ -20,7 +20,7 @@
 // id-token permission.
 
 import { execFile as execFileCallback, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { availableParallelism, freemem, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -35,6 +35,7 @@ const tsc = createRequire(join(sdkDir, "package.json")).resolve("typescript/bin/
 const installedVersion = (name) =>
   JSON.parse(readFileSync(join(sdkDir, "node_modules", name, "package.json"), "utf8")).version;
 const mcpVersion = installedVersion("@modelcontextprotocol/sdk");
+const mcpV2Version = installedVersion("@modelcontextprotocol/server");
 const reactVersion = installedVersion("react");
 
 // The settings apps actually use, with skipLibCheck off: on, an unresolvable
@@ -53,11 +54,13 @@ const CASES = [
 
 const SOURCES = {
   "server.ts": `import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { type Platform, platformValues, withYavio } from "@yavio/sdk";
+import { type Platform, createYavio, platformValues, withYavio } from "@yavio/sdk";
 
 // Fails when require() gets the ESM declarations: the app's McpServer is then
 // the CommonJS class and withYavio() expects the ESM one.
 export const server = withYavio(new McpServer({ name: "consumer", version: "1.0.0" }));
+// The per-request half keeps the server's own type.
+export const wrapped: McpServer = createYavio().wrap(new McpServer({ name: "c", version: "1" }));
 
 export const first: Platform = platformValues[0];
 // @ts-expect-error unused, and so an error, if Platform has become any
@@ -71,11 +74,25 @@ export const bogus: YavioWidget = 1;
 `,
 };
 
+// A consumer on MCP SDK v2 only (#133): @modelcontextprotocol/server installed,
+// @modelcontextprotocol/sdk NOT installed. Our declarations must not import
+// the v1 package, or this app's type check fails on a missing module.
+const V2_SOURCES = {
+  "server-v2.ts": `import { McpServer } from "@modelcontextprotocol/server";
+import { createYavio, withYavio } from "@yavio/sdk";
+
+export const server = withYavio(new McpServer({ name: "consumer-v2", version: "1.0.0" }));
+export const wrapped: McpServer = createYavio().wrap(new McpServer({ name: "c", version: "1" }));
+// @ts-expect-error a value without registerTool() is not an McpServerLike
+export const bogus = withYavio({ connect: async () => {} });
+`,
+};
+
 // Each entry point must expose its API however it is loaded. "legacy" is an
 // exports-unaware resolver (resolve@1, as in Jest before 28 or webpack 4):
 // it finds the root through `main` and the subpath through react/package.json.
 const RUNTIME = [
-  { entry: "@yavio/sdk", exports: ["withYavio", "yavio", "platformValues"] },
+  { entry: "@yavio/sdk", exports: ["withYavio", "createYavio", "yavio", "platformValues"] },
   { entry: "@yavio/sdk/react", exports: ["useYavio", "extractWidgetConfig"] },
 ];
 
@@ -138,7 +155,9 @@ try {
     tarball = join(work, JSON.parse(packed)[0].filename);
   }
   console.log(`package: ${tarball}`);
-  console.log(`@modelcontextprotocol/sdk ${mcpVersion}, react ${reactVersion}`);
+  console.log(
+    `@modelcontextprotocol/sdk ${mcpVersion}, @modelcontextprotocol/server ${mcpV2Version}, react ${reactVersion}`,
+  );
 
   // Outside the repository, so nothing can resolve to the workspace sources.
   writeFileSync(join(work, "package.json"), '{ "name": "consumer", "private": true }\n');
@@ -158,6 +177,27 @@ try {
       "resolve@^1.22.0",
     ],
     { cwd: work, stdio: ["ignore", "ignore", "inherit"] },
+  );
+
+  // The v2-only consumer gets its own node_modules, without the v1 package.
+  const workV2 = join(work, "v2-only");
+  mkdirSync(workV2);
+  writeFileSync(join(workV2, "package.json"), '{ "name": "consumer-v2", "private": true }\n');
+  execFileSync(
+    "npm",
+    [
+      "install",
+      "--no-audit",
+      "--no-fund",
+      "--ignore-scripts",
+      "--no-package-lock",
+      tarball,
+      `@modelcontextprotocol/server@${mcpV2Version}`,
+      // The v2 declarations use Buffer; with skipLibCheck off the consumer
+      // needs Node's types, as a real app does.
+      "@types/node@^24",
+    ],
+    { cwd: workV2, stdio: ["ignore", "ignore", "inherit"] },
   );
 
   const checks = [];
@@ -185,11 +225,57 @@ try {
       run: () => failureOf([tsc, "-p", dir, "--pretty", "false"], work),
     });
   }
+  {
+    const dir = join(workV2, "esm-nodenext");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "package.json"), '{ "type": "module" }\n');
+    for (const [file, source] of Object.entries(V2_SOURCES)) writeFileSync(join(dir, file), source);
+    const compilerOptions = {
+      target: "es2022",
+      module: "nodenext",
+      moduleResolution: "nodenext",
+      strict: true,
+      esModuleInterop: true,
+      // Off, as in the other cases: with it on, a `@modelcontextprotocol/sdk`
+      // import in our declarations would be silently `any` here, where that
+      // package is not installed.
+      skipLibCheck: false,
+      noEmit: true,
+      types: ["node"],
+    };
+    writeFileSync(
+      join(dir, "tsconfig.json"),
+      JSON.stringify({ compilerOptions, files: Object.keys(V2_SOURCES) }, null, 2),
+    );
+    checks.push({
+      name: "esm-nodenext (v2 only)",
+      run: () => failureOf([tsc, "-p", dir, "--pretty", "false"], workV2),
+    });
+  }
   for (const { entry, exports } of RUNTIME) {
     for (const [how, args] of Object.entries(loaders(entry, exports))) {
       checks.push({ name: `${how} ${entry}`, run: () => failureOf(args, work) });
     }
   }
+  // The bundle and the typings must not import either MCP package: both are
+  // optional peers, read by shape (#133). A type-only import in a .d.ts
+  // would fail every app that installs only the other generation.
+  checks.push({
+    name: "dist imports no @modelcontextprotocol package",
+    run: async () => {
+      const dist = join(work, "node_modules", "@yavio", "sdk", "dist");
+      const offenders = readdirSync(dist)
+        .filter((f) => /\.(d\.ts|d\.cts|d\.mts|js|cjs|mjs)$/.test(f))
+        .filter((f) =>
+          /(from\s*["']@modelcontextprotocol\/|require\(\s*["']@modelcontextprotocol\/|import\(\s*["']@modelcontextprotocol\/)/.test(
+            readFileSync(join(dist, f), "utf8"),
+          ),
+        );
+      return offenders.length === 0
+        ? null
+        : `imports @modelcontextprotocol: ${offenders.join(", ")}`;
+    },
+  });
 
   const failures = await runAll(checks.map((c) => c.run));
   const failed = [];

@@ -75,7 +75,7 @@ Fires when the server-side proxy detects a widget response in a tool call return
 
 ### tool_discovery
 
-Sent once per tool per server process, on the first `tools/list` that lists it: the tool's name, description (up to 2048 characters) and input JSON Schema exactly as the client sees it, without the intent `context` parameter. Schemas longer than 16,384 characters are left out. Feeds the tool registry shown on the dashboard's tool pages. Tools registered on the unwrapped server are not discovered.
+Sent once per tool per server process, on the first `tools/list` that lists it: the tool's name, description (up to 2048 characters) and input JSON Schema exactly as the client sees it, without the intent `context` parameter. Schemas longer than 16,384 characters are left out. Feeds the tool registry shown on the dashboard's tool pages. Under `withYavio()`, tools registered on the unwrapped server are not discovered; `createYavio().wrap()` instruments every tool on the server.
 
 ## Server-Side Explicit Events
 

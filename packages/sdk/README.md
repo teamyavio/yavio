@@ -8,7 +8,7 @@ Instrument [MCP](https://modelcontextprotocol.io/) servers with analytics, sessi
 npm install @yavio/sdk
 ```
 
-Requires `@modelcontextprotocol/sdk` >=1.24.0 as a peer dependency. CI tests that floor and the latest release weekly.
+Works with either MCP SDK generation, installed as an optional peer dependency: `@modelcontextprotocol/sdk` >=1.24.0 (v1) or `@modelcontextprotocol/server` 2.x (v2, the scoped package family). CI tests the v1 floor, the latest v1 release, the v2 floor and the latest v2 release weekly.
 
 ## Quick Start
 
@@ -113,6 +113,49 @@ In this mode the SDK:
 
 The React widget (`useYavio()`) auto-configures from `_meta.yavio`, so it will not connect on its own in server-only mode — pass config to the hook explicitly if you still want client-side tracking.
 
+### Stateless / per-request servers
+
+Stateless HTTP hosts build a new `McpServer` for every request (the MCP SDK's stateless Streamable HTTP pattern, v2 `createMcpHandler`, `mcp-handler`, Skybridge 2). Create the client once per process and wrap each server as it is built:
+
+```typescript
+import express from "express";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createYavio } from "@yavio/sdk";
+
+// Once per process: config, the HTTP transport to ingest, the shutdown hooks.
+// (Named `analytics` here: `yavio` is the package's tracking singleton.)
+const analytics = createYavio({ serverOnly: true, capture: { geo: "country" } });
+
+function buildServer() {
+  const server = new McpServer({ name: "example", version: "1.0.0" });
+  server.registerTool("get_price", { /* schemas, annotations, _meta */ }, handler);
+  return server;
+}
+
+const app = express().use(express.json());
+app.post("/mcp", async (req, res) => {
+  // Per request: cheap and synchronous, no new transport, listeners or session store.
+  const server = analytics.wrap(buildServer());
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+  res.on("close", () => { void transport.close(); void server.close(); });
+  await server.connect(transport);
+  await transport.handleRequest(req, res, req.body);
+});
+```
+
+On MCP SDK v2 only the imports differ: `McpServer` from `@modelcontextprotocol/server`, `NodeStreamableHTTPServerTransport` from `@modelcontextprotocol/node`, or `createMcpHandler((ctx) => analytics.wrap(buildServer()))`.
+
+What holds across instances: the same `session_id` and user for the same conversation (`Mcp-Session-Id` or ChatGPT's `openai/session`), one `connection` event per session, one `tool_discovery` per tool per project per process, and `yavio.identify()` on one request visible on the next. A client that sends neither session key gets one session per request. Widget tokens are minted per tool call in non-serverOnly mode, as the ingest contract requires (a token is bound to the trace of the call that minted it); the mint is bounded by a 2 s timeout, after which the result goes out without `_meta.yavio`.
+
+`wrap()` instruments **every tool on the server**, including the ones `buildServer()` registered before the wrap. That is the one behavioural difference to `withYavio()`, which tracks only the tools registered through the proxy it returns — a tool kept on the raw server on purpose stays untracked under `withYavio()`, and the way to limit capture for a sensitive tool under either entry point is the `tools` overrides.
+
+`withYavio(server, options)` is safe for a server created per request too: the transport, the session store and the shutdown hooks are shared per API key and endpoint. It resolves the configuration (environment, `.yaviorc.json`) on every call, which `createYavio()` does once. Wrapping the same long-lived server again — with either entry point — returns the existing proxy, so a host that wraps on every request never stacks instrumentation. The first wrap wins: later options are ignored — any difference (another key or endpoint, other `capture` flags or `tools` overrides, `serverOnly`, intent, or a `wrap()` after a `withYavio()`) logs one `YAVIO-1108` warning and the first wrap's configuration keeps applying.
+
+`analytics.shutdown()` drains (bounded by the transport's 10 s shutdown timeout) and releases this client's hold on the shared transport, for hosts with their own lifecycle; the transport stops once no client with the same key holds it (a `withYavio()` call never releases). The SDK also drains everything on `SIGTERM`/`SIGINT`. A `401` from ingest stops delivery for that key process-wide (`YAVIO-1203`): every wrap sharing the key is affected, which is what an invalid key means.
+
+A value that is not an `McpServer` (no `registerTool()` / `connect()`) comes back unwrapped with one `YAVIO-1107` error per process — in no-op mode too — so a mis-wired integration keeps serving. After `SIGTERM`/`SIGINT` the SDK drains every transport; requests still served during the graceful-shutdown window send their events at once, best effort.
+
 ## Captured data
 
 Every call to a tool registered through the wrapped server produces one `tool_call` event with the tool name, latency, status and — subject to the `capture` flags — the inputs and the output.
@@ -127,11 +170,11 @@ A call is an error when the handler **throws** or when it **returns a result wit
 | `error` | `tool_error` | The handler returned a result with `isError: true` (an expired reference, an invalid postal code, a missing field) |
 | `error` | `unknown` | The handler threw |
 | `error` | `validation` | The call failed **before** the handler ran: unknown or disabled tool, or arguments the tool's schema rejected. No `latency_ms` (nothing executed). By default the event has the names and types (`input_keys`, `input_types`) of the parameters the tool's schema declares, the `_`-prefixed request context in `input_values`, the client metadata and a value-free reason in `error_message` (McpServer's text as-is when it names only the tool — unknown, disabled — otherwise a fixed "Input validation error" reason), but **no argument values**, no key the model invented and no `output_content`. `rejectedInputValues: true` stores the raw arguments and McpServer's error text, to see what the model sent |
-| `error` | `server` | The handler returned, but its result failed the tool's own `outputSchema` |
+| `error` | `server` | The handler returned, but its result failed the tool's own `outputSchema` — or the MCP SDK's validation of the result on the wire |
 
-Only the literal boolean `true` counts as `isError`. The client sees the same shape in all four error cases (the MCP SDK converts throws and pre-handler failures into `isError` results), so the distinction is server-side only.
+Only the literal boolean `true` counts as `isError`. On v1 the client sees the same shape in all four error cases (the MCP SDK converts throws and pre-handler failures into `isError` results), so the distinction is server-side only. On v2 an unknown or disabled tool is a thrown JSON-RPC error instead of an `isError` result; it is still counted as `validation`.
 
-Every `tools/call` request the wrapped server receives is counted, including the ones the MCP SDK rejects before your handler runs — a call to a tool name that does not exist shows up as that name with a 100 % error rate, which is the honest signal. A tool registered on the original, unwrapped server stays untracked either way.
+Every `tools/call` request the wrapped server receives is counted, including the ones the MCP SDK rejects before your handler runs — a call to a tool name that does not exist shows up as that name with a 100 % error rate, which is the honest signal. Under `withYavio()` a tool registered on the original, unwrapped server stays untracked either way; `createYavio().wrap()` instruments every tool on the server (see [Stateless / per-request servers](#stateless--per-request-servers)).
 
 `error_message` is the exception's message, or for an `isError` result the first `text` content item. Both are PII-stripped and clamped to 500 characters. The result text is output, so it is stored only while `outputValues` is on. A thrown message is developer-written, but messages routinely interpolate the arguments (`IBAN ${iban} rejected`) and the PII stripper does not recognise IBANs or customer numbers, so it is stored only while `inputValues` is on. `status` and `error_category` are recorded regardless.
 

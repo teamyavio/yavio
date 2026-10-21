@@ -7,6 +7,12 @@ name: SDK × MCP SDK
 # weekly too, so a breaking MCP SDK release shows up here before an app
 # upgrades into it (#84).
 #
+# MCP SDK v2 is a separate package family (@modelcontextprotocol/server,
+# /client, /node — #133); the `server-v2-floor` leg tests the declared v2
+# peer floor (client and node pinned to the same version: the family moves
+# together, and 2.0.0's client/node are the ones that pair with its core),
+# the `server-v2` leg its current release.
+#
 # Unlike ci.yml this runs for pull requests into any branch, so stacked SDK
 # PRs get tested as well.
 
@@ -40,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mcp-sdk: [floor, latest]
+        mcp-sdk: [floor, latest, server-v2-floor, server-v2]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: ./.github/actions/setup
@@ -56,20 +62,50 @@ jobs:
               exit 1
             fi
             version="${BASH_REMATCH[1]}"
+            package=@modelcontextprotocol/sdk
+          elif [ "${{ matrix.mcp-sdk }}" = server-v2-floor ]; then
+            # Single source: the peer range in packages/sdk/package.json.
+            range=$(node -p "require('./packages/sdk/package.json').peerDependencies['@modelcontextprotocol/server']")
+            if [[ ! "$range" =~ ^\^([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+              echo "::error::expected a '^X.Y.Z' peer range for @modelcontextprotocol/server, got '$range'"
+              exit 1
+            fi
+            version="${BASH_REMATCH[1]}"
+            package=@modelcontextprotocol/server
+          elif [ "${{ matrix.mcp-sdk }}" = server-v2 ]; then
+            # The v2 family moves together; the server's version is the one
+            # checked, client and node follow their own latest.
+            version=$(npm view @modelcontextprotocol/server version)
+            package=@modelcontextprotocol/server
           else
             version=$(npm view @modelcontextprotocol/sdk version)
+            package=@modelcontextprotocol/sdk
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "package=$package" >> "$GITHUB_OUTPUT"
 
-      - name: Install @modelcontextprotocol/sdk@${{ steps.mcp.outputs.version }}
-        run: pnpm --filter @yavio/sdk add -D "@modelcontextprotocol/sdk@${{ steps.mcp.outputs.version }}"
+      - name: Install ${{ steps.mcp.outputs.package }}@${{ steps.mcp.outputs.version }}
+        run: |
+          if [ "${{ matrix.mcp-sdk }}" = server-v2-floor ]; then
+            pnpm --filter @yavio/sdk add -D \
+              "@modelcontextprotocol/server@${{ steps.mcp.outputs.version }}" \
+              "@modelcontextprotocol/client@${{ steps.mcp.outputs.version }}" \
+              "@modelcontextprotocol/node@${{ steps.mcp.outputs.version }}"
+          elif [ "${{ matrix.mcp-sdk }}" = server-v2 ]; then
+            pnpm --filter @yavio/sdk add -D \
+              "@modelcontextprotocol/server@${{ steps.mcp.outputs.version }}" \
+              "@modelcontextprotocol/client@latest" \
+              "@modelcontextprotocol/node@latest"
+          else
+            pnpm --filter @yavio/sdk add -D "@modelcontextprotocol/sdk@${{ steps.mcp.outputs.version }}"
+          fi
 
       # A matrix leg that silently tests the lockfile version would be green
       # for the wrong reason.
       - name: Check the installed version
         run: |
-          installed=$(node -p "require('./packages/sdk/node_modules/@modelcontextprotocol/sdk/package.json').version")
-          echo "Testing against @modelcontextprotocol/sdk $installed"
+          installed=$(node -p "require('./packages/sdk/node_modules/${{ steps.mcp.outputs.package }}/package.json').version")
+          echo "Testing against ${{ steps.mcp.outputs.package }} $installed"
           if [ "$installed" != "${{ steps.mcp.outputs.version }}" ]; then
             echo "::error::expected ${{ steps.mcp.outputs.version }}, installed $installed"
             exit 1

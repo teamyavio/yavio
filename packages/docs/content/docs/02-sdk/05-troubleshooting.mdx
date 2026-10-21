@@ -44,7 +44,7 @@ All SDK error codes are prefixed with `YAVIO-1` and logged to stderr.
 |------|-------------|
 | `YAVIO-1000` | No API key found — SDK is in no-op mode |
 | `YAVIO-1001` | API key format is invalid (must start with `yav_`) |
-| `YAVIO-1002` | Endpoint URL is malformed |
+| `YAVIO-1002` | Endpoint is not an http(s) URL — SDK is in no-op mode (the hosted default is never substituted for an explicit endpoint; empty counts as unset) |
 | `YAVIO-1003` | Config loaded successfully (debug) |
 | `YAVIO-1004` | `.yaviorc.json` is malformed JSON |
 | `YAVIO-1005` | Config file version is not supported |
@@ -61,6 +61,8 @@ All SDK error codes are prefixed with `YAVIO-1` and logged to stderr.
 | `YAVIO-1104` | Widget config injection skipped |
 | `YAVIO-1105` | Context injection unavailable (AsyncLocalStorage issue) |
 | `YAVIO-1106` | Tool response inspection failed |
+| `YAVIO-1107` | Unsupported server: the value passed to `withYavio()` / `wrap()` has no `registerTool()` / `connect()`; returned unwrapped |
+| `YAVIO-1108` | Re-wrap options ignored: the server was already wrapped with other options; the first wrap wins |
 
 ### Transport and delivery (1200-1299)
 

@@ -58,6 +58,38 @@ describe("Shutdown flush", () => {
     }
   });
 
+  it("leaves no shutdown-timeout timer behind once the drain wins", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      status: 200,
+      headers: { get: () => null },
+      json: () => ({}),
+    });
+    const transport = new HttpTransport({
+      endpoint: "http://test/v1/events",
+      apiKey: "yav_test",
+      sdkVersion: "0.0.1",
+      flushIntervalMs: 60_000,
+      shutdownTimeoutMs: 10_000,
+      fetch: mockFetch,
+    });
+    transport.start();
+    transport.send([
+      {
+        event_id: crypto.randomUUID(),
+        event_type: "track",
+        trace_id: "tr_test",
+        session_id: "ses_test",
+        timestamp: new Date().toISOString(),
+        source: "server",
+      } as BaseEvent,
+    ]);
+    await transport.shutdown();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // Fake timers: the flush interval and the shutdown timeout would both
+    // still be pending if they were not cleared.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("stops accepting new events after shutdown", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       status: 200,

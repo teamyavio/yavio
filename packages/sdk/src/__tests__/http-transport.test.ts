@@ -380,3 +380,137 @@ describe("HttpTransport", () => {
     warnSpy.mockRestore();
   });
 });
+
+describe("HttpTransport.shutdown() and a send in flight", () => {
+  it("waits for the batch in flight before resolving, without sending it twice", async () => {
+    let release: (() => void) | undefined;
+    const fetch = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ status: 200, headers: { get: () => null }, json: () => ({}) });
+        }),
+    );
+    const transport = new HttpTransport({
+      endpoint: "http://test/v1/events",
+      apiKey: "yav_test",
+      sdkVersion: "0.0.1",
+      flushIntervalMs: 60_000,
+      shutdownTimeoutMs: 5_000,
+      fetch,
+    });
+    transport.send([fakeEvent()]);
+    const flushing = transport.flush(); // in flight, blocked on fetch
+    let done = false;
+    const shutdown = transport.shutdown().then(() => {
+      done = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(done).toBe(false);
+    release?.();
+    await Promise.all([flushing, shutdown]);
+    expect(done).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("HttpTransport.drain()", () => {
+  it("delivers every queued batch without stopping, waiting for a send already in flight", async () => {
+    const batches: number[] = [];
+    let release: (() => void) | undefined;
+    const fetch = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      const count = (JSON.parse(init.body as string).events as unknown[]).length;
+      // The first batch hangs until the test releases it — a timer flush in flight.
+      if (batches.length === 0)
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      batches.push(count);
+      return { status: 200, headers: { get: () => null }, json: () => ({}) };
+    });
+    const transport = new HttpTransport({
+      endpoint: "http://test/v1/events",
+      apiKey: "yav_test",
+      sdkVersion: "0.0.1",
+      maxBatchSize: 100,
+      flushIntervalMs: 60_000,
+      fetch,
+    });
+    transport.start();
+    for (let i = 0; i < 250; i++) transport.send([fakeEvent()]);
+    // The early flush at 100 is in flight and blocked; flush() alone returns at once.
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await transport.flush();
+    expect(batches).toEqual([]);
+
+    const drained = transport.drain();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    release?.();
+    await drained;
+
+    expect(batches).toEqual([100, 100, 50]);
+    // Not stopped: later events still go out.
+    transport.send([fakeEvent()]);
+    await transport.flush();
+    expect(batches).toEqual([100, 100, 50, 1]);
+    await transport.shutdown();
+  });
+
+  it("gives up at shutdownTimeoutMs against a hanging endpoint, keeps the queue and stays live", async () => {
+    const okResponse = { status: 200, headers: { get: () => null }, json: () => ({}) };
+    let hanging = true;
+    const pending: Array<() => void> = [];
+    const fetch = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          if (!hanging) resolve(okResponse);
+          else pending.push(() => resolve(okResponse));
+        }),
+    );
+    const transport = new HttpTransport({
+      endpoint: "http://test/v1/events",
+      apiKey: "yav_test",
+      sdkVersion: "0.0.1",
+      maxBatchSize: 2,
+      flushIntervalMs: 60_000,
+      fetchTimeoutMs: 60_000,
+      shutdownTimeoutMs: 50,
+      fetch,
+    });
+    for (let i = 0; i < 6; i++) transport.send([fakeEvent()]);
+    const started = Date.now();
+    await transport.drain();
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(fetch).toHaveBeenCalledTimes(1); // the first batch, still hanging
+
+    // Not stopped and nothing dropped: once ingest answers, the queue goes out.
+    hanging = false;
+    for (const release of pending) release();
+    await transport.drain();
+    let delivered = 0;
+    for (const [, init] of fetch.mock.calls as Array<[string, RequestInit]>) {
+      delivered += (JSON.parse(init.body as string).events as unknown[]).length;
+    }
+    expect(delivered).toBe(6);
+    transport.send([fakeEvent()]);
+    await transport.flush();
+    expect(fetch).toHaveBeenCalledTimes(4);
+    await transport.shutdown();
+  });
+
+  it("is bounded: a batch that keeps failing does not loop forever", async () => {
+    const fetch = vi.fn().mockRejectedValue(new Error("down"));
+    const transport = new HttpTransport({
+      endpoint: "http://test/v1/events",
+      apiKey: "yav_test",
+      sdkVersion: "0.0.1",
+      maxBatchSize: 2,
+      maxBufferSize: 6,
+      maxRetries: 0,
+      flushIntervalMs: 60_000,
+      fetch,
+    });
+    for (let i = 0; i < 6; i++) transport.send([fakeEvent()]);
+    await expect(transport.drain()).resolves.toBeUndefined();
+    expect(fetch.mock.calls.length).toBeLessThanOrEqual(6 / 2 + 1);
+  });
+});

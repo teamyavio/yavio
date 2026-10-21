@@ -272,22 +272,115 @@ describe("createProxy — widget config injection", () => {
     expect(meta.yavio).toBeDefined();
   });
 
-  it("reuses cached token on subsequent tool calls", async () => {
-    const futureExpiry = new Date(Date.now() + 600_000).toISOString();
-    mockedMint.mockResolvedValue({
-      token: "jwt_cached",
-      expiresAt: futureExpiry,
+  it("never leaves an unhandled rejection: unreachable endpoint, throwing handler, non-object result", async () => {
+    // The real mint (not the mock): an endpoint that is not a URL made
+    // `new URL()` throw inside the mint promise, which only the object-result
+    // path awaited — a throwing handler left it unhandled and the process
+    // exited. The mock is bypassed for this test with the module's real code.
+    const { mintWidgetToken: realMint } =
+      await vi.importActual<typeof import("../server/token.js")>("../server/token.js");
+    mockedMint.mockImplementation(realMint);
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", onRejection);
+    try {
+      const server = new McpServer({ name: "test", version: "1.0" });
+      const transport = createMockTransport();
+      // Syntactically valid but unreachable: the mint's failure path. (An
+      // unparseable endpoint never reaches createProxy — resolveConfig goes
+      // no-op for it — but the mint guards hold for "" as well.)
+      const proxy = createProxy(
+        server,
+        { ...testConfig, endpoint: "http://127.0.0.1:9/v1/events" },
+        transport,
+        "0.0.1",
+      );
+      proxy.tool("throws", async () => {
+        throw new Error("boom");
+      });
+      proxy.tool("non_object", async () => "just a string" as unknown as { content: [] });
+      const extra = {
+        signal: new AbortController().signal,
+        requestId: "req-ur",
+        sendNotification: async () => {},
+        sendRequest: async () => ({}),
+      };
+      await expect(getRegisteredTool(server, "throws")?.handler(extra)).rejects.toThrow("boom");
+      await expect(getRegisteredTool(server, "non_object")?.handler(extra)).resolves.toBe(
+        "just a string",
+      );
+      // Let any rejection surface.
+      for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+      expect(rejections).toEqual([]);
+      const events = transport.sent.flat().filter((e) => e.event_type === "tool_call");
+      expect(events.map((e) => (e as { status?: string }).status)).toEqual(["error", "success"]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+      mockedMint.mockReset();
+    }
+  });
+
+  it("starts the mint before the handler runs, so its round trip hides behind the handler", async () => {
+    let releaseMint: (() => void) | undefined;
+    mockedMint.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseMint = () => resolve({ token: "jwt_early", expiresAt: "2099-01-01T00:00:00Z" });
+        }),
+    );
+    let releaseHandler: (() => void) | undefined;
+    let mintCallsWhenHandlerRan = -1;
+
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("slow_tool", async () => {
+      mintCallsWhenHandlerRan = mockedMint.mock.calls.length;
+      await new Promise<void>((resolve) => {
+        releaseHandler = resolve;
+      });
+      return { content: [{ type: "text", text: "ok" }] };
     });
+
+    const tool = getRegisteredTool(server, "slow_tool");
+    const call = tool?.handler({
+      signal: new AbortController().signal,
+      requestId: "req-early",
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+    }) as Promise<Record<string, unknown>>;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    // The mint was requested while the handler was still pending.
+    expect(mintCallsWhenHandlerRan).toBe(1);
+    releaseHandler?.();
+    releaseMint?.();
+    const result = await call;
+    expect(((result._meta as Record<string, unknown>).yavio as { token: string }).token).toBe(
+      "jwt_early",
+    );
+  });
+
+  it("mints a token per call, bound to that call's trace id (never reused across calls)", async () => {
+    // Ingest binds the JWT to the minting call's trace id and rejects a widget
+    // batch under any other trace, so a cached token would break every call
+    // after the first.
+    const futureExpiry = new Date(Date.now() + 600_000).toISOString();
+    mockedMint.mockImplementation(async (_endpoint, _key, traceId) => ({
+      token: `jwt_for_${traceId}`,
+      expiresAt: futureExpiry,
+    }));
 
     const server = new McpServer({ name: "test", version: "1.0" });
     const transport = createMockTransport();
     const proxy = createProxy(server, testConfig, transport, "0.0.1");
 
-    proxy.tool("cached_tool", (extra) => ({
+    proxy.tool("per_call_tool", (extra) => ({
       content: [{ type: "text", text: "ok" }],
     }));
 
-    const tool = getRegisteredTool(server, "cached_tool");
+    const tool = getRegisteredTool(server, "per_call_tool");
     const mockExtra = {
       signal: new AbortController().signal,
       requestId: "req-6",
@@ -295,23 +388,24 @@ describe("createProxy — widget config injection", () => {
       sendRequest: async () => ({}),
     };
 
-    // First call — mints token
-    const result1 = (await tool?.handler(mockExtra)) as Record<string, unknown>;
-    expect(
-      ((result1._meta as Record<string, unknown>).yavio as Record<string, unknown>).token,
-    ).toBe("jwt_cached");
+    const widgetMeta = (result: unknown) =>
+      ((result as Record<string, unknown>)._meta as Record<string, unknown>).yavio as {
+        token: string;
+        traceId: string;
+      };
+    const first = widgetMeta(await tool?.handler(mockExtra));
+    const second = widgetMeta(await tool?.handler({ ...mockExtra, requestId: "req-7" }));
 
-    // Second call — reuses cached token
-    const result2 = (await tool?.handler({
-      ...mockExtra,
-      requestId: "req-7",
-    })) as Record<string, unknown>;
-    expect(
-      ((result2._meta as Record<string, unknown>).yavio as Record<string, unknown>).token,
-    ).toBe("jwt_cached");
-
-    // mintWidgetToken should only have been called once
-    expect(mockedMint).toHaveBeenCalledTimes(1);
+    expect(mockedMint).toHaveBeenCalledTimes(2);
+    expect(first.token).toBe(`jwt_for_${first.traceId}`);
+    expect(second.token).toBe(`jwt_for_${second.traceId}`);
+    expect(second.traceId).not.toBe(first.traceId);
+    // The trace id the token is bound to is the one on the call's event.
+    const traces = transport.sent
+      .flat()
+      .filter((e) => e.event_type === "tool_call")
+      .map((e) => e.trace_id);
+    expect(traces).toEqual([first.traceId, second.traceId]);
   });
 });
 

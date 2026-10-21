@@ -11,7 +11,9 @@ import { Callout } from "fumadocs-ui/components/callout";
 npm install @yavio/sdk
 ```
 
-The SDK requires `@modelcontextprotocol/sdk` >= 1.24.0 as a peer dependency.
+The SDK works with either MCP SDK generation as an optional peer dependency: `@modelcontextprotocol/sdk` >= 1.24.0, or `@modelcontextprotocol/server` 2.x.
+
+Hosts that build a new `McpServer` per request (stateless Streamable HTTP, `createMcpHandler`, `mcp-handler`, Skybridge 2) create the client once with `const analytics = createYavio(options)` and call `analytics.wrap(server)` per request; see the package README's "Stateless / per-request servers" section. One difference to `withYavio()`: `wrap()` instruments every tool on the server, including those registered before the wrap, while `withYavio()` tracks only the tools registered through the proxy it returns. Wrapping the same server twice, with either entry point, returns the existing proxy: the first wrap wins and later options are ignored — any differing option (key, endpoint, `capture`, `tools`, `serverOnly`, intent) logs `YAVIO-1108` once.
 
 ## Wrapping your server
 
@@ -40,7 +42,7 @@ const instrumented = withYavio(server, {
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `apiKey` | `string` | — | Project API key. Falls back to `YAVIO_API_KEY` env var, then `.yaviorc.json`. |
-| `endpoint` | `string` | `https://ingest.yavio.ai/v1/events` | Ingestion API URL. Falls back to `YAVIO_ENDPOINT` env var. |
+| `endpoint` | `string` | `https://ingest.yavio.ai/v1/events` | Ingestion API URL. Falls back to `YAVIO_ENDPOINT` env var. Must be `http(s)://`; anything else puts the SDK in no-op mode (`YAVIO-1002`) rather than using the hosted default. |
 | `capture.inputValues` | `boolean` | `true` | Capture tool input values, key names and types, plus client metadata |
 | `capture.outputValues` | `boolean` | `true` | Capture tool results |
 | `capture.geo` | `boolean \| "region" \| "country"` | `true` | End-user location: `true` keeps it as sent, `"region"` keeps the country and the state or province, `"country"` keeps only the country, `false` drops it |

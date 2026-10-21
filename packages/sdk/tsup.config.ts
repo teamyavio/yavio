@@ -17,5 +17,7 @@ export default defineConfig({
   dts: true,
   clean: true,
   noExternal: ["@yavio/shared"],
-  external: ["@modelcontextprotocol/sdk", "react", "react-dom"],
+  // Neither MCP package is imported at runtime (the server is typed by shape,
+  // core/types.ts McpServerLike); listed so a stray import can never be bundled.
+  external: ["@modelcontextprotocol/sdk", "@modelcontextprotocol/server", "react", "react-dom"],
 });
