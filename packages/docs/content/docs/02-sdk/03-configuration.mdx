@@ -24,7 +24,7 @@ Code options → Environment variables → .yaviorc.json → Defaults → No-op
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `YAVIO_API_KEY` | Project API key | `yav_abc123...` |
-| `YAVIO_ENDPOINT` | Ingestion API URL. Defaults to `https://ingest.yavio.ai/v1/events`; only set it to point at a self-hosted ingest. | `https://ingest.yavio.ai/v1/events` |
+| `YAVIO_ENDPOINT` | Ingestion API URL. Defaults to `https://ingest.yavio.ai/v1/events`; only set it to point at a self-hosted ingest. Empty counts as unset. A value that is not an `http(s)://` URL (a missing scheme, a typo) puts the SDK in no-op mode with one `YAVIO-1002` error — it never falls back to the hosted endpoint. | `https://ingest.yavio.ai/v1/events` |
 
 ```bash title=".env"
 YAVIO_API_KEY=yav_abc123...

@@ -1,5 +1,5 @@
 import { ErrorCode } from "@yavio/shared/error-codes";
-import { resolveConfig } from "../core/config.js";
+import { lastNoopReason, resolveConfig } from "../core/config.js";
 import type {
   McpServerLike,
   WithYavioOptions,
@@ -57,8 +57,13 @@ function rejectUnsupported(server: unknown, entry: EntryPoint): void {
   });
 }
 
-/** Once per process, however many requests a stateless host wraps on. */
+/**
+ * Once per process, however many requests a stateless host wraps on. An
+ * invalid endpoint goes no-op as well, but resolveConfig() already logged
+ * its own error (`YAVIO-1002`) — "no API key" would be the wrong story.
+ */
 function warnNoApiKey(): void {
+  if (lastNoopReason() === "invalid-endpoint") return;
   logOnce(ErrorCode.SDK.NO_API_KEY, () =>
     console.warn(
       `[${ErrorCode.SDK.NO_API_KEY}] No API key found — Yavio SDK running in no-op mode`,

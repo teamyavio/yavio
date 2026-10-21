@@ -129,28 +129,41 @@ function warnInvalidFlag(path: string, accepted: string, value: unknown): void {
   );
 }
 
+/** Why the last `resolveConfig()` returned null, for the caller's log line. */
+let noopReason: "no-api-key" | "invalid-endpoint" | null = null;
+
+/** The reason the last `resolveConfig()` call went no-op, if it did. */
+export function lastNoopReason(): "no-api-key" | "invalid-endpoint" | null {
+  return noopReason;
+}
+
 /**
  * The endpoint must be an http(s) URL: the transport and the widget-token
- * mint both build URLs from it, and `new URL("")` throws. An empty value is
- * what a compose file passes for an unset `YAVIO_ENDPOINT=`, and `??` keeps
- * it. Warn once (`YAVIO-1002`) and use the default.
+ * mint both build URLs from it, and `new URL("")` throws.
+ *
+ * Empty or whitespace-only means unset — what a compose file passes for an
+ * unset `YAVIO_ENDPOINT=`, and `??` keeps it — and takes the default. Any
+ * other value that is not an http(s) URL is an error (`YAVIO-1002`, once)
+ * and the SDK goes no-op: a typo in a self-hosted endpoint
+ * (`localhost:3001/v1/events` parses with protocol `localhost:`, `htps://`,
+ * a missing scheme) must never reroute an integrator's events and API key
+ * to the hosted service. Returns null for that case.
  */
-function resolveEndpoint(value: unknown): string {
-  if (typeof value === "string" && value !== "") {
-    try {
-      const url = new URL(value);
-      if (url.protocol === "http:" || url.protocol === "https:") return value;
-    } catch {
-      // Not a URL — fall through to the warning.
-    }
+function resolveEndpoint(value: unknown): string | null {
+  if (typeof value !== "string" || value.trim() === "") return DEFAULT_ENDPOINT;
+  try {
+    const url = new URL(value);
+    if (url.protocol === "http:" || url.protocol === "https:") return value;
+  } catch {
+    // Not a URL at all.
   }
   if (!warnedInvalidFlags.has("endpoint")) {
     warnedInvalidFlags.add("endpoint");
-    console.warn(
-      `[${ErrorCode.SDK.INVALID_ENDPOINT_URL}] endpoint must be an http(s) URL, got ${JSON.stringify(value)} — using ${DEFAULT_ENDPOINT}. Shown once per process.`,
+    console.error(
+      `[${ErrorCode.SDK.INVALID_ENDPOINT_URL}] endpoint must be an http(s) URL, got ${JSON.stringify(value)} — Yavio SDK running in no-op mode (nothing is sent anywhere; the hosted default is not used for an explicit endpoint). Shown once per process.`,
     );
   }
-  return DEFAULT_ENDPOINT;
+  return null;
 }
 
 function resolveGeo(value: unknown): CaptureConfig["geo"] {
@@ -223,11 +236,19 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
 
   const apiKey = options?.apiKey ?? process.env.YAVIO_API_KEY ?? fileConfig?.apiKey;
 
-  if (!apiKey) return null;
+  if (!apiKey) {
+    noopReason = "no-api-key";
+    return null;
+  }
+  noopReason = null;
 
   const endpoint = resolveEndpoint(
     options?.endpoint ?? process.env.YAVIO_ENDPOINT ?? fileConfig?.endpoint ?? DEFAULT_ENDPOINT,
   );
+  if (endpoint === null) {
+    noopReason = "invalid-endpoint";
+    return null;
+  }
 
   // A field set to undefined is "not set" — untyped JS and computed options
   // (`geo: flag ? "country" : undefined`) produce one routinely — so it must

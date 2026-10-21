@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { _resetConfigWarnings } from "../core/config.js";
 import { SDK_VERSION as REACT_SDK_VERSION } from "../react/constants.js";
 import { SDK_VERSION, createYavio, withYavio, yavio } from "../server/index.js";
 import { _resetGlobalState } from "../server/proxy.js";
@@ -121,6 +122,38 @@ describe("withYavio", () => {
     const server = new McpServer({ name: "test", version: "1.0" });
     expect(createYavio().wrap(server)).toBe(server);
     expect(errorSpy).toHaveBeenCalledTimes(1);
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+    _resetGlobalState();
+  });
+
+  it("goes no-op for an invalid endpoint: no proxy, no transport, no listeners, no fetch, one YAVIO-1002 error", () => {
+    _resetGlobalState();
+    _resetConfigWarnings();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const sigterm = process.listenerCount("SIGTERM");
+    const sigint = process.listenerCount("SIGINT");
+    for (const endpoint of [
+      "localhost:3001/v1/events",
+      "htps://ingest.example.com/v1/events",
+      "ingest.example.com/v1/events",
+    ]) {
+      const server = new McpServer({ name: "test", version: "1.0" });
+      expect(withYavio(server, { apiKey: "yav_test", endpoint })).toBe(server);
+      const client = createYavio({ apiKey: "yav_test", endpoint });
+      expect(client.wrap(server)).toBe(server);
+    }
+    expect(_sharedStateCount()).toBe(0);
+    expect(process.listenerCount("SIGTERM")).toBe(sigterm);
+    expect(process.listenerCount("SIGINT")).toBe(sigint);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0]?.[0]).toContain("YAVIO-1002");
+    // Not "no API key": the endpoint error is the story.
+    expect(warnSpy.mock.calls.filter((c) => String(c[0]).includes("YAVIO-1000"))).toEqual([]);
+    fetchSpy.mockRestore();
     errorSpy.mockRestore();
     warnSpy.mockRestore();
     _resetGlobalState();

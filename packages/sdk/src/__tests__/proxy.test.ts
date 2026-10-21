@@ -272,7 +272,7 @@ describe("createProxy — widget config injection", () => {
     expect(meta.yavio).toBeDefined();
   });
 
-  it("never leaves an unhandled rejection: unparseable endpoint, throwing handler, non-object result", async () => {
+  it("never leaves an unhandled rejection: unreachable endpoint, throwing handler, non-object result", async () => {
     // The real mint (not the mock): an endpoint that is not a URL made
     // `new URL()` throw inside the mint promise, which only the object-result
     // path awaited — a throwing handler left it unhandled and the process
@@ -288,7 +288,15 @@ describe("createProxy — widget config injection", () => {
     try {
       const server = new McpServer({ name: "test", version: "1.0" });
       const transport = createMockTransport();
-      const proxy = createProxy(server, { ...testConfig, endpoint: "" }, transport, "0.0.1");
+      // Syntactically valid but unreachable: the mint's failure path. (An
+      // unparseable endpoint never reaches createProxy — resolveConfig goes
+      // no-op for it — but the mint guards hold for "" as well.)
+      const proxy = createProxy(
+        server,
+        { ...testConfig, endpoint: "http://127.0.0.1:9/v1/events" },
+        transport,
+        "0.0.1",
+      );
       proxy.tool("throws", async () => {
         throw new Error("boom");
       });

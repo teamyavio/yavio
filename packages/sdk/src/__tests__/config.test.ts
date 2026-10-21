@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { _resetConfigWarnings, resolveConfig } from "../core/config.js";
+import { _resetConfigWarnings, lastNoopReason, resolveConfig } from "../core/config.js";
 
 describe("resolveConfig", () => {
   const originalEnv = process.env;
@@ -311,19 +311,38 @@ describe("endpoint validation", () => {
     process.env = originalEnv;
   });
 
-  it("falls back to the default for an empty or unparseable endpoint, warning once (YAVIO-1002)", () => {
+  it("treats an empty or whitespace-only endpoint as unset: the default, no warning", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     process.env.YAVIO_ENDPOINT = ""; // what a compose file passes for an unset variable
     expect(resolveConfig()?.endpoint).toBe("https://ingest.yavio.ai/v1/events");
-    expect(resolveConfig({ endpoint: "not a url" })?.endpoint).toBe(
-      "https://ingest.yavio.ai/v1/events",
-    );
-    expect(resolveConfig({ endpoint: "ftp://ingest.example/v1/events" })?.endpoint).toBe(
-      "https://ingest.yavio.ai/v1/events",
-    );
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]?.[0]).toContain("YAVIO-1002");
+    expect(resolveConfig({ endpoint: "  " })?.endpoint).toBe("https://ingest.yavio.ai/v1/events");
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
     warn.mockRestore();
+    error.mockRestore();
+  });
+
+  it("goes no-op for an endpoint that is not an http(s) URL — never the hosted default — with one YAVIO-1002 error", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    // A self-hosted integrator's typo must not reroute events and API key to
+    // the hosted service.
+    for (const endpoint of [
+      "localhost:3001/v1/events", // parses, protocol "localhost:"
+      "htps://ingest.example.com/v1/events",
+      "ingest.example.com/v1/events",
+      "ftp://ingest.example/v1/events",
+    ]) {
+      expect(resolveConfig({ endpoint })).toBeNull();
+      expect(lastNoopReason()).toBe("invalid-endpoint");
+    }
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error.mock.calls[0]?.[0]).toContain("YAVIO-1002");
+    expect(error.mock.calls[0]?.[0]).toContain("no-op");
+    // A valid endpoint afterwards resolves again, with no reason left behind.
+    expect(resolveConfig({ endpoint: "http://127.0.0.1:3001/v1/events" })).not.toBeNull();
+    expect(lastNoopReason()).toBeNull();
+    error.mockRestore();
   });
 
   it("keeps a valid http(s) endpoint", () => {
