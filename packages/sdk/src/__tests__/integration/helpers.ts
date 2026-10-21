@@ -15,6 +15,9 @@ export type Event = Record<string, unknown>;
 export interface ReceivedBatch {
   /** The `Authorization` header the batch came with. */
   authorization: string | undefined;
+  /** `Date.now()` when the batch was received, and when its response was written. */
+  receivedAt: number;
+  answeredAt?: number;
   events: Event[];
   sdk_version?: string;
   sent_at?: string;
@@ -119,16 +122,21 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
         );
         return;
       }
-      const batch = parsed as Omit<ReceivedBatch, "authorization">;
-      batches.push({ ...batch, authorization: req.headers.authorization });
+      const batch = parsed as Omit<ReceivedBatch, "authorization" | "receivedAt">;
+      const received: ReceivedBatch = {
+        ...batch,
+        authorization: req.headers.authorization,
+        receivedAt: Date.now(),
+      };
+      batches.push(received);
       events.push(...batch.events);
       if (ingest.hangEvents) return;
       const respond = () => {
         ingest.responded++;
+        received.answeredAt = Date.now();
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ accepted: batch.events.length, rejected: 0 }));
       };
-      const received = batches[batches.length - 1] as ReceivedBatch;
       const delay =
         typeof ingest.respondAfterMs === "function"
           ? ingest.respondAfterMs(received)

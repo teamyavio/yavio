@@ -8,7 +8,8 @@
  * Env: ENDPOINT (the mock ingest), MODE = "readme" (the README's handler:
  * close the HTTP server, await shutdown(), exit 0) | "none" (no handler of
  * its own: the SDK drains and hands the signal back, Node's default exit).
- * Prints `ready <port>` once listening.
+ * Prints `ready <port>` once listening and `started <sku>` when the `slow`
+ * tool begins, so the test can send the signal with that call in flight.
  */
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -36,6 +37,7 @@ function buildServer(): McpServer {
     "slow",
     { description: "Takes a while", inputSchema: { sku: z.string(), ms: z.number() } },
     async ({ sku, ms }) => {
+      process.stdout.write(`started ${sku}\n`); // the test waits for this before it sends the signal
       await sleep(ms);
       return { content: [{ type: "text", text: `slow ${sku}` }] };
     },
