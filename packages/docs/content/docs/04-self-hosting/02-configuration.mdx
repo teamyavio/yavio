@@ -120,6 +120,8 @@ docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d
 | --- | --- | --- |
 | `NEXTAUTH_URL` | `http://localhost:3000` | Auth callback URL (set to your public domain in production) |
 | `APP_URL` | `http://localhost:3000` | Public-facing URL used in emails and links |
+| `ERASURE_WORKER` | `on` | `off` only for a **non-production copy that shares a production ClickHouse**: the dashboard then boots without `CLICKHOUSE_ERASER_PASSWORD`, deletions stay queued in Postgres and nothing is erased from ClickHouse. A dev dashboard seeded from a production Postgres dump carries the production workspace and project ids, so without this a deletion there would erase the production tenant's analytics. Never set it in production. Any other value stops the boot |
+
 ## OAuth Providers (Optional)
 
 Enable social login by setting provider credentials. Omit to disable.
