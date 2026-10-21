@@ -27,7 +27,7 @@ import { createYavio, withYavio } from "../../server/index.js";
 import { _resetGlobalState, createProxy } from "../../server/proxy.js";
 import { _sharedStateCount } from "../../server/shared.js";
 import type { Transport } from "../../transport/types.js";
-import { type MockIngest, startMockIngest } from "./helpers.js";
+import { type MockIngest, registeredTool, startMockIngest } from "./helpers.js";
 
 function createMockTransport(): Transport & { sent: BaseEvent[][] } {
   const sent: BaseEvent[][] = [];
@@ -512,9 +512,8 @@ describe("MCP SDK v2 — 2026-07-28 era over Streamable HTTP, a new server per r
     const transport = createMockTransport();
     const proxy = createProxy(server, makeConfig({ serverOnly: true }), transport, "0.5.0");
     proxy.registerTool("get_price", { inputSchema: { sku: z.string() } }, async () => ok("x"));
-    const tool = (server as unknown as { _registeredTools: Record<string, { handler: unknown }> })
-      ._registeredTools.get_price;
-    const handler = tool?.handler as (args: unknown, ctx: unknown) => Promise<unknown>;
+    const handler = registeredTool(server, "get_price")?.handler;
+    if (!handler) throw new Error("get_price is not registered");
     await handler(
       { sku: "A1" },
       {

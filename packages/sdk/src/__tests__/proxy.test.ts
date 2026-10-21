@@ -10,6 +10,7 @@ import { createYavioContext } from "../server/context.js";
 import { _resetGlobalState, createProxy, valueFreeRejection } from "../server/proxy.js";
 import { mintWidgetToken } from "../server/token.js";
 import type { Transport } from "../transport/types.js";
+import { registeredTool } from "./integration/helpers.js";
 
 vi.mock("../server/token.js", () => ({
   mintWidgetToken: vi.fn(),
@@ -148,16 +149,6 @@ describe("createProxy — registerTool", () => {
   });
 });
 
-/** Access the internal _registeredTools object on McpServer. */
-function getRegisteredTool(
-  server: McpServer,
-  name: string,
-): { handler: (...args: unknown[]) => unknown } | undefined {
-  const tools = (server as unknown as Record<string, Record<string, unknown>>)._registeredTools;
-  if (!tools || !(name in tools)) return undefined;
-  return tools[name] as { handler: (...args: unknown[]) => unknown };
-}
-
 describe("createProxy — widget config injection", () => {
   beforeEach(() => {
     mockedMint.mockReset();
@@ -177,7 +168,7 @@ describe("createProxy — widget config injection", () => {
       content: [{ type: "text", text: "ok" }],
     }));
 
-    const tool = getRegisteredTool(server, "my_tool");
+    const tool = registeredTool(server, "my_tool");
     const mockExtra = {
       signal: new AbortController().signal,
       requestId: "req-1",
@@ -208,7 +199,7 @@ describe("createProxy — widget config injection", () => {
       content: [{ type: "text", text: "ok" }],
     }));
 
-    const tool = getRegisteredTool(server, "fail_mint_tool");
+    const tool = registeredTool(server, "fail_mint_tool");
     const mockExtra = {
       signal: new AbortController().signal,
       requestId: "req-3",
@@ -231,7 +222,7 @@ describe("createProxy — widget config injection", () => {
       content: [{ type: "text", text: "ok" }],
     }));
 
-    const tool = getRegisteredTool(server, "throw_mint_tool");
+    const tool = registeredTool(server, "throw_mint_tool");
     const mockExtra = {
       signal: new AbortController().signal,
       requestId: "req-4",
@@ -258,7 +249,7 @@ describe("createProxy — widget config injection", () => {
       _meta: { custom: "value" },
     }));
 
-    const tool = getRegisteredTool(server, "meta_tool");
+    const tool = registeredTool(server, "meta_tool");
     const mockExtra = {
       signal: new AbortController().signal,
       requestId: "req-5",
@@ -307,8 +298,8 @@ describe("createProxy — widget config injection", () => {
         sendNotification: async () => {},
         sendRequest: async () => ({}),
       };
-      await expect(getRegisteredTool(server, "throws")?.handler(extra)).rejects.toThrow("boom");
-      await expect(getRegisteredTool(server, "non_object")?.handler(extra)).resolves.toBe(
+      await expect(registeredTool(server, "throws")?.handler(extra)).rejects.toThrow("boom");
+      await expect(registeredTool(server, "non_object")?.handler(extra)).resolves.toBe(
         "just a string",
       );
       // Let any rejection surface.
@@ -344,7 +335,7 @@ describe("createProxy — widget config injection", () => {
       return { content: [{ type: "text", text: "ok" }] };
     });
 
-    const tool = getRegisteredTool(server, "slow_tool");
+    const tool = registeredTool(server, "slow_tool");
     const call = tool?.handler({
       signal: new AbortController().signal,
       requestId: "req-early",
@@ -380,7 +371,7 @@ describe("createProxy — widget config injection", () => {
       content: [{ type: "text", text: "ok" }],
     }));
 
-    const tool = getRegisteredTool(server, "per_call_tool");
+    const tool = registeredTool(server, "per_call_tool");
     const mockExtra = {
       signal: new AbortController().signal,
       requestId: "req-6",
@@ -431,7 +422,7 @@ describe("createProxy — serverOnly mode", () => {
       content: [{ type: "text", text: "ok" }],
     }));
 
-    const tool = getRegisteredTool(server, "server_only_tool");
+    const tool = registeredTool(server, "server_only_tool");
     const mockExtra = {
       signal: new AbortController().signal,
       requestId: "req-so-1",
@@ -452,7 +443,7 @@ describe("createProxy — serverOnly mode", () => {
       content: [{ type: "text", text: "ok" }],
     }));
 
-    const tool = getRegisteredTool(server, "no_mint_tool");
+    const tool = registeredTool(server, "no_mint_tool");
     await tool?.handler({
       signal: new AbortController().signal,
       requestId: "req-so-2",
@@ -473,7 +464,7 @@ describe("createProxy — serverOnly mode", () => {
       _meta: { custom: "value" },
     }));
 
-    const tool = getRegisteredTool(server, "preserve_meta_tool");
+    const tool = registeredTool(server, "preserve_meta_tool");
     const result = (await tool?.handler({
       signal: new AbortController().signal,
       requestId: "req-so-3",
@@ -497,7 +488,7 @@ describe("createProxy — serverOnly mode", () => {
     await listToolsThrough(proxy);
     expect(discoveries(transport.sent).map((e) => e.tool_name)).toEqual(["events_still_fire"]);
 
-    const tool = getRegisteredTool(server, "events_still_fire");
+    const tool = registeredTool(server, "events_still_fire");
     await tool?.handler({
       signal: new AbortController().signal,
       requestId: "req-so-4",
@@ -1001,7 +992,7 @@ describe("createProxy — instrumentation failures never break the call", () => 
     const proxy = createProxy(server, testConfig, transport, "0.0.1");
     proxy.tool("search", { q: z.string() }, () => ({ content: [{ type: "text", text: "found" }] }));
 
-    const result = await getRegisteredTool(server, "search")?.handler(
+    const result = await registeredTool(server, "search")?.handler(
       { q: "x" },
       {
         signal: new AbortController().signal,
@@ -1051,7 +1042,7 @@ describe("createProxy — session reuse", () => {
     await proxy1.connect(mcpTransport1 as never);
 
     // Tool call with MCP session ID in extra (from Mcp-Session-Id header)
-    const tool1 = getRegisteredTool(server1, "tool_a");
+    const tool1 = registeredTool(server1, "tool_a");
     await tool1?.handler(makeExtra({ sessionId: "mcp-session-abc" }));
 
     const firstSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
@@ -1061,7 +1052,7 @@ describe("createProxy — session reuse", () => {
     const mcpTransport2 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
     await proxy2.connect(mcpTransport2 as never);
 
-    const tool2 = getRegisteredTool(server2, "tool_a");
+    const tool2 = registeredTool(server2, "tool_a");
     await tool2?.handler(makeExtra({ sessionId: "mcp-session-abc", requestId: "req-2" }));
 
     const secondSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
@@ -1081,7 +1072,7 @@ describe("createProxy — session reuse", () => {
     await proxy1.connect(mcpTransport1 as never);
     mcpTransport1.sessionId = "mcp-transport-abc";
 
-    const tool1 = getRegisteredTool(server1, "tool_a");
+    const tool1 = registeredTool(server1, "tool_a");
     await tool1?.handler(makeExtra());
 
     const firstSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
@@ -1095,7 +1086,7 @@ describe("createProxy — session reuse", () => {
     await proxy2.connect(mcpTransport2 as never);
     mcpTransport2.sessionId = "mcp-transport-abc";
 
-    const tool2 = getRegisteredTool(server2, "tool_a");
+    const tool2 = registeredTool(server2, "tool_a");
     await tool2?.handler(makeExtra({ requestId: "req-2" }));
 
     const secondSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
@@ -1111,7 +1102,7 @@ describe("createProxy — session reuse", () => {
     const mcpTransport1 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
     await proxy1.connect(mcpTransport1 as never);
 
-    const tool1 = getRegisteredTool(server1, "tool_a");
+    const tool1 = registeredTool(server1, "tool_a");
     await tool1?.handler(makeExtra({ sessionId: "mcp-session-alpha" }));
 
     const firstSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
@@ -1121,7 +1112,7 @@ describe("createProxy — session reuse", () => {
     const mcpTransport2 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
     await proxy2.connect(mcpTransport2 as never);
 
-    const tool2 = getRegisteredTool(server2, "tool_a");
+    const tool2 = registeredTool(server2, "tool_a");
     await tool2?.handler(makeExtra({ sessionId: "mcp-session-beta", requestId: "req-3" }));
 
     const secondSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
@@ -1137,7 +1128,7 @@ describe("createProxy — session reuse", () => {
     const mcpTransport1 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
     await proxy1.connect(mcpTransport1 as never);
 
-    const tool1 = getRegisteredTool(server1, "tool_a");
+    const tool1 = registeredTool(server1, "tool_a");
     await tool1?.handler(makeExtra());
 
     const firstSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
@@ -1147,7 +1138,7 @@ describe("createProxy — session reuse", () => {
     const mcpTransport2 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
     await proxy2.connect(mcpTransport2 as never);
 
-    const tool2 = getRegisteredTool(server2, "tool_a");
+    const tool2 = registeredTool(server2, "tool_a");
     await tool2?.handler(makeExtra({ requestId: "req-4" }));
 
     const secondSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
@@ -1164,7 +1155,7 @@ describe("createProxy — session reuse", () => {
     const mcpTransport1 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
     await proxy1.connect(mcpTransport1 as never);
 
-    const tool1 = getRegisteredTool(server1, "tool_a");
+    const tool1 = registeredTool(server1, "tool_a");
     await tool1?.handler(
       makeExtra({
         _meta: {
@@ -1181,7 +1172,7 @@ describe("createProxy — session reuse", () => {
     const mcpTransport2 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
     await proxy2.connect(mcpTransport2 as never);
 
-    const tool2 = getRegisteredTool(server2, "tool_a");
+    const tool2 = registeredTool(server2, "tool_a");
     await tool2?.handler(
       makeExtra({
         requestId: "req-2",
@@ -1211,7 +1202,7 @@ describe("createProxy — session reuse", () => {
     const mcpTransport1 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
     await proxy1.connect(mcpTransport1 as never);
 
-    const tool1 = getRegisteredTool(server1, "tool_a");
+    const tool1 = registeredTool(server1, "tool_a");
     await tool1?.handler(
       makeExtra({
         sessionId: "mcp-session-real",
@@ -1226,7 +1217,7 @@ describe("createProxy — session reuse", () => {
     const mcpTransport2 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
     await proxy2.connect(mcpTransport2 as never);
 
-    const tool2 = getRegisteredTool(server2, "tool_a");
+    const tool2 = registeredTool(server2, "tool_a");
     await tool2?.handler(
       makeExtra({
         sessionId: "mcp-session-real",
@@ -1249,7 +1240,7 @@ describe("createProxy — session reuse", () => {
     const mcpTransport1 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
     await proxy1.connect(mcpTransport1 as never);
 
-    const tool1 = getRegisteredTool(server1, "tool_a");
+    const tool1 = registeredTool(server1, "tool_a");
     await tool1?.handler(makeExtra({ _meta: { "openai/session": "v1/conversation-alpha" } }));
 
     const firstSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
@@ -1259,7 +1250,7 @@ describe("createProxy — session reuse", () => {
     const mcpTransport2 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
     await proxy2.connect(mcpTransport2 as never);
 
-    const tool2 = getRegisteredTool(server2, "tool_a");
+    const tool2 = registeredTool(server2, "tool_a");
     await tool2?.handler(
       makeExtra({
         requestId: "req-2",
@@ -1280,7 +1271,7 @@ describe("createProxy — session reuse", () => {
     const { server: server1, proxy: proxy1 } = createServerAndProxy(yavioTransport);
     const mcpTransport1 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
     await proxy1.connect(mcpTransport1 as never);
-    const tool1 = getRegisteredTool(server1, "tool_a");
+    const tool1 = registeredTool(server1, "tool_a");
     await tool1?.handler(makeExtra({ sessionId: "mcp-session-stable" }));
 
     const firstSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
@@ -1291,7 +1282,7 @@ describe("createProxy — session reuse", () => {
     const { server: server2, proxy: proxy2 } = createServerAndProxy(yavioTransport);
     const mcpTransport2 = { start: vi.fn(), close: vi.fn(), send: vi.fn() };
     await proxy2.connect(mcpTransport2 as never);
-    const tool2 = getRegisteredTool(server2, "tool_a");
+    const tool2 = registeredTool(server2, "tool_a");
     await tool2?.handler(makeExtra({ sessionId: "mcp-session-stable", requestId: "req-2" }));
 
     const secondSessionId = (yavioTransport.sent.at(-1) as unknown as BaseEvent[])[0].session_id;
@@ -1310,7 +1301,7 @@ describe("createProxy — client identity on connection events", () => {
   });
 
   async function invokeTool(server: McpServer, name: string) {
-    const tool = getRegisteredTool(server, name);
+    const tool = registeredTool(server, name);
     await tool?.handler({
       signal: new AbortController().signal,
       requestId: "req-ci-1",
@@ -1394,7 +1385,7 @@ describe("createProxy — platform detection from HTTP request headers", () => {
     const proxy = createProxy(server, testConfig, transport, "0.0.1");
 
     proxy.tool("ua_tool", () => ({ content: [{ type: "text", text: "ok" }] }));
-    const tool = getRegisteredTool(server, "ua_tool");
+    const tool = registeredTool(server, "ua_tool");
     await tool?.handler({
       signal: new AbortController().signal,
       requestId: "req-ua-1",
@@ -1416,7 +1407,7 @@ describe("createProxy — platform detection from HTTP request headers", () => {
     const proxy = createProxy(server, testConfig, transport, "0.0.1");
 
     proxy.tool("origin_tool", () => ({ content: [{ type: "text", text: "ok" }] }));
-    const tool = getRegisteredTool(server, "origin_tool");
+    const tool = registeredTool(server, "origin_tool");
     await tool?.handler({
       signal: new AbortController().signal,
       requestId: "req-or-1",
@@ -1442,7 +1433,7 @@ describe("request info capture", () => {
     proxy.tool("ri_tool", { q: z.string() }, () => ({
       content: [{ type: "text", text: "ok" }],
     }));
-    const tool = getRegisteredTool(server, "ri_tool");
+    const tool = registeredTool(server, "ri_tool");
     await tool?.handler(
       { q: "hello" },
       {
@@ -1560,7 +1551,7 @@ describe("client metadata capture", () => {
     proxy.tool("meta_tool", { q: z.string() }, () => ({
       content: [{ type: "text", text: "ok" }],
     }));
-    const tool = getRegisteredTool(server, "meta_tool");
+    const tool = registeredTool(server, "meta_tool");
     await tool?.handler(
       { q: "hello" },
       {
@@ -1676,7 +1667,7 @@ describe("client metadata capture", () => {
       throw new Error("boom");
     });
     await expect(
-      getRegisteredTool(server, "meta_tool")?.handler(
+      registeredTool(server, "meta_tool")?.handler(
         { q: "hello" },
         {
           signal: new AbortController().signal,
@@ -1829,7 +1820,7 @@ describe("client metadata capture", () => {
         throw new Error("boom");
       });
       await expect(
-        getRegisteredTool(server, "meta_tool")?.handler(
+        registeredTool(server, "meta_tool")?.handler(
           { q: "hello" },
           {
             signal: new AbortController().signal,
@@ -1982,7 +1973,7 @@ describe("client metadata capture", () => {
         return { content: [{ type: "text", text: "ok" }] };
       });
       const _meta = JSON.parse(JSON.stringify(CHATGPT_META));
-      await getRegisteredTool(server, "meta_tool")?.handler(
+      await registeredTool(server, "meta_tool")?.handler(
         { q: "hello" },
         {
           signal: new AbortController().signal,
@@ -2046,7 +2037,7 @@ describe("tool-result errors (isError: true)", () => {
     // The handler deliberately returns shapes the CallToolResult type rejects
     // (a string isError, no content) — the proxy must classify them anyway.
     proxy.tool("te_tool", { q: z.string() }, () => result as never);
-    const tool = getRegisteredTool(server, "te_tool");
+    const tool = registeredTool(server, "te_tool");
     const returned = await tool?.handler({ q: "hello" }, extra());
     const event = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
       string,
@@ -2126,7 +2117,7 @@ describe("tool-result errors (isError: true)", () => {
     proxy.tool("throwing", () => {
       throw new Error("customer max@example.com not found");
     });
-    const tool = getRegisteredTool(server, "throwing");
+    const tool = registeredTool(server, "throwing");
     await expect(tool?.handler(extra())).rejects.toThrow();
     const event = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
       string,
@@ -2237,8 +2228,8 @@ describe("per-tool capture overrides", () => {
     proxy.tool("book", { q: z.string() }, () => result);
     proxy.tool("search", { q: z.string() }, () => result);
 
-    await getRegisteredTool(server, "book")?.handler({ q: "hello" }, extra());
-    await getRegisteredTool(server, "search")?.handler({ q: "hello" }, extra());
+    await registeredTool(server, "book")?.handler({ q: "hello" }, extra());
+    await registeredTool(server, "search")?.handler({ q: "hello" }, extra());
 
     const book = toolCallFor(transport, "book");
     expectNoInputs(book);
@@ -2264,7 +2255,7 @@ describe("per-tool capture overrides", () => {
     proxy.registerTool("book", { inputSchema: { q: z.string() } }, () => ({
       content: [{ type: "text", text: "ok" }],
     }));
-    await getRegisteredTool(server, "book")?.handler({ q: "hello" }, extra());
+    await registeredTool(server, "book")?.handler({ q: "hello" }, extra());
     const book = toolCallFor(transport, "book");
     expectNoInputs(book);
     // Only inputValues was overridden: output capture follows the global flag.
@@ -2316,7 +2307,7 @@ describe("per-tool capture overrides", () => {
       throw new Error(`IBAN ${iban} rejected`);
     });
     await expect(
-      getRegisteredTool(server, "book")?.handler({ iban: "DE89370400440532013000" }, extra()),
+      registeredTool(server, "book")?.handler({ iban: "DE89370400440532013000" }, extra()),
     ).rejects.toThrow();
     const book = toolCallFor(transport, "book");
     expectNoInputs(book);
@@ -2339,7 +2330,7 @@ describe("per-tool capture overrides", () => {
       throw new Error("upstream unavailable");
     });
     await expect(
-      getRegisteredTool(server, "book")?.handler({ q: "hello" }, extra()),
+      registeredTool(server, "book")?.handler({ q: "hello" }, extra()),
     ).rejects.toThrow();
     const book = toolCallFor(transport, "book");
     expect(book?.status).toBe("error");
@@ -2359,7 +2350,7 @@ describe("per-tool capture overrides", () => {
       throw new Error("upstream unavailable");
     });
     await expect(
-      getRegisteredTool(server, "book")?.handler({ q: "hello" }, extra()),
+      registeredTool(server, "book")?.handler({ q: "hello" }, extra()),
     ).rejects.toThrow();
     expect(toolCallFor(transport, "book")?.error_message).toBe("upstream unavailable");
   });
@@ -2377,7 +2368,7 @@ describe("per-tool capture overrides", () => {
       isError: true,
       content: [{ type: "text", text: "postal code 12345 invalid" }],
     }));
-    await getRegisteredTool(server, "book")?.handler({ q: "hello" }, extra());
+    await registeredTool(server, "book")?.handler({ q: "hello" }, extra());
     const book = toolCallFor(transport, "book");
     expect(book?.status).toBe("error");
     expect(book?.error_category).toBe("tool_error");
@@ -2402,8 +2393,8 @@ describe("per-tool capture overrides", () => {
     const result = { content: [{ type: "text" as const, text: "ok" }] };
     proxy.tool("search", { q: z.string() }, () => result);
     proxy.tool("other", { q: z.string() }, () => result);
-    await getRegisteredTool(server, "search")?.handler({ q: "hello" }, extra());
-    await getRegisteredTool(server, "other")?.handler({ q: "hello" }, extra());
+    await registeredTool(server, "search")?.handler({ q: "hello" }, extra());
+    await registeredTool(server, "other")?.handler({ q: "hello" }, extra());
     expectInputs(toolCallFor(transport, "search"));
     expectNoInputs(toolCallFor(transport, "other"));
   });
@@ -2422,7 +2413,7 @@ describe("per-tool capture overrides", () => {
       yavio.conversion("booking_received", { value: 99, currency: "EUR" });
       return { content: [{ type: "text", text: "booked" }] };
     });
-    await getRegisteredTool(server, "book")?.handler({ q: "hello" }, extra());
+    await registeredTool(server, "book")?.handler({ q: "hello" }, extra());
 
     const events = transport.sent.flat();
     const conversion = events.find((e) => e.event_type === "conversion");
@@ -2447,7 +2438,7 @@ describe("input_values extra fields (_-prefixed)", () => {
     proxy.tool("ef_tool", { q: z.string() }, () => ({
       content: [{ type: "text", text: "ok" }],
     }));
-    await getRegisteredTool(server, "ef_tool")?.handler(
+    await registeredTool(server, "ef_tool")?.handler(
       { q: "hello" },
       {
         signal: new AbortController().signal,
@@ -2536,7 +2527,7 @@ describe("client metadata for schema-less tools", () => {
     const transport = createMockTransport();
     const proxy = createProxy(server, testConfig, transport, "0.0.1");
     proxy.tool("ping", () => ({ content: [{ type: "text", text: "pong" }] }));
-    await getRegisteredTool(server, "ping")?.handler(
+    await registeredTool(server, "ping")?.handler(
       extra({
         "openai/locale": "de-DE",
         "openai/subject": "v1/subject-7",
@@ -2560,7 +2551,7 @@ describe("client metadata for schema-less tools", () => {
     const config = { ...testConfig, capture: { ...testConfig.capture, inputValues: false } };
     const proxy = createProxy(server, config, transport, "0.0.1");
     proxy.tool("ping", () => ({ content: [{ type: "text", text: "pong" }] }));
-    await getRegisteredTool(server, "ping")?.handler(
+    await registeredTool(server, "ping")?.handler(
       extra({ "openai/locale": "de-DE", "openai/subject": "v1/subject-7" }),
     );
 
@@ -2595,7 +2586,7 @@ describe("one proxy, many conversations", () => {
       if (meta?.["openai/session"] === "conv-a") yavio.identify("anna");
       return { content: [{ type: "text", text: "ok" }] };
     });
-    const handler = getRegisteredTool(server, "whoami")?.handler;
+    const handler = registeredTool(server, "whoami")?.handler;
 
     await handler?.(extra("conv-a", "r1"));
     await handler?.(extra("conv-b", "r2"));
@@ -2625,7 +2616,7 @@ describe("one proxy, many conversations", () => {
       }
       return { content: [{ type: "text", text: "ok" }] };
     });
-    const handler = getRegisteredTool(server, "whoami")?.handler;
+    const handler = registeredTool(server, "whoami")?.handler;
 
     await handler?.(extra("conv-0", "r0"));
     await handler?.(extra("conv-0", "r0b")); // still known: no second connection event
@@ -2654,7 +2645,7 @@ describe("one proxy, many conversations", () => {
     const transport = createMockTransport();
     const proxy = createProxy(server, testConfig, transport, "0.0.1");
     proxy.tool("ping", () => ({ content: [{ type: "text", text: "ok" }] }));
-    const handler = getRegisteredTool(server, "ping")?.handler;
+    const handler = registeredTool(server, "ping")?.handler;
     const keyless = (requestId: string) => ({
       signal: new AbortController().signal,
       requestId,
@@ -2695,7 +2686,7 @@ describe("one proxy, many conversations", () => {
       await gate;
       return { content: [{ type: "text", text: "done" }] };
     });
-    const handler = getRegisteredTool(server, "slow")?.handler;
+    const handler = registeredTool(server, "slow")?.handler;
 
     const a = handler?.(extra("conv-a", "r1"));
     const b = handler?.(extra("conv-b", "r2"));

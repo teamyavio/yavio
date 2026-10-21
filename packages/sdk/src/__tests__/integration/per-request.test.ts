@@ -34,7 +34,7 @@ describe("per-request servers share one process-level state", () => {
   });
 
   const callOnce = (wrapped: McpServer, meta?: Record<string, unknown>) =>
-    callViaClient(wrapped, { _meta: meta });
+    callViaClient(wrapped, { name: "get_price", arguments: { q: "x" }, _meta: meta });
   const toolCallEvents = () => ingest.ofType("tool_call");
 
   it("wrapping 1,000 servers creates one transport and at most one signal handler pair, with no MaxListenersExceededWarning", async () => {
@@ -106,7 +106,7 @@ describe("per-request servers share one process-level state", () => {
 
     await client.shutdown();
 
-    const events = ingest.batches.flatMap((b) => b.events);
+    const events = ingest.events;
     const calls = events.filter((e) => e.event_type === "tool_call");
     expect(calls).toHaveLength(3);
     const sessionId = deriveSessionId("conv-shared");
@@ -335,7 +335,7 @@ describe("per-request servers share one process-level state", () => {
     await callOnce(wrapped);
     await a.shutdown();
     // Delivered before shutdown() resolved: 250 track + 1 tool_call (+ connection).
-    const events = ingest.batches.flatMap((batch) => batch.events);
+    const events = ingest.events;
     expect(events.filter((e) => e.event_type === "track")).toHaveLength(250);
     expect(events.filter((e) => e.event_type === "tool_call")).toHaveLength(1);
     expect(_sharedStateCount()).toBe(1);
@@ -596,8 +596,7 @@ describe("per-request servers share one process-level state", () => {
       await mcpClient.connect(ct);
       return mcpClient;
     };
-    const toolCalls = () =>
-      ingest.batches.flatMap((b) => b.events).filter((e) => e.event_type === "tool_call");
+    const toolCalls = () => ingest.ofType("tool_call");
 
     it("withYavio() leaves them untracked, as before 0.5.0", async () => {
       let ran = 0;

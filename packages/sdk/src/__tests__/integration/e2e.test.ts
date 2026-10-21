@@ -5,7 +5,7 @@ import type { YavioConfig } from "../../core/types.js";
 import { createYavioContext } from "../../server/context.js";
 import { _resetGlobalState, createProxy } from "../../server/proxy.js";
 import { HttpTransport } from "../../transport/http.js";
-import { type MockIngest, callTool, registeredTool, startMockIngest, v1Extra } from "./helpers.js";
+import { type MockIngest, callTool, startMockIngest, v1Extra } from "./helpers.js";
 
 describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", () => {
   // One ingest for the whole file: the tests slice its batches by count.
@@ -60,7 +60,6 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
       return { content: [{ type: "text" as const, text: "Found 3 rooms" }] };
     });
 
-    expect(registeredTool(server, "search_rooms")).toBeDefined();
     await callTool(
       server,
       "search_rooms",
@@ -140,7 +139,6 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
       throw new Error("Something went wrong");
     });
 
-    expect(registeredTool(server, "failing_tool")).toBeDefined();
     try {
       await callTool(
         server,
@@ -209,7 +207,6 @@ describe("End-to-end: proxy → tool call → HTTP transport → mock ingest", (
       },
     );
 
-    expect(registeredTool(server, "search_hotels")).toBeDefined();
     await callTool(
       server,
       "search_hotels",

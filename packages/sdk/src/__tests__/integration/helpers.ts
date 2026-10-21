@@ -33,8 +33,6 @@ export interface MockIngest {
   hangMints: boolean;
   /** Events of one type, in order. */
   ofType(eventType: string): Event[];
-  /** Forget what was received (the server keeps running). */
-  reset(): void;
   /** Cut every open connection, e.g. to fail a pending mint now. */
   dropConnections(): void;
   close(): Promise<void>;
@@ -55,12 +53,6 @@ export async function startMockIngest(): Promise<MockIngest> {
     mints,
     hangMints: false,
     ofType: (eventType) => events.filter((e) => e.event_type === eventType),
-    reset() {
-      batches.length = 0;
-      events.length = 0;
-      mints.length = 0;
-      ingest.hangMints = false;
-    },
     dropConnections: () => server.closeAllConnections(),
     close: () =>
       new Promise<void>((resolve) => {
@@ -69,13 +61,27 @@ export async function startMockIngest(): Promise<MockIngest> {
       }),
   };
   const server = createServer((req, res) => {
+    // Only the two routes the SDK may call; anything else is a regression, not a batch.
+    if (req.method !== "POST" || (req.url !== "/v1/events" && req.url !== "/v1/widget-tokens")) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
     let body = "";
     req.on("data", (chunk) => {
       body += chunk;
     });
     req.on("end", () => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        res.writeHead(400);
+        res.end();
+        return;
+      }
       if (req.url === "/v1/widget-tokens") {
-        const { traceId } = JSON.parse(body) as { traceId: string };
+        const { traceId } = parsed as { traceId: string };
         mints.push(traceId);
         if (ingest.hangMints) return;
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -87,7 +93,7 @@ export async function startMockIngest(): Promise<MockIngest> {
         );
         return;
       }
-      const batch = JSON.parse(body) as Omit<ReceivedBatch, "authorization">;
+      const batch = parsed as Omit<ReceivedBatch, "authorization">;
       batches.push({ ...batch, authorization: req.headers.authorization });
       events.push(...batch.events);
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -106,30 +112,24 @@ export async function startMockIngest(): Promise<MockIngest> {
  */
 export async function callViaClient(
   wrapped: McpServer,
-  call: {
-    name?: string;
-    arguments?: Record<string, unknown>;
-    _meta?: Record<string, unknown>;
-  } = {},
-  options: { listTools?: boolean } = {},
+  call: { name: string; arguments?: Record<string, unknown>; _meta?: Record<string, unknown> },
 ): Promise<Awaited<ReturnType<Client["callTool"]>>> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await wrapped.connect(serverTransport);
   const client = new Client({ name: "c", version: "1.0" });
   await client.connect(clientTransport);
-  if (options.listTools) await client.listTools();
   try {
-    return await client.callTool({
-      name: call.name ?? "get_price",
-      arguments: call.arguments ?? { q: "x" },
-      _meta: call._meta,
-    });
+    return await client.callTool(call);
   } finally {
     await client.close();
   }
 }
 
-type ToolHandler = (args: unknown, extra: unknown) => Promise<unknown>;
+/** A registered tool as the MCP SDK stores it: the (wrapped) handler plus whatever else the SDK keeps. */
+export interface RegisteredToolEntry {
+  handler: (...args: unknown[]) => Promise<unknown>;
+  inputSchema?: unknown;
+}
 
 /** The extra the MCP SDK (v1) passes to a tool handler. */
 export function v1Extra(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -143,29 +143,35 @@ export function v1Extra(overrides: Record<string, unknown> = {}): Record<string,
   };
 }
 
-/** The registered tool behind a server (proxy or raw), reaching into `_registeredTools` as the SDK does. */
-export function registeredTool(
-  server: McpServer,
-  name: string,
-): { handler: ToolHandler } | undefined {
-  const tools = (
-    server as unknown as { _registeredTools?: Record<string, { handler: ToolHandler }> }
-  )._registeredTools;
-  return tools?.[name];
+/**
+ * The registry behind a server (v1 or v2, proxy or raw): the private
+ * `_registeredTools` the SDK itself patches — one place to reach into it.
+ */
+export function registeredTools(server: object): Record<string, RegisteredToolEntry> {
+  const tools = (server as { _registeredTools?: Record<string, RegisteredToolEntry> })
+    ._registeredTools;
+  if (!tools) throw new Error("no _registeredTools on this server");
+  return tools;
+}
+
+/** One registered tool, or undefined. */
+export function registeredTool(server: object, name: string): RegisteredToolEntry | undefined {
+  return registeredTools(server)[name];
 }
 
 /**
  * Invoke a tool's registered handler directly with a v1 extra: no transport,
- * no protocol layer — exactly what the callback wrapper sees.
+ * no protocol layer — exactly what the callback wrapper sees. The call shape
+ * follows the SDK: a tool with an input schema gets `(args, extra)`, one
+ * without gets `(extra)` only.
  */
 export async function callTool(
   raw: McpServer,
   name: string,
-  args: Record<string, unknown> | undefined = { q: "x" },
+  args?: Record<string, unknown>,
   extra: Record<string, unknown> = v1Extra(),
 ): Promise<unknown> {
   const tool = registeredTool(raw, name);
   if (!tool) throw new Error(`tool ${name} is not registered`);
-  // A tool without an input schema takes (extra) only, like the SDK calls it.
-  return args === undefined ? tool.handler(extra, undefined) : tool.handler(args, extra);
+  return tool.inputSchema === undefined ? tool.handler(extra) : tool.handler(args ?? {}, extra);
 }

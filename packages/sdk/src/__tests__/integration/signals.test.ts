@@ -49,7 +49,7 @@ describe("SIGTERM/SIGINT hand-back (#138)", () => {
       { inputSchema: { q: z.string() } },
       ok,
     );
-    await callTool(raw, "get_price");
+    await callTool(raw, "get_price", { q: "x" });
     return raw;
   }
 
@@ -103,7 +103,7 @@ describe("SIGTERM/SIGINT hand-back (#138)", () => {
         });
         const raw = new McpServer({ name: "app", version: "1.0" });
         client.wrap(raw).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
-        await callTool(raw, "get_price");
+        await callTool(raw, "get_price", { q: "x" });
         expect(process.listenerCount("SIGINT")).toBe(2);
 
         process.emit("SIGINT", "SIGINT");
