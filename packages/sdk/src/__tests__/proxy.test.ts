@@ -272,6 +272,48 @@ describe("createProxy — widget config injection", () => {
     expect(meta.yavio).toBeDefined();
   });
 
+  it("never leaves an unhandled rejection: unparseable endpoint, throwing handler, non-object result", async () => {
+    // The real mint (not the mock): an endpoint that is not a URL made
+    // `new URL()` throw inside the mint promise, which only the object-result
+    // path awaited — a throwing handler left it unhandled and the process
+    // exited. The mock is bypassed for this test with the module's real code.
+    const { mintWidgetToken: realMint } =
+      await vi.importActual<typeof import("../server/token.js")>("../server/token.js");
+    mockedMint.mockImplementation(realMint);
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", onRejection);
+    try {
+      const server = new McpServer({ name: "test", version: "1.0" });
+      const transport = createMockTransport();
+      const proxy = createProxy(server, { ...testConfig, endpoint: "" }, transport, "0.0.1");
+      proxy.tool("throws", async () => {
+        throw new Error("boom");
+      });
+      proxy.tool("non_object", async () => "just a string" as unknown as { content: [] });
+      const extra = {
+        signal: new AbortController().signal,
+        requestId: "req-ur",
+        sendNotification: async () => {},
+        sendRequest: async () => ({}),
+      };
+      await expect(getRegisteredTool(server, "throws")?.handler(extra)).rejects.toThrow("boom");
+      await expect(getRegisteredTool(server, "non_object")?.handler(extra)).resolves.toBe(
+        "just a string",
+      );
+      // Let any rejection surface.
+      for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+      expect(rejections).toEqual([]);
+      const events = transport.sent.flat().filter((e) => e.event_type === "tool_call");
+      expect(events.map((e) => (e as { status?: string }).status)).toEqual(["error", "success"]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+      mockedMint.mockReset();
+    }
+  });
+
   it("starts the mint before the handler runs, so its round trip hides behind the handler", async () => {
     let releaseMint: (() => void) | undefined;
     mockedMint.mockImplementation(

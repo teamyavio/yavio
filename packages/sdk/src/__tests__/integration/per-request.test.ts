@@ -344,6 +344,17 @@ describe("per-request servers share one process-level state", () => {
     expect(toolCallEvents()).toEqual([]);
   });
 
+  it("a re-wrap for another key neither pins nor holds a transport for that key", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const raw = new McpServer({ name: "other-key", version: "1.0" });
+    const first = withYavio(raw, { apiKey: "yav_mine", endpoint, serverOnly: true });
+    expect(_sharedStateCount()).toBe(1);
+    expect(withYavio(first, { apiKey: "yav_other", endpoint, serverOnly: true })).toBe(first);
+    expect(withYavio(raw, { apiKey: "yav_other", endpoint, serverOnly: true })).toBe(first);
+    expect(_sharedStateCount()).toBe(1); // still only yav_mine's transport
+    expect(warn.mock.calls.filter((c) => String(c[0]).includes("YAVIO-1108"))).toHaveLength(1);
+  });
+
   it("a differing capture override on a re-wrap warns once (YAVIO-1108) and the first wrap's capture keeps applying", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const raw = new McpServer({ name: "pay-raw", version: "1.0" });
@@ -443,6 +454,99 @@ describe("per-request servers share one process-level state", () => {
     expect(outputs.sort()).toEqual(["after", "before", "before"]);
     const lines = info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("best effort"));
     expect(lines).toHaveLength(1);
+  });
+
+  it("never leaves an unhandled rejection when the mint fails under a throwing handler or a non-object result", async () => {
+    // The mint endpoint drops the connection: the mint promise fails while
+    // nothing awaits it (handler threw / non-object result).
+    hangMints = true;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", onRejection);
+    try {
+      const client = createYavio({ apiKey: "yav_unhandled", endpoint, serverOnly: false });
+      const wrapped = client.wrap(new McpServer({ name: "w", version: "1.0" }));
+      wrapped.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => {
+        throw new Error("boom");
+      });
+      const result = await callOnce(wrapped);
+      expect(result.isError).toBe(true);
+      ingest.closeAllConnections(); // fail the pending mint now
+      for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+      await client.shutdown();
+      expect(rejections).toEqual([]);
+      expect(toolCallEvents().map((e) => e.status)).toEqual(["error"]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+      warn.mockRestore();
+    }
+  });
+
+  it("after the signal handler ran, a long-lived withYavio() server that is never wrapped again still delivers", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const server = withYavio(new McpServer({ name: "long-lived", version: "1.0" }), {
+      apiKey: "yav_sig_pinned",
+      endpoint,
+      serverOnly: true,
+    });
+    server.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => ok("late"));
+    await beginProcessShutdown(); // what SIGTERM does
+    expect(_sharedStateCount()).toBe(0);
+
+    // No wrap after the signal: the existing proxy's send must create the
+    // immediate transport itself.
+    await callOnce(server);
+    const deadline = Date.now() + 2_000;
+    while (toolCallEvents().length < 1 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const outputs = toolCallEvents().map(
+      (e) => (e.output_content as { content: Array<{ text: string }> }).content[0]?.text,
+    );
+    expect(outputs).toEqual(["late"]);
+    expect(info.mock.calls.filter((c) => String(c[0]).includes("best effort"))).toHaveLength(1);
+  });
+
+  describe("a result the MCP SDK rejects on the wire (v1)", () => {
+    const malformed = async () => ({ content: "not an array" }) as unknown as { content: [] };
+    const expectServerError = async (wrapped: McpServer, drain: () => Promise<void>) => {
+      const [ct, st] = InMemoryTransport.createLinkedPair();
+      await wrapped.connect(st);
+      const mcpClient = new Client({ name: "c", version: "1.0" });
+      await mcpClient.connect(ct);
+      await expect(
+        mcpClient.callTool({ name: "get_price", arguments: { q: "x" } }),
+      ).rejects.toThrow(/Invalid tools\/call result/);
+      await mcpClient.close();
+      await drain();
+      const calls = toolCallEvents();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.status).toBe("error");
+      expect(calls[0]?.error_category).toBe("server");
+      expect(calls[0]?.error_message).toContain("Invalid tools/call result");
+    };
+
+    it("tool registered after withYavio() → client error and a server-category event", async () => {
+      const wrapped = withYavio(new McpServer({ name: "lazy", version: "1.0" }), {
+        apiKey: "yav_wire_with",
+        endpoint,
+        serverOnly: true,
+      });
+      wrapped.registerTool("get_price", { inputSchema: { q: z.string() } }, malformed);
+      await expectServerError(wrapped, () =>
+        createYavio({ apiKey: "yav_wire_with", endpoint, serverOnly: true }).shutdown(),
+      );
+    });
+
+    it("tool registered after createYavio().wrap() → client error and a server-category event", async () => {
+      const client = createYavio({ apiKey: "yav_wire_wrap", endpoint, serverOnly: true });
+      const wrapped = client.wrap(new McpServer({ name: "lazy", version: "1.0" }));
+      wrapped.registerTool("get_price", { inputSchema: { q: z.string() } }, malformed);
+      await expectServerError(wrapped, () => client.shutdown());
+    });
   });
 
   it("shutdown() drains and forgets the state; a later wrap starts afresh", async () => {

@@ -127,6 +127,15 @@ describe("mintWidgetToken", () => {
     expect(init.signal?.aborted).toBe(false);
   });
 
+  it("resolves null for an endpoint that is not a URL — never rejects", async () => {
+    const mockFetch = vi.fn();
+    await expect(mintWidgetToken("", "yav_test", "tr", "ses", mockFetch)).resolves.toBeNull();
+    await expect(
+      mintWidgetToken("not a url", "yav_test", "tr", "ses", mockFetch),
+    ).resolves.toBeNull();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   it("returns null on network error", async () => {
     const mockFetch = vi.fn().mockRejectedValue(new Error("Network error"));
     const result = await mintWidgetToken(

@@ -505,6 +505,24 @@ describe("MCP SDK v2 — 2026-07-28 era over Streamable HTTP, a new server per r
     expect(typeof events[0]?.latency_ms).toBe("number");
   });
 
+  it("records v2's wire rejection as a server error on the lazy path too (tool registered after the wrap)", async () => {
+    const h = await setup((proxy) => {
+      proxy.registerTool(
+        "get_price",
+        { inputSchema: { sku: z.string() } },
+        async () => ({ content: "not an array" }) as unknown as { content: [] },
+      );
+    });
+    await expect(
+      h.client.callTool({ name: "get_price", arguments: { sku: "A1" } }),
+    ).rejects.toThrow(/Invalid tools\/call result/);
+    const events = toolCalls(h.events);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.status).toBe("error");
+    expect(events[0]?.error_category).toBe("server");
+    expect(events[0]?.error_message).toContain("Invalid tools/call result");
+  });
+
   it("reads the client identity from the per-request envelope when no handshake is known", async () => {
     // A per-request instance never saw the initialize handshake, so
     // getClientVersion() is empty; the envelope is the only source. Fails

@@ -300,6 +300,42 @@ describe("per-tool capture overrides (tools)", () => {
   });
 });
 
+describe("endpoint validation", () => {
+  const originalEnv = process.env;
+  beforeEach(() => {
+    process.env = { ...originalEnv, YAVIO_API_KEY: "yav_test" };
+    process.env.YAVIO_ENDPOINT = undefined;
+    _resetConfigWarnings();
+  });
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it("falls back to the default for an empty or unparseable endpoint, warning once (YAVIO-1002)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.YAVIO_ENDPOINT = ""; // what a compose file passes for an unset variable
+    expect(resolveConfig()?.endpoint).toBe("https://ingest.yavio.ai/v1/events");
+    expect(resolveConfig({ endpoint: "not a url" })?.endpoint).toBe(
+      "https://ingest.yavio.ai/v1/events",
+    );
+    expect(resolveConfig({ endpoint: "ftp://ingest.example/v1/events" })?.endpoint).toBe(
+      "https://ingest.yavio.ai/v1/events",
+    );
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain("YAVIO-1002");
+    warn.mockRestore();
+  });
+
+  it("keeps a valid http(s) endpoint", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(resolveConfig({ endpoint: "http://127.0.0.1:3001/v1/events" })?.endpoint).toBe(
+      "http://127.0.0.1:3001/v1/events",
+    );
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
 describe("boolean capture flags fail closed", () => {
   let warn: ReturnType<typeof vi.spyOn>;
 
