@@ -9,8 +9,15 @@ import type {
 } from "../core/types.js";
 import { SDK_VERSION } from "../core/version.js";
 import { createYavioContext, markSdkActive } from "./context.js";
-import { createProxy, releaseConnectionMark } from "./proxy.js";
-import { logOnce, sharedStateFor, shutdownShared } from "./shared.js";
+import { createProxy, existingProxy, releaseConnectionMark } from "./proxy.js";
+import {
+  type SharedState,
+  acquireShared,
+  logOnce,
+  peekShared,
+  pinShared,
+  releaseShared,
+} from "./shared.js";
 
 // Sent on every event batch. Defined in core/version.ts so the server and React
 // bundles cannot drift apart at release time. Imported as well as re-exported
@@ -45,6 +52,15 @@ function rejectUnsupported(server: unknown): void {
   });
 }
 
+/** Once per process, however many requests a stateless host wraps on. */
+function warnNoApiKey(): void {
+  logOnce(ErrorCode.SDK.NO_API_KEY, () =>
+    console.warn(
+      `[${ErrorCode.SDK.NO_API_KEY}] No API key found — Yavio SDK running in no-op mode`,
+    ),
+  );
+}
+
 /** Process-level log lines, once per process whatever the host's request rate. */
 function logModes(config: YavioConfig): void {
   if (config.serverOnly) {
@@ -68,22 +84,60 @@ function logModes(config: YavioConfig): void {
   }
 }
 
+/** The session LRU's eviction hook: forget the conversation's connection-event mark. */
+const evictionHookFor =
+  (config: YavioConfig) =>
+  (sessionId: string): void =>
+    releaseConnectionMark(config.apiKey, sessionId);
+
+/**
+ * Wrap one server. A server that is already wrapped — or a proxy itself —
+ * comes back as the existing proxy: a host that wraps the same long-lived
+ * server on every request must not stack a callback wrapper per request
+ * (N wraps, N `tool_call` events per call).
+ */
+function wrapServer<T extends McpServerLike>(
+  server: T,
+  config: YavioConfig,
+  state: SharedState,
+  instrumentExisting: boolean,
+): T {
+  if (!isSupportedServer(server)) {
+    rejectUnsupported(server);
+    return server;
+  }
+  const existing = existingProxy(server);
+  if (existing) {
+    logOnce("rewrap", () =>
+      console.debug(
+        "[yavio] withYavio()/wrap() called on a server that is already wrapped — returning the existing proxy. Shown once per process.",
+      ),
+    );
+    return existing;
+  }
+  return createProxy(server, config, state.transport, SDK_VERSION, state, { instrumentExisting });
+}
+
 /**
  * Create a Yavio client: the once-per-process half of the SDK (#133).
  *
- * Resolves the configuration once and binds to the process-level state for
- * it — the HTTP transport to ingest, the session store, the widget token
- * cache, the shutdown hooks — shared with every other client and
- * `withYavio()` call that resolves to the same endpoint and API key. `wrap()`
- * is then cheap enough to run on every request of a stateless host:
+ * Resolves the configuration once and holds the process-level state for it —
+ * the HTTP transport to ingest, the session store, the shutdown hooks —
+ * shared with every other client and `withYavio()` call that resolves to the
+ * same endpoint and API key. `wrap()` is then cheap enough to run on every
+ * request of a stateless host:
  *
  * ```ts
- * const yavio = createYavio({ serverOnly: true });
+ * const analytics = createYavio({ serverOnly: true });
  * app.post("/mcp", async (req, res) => {
- *   const server = yavio.wrap(buildServer()); // a new McpServer per request
+ *   const server = analytics.wrap(buildServer()); // a new McpServer per request
  *   …
  * });
  * ```
+ *
+ * `wrap()` instruments every tool on the server, including the ones
+ * `buildServer()` registered before the wrap — unlike `withYavio()`, which
+ * tracks only tools registered through the proxy it returns.
  *
  * If no API key is found, `wrap()` returns every server unchanged
  * (transparent no-op) and `shutdown()` does nothing.
@@ -92,9 +146,7 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
   const config = resolveConfig(options);
 
   if (!config) {
-    console.warn(
-      `[${ErrorCode.SDK.NO_API_KEY}] No API key found — Yavio SDK running in no-op mode`,
-    );
+    warnNoApiKey();
     return {
       wrap: (server) => server,
       shutdown: async () => {},
@@ -106,23 +158,26 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
   markSdkActive();
   logModes(config);
 
-  // Created on first use and shared process-wide: one transport, one session
-  // store, one token cache per (endpoint, apiKey), one signal handler pair.
-  // Looked up per wrap (a Map read), so a wrap after shutdown() starts a
-  // fresh transport instead of writing into a stopped one.
-  const shared = () => sharedStateFor(config, SDK_VERSION, releaseConnectionMark);
-  shared();
+  // This client's hold on the shared state: taken on creation, released by
+  // shutdown(), taken again by a wrap after shutdown() — which then finds the
+  // state other holders kept alive, or starts a fresh transport.
+  const onEvict = evictionHookFor(config);
+  let held = false;
+  const state = (): SharedState => {
+    const live = held ? peekShared(config) : undefined;
+    if (live) return live;
+    held = true;
+    return acquireShared(config, SDK_VERSION, onEvict);
+  };
+  state();
 
   return {
-    wrap<T extends McpServerLike>(server: T): T {
-      if (!isSupportedServer(server)) {
-        rejectUnsupported(server);
-        return server;
-      }
-      const state = shared();
-      return createProxy(server, config, state.transport, SDK_VERSION, state);
+    wrap: <T extends McpServerLike>(server: T): T => wrapServer(server, config, state(), true),
+    shutdown: async () => {
+      if (!held) return;
+      held = false;
+      await releaseShared(config);
     },
-    shutdown: () => shutdownShared(config),
   };
 }
 
@@ -134,9 +189,13 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
  *
  * If no API key is found, returns the original server unchanged (transparent no-op).
  *
- * Safe to call once per request on a stateless host: the transport, the
- * session store and the shutdown hooks are shared per resolved configuration
- * (see `createYavio()`, which also resolves the configuration only once).
+ * Tracks the tools registered through the proxy it returns; a tool registered
+ * on the server before the wrap stays untracked (`createYavio().wrap()` is
+ * the entry point that instruments those). Safe for a server created per
+ * request on a stateless host: the transport, the session store and the
+ * shutdown hooks are shared per API key and endpoint, and never stopped
+ * before the process exits. Wrapping the same long-lived server again returns
+ * the existing proxy.
  */
 export function withYavio<T extends McpServerLike>(server: T, options?: WithYavioOptions): T {
   // Before the configuration is resolved and anything is created: an
@@ -145,7 +204,14 @@ export function withYavio<T extends McpServerLike>(server: T, options?: WithYavi
     rejectUnsupported(server);
     return server;
   }
-  return createYavio(options).wrap(server);
+  const config = resolveConfig(options);
+  if (!config) {
+    warnNoApiKey();
+    return server;
+  }
+  markSdkActive();
+  logModes(config);
+  return wrapServer(server, config, pinShared(config, SDK_VERSION, evictionHookFor(config)), false);
 }
 
 /**

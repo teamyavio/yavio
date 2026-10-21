@@ -28,12 +28,7 @@ import {
   installProtocolWrappers,
   runInCallFrame,
 } from "./protocol.js";
-import {
-  type CachedWidgetToken,
-  type SharedSessions,
-  _resetSharedState,
-  createSharedSessions,
-} from "./shared.js";
+import { type SharedSessions, _resetSharedState, createSharedSessions } from "./shared.js";
 import { type MintResult, mintWidgetToken } from "./token.js";
 
 function isMintResult(result: unknown): result is MintResult {
@@ -41,29 +36,19 @@ function isMintResult(result: unknown): result is MintResult {
 }
 
 /**
- * Get a widget token, reusing a cached one if still valid (30s buffer).
- * Invalidates cache on 401/403 (key rotation, revocation).
+ * Mint the widget token for one tool call. Ingest binds the JWT's `tid` to
+ * this trace id and rejects a widget batch under any other trace
+ * (`WIDGET_TRACE_ID_MISMATCH`), and every call has its own trace id — so
+ * there is nothing to cache, across calls or across instances (#133 review).
  * Returns null if minting fails — callers should skip injection silently.
  */
-async function getWidgetToken(
-  cache: { current: CachedWidgetToken | null },
+async function mintCallToken(
   config: YavioConfig,
   traceId: string,
   sessionId: string,
 ): Promise<string | null> {
-  if (cache.current && Date.now() < cache.current.expiresAt - 30_000) {
-    return cache.current.token;
-  }
   const result = await mintWidgetToken(config.endpoint, config.apiKey, traceId, sessionId);
-  if (isMintResult(result)) {
-    cache.current = { token: result.token, expiresAt: Date.parse(result.expiresAt) };
-    return result.token;
-  }
-  // Auth failure — invalidate any stale cached token
-  if (result && "status" in result && (result.status === 401 || result.status === 403)) {
-    cache.current = null;
-  }
-  return null;
+  return isMintResult(result) ? result.token : null;
 }
 
 /**
@@ -149,7 +134,8 @@ function openCallContext(
   // for the once-per-session connection event and unresolved platforms.
   // `get`, not `has`: a hit refreshes the mark's recency, so an active
   // conversation is never aged out of the dedup by newer ones.
-  const connectionEmitted = emittedConnections.get(session.sessionId) === true;
+  const connectionKey = dedupKey(config.apiKey, session.sessionId);
+  const connectionEmitted = emittedConnections.get(connectionKey) === true;
   let clientInfo: { name?: string; version?: string } | undefined;
   if (session.platform === "unknown" || !connectionEmitted) {
     clientInfo = ex.client;
@@ -185,7 +171,7 @@ function openCallContext(
   // Deferred from connect() so that OpenAI's per-tool-call reconnects don't
   // spam a connection event for every tool call in the same conversation.
   if (!connectionEmitted) {
-    emittedConnections.set(session.sessionId, true);
+    emittedConnections.set(connectionKey, true);
     const connectionEvent = buildConnectionEvent(
       {
         traceId: generateTraceId(),
@@ -224,7 +210,6 @@ function wrapToolCallback(
   capture: CaptureConfig,
   transport: Transport,
   sdkVersion: string,
-  tokenCache: { current: CachedWidgetToken | null },
 ): (...cbArgs: unknown[]) => Promise<unknown> {
   return async (...cbArgs: unknown[]) => {
     const extra = cbArgs[cbArgs.length - 1];
@@ -308,12 +293,7 @@ function wrapToolCallback(
       // so the tool result is forwarded to the MCP client byte-for-byte.
       if (!config.serverOnly && result && typeof result === "object") {
         try {
-          const token = await getWidgetToken(
-            tokenCache,
-            config,
-            store.traceId,
-            store.session.sessionId,
-          );
+          const token = await mintCallToken(config, store.traceId, store.session.sessionId);
           if (token) {
             const res = result as Record<string, unknown>;
             if (!res._meta || typeof res._meta !== "object") {
@@ -401,21 +381,39 @@ function intentContextFor(config: YavioConfig): IntentContext | undefined {
  * session map — emits a fresh connection event on its next call, which also
  * marks that its state (user, step sequence) started over.
  *
- * Shared by every proxy in the process: if two long-lived instrumented
- * servers in one process see the same conversation key, only the first to
- * see it emits a connection event for it, and one's eviction can make the
- * other emit a second one. Niche topology; keying by (apiKey, sessionId)
- * would separate them if it ever matters.
+ * Shared by every proxy in the process, keyed by `(apiKey, sessionId)`: two
+ * instrumented servers reporting to the same project that see the same
+ * conversation emit one connection event between them, while two projects
+ * (two API keys) in one process each get their own.
  */
 const MAX_EMITTED_CONNECTIONS = 10_000;
 const emittedConnections = new LruMap<string, true>(MAX_EMITTED_CONNECTIONS);
 
-/** Tracks tool names that have already emitted a tool_discovery event (global dedup). */
+/**
+ * `(apiKey, toolName)` pairs that have emitted a tool_discovery event: once
+ * per tool per project per process, however many instances register it.
+ */
 const emittedToolDiscoveries = new Set<string>();
 
+/** Every proxy createProxy built, by the server it wraps, and the proxies themselves. */
+const proxiesByServer = new WeakMap<object, object>();
+const proxies = new WeakSet<object>();
+
+/** A NUL cannot occur in an API key, so the pair cannot collide with another. */
+const dedupKey = (apiKey: string, name: string): string => `${apiKey}\u0000${name}`;
+
 /** Drop a session's connection-event mark (the shared session map's eviction hook). */
-export function releaseConnectionMark(sessionId: string): void {
-  emittedConnections.delete(sessionId);
+export function releaseConnectionMark(apiKey: string, sessionId: string): void {
+  emittedConnections.delete(dedupKey(apiKey, sessionId));
+}
+
+/**
+ * The proxy already wrapping this server (or the value itself when it is a
+ * proxy), so wrapping twice never instruments twice.
+ */
+export function existingProxy<T extends object>(server: T): T | undefined {
+  if (proxies.has(server)) return server;
+  return proxiesByServer.get(server) as T | undefined;
 }
 
 /** @internal Reset global dedup state and the shared registry — exposed for testing only. */
@@ -425,22 +423,34 @@ export function _resetGlobalState(): void {
   _resetSharedState();
 }
 
+export interface CreateProxyOptions {
+  /**
+   * Instrument the tools already registered on the server at wrap time
+   * (`createYavio().wrap()`). Off by default: `withYavio()` tracks only the
+   * tools registered through the proxy, as it always has, so a tool kept on
+   * the raw server on purpose stays untracked.
+   */
+  instrumentExisting?: boolean;
+}
+
 /**
  * Create a Proxy around McpServer that intercepts tool()/registerTool() and connect()
  * to inject Yavio instrumentation transparently.
  *
  * `shared` is the session state that outlives this instance (#133): the
- * sessions map and the widget token cache, owned by the process-level client
- * so a per-request server instance finds the conversation state its
- * predecessors built. Without it (tests building a proxy directly) the proxy
- * gets a private one.
+ * sessions map, owned by the process-level client so a per-request server
+ * instance finds the conversation state its predecessors built. Without it
+ * (tests building a proxy directly) the proxy gets a private one.
  */
 export function createProxy<T extends McpServerLike>(
   server: T,
   config: YavioConfig,
   transport: Transport,
   sdkVersion: string,
-  shared: SharedSessions = createSharedSessions(releaseConnectionMark),
+  shared: SharedSessions = createSharedSessions((sessionId) =>
+    releaseConnectionMark(config.apiKey, sessionId),
+  ),
+  options: CreateProxyOptions = {},
 ): T {
   // Session state of the connection itself: set on connect, used for calls
   // that carry no session key and for discovery events.
@@ -452,8 +462,12 @@ export function createProxy<T extends McpServerLike>(
     stepSequence: 0,
   };
 
-  // Widget token cache — shared across tool calls and server instances
-  const tokenCache: { current: CachedWidgetToken | null } = shared.tokenCache;
+  // Discovery dedup, once per tool per project per process.
+  const discoveryEmitted = (toolName: string): boolean =>
+    emittedToolDiscoveries.has(dedupKey(config.apiKey, toolName));
+  const markDiscovery = (toolName: string): void => {
+    emittedToolDiscoveries.add(dedupKey(config.apiKey, toolName));
+  };
 
   // Intent capture operates at the protocol layer (wrapped tools/list and
   // tools/call handlers on the low-level server) — registered tool schemas
@@ -663,8 +677,8 @@ export function createProxy<T extends McpServerLike>(
         for (const tool of tools as Array<Record<string, unknown> | null>) {
           const name = tool?.name;
           if (typeof name !== "string" || !instrumentedTools.has(name)) continue;
-          if (emittedToolDiscoveries.has(name)) continue;
-          emittedToolDiscoveries.add(name);
+          if (discoveryEmitted(name)) continue;
+          markDiscovery(name);
           events.push(
             discoveryEvent(
               name,
@@ -798,28 +812,36 @@ export function createProxy<T extends McpServerLike>(
   ) => transport.send([discoveryEvent(toolName, description, inputSchema)]);
 
   /**
-   * Tools registered BEFORE the wrap (#133). A stateless host builds the
-   * server — tools included — and wraps the finished server, so the
-   * interceptors below never see those registrations. Instrument them in
-   * place through `RegisteredTool.update({ callback })`, public API on every
-   * supported MCP SDK (v1 since the floor, v2), exactly as the interceptors
-   * would have: same callback wrapper, same capture flags, same intent
-   * classification. Task tools (the handler is an object, not a function)
-   * stay out, as they do for the interceptors. A tool the integrator
-   * registers on the UNWRAPPED server after wrapping is still untracked.
+   * Tools registered BEFORE the wrap (#133), `createYavio().wrap()` only. A
+   * stateless host builds the server — tools included — and wraps the
+   * finished server, so the interceptors below never see those
+   * registrations. Instrument them in place through
+   * `RegisteredTool.update({ callback })`, public API on every supported MCP
+   * SDK (v1 since the floor, v2), exactly as the interceptors would have:
+   * same callback wrapper, same capture flags, same intent classification.
+   * `update()` is the only way on v2, whose tools/call executor captured the
+   * handler at registration; it also sends `notifications/tools/list_changed`
+   * when the server is already connected — one per tool, harmless (a
+   * per-request host wraps before it connects). Task tools (the handler is an
+   * object, not a function) stay out, as they do for the interceptors. A tool
+   * the integrator registers on the UNWRAPPED server after wrapping is still
+   * untracked. One tool whose update throws is skipped, not the rest.
    */
   const instrumentRegisteredTools = (): void => {
+    let tools: Record<string, RegisteredToolLike> | undefined;
     try {
-      const tools = (server as unknown as { _registeredTools?: Record<string, RegisteredToolLike> })
+      tools = (server as unknown as { _registeredTools?: Record<string, RegisteredToolLike> })
         ._registeredTools;
-      if (!tools || typeof tools !== "object") return;
-      for (const name of Object.keys(tools)) {
+    } catch {
+      return; // Registry unreadable: nothing to instrument, the interceptors still work.
+    }
+    if (!tools || typeof tools !== "object") return;
+    for (const name of Object.keys(tools)) {
+      try {
         const tool = tools[name];
         if (!tool || typeof tool !== "object" || instrumentedTools.has(name)) continue;
         const handler = tool.handler;
         if (typeof handler !== "function" || typeof tool.update !== "function") continue;
-        intent?.noteToolRegistration(name, tool.inputSchema ? [tool.inputSchema] : [], tool._meta);
-        instrumentedTools.add(name);
         tool.update({
           callback: wrapToolCallback(
             handler as (...cbArgs: unknown[]) => unknown,
@@ -830,25 +852,28 @@ export function createProxy<T extends McpServerLike>(
             resolveToolCapture(config, name),
             transport,
             sdkVersion,
-            tokenCache,
           ),
         });
-        if (!protocolInstalled && !emittedToolDiscoveries.has(name)) {
-          emittedToolDiscoveries.add(name);
+        // Only once the wrapper is in place: a tool whose update threw must
+        // not count as instrumented (a frame would then be opened for it).
+        instrumentedTools.add(name);
+        intent?.noteToolRegistration(name, tool.inputSchema ? [tool.inputSchema] : [], tool._meta);
+        if (!protocolInstalled && !discoveryEmitted(name)) {
+          markDiscovery(name);
           emitDiscovery(
             name,
             typeof tool.description === "string" ? tool.description : undefined,
             extractParamKeys(tool.inputSchema),
           );
         }
+      } catch {
+        // This tool stays as it was; the next one is still instrumented.
       }
-    } catch {
-      // Registry unreadable: nothing to instrument, the interceptors still work.
     }
   };
-  instrumentRegisteredTools();
+  if (options.instrumentExisting) instrumentRegisteredTools();
 
-  return new Proxy<T>(server, {
+  const proxy = new Proxy<T>(server, {
     get(target, prop, receiver) {
       if (prop === "tool" && originalTool) {
         return (...args: unknown[]) => {
@@ -873,15 +898,14 @@ export function createProxy<T extends McpServerLike>(
             resolveToolCapture(config, toolName),
             transport,
             sdkVersion,
-            tokenCache,
           );
 
           const result = originalTool(...args);
 
           // Fallback when tools/list could not be wrapped (see discoveryWrapper):
           // emit at registration, once per tool name, with property names only.
-          if (!protocolInstalled && !emittedToolDiscoveries.has(toolName)) {
-            emittedToolDiscoveries.add(toolName);
+          if (!protocolInstalled && !discoveryEmitted(toolName)) {
+            markDiscovery(toolName);
             let description: string | undefined;
             let inputSchema: Record<string, unknown> | undefined;
             // Scan args between name and callback for description + schema
@@ -946,7 +970,6 @@ export function createProxy<T extends McpServerLike>(
               resolveToolCapture(config, toolName),
               transport,
               sdkVersion,
-              tokenCache,
             );
           }
 
@@ -955,8 +978,8 @@ export function createProxy<T extends McpServerLike>(
           // Fallback when tools/list could not be wrapped (see discoveryWrapper).
           // Property names only: the raw inputSchema is a Zod object, and
           // serialising it ships Zod's internal state, not a schema (#83).
-          if (cbIndex !== -1 && !protocolInstalled && !emittedToolDiscoveries.has(toolName)) {
-            emittedToolDiscoveries.add(toolName);
+          if (cbIndex !== -1 && !protocolInstalled && !discoveryEmitted(toolName)) {
+            markDiscovery(toolName);
             emitDiscovery(
               toolName,
               typeof configArg?.description === "string" ? configArg.description : undefined,
@@ -989,9 +1012,6 @@ export function createProxy<T extends McpServerLike>(
             stepSequence: 0,
           };
           activeSession = null;
-          // The widget token cache is NOT reset here: it is shared across
-          // server instances (#133), and a per-request host connects a new
-          // instance for every request. Expiry alone decides a re-mint.
 
           const result = await originalConnect(mcpTransport);
 
@@ -1005,6 +1025,9 @@ export function createProxy<T extends McpServerLike>(
       return Reflect.get(target, prop, receiver);
     },
   });
+  proxiesByServer.set(server, proxy);
+  proxies.add(proxy);
+  return proxy;
 }
 
 /** The registry entry of an MCP SDK v1 or v2 tool, as far as the proxy reads it. */

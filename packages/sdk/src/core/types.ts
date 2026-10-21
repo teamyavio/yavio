@@ -192,14 +192,18 @@ export interface McpServerLike {
  */
 export interface YavioClient {
   /**
-   * Instrument a server. Synchronous. Returns the server unchanged in no-op
-   * mode (no API key) and for a server shape the SDK does not support
-   * (`YAVIO-1107`, logged once per process).
+   * Instrument a server: every tool on it, including those registered before
+   * the wrap. Synchronous. Returns the server unchanged in no-op mode (no API
+   * key) and for a server shape the SDK does not support (`YAVIO-1107`,
+   * logged once per process), and the existing proxy for a server that is
+   * already wrapped.
    */
   wrap<T extends McpServerLike>(server: T): T;
   /**
-   * Drain the client's transport and forget its shared state. A later wrap
-   * with the same configuration starts a fresh transport.
+   * Flush, then release this client's hold on the shared transport. The
+   * transport stops only when no other client with the same configuration
+   * holds it and no `withYavio()` call pinned it; a later wrap by this client
+   * holds it again, or starts a fresh one.
    */
   shutdown(): Promise<void>;
 }

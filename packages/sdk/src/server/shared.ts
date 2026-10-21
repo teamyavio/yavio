@@ -16,22 +16,27 @@ import type { Transport } from "../transport/types.js";
  * - one `sessions` map per key: `yavio.identify()`, the traits and the step
  *   sequence of a conversation, found again by the next instance that serves
  *   the same `Mcp-Session-Id` or `openai/session`;
- * - one widget-token cache per key, so a non-serverOnly stateless app mints
- *   one token per expiry instead of one per request;
  * - exactly one SIGTERM/SIGINT handler pair for the whole process, which
  *   drains every transport in the registry.
  *
+ * Not shared, on purpose: the widget token. Ingest binds a widget JWT to the
+ * trace id of the call that minted it (`WIDGET_TRACE_ID_MISMATCH` for any
+ * other), and every tool call has its own trace id, so a token is minted per
+ * call and never cached.
+ *
  * Still per wrapped instance (in createProxy): the connection's own session,
  * the current MCP transport, the set of tools the instance wrapped. Module
- * level elsewhere, as before: the connection-event dedup (`emittedConnections`)
- * and the discovery dedup (`emittedToolDiscoveries`) in proxy.ts.
+ * level elsewhere, keyed by API key: the connection-event dedup
+ * (`emittedConnections`) and the discovery dedup (`emittedToolDiscoveries`)
+ * in proxy.ts.
+ *
+ * Lifetime. The state of a key is held by every `createYavio()` client bound
+ * to it (a counter) and pinned by the first `withYavio()` call for it (which
+ * has no shutdown of its own). `client.shutdown()` flushes and releases that
+ * client's hold; the transport stops only when the last hold is gone and
+ * nothing pins it — another client's events for the same key keep flowing.
+ * The signal handlers drain everything regardless.
  */
-
-/** Cached widget token with parsed expiry for reuse across tool calls. */
-export interface CachedWidgetToken {
-  token: string;
-  expiresAt: number;
-}
 
 export interface SharedSessions {
   /**
@@ -42,8 +47,6 @@ export interface SharedSessions {
    * a fresh connection event.
    */
   sessions: LruMap<string, SessionState>;
-  /** Widget token cache, shared across tool calls and instances. */
-  tokenCache: { current: CachedWidgetToken | null };
 }
 
 export interface SharedState extends SharedSessions {
@@ -54,19 +57,27 @@ export const MAX_SESSIONS = 1000;
 
 /**
  * Fresh session state with no transport attached. The proxy's default when it
- * is built directly (tests); `sharedStateFor` builds the real one.
+ * is built directly (tests); the registry builds the real one.
  */
 export function createSharedSessions(onEvict?: (sessionId: string) => void): SharedSessions {
   return {
     sessions: new LruMap<string, SessionState>(MAX_SESSIONS, (sessionId) => onEvict?.(sessionId)),
-    tokenCache: { current: null },
   };
 }
 
-const registry = new Map<string, SharedState>();
+interface Entry {
+  state: SharedState;
+  /** Live `createYavio()` clients bound to this key. */
+  holders: number;
+  /** Set by `withYavio()`, which never releases: the state lives until a signal. */
+  pinned: boolean;
+}
 
-const keyOf = (config: Pick<YavioConfig, "endpoint" | "apiKey">): string =>
-  `${config.endpoint}\n${config.apiKey}`;
+const registry = new Map<string, Entry>();
+
+type Key = Pick<YavioConfig, "endpoint" | "apiKey">;
+
+const keyOf = (config: Key): string => `${config.endpoint}\n${config.apiKey}`;
 
 let signalHandlersInstalled = false;
 const shutdownHandler = (): void => {
@@ -80,16 +91,7 @@ function installSignalHandlers(): void {
   process.on("SIGINT", shutdownHandler);
 }
 
-/**
- * The shared state for a resolved config: created on first use, reused by
- * every later wrap with the same endpoint and key. Installs the process
- * signal handlers the first time any state is created.
- */
-export function sharedStateFor(
-  config: Pick<YavioConfig, "endpoint" | "apiKey">,
-  sdkVersion: string,
-  onEvict?: (sessionId: string) => void,
-): SharedState {
+function entryFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string) => void): Entry {
   const key = keyOf(config);
   const existing = registry.get(key);
   if (existing) return existing;
@@ -100,32 +102,75 @@ export function sharedStateFor(
     sdkVersion,
   });
   transport.start();
-  const state: SharedState = { transport, ...createSharedSessions(onEvict) };
-  registry.set(key, state);
+  const entry: Entry = {
+    state: { transport, ...createSharedSessions(onEvict) },
+    holders: 0,
+    pinned: false,
+  };
+  registry.set(key, entry);
   installSignalHandlers();
-  return state;
+  return entry;
 }
 
 /**
- * Drain and forget the shared state of one config. A later wrap with the
- * same config starts afresh (a stopped transport drops events, so it must
- * not be reused).
+ * The shared state for a resolved config, pinned: created on first use, then
+ * reused by every later wrap with the same endpoint and key and never stopped
+ * before the process exits (`withYavio()` has no shutdown). Installs the
+ * process signal handlers the first time any state is created.
  */
-export async function shutdownShared(
-  config: Pick<YavioConfig, "endpoint" | "apiKey">,
-): Promise<void> {
+export function pinShared(
+  config: Key,
+  sdkVersion: string,
+  onEvict?: (sessionId: string) => void,
+): SharedState {
+  const entry = entryFor(config, sdkVersion, onEvict);
+  entry.pinned = true;
+  return entry.state;
+}
+
+/**
+ * The shared state for a resolved config, held by one more client. Each
+ * `acquireShared` is balanced by one `releaseShared`.
+ */
+export function acquireShared(
+  config: Key,
+  sdkVersion: string,
+  onEvict?: (sessionId: string) => void,
+): SharedState {
+  const entry = entryFor(config, sdkVersion, onEvict);
+  entry.holders++;
+  return entry.state;
+}
+
+/** The live shared state for a config, if any — no side effect. */
+export function peekShared(config: Key): SharedState | undefined {
+  return registry.get(keyOf(config))?.state;
+}
+
+/**
+ * Flush, then release one client's hold on a config's state. The transport
+ * stops — and the state is forgotten, so a later wrap starts afresh — only
+ * when no client holds it and no `withYavio()` call pinned it; otherwise the
+ * other holders keep delivering through it.
+ */
+export async function releaseShared(config: Key): Promise<void> {
   const key = keyOf(config);
-  const state = registry.get(key);
-  if (!state) return;
+  const entry = registry.get(key);
+  if (!entry) return;
+  entry.holders = Math.max(0, entry.holders - 1);
+  if (entry.holders > 0 || entry.pinned) {
+    await entry.state.transport.flush();
+    return;
+  }
   registry.delete(key);
-  await state.transport.shutdown();
+  await entry.state.transport.shutdown();
 }
 
 /** Drain every transport in the registry (the signal handlers' job). */
 export async function shutdownAllShared(): Promise<void> {
-  const states = [...registry.values()];
+  const entries = [...registry.values()];
   registry.clear();
-  await Promise.all(states.map((state) => state.transport.shutdown().catch(() => {})));
+  await Promise.all(entries.map((entry) => entry.state.transport.shutdown().catch(() => {})));
 }
 
 /** @internal Number of live shared states — exposed for testing only. */
@@ -151,8 +196,8 @@ export function logOnce(key: string, log: () => void): void {
  * exposed for testing only. Transports are stopped without draining.
  */
 export function _resetSharedState(): void {
-  for (const state of registry.values()) {
-    state.transport.shutdown().catch(() => {});
+  for (const entry of registry.values()) {
+    entry.state.transport.shutdown().catch(() => {});
   }
   registry.clear();
   loggedOnce.clear();
