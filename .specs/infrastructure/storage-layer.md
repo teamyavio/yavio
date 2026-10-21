@@ -631,6 +631,7 @@ The dashboard's housekeeping job (`lib/housekeeping`, #92) runs hourly under an 
 Deleting an account, workspace or project removes the Postgres rows and queues an `erasure_requests` row **in the same transaction** (#91).
 - **Worker:** the dashboard's erasure worker deletes the tenant's rows from every ClickHouse table, both tiers and `tool_registry` (by the snapshotted project ids). It runs as `yavio_eraser` (`ALTER DELETE` only, no `SELECT`).
 - **Retries:** it retries every minute and remembers finished tables. A request pending for more than 24 h is logged as an error.
+- **`ERASURE_WORKER=off`** (`lib/erasure/switch.ts`): for a non-production copy that shares a production ClickHouse — a dev dashboard seeded from a production Postgres dump carries the production workspace and project ids, so a deletion there would erase the production tenant's analytics. With the worker off the dashboard boots without `CLICKHOUSE_ERASER_PASSWORD`, the delete routes still remove the Postgres rows and queue the request, and nothing executes it; the mutating ClickHouse client refuses to be created. Any value other than `on`/`off` stops the boot. Never in production: queued requests would never complete.
 - **Backups:** erased data stays in earlier backups until they expire, **up to 4 weeks** on Yavio Cloud (14 days on the host plus 14 days of disk snapshots). Docs: Self-Hosting → Backups & Operations.
 
 ### 5.3.4 Logs

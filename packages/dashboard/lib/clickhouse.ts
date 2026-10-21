@@ -1,4 +1,5 @@
 import { LONG_RUNNING_REQUEST_TIMEOUT_MS, createClickHouseClient } from "@yavio/db/clickhouse";
+import { erasureWorkerEnabled } from "./erasure/switch";
 
 type ClickHouseClient = ReturnType<typeof createClickHouseClient>;
 
@@ -104,6 +105,10 @@ export function requireEraserPassword(): string {
  * later, and every retry queued one more full-table mutation.
  */
 export function getMutatingClickHouseClient(): ClickHouseClient {
+  if (!erasureWorkerEnabled()) {
+    // Belt and braces: the worker and the kicks are already no-ops when off.
+    throw new Error("ERASURE_WORKER=off: this process must not mutate ClickHouse");
+  }
   if (!mutatingClient) {
     mutatingClient = createClickHouseClient(
       narrowedUrl(process.env.CLICKHOUSE_URL, ERASER_CH_USER, requireEraserPassword()),

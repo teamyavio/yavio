@@ -8,7 +8,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // is still there. So: register() itself, and the built standalone server.
 
 // DATABASE_URL too: with it, register() also starts the erasure worker (#91 part 2).
-const KEYS = ["CLICKHOUSE_ERASER_PASSWORD", "NEXT_RUNTIME", "NEXT_PHASE", "DATABASE_URL"] as const;
+const KEYS = [
+  "CLICKHOUSE_ERASER_PASSWORD",
+  "ERASURE_WORKER",
+  "NEXT_RUNTIME",
+  "NEXT_PHASE",
+  "DATABASE_URL",
+] as const;
 let saved: Record<string, string | undefined>;
 
 beforeEach(() => {
@@ -48,6 +54,31 @@ describe("instrumentation register()", () => {
     const { register } = await import("@/instrumentation");
     await register();
     expect(exit).not.toHaveBeenCalled();
+  });
+
+  it("ERASURE_WORKER=off boots without the eraser credential and says so", async () => {
+    process.env.NEXT_RUNTIME = "nodejs";
+    process.env.ERASURE_WORKER = "off";
+    const exit = spyExit();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { register } = await import("@/instrumentation");
+    await register();
+    expect(exit).not.toHaveBeenCalled();
+    expect(warn.mock.calls.flat().join(" ")).toContain("ERASURE_WORKER=off");
+  });
+
+  it("exits with status 1 and names the variable when ERASURE_WORKER has another value", async () => {
+    process.env.NEXT_RUNTIME = "nodejs";
+    process.env.CLICKHOUSE_ERASER_PASSWORD = "eraser-secret";
+    process.env.ERASURE_WORKER = "maybe";
+    const exit = spyExit();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { register } = await import("@/instrumentation");
+    await register();
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(error.mock.calls.flat().join(" ")).toContain(
+      'ERASURE_WORKER must be "on" (default) or "off"',
+    );
   });
 
   it("does not check during `next build`, which holds no runtime secrets", async () => {
@@ -131,6 +162,30 @@ describe.skipIf(!built)("standalone server (built output)", () => {
       }
       expect(exitCode).toBeUndefined();
       expect(status).toBe(200);
+    } finally {
+      child.kill("SIGTERM");
+    }
+  }, 40_000);
+
+  it("serves requests with ERASURE_WORKER=off and no eraser credential", async () => {
+    const port = 3919;
+    const child = startServer({ ERASURE_WORKER: "off" }, port);
+    const output = collect(child);
+    let exitCode: number | null | undefined;
+    child.on("exit", (c) => {
+      exitCode = c;
+    });
+    try {
+      let status = 0;
+      for (let i = 0; i < 60 && status === 0 && exitCode === undefined; i++) {
+        await new Promise((r) => setTimeout(r, 500));
+        status = await fetch(`http://127.0.0.1:${port}/login`)
+          .then((r) => r.status)
+          .catch(() => 0);
+      }
+      expect(exitCode).toBeUndefined();
+      expect(status).toBe(200);
+      expect(output()).toContain("ERASURE_WORKER=off");
     } finally {
       child.kill("SIGTERM");
     }

@@ -157,6 +157,9 @@ services:
       # the dashboard refuses to start without it rather than erasing as the
       # superuser (#91).
       CLICKHOUSE_ERASER_PASSWORD: ${CLICKHOUSE_ERASER_PASSWORD:?CLICKHOUSE_ERASER_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — the dashboard erases data as the yavio_eraser user and no longer falls back to the superuser.}
+      # "off" only for a non-production copy that shares a production
+      # ClickHouse: deletions stay queued, nothing is erased. Never in production.
+      ERASURE_WORKER: ${ERASURE_WORKER:-on}
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET}
