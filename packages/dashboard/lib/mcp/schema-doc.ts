@@ -82,8 +82,9 @@ conversions, conversion_value
   in that cell. NOT additive across days or cells.
 - events = rows, except in cells with event_type = 'connection', where it is
   the distinct sessions that connected that day, from the stats runs after
-  the #142 ingest deploy: NOT additive across days. The first run after the
-  deploy recomputes the previous month too, so only months before that keep
+  the ingest deploy that shipped #142 (date to be filled in at deploy time:
+  YYYY-MM-DD): NOT additive across days. The first run after that deploy
+  recomputes the previous month too, so only months before that keep
   counting connection rows (one per session per server process); a
   connection figure spanning them mixes the two. Use uniqExact(session_id)
   over events for sessions whenever the raw data is still there.
