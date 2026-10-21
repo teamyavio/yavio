@@ -205,17 +205,22 @@ function resolveBooleanFlag(path: string, value: unknown): boolean {
 /**
  * `shutdownTimeoutMs`: an integer number of milliseconds in
  * [`MIN_SHUTDOWN_TIMEOUT_MS`, `MAX_SHUTDOWN_TIMEOUT_MS`] — from code (a
- * number), the env var (a numeric string) or the file (a number). An unset
- * or empty value falls through to the next source; anything else is one
- * `YAVIO-1006` warning and the default, because a typo must not turn into a
- * deadline that drops every event on shutdown.
+ * number), the env var (a string of decimal digits) or the file (a number,
+ * or the same string). An unset or empty value falls through to the next
+ * source; anything else — a string `Number()` would take, `0x2710` or
+ * `1e4`, included — is one `YAVIO-1006` warning and the default, because a
+ * typo must not turn into a deadline that drops every event on shutdown.
  */
 function resolveShutdownTimeout(...sources: unknown[]): number {
   for (const value of sources) {
     if (value === undefined || value === null) continue;
     if (typeof value === "string" && value.trim() === "") continue;
     const ms =
-      typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+      typeof value === "number"
+        ? value
+        : typeof value === "string" && /^\d+$/.test(value.trim())
+          ? Number(value)
+          : Number.NaN;
     if (Number.isInteger(ms) && ms >= MIN_SHUTDOWN_TIMEOUT_MS && ms <= MAX_SHUTDOWN_TIMEOUT_MS) {
       return ms;
     }

@@ -545,20 +545,51 @@ describe("shutdownTimeoutMs (#142)", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it.each(["0", "-1", "soon", "NaN", "99", "2147483648", "9007199254740991", "Infinity", "1500.5"])(
-    "rejects %s with one warning and uses the default",
-    (value) => {
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = value;
+  it.each([
+    "0",
+    "-1",
+    "soon",
+    "NaN",
+    "99",
+    "2147483648",
+    "9007199254740991",
+    "Infinity",
+    "1500.5",
+    // Strings Number() would take: only decimal digits are a number (review round 2).
+    "0x2710",
+    "1e4",
+    "+2500",
+    " 2500 ms",
+  ])("rejects %s with one warning and uses the default", (value) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = value;
+    expect(resolveConfig()?.shutdownTimeoutMs).toBe(10_000);
+    expect(resolveConfig()?.shutdownTimeoutMs).toBe(10_000);
+    const lines = warn.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.includes("shutdownTimeoutMs"));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("YAVIO-1006");
+  });
+
+  it.each(["0x2710", "1e4"])("rejects the string %s in .yaviorc.json the same way", (value) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const tempDir = mkdtempSync(join(tmpdir(), "yavio-shutdown-test-"));
+    const originalCwd = process.cwd;
+    try {
+      writeFileSync(
+        join(tempDir, ".yaviorc.json"),
+        JSON.stringify({ apiKey: "file_key", shutdownTimeoutMs: value }),
+      );
+      process.cwd = () => tempDir;
       expect(resolveConfig()?.shutdownTimeoutMs).toBe(10_000);
-      expect(resolveConfig()?.shutdownTimeoutMs).toBe(10_000);
-      const lines = warn.mock.calls
-        .map((c) => String(c[0]))
-        .filter((l) => l.includes("shutdownTimeoutMs"));
-      expect(lines).toHaveLength(1);
-      expect(lines[0]).toContain("YAVIO-1006");
-    },
-  );
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain("YAVIO-1006");
+    } finally {
+      process.cwd = originalCwd;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 
   it("rejects a zero code option the same way", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
