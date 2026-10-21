@@ -12,6 +12,14 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
 import {
+  type AnalyticsSection,
+  analyticsFilterSearch,
+  analyticsSection,
+  lastViewKey,
+  parseLastView,
+  serializeLastView,
+} from "@/lib/navigation";
+import {
   accountSettingsTabs,
   resolveAccountTab,
   resolveWorkspaceTab,
@@ -59,7 +67,12 @@ interface SidebarProps {
   user: { name: string | null; email: string };
 }
 
-const analyticsNavItems = [
+const analyticsNavItems: {
+  path: AnalyticsSection;
+  label: string;
+  icon: typeof LayoutDashboard;
+  comingSoon?: boolean;
+}[] = [
   { path: "overview", label: "Overview", icon: LayoutDashboard },
   { path: "tools", label: "Tools", icon: Wrench },
   { path: "invocations", label: "Invocations", icon: Target },
@@ -115,14 +128,36 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
   const paramWorkspace = params.workspace as string | undefined;
   const paramProject = params.project as string | undefined;
 
+  // The analytics filters in the URL (#43): carried on every sidebar link
+  // and remembered per project together with the section, so leaving for
+  // settings or another project does not reset them.
+  const filterSearch = analyticsFilterSearch(searchParams);
+  const paramSection =
+    paramWorkspace && paramProject
+      ? analyticsSection(pathname, `/${paramWorkspace}/${paramProject}`)
+      : null;
+
   useEffect(() => {
     if (paramWorkspace) {
       localStorage.setItem(LAST_WORKSPACE_KEY, paramWorkspace);
       if (paramProject) {
         localStorage.setItem(lastProjectKey(paramWorkspace), paramProject);
+        if (paramSection) {
+          // A page without filters in its URL (Live, a fresh link) keeps the
+          // filters remembered before it rather than clearing them.
+          const key = lastViewKey(paramWorkspace, paramProject);
+          const previous = parseLastView(localStorage.getItem(key));
+          localStorage.setItem(
+            key,
+            serializeLastView({
+              section: paramSection,
+              search: filterSearch || previous?.search || "",
+            }),
+          );
+        }
       }
     }
-  }, [paramWorkspace, paramProject]);
+  }, [paramWorkspace, paramProject, paramSection, filterSearch]);
 
   // localStorage is only consulted after mount so the first client
   // render matches the server-rendered HTML.
@@ -152,6 +187,16 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
     currentWorkspaceSlug && currentProjectSlug
       ? `/${currentWorkspaceSlug}/${currentProjectSlug}`
       : "";
+
+  // Where the user last was in this project; settings pages return there,
+  // and links from a page without filters in its URL carry those filters.
+  const lastView = parseLastView(
+    mounted && currentWorkspaceSlug && currentProjectSlug
+      ? localStorage.getItem(lastViewKey(currentWorkspaceSlug, currentProjectSlug))
+      : null,
+  );
+  const navSearch = filterSearch || lastView?.search || "";
+  const currentSection = paramSection ?? lastView?.section ?? "overview";
 
   // Settings pages are workspace- (or account-)scoped: the project
   // selector has no honest job there, so it is replaced by an explicit
@@ -215,6 +260,8 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
             currentProjectSlug={currentProjectSlug}
             collapsed={collapsed}
             mode={inSettings ? "workspace-settings" : "scope"}
+            section={currentSection}
+            search={navSearch}
           />
         </div>
       )}
@@ -292,7 +339,7 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
               return (
                 <Link
                   key={item.path}
-                  href={href}
+                  href={`${href}${navSearch}`}
                   title={collapsed ? item.label : undefined}
                   className={cn(
                     "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
@@ -332,7 +379,7 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
       {inSettings && basePath && (
         <div className="p-2">
           <Link
-            href={`${basePath}/overview`}
+            href={`${basePath}/${currentSection}${navSearch}`}
             title={collapsed ? "Back to Dashboard" : (currentProjectName ?? undefined)}
             className={cn(
               "flex h-9 items-center gap-3 rounded-md border text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",

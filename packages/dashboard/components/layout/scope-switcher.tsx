@@ -32,6 +32,10 @@ interface ScopeSwitcherProps {
   /** In settings mode the switcher stays in the same spot but switches
    *  which workspace's settings are shown instead of the project scope. */
   mode?: "scope" | "workspace-settings";
+  /** Section a project link lands on, so switching projects keeps it (#43). */
+  section?: string;
+  /** Query string ("?from=…" or "") carried over to the target project. */
+  search?: string;
 }
 
 /**
@@ -47,6 +51,8 @@ export function ScopeSwitcher({
   currentProjectSlug,
   collapsed,
   mode = "scope",
+  section = "overview",
+  search = "",
 }: ScopeSwitcherProps) {
   const inSettingsMode = mode === "workspace-settings";
   const currentWorkspace = workspaces.find((ws) => ws.slug === currentWorkspaceSlug);
@@ -114,7 +120,7 @@ export function ScopeSwitcher({
                       ws.slug === currentWorkspaceSlug && proj.slug === currentProjectSlug;
                     return (
                       <DropdownMenuItem asChild key={proj.id}>
-                        <Link href={`/${ws.slug}/${proj.slug}/overview`}>
+                        <Link href={`/${ws.slug}/${proj.slug}/${section}${search}`}>
                           <span className="truncate">{proj.name}</span>
                           {active && <Check className="ml-auto h-4 w-4" />}
                         </Link>
