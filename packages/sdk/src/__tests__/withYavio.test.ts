@@ -47,22 +47,46 @@ describe("withYavio", () => {
     _resetGlobalState();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const sigterm = process.listenerCount("SIGTERM");
+    const sigint = process.listenerCount("SIGINT");
 
     const notAServer = { connect: async () => {} };
     const result = withYavio(notAServer as unknown as McpServer, { apiKey: "yav_test" });
     expect(result).toBe(notAServer);
-    const empty = withYavio({} as unknown as McpServer, { apiKey: "yav_test" });
-    expect(empty).toBe(empty);
-    expect(createYavio({ apiKey: "yav_unsupported" }).wrap({} as unknown as McpServer)).toEqual({});
+    const emptyInput = {};
+    const empty = withYavio(emptyInput as unknown as McpServer, { apiKey: "yav_test" });
+    expect(empty).toBe(emptyInput);
+
+    // withYavio rejected before resolving anything: no transport, no listeners.
+    expect(process.listenerCount("SIGTERM")).toBe(sigterm);
+    expect(process.listenerCount("SIGINT")).toBe(sigint);
+    expect(_sharedStateCount()).toBe(0);
+
+    // wrap() on a client that already holds a transport: still unwrapped.
+    const unsupportedInput = {};
+    const client = createYavio({ apiKey: "yav_unsupported" });
+    expect(client.wrap(unsupportedInput as unknown as McpServer)).toBe(unsupportedInput);
+    expect(_sharedStateCount()).toBe(1);
+    expect(process.listenerCount("SIGTERM")).toBe(sigterm + 1);
+    expect(process.listenerCount("SIGINT")).toBe(sigint + 1);
 
     // Once per process, however many unsupported values arrive.
     expect(errorSpy).toHaveBeenCalledTimes(1);
     expect(errorSpy.mock.calls[0]?.[0]).toContain("YAVIO-1107");
     expect(errorSpy.mock.calls[0]?.[0]).toContain("registerTool");
-    // withYavio rejected before resolving anything: no transport, no listeners.
-    expect(process.listenerCount("SIGTERM")).toBe(sigterm + 1); // createYavio above made one
-    expect(_sharedStateCount()).toBe(1);
     errorSpy.mockRestore();
+    _resetGlobalState();
+  });
+
+  it("warns about a missing API key once per process, not once per wrap", () => {
+    _resetGlobalState();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    for (let i = 0; i < 3; i++) {
+      withYavio(new McpServer({ name: "test", version: "1.0" }));
+      createYavio();
+    }
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]?.[0]).toContain("YAVIO-1000");
+    warnSpy.mockRestore();
     _resetGlobalState();
   });
 

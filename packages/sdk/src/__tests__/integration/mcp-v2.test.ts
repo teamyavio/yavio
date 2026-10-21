@@ -469,5 +469,38 @@ describe("MCP SDK v2 — 2026-07-28 era over Streamable HTTP, a new server per r
     expect(requestInfo?.headers).toHaveProperty("user-agent");
     expect(requestInfo?.headers).not.toHaveProperty("authorization");
     expect(requestInfo?.headers).not.toHaveProperty("mcp-session-id");
+    // What v1 records: headers only. The web Request's URL is never read.
+    expect(requestInfo).not.toHaveProperty("url");
+    expect(JSON.stringify(calls)).not.toContain("127.0.0.1");
+  });
+
+  it("reads the client identity from the per-request envelope when no handshake is known", async () => {
+    // A per-request instance never saw the initialize handshake, so
+    // getClientVersion() is empty; the envelope is the only source. Fails
+    // without the envelope read in extra.ts.
+    const server = new McpServer({ name: "envelope", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, makeConfig({ serverOnly: true }), transport, "0.5.0");
+    proxy.registerTool("get_price", { inputSchema: { sku: z.string() } }, async () => ok("x"));
+    const tool = (server as unknown as { _registeredTools: Record<string, { handler: unknown }> })
+      ._registeredTools.get_price;
+    const handler = tool?.handler as (args: unknown, ctx: unknown) => Promise<unknown>;
+    await handler(
+      { sku: "A1" },
+      {
+        mcpReq: {
+          id: 1,
+          method: "tools/call",
+          _meta: { "openai/session": "conv-envelope" },
+          envelope: {
+            "io.modelcontextprotocol/clientInfo": { name: "envelope-client", version: "9.1" },
+          },
+        },
+      },
+    );
+    const [connection] = connections(transport.sent);
+    expect(connection?.client_name).toBe("envelope-client");
+    expect(connection?.client_version).toBe("9.1");
+    expect(connection?.session_id).toBe(deriveSessionId("conv-envelope"));
   });
 });

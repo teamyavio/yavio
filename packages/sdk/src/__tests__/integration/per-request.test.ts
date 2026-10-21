@@ -25,14 +25,15 @@ const ok = (text: string) => ({ content: [{ type: "text" as const, text }] });
 
 describe("per-request servers share one process-level state", () => {
   const received: ReceivedBatch[] = [];
-  let mints = 0;
+  /** The trace ids the widget-token endpoint was asked to bind, in order. */
+  const mints: string[] = [];
   let ingest: ReturnType<typeof createServer>;
   let endpoint: string;
 
   beforeEach(async () => {
     _resetGlobalState();
     received.length = 0;
-    mints = 0;
+    mints.length = 0;
     ingest = createServer((req, res) => {
       let body = "";
       req.on("data", (chunk) => {
@@ -40,11 +41,13 @@ describe("per-request servers share one process-level state", () => {
       });
       req.on("end", () => {
         if (req.url === "/v1/widget-tokens") {
-          mints++;
+          const { traceId } = JSON.parse(body) as { traceId: string };
+          mints.push(traceId);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
-              token: "tok",
+              // Like ingest: the token is bound to the minting call's trace.
+              token: `tok-${traceId}`,
               expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
             }),
           );
@@ -157,39 +160,56 @@ describe("per-request servers share one process-level state", () => {
     expect(new Set(received.map((b) => b.authorization))).toEqual(new Set(["Bearer yav_stream"]));
   });
 
-  it("keeps two API keys apart: two transports, no cross-delivery", async () => {
+  it("keeps two API keys apart: two transports, no cross-delivery, each its own discovery and connection", async () => {
     const a = createYavio({ apiKey: "yav_a", endpoint, serverOnly: true });
     const b = createYavio({ apiKey: "yav_b", endpoint, serverOnly: true });
     expect(_sharedStateCount()).toBe(2);
 
-    const call = async (client: typeof a, toolName: string) => {
-      const wrapped = client.wrap(new McpServer({ name: toolName, version: "1.0" }));
-      wrapped.registerTool(toolName, { inputSchema: { q: z.string() } }, async () => ok("x"));
+    // The same tool name and the same conversation on both projects: the
+    // dedup is per key, so neither project's events are swallowed by the
+    // other's.
+    const call = async (client: typeof a, marker: string) => {
+      const wrapped = client.wrap(new McpServer({ name: "same", version: "1.0" }));
+      wrapped.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => ok(marker));
       const [ct, st] = InMemoryTransport.createLinkedPair();
       await wrapped.connect(st);
       const mcpClient = new Client({ name: "c", version: "1.0" });
       await mcpClient.connect(ct);
-      await mcpClient.callTool({ name: toolName, arguments: { q: "x" } });
+      await mcpClient.listTools();
+      await mcpClient.callTool({
+        name: "get_price",
+        arguments: { q: "x" },
+        _meta: { "openai/session": "conv-both" },
+      });
       await mcpClient.close();
     };
-    await call(a, "tool_a");
-    await call(b, "tool_b");
+    await call(a, "from-a");
+    await call(b, "from-b");
     await a.shutdown();
     await b.shutdown();
 
-    const byKey = (key: string) =>
+    const byKey = (key: string, type: string) =>
       received
         .filter((batch) => batch.authorization === `Bearer ${key}`)
         .flatMap((batch) => batch.events)
-        .filter((e) => e.event_type === "tool_call")
-        .map((e) => e.event_name);
-    expect(byKey("yav_a")).toEqual(["tool_a"]);
-    expect(byKey("yav_b")).toEqual(["tool_b"]);
+        .filter((e) => e.event_type === type);
+    const outputText = (e: Record<string, unknown>) =>
+      (e.output_content as { content: Array<{ text: string }> }).content[0]?.text;
+    expect(byKey("yav_a", "tool_call").map(outputText)).toEqual(["from-a"]);
+    expect(byKey("yav_b", "tool_call").map(outputText)).toEqual(["from-b"]);
+    expect(byKey("yav_a", "tool_discovery")).toHaveLength(1);
+    expect(byKey("yav_b", "tool_discovery")).toHaveLength(1);
+    expect(byKey("yav_a", "connection")).toHaveLength(1);
+    expect(byKey("yav_b", "connection")).toHaveLength(1);
     expect(_sharedStateCount()).toBe(0);
   });
 
-  it("mints one widget token across instances (non-serverOnly)", async () => {
+  it("mints a widget token per call, bound to that call's trace id (non-serverOnly)", async () => {
+    // Ingest binds the JWT's `tid` to the minting call's trace id and rejects
+    // a widget batch under any other trace, so a token shared across
+    // instances would break every call after the first.
     const client = createYavio({ apiKey: "yav_widget", endpoint, serverOnly: false });
+    const seen: Array<{ token: string; traceId: string }> = [];
     for (let i = 0; i < 3; i++) {
       const wrapped = client.wrap(new McpServer({ name: `w-${i}`, version: "1.0" }));
       wrapped.registerTool("show", { inputSchema: { q: z.string() } }, async () => ok("x"));
@@ -201,12 +221,23 @@ describe("per-request servers share one process-level state", () => {
         name: "show",
         arguments: { q: "x" },
         _meta: { "openai/session": "conv-widget" },
-      })) as { _meta?: { yavio?: { token?: string } } };
-      expect(result._meta?.yavio?.token).toBe("tok");
+      })) as { _meta?: { yavio?: { token: string; traceId: string } } };
+      const widget = result._meta?.yavio;
+      expect(widget).toBeDefined();
+      if (widget) seen.push(widget);
       await mcpClient.close();
     }
     await client.shutdown();
-    expect(mints).toBe(1);
+
+    expect(mints).toHaveLength(3);
+    expect(new Set(seen.map((w) => w.traceId)).size).toBe(3);
+    for (const widget of seen) expect(widget.token).toBe(`tok-${widget.traceId}`);
+    // Each token's trace is the trace of the call's own event.
+    const traces = received
+      .flatMap((b) => b.events)
+      .filter((e) => e.event_type === "tool_call")
+      .map((e) => e.trace_id);
+    expect(traces).toEqual(seen.map((w) => w.traceId));
   });
 
   it("logs the mode lines once per process, not once per wrap", () => {
@@ -234,5 +265,140 @@ describe("per-request servers share one process-level state", () => {
     client.wrap(new McpServer({ name: "s2", version: "1" }));
     expect(_sharedStateCount()).toBe(1);
     expect(starts).toHaveBeenCalledTimes(1);
+  });
+
+  it("shutdown() of one client does not stop the transport another client with the same key still uses", async () => {
+    const first = createYavio({ apiKey: "yav_two", endpoint, serverOnly: true });
+    const second = createYavio({ apiKey: "yav_two", endpoint, serverOnly: true });
+    expect(_sharedStateCount()).toBe(1);
+
+    const call = async (client: typeof first, marker: string) => {
+      const wrapped = client.wrap(new McpServer({ name: marker, version: "1.0" }));
+      wrapped.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => ok(marker));
+      const [ct, st] = InMemoryTransport.createLinkedPair();
+      await wrapped.connect(st);
+      const mcpClient = new Client({ name: "c", version: "1.0" });
+      await mcpClient.connect(ct);
+      await mcpClient.callTool({ name: "get_price", arguments: { q: "x" } });
+      await mcpClient.close();
+    };
+
+    await call(first, "before");
+    await first.shutdown();
+    // Flushed, released, but not stopped: the second client still holds it.
+    expect(_sharedStateCount()).toBe(1);
+    await call(second, "after");
+    await second.shutdown();
+    expect(_sharedStateCount()).toBe(0);
+
+    const outputs = received
+      .flatMap((b) => b.events)
+      .filter((e) => e.event_type === "tool_call")
+      .map((e) => (e.output_content as { content: Array<{ text: string }> }).content[0]?.text);
+    expect(outputs).toEqual(["before", "after"]);
+  });
+
+  it("never stops a transport withYavio() created: shutdown() of a client sharing it only flushes", async () => {
+    withYavio(new McpServer({ name: "w", version: "1" }), {
+      apiKey: "yav_pinned",
+      endpoint,
+      serverOnly: true,
+    });
+    const client = createYavio({ apiKey: "yav_pinned", endpoint, serverOnly: true });
+    expect(_sharedStateCount()).toBe(1);
+    const shutdowns = vi.spyOn(HttpTransport.prototype, "shutdown");
+    await client.shutdown();
+    expect(shutdowns).not.toHaveBeenCalled();
+    expect(_sharedStateCount()).toBe(1);
+  });
+
+  it("wrapping the same server again returns the existing proxy: one tool_call per call, not one per wrap", async () => {
+    const client = createYavio({ apiKey: "yav_rewrap", endpoint, serverOnly: true });
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const server = new McpServer({ name: "long-lived", version: "1.0" });
+    const first = client.wrap(server);
+    first.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => ok("x"));
+    // A host that wraps its one long-lived server on every request.
+    for (let i = 0; i < 3; i++) {
+      expect(client.wrap(server)).toBe(first);
+      expect(withYavio(server, { apiKey: "yav_rewrap", endpoint, serverOnly: true })).toBe(first);
+    }
+    // Wrapping the proxy itself is the same no-op.
+    expect(client.wrap(first)).toBe(first);
+    expect(debug.mock.calls.filter((c) => String(c[0]).includes("already wrapped"))).toHaveLength(
+      1,
+    );
+
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await first.connect(st);
+    const mcpClient = new Client({ name: "c", version: "1.0" });
+    await mcpClient.connect(ct);
+    await mcpClient.callTool({ name: "get_price", arguments: { q: "x" } });
+    await mcpClient.close();
+    await client.shutdown();
+
+    const calls = received.flatMap((b) => b.events).filter((e) => e.event_type === "tool_call");
+    expect(calls).toHaveLength(1);
+  });
+
+  describe("tools registered before the wrap", () => {
+    const buildServer = (onCall: () => void) => {
+      const server = new McpServer({ name: "built", version: "1.0" });
+      server.registerTool("get_price", { inputSchema: { sku: z.string() } }, async () => {
+        onCall();
+        return ok("x");
+      });
+      return server;
+    };
+    const connectClient = async (wrapped: McpServer) => {
+      const [ct, st] = InMemoryTransport.createLinkedPair();
+      await wrapped.connect(st);
+      const mcpClient = new Client({ name: "c", version: "1.0" });
+      await mcpClient.connect(ct);
+      return mcpClient;
+    };
+    const toolCalls = () =>
+      received.flatMap((b) => b.events).filter((e) => e.event_type === "tool_call");
+
+    it("withYavio() leaves them untracked, as before 0.5.0", async () => {
+      let ran = 0;
+      const wrapped = withYavio(
+        buildServer(() => ran++),
+        { apiKey: "yav_pre_with", endpoint, serverOnly: true },
+      );
+      const mcpClient = await connectClient(wrapped);
+      await mcpClient.callTool({ name: "get_price", arguments: { sku: "A1" } });
+      await mcpClient.callTool({ name: "get_price", arguments: { sku: 1 } });
+      await mcpClient.close();
+      await createYavio({ apiKey: "yav_pre_with", endpoint, serverOnly: true }).shutdown();
+      expect(ran).toBe(1);
+      expect(toolCalls()).toEqual([]);
+    });
+
+    it("createYavio().wrap() instruments them: success, schema rejection and unknown tool are counted", async () => {
+      const client = createYavio({ apiKey: "yav_pre_wrap", endpoint, serverOnly: true });
+      let ran = 0;
+      const wrapped = client.wrap(buildServer(() => ran++));
+      const mcpClient = await connectClient(wrapped);
+      const okResult = await mcpClient.callTool({ name: "get_price", arguments: { sku: "A1" } });
+      expect(okResult.isError).toBeFalsy();
+      const rejected = await mcpClient.callTool({ name: "get_price", arguments: { sku: 1 } });
+      expect(rejected.isError).toBe(true);
+      const unknown = await mcpClient.callTool({ name: "nope", arguments: {} });
+      expect(unknown.isError).toBe(true);
+      await mcpClient.close();
+      await client.shutdown();
+
+      expect(ran).toBe(1);
+      const calls = toolCalls();
+      expect(calls.map((e) => [e.event_name, e.status, e.error_category])).toEqual([
+        ["get_price", "success", undefined],
+        ["get_price", "error", "validation"],
+        ["nope", "error", "validation"],
+      ]);
+      // The rejected call carries the declared parameter names, not the value.
+      expect(calls[1]?.input_keys).toEqual({ sku: true });
+      expect(JSON.stringify(calls[1]?.input_values ?? {})).not.toContain("1");
+    });
   });
 });

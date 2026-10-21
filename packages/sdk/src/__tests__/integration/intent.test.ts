@@ -405,7 +405,10 @@ describe("intent capture — enabled", () => {
       },
     );
     const transport = createMockTransport();
-    const proxy = createProxy(server, makeConfig(INTENT_ON), transport, "0.2.0");
+    // `createYavio().wrap()` instruments the tools registered before the wrap.
+    const proxy = createProxy(server, makeConfig(INTENT_ON), transport, "0.2.0", undefined, {
+      instrumentExisting: true,
+    });
     const h = await connect(proxy, transport.sent);
 
     // No listTools() on this instance — straight to the call
@@ -415,7 +418,7 @@ describe("intent capture — enabled", () => {
     });
     expect(result.isError).toBeFalsy();
     expect(seenArgs).toEqual({ q: "x" });
-    // Callbacks registered before the wrap are instrumented in place (#133):
+    // Callbacks registered before a wrap() are instrumented in place (#133):
     // one tool_call event, carrying the intent the wrapper captured.
     const events = toolCallEvents(h.events);
     expect(events).toHaveLength(1);

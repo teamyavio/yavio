@@ -272,22 +272,25 @@ describe("createProxy — widget config injection", () => {
     expect(meta.yavio).toBeDefined();
   });
 
-  it("reuses cached token on subsequent tool calls", async () => {
+  it("mints a token per call, bound to that call's trace id (never reused across calls)", async () => {
+    // Ingest binds the JWT to the minting call's trace id and rejects a widget
+    // batch under any other trace, so a cached token would break every call
+    // after the first.
     const futureExpiry = new Date(Date.now() + 600_000).toISOString();
-    mockedMint.mockResolvedValue({
-      token: "jwt_cached",
+    mockedMint.mockImplementation(async (_endpoint, _key, traceId) => ({
+      token: `jwt_for_${traceId}`,
       expiresAt: futureExpiry,
-    });
+    }));
 
     const server = new McpServer({ name: "test", version: "1.0" });
     const transport = createMockTransport();
     const proxy = createProxy(server, testConfig, transport, "0.0.1");
 
-    proxy.tool("cached_tool", (extra) => ({
+    proxy.tool("per_call_tool", (extra) => ({
       content: [{ type: "text", text: "ok" }],
     }));
 
-    const tool = getRegisteredTool(server, "cached_tool");
+    const tool = getRegisteredTool(server, "per_call_tool");
     const mockExtra = {
       signal: new AbortController().signal,
       requestId: "req-6",
@@ -295,23 +298,24 @@ describe("createProxy — widget config injection", () => {
       sendRequest: async () => ({}),
     };
 
-    // First call — mints token
-    const result1 = (await tool?.handler(mockExtra)) as Record<string, unknown>;
-    expect(
-      ((result1._meta as Record<string, unknown>).yavio as Record<string, unknown>).token,
-    ).toBe("jwt_cached");
+    const widgetMeta = (result: unknown) =>
+      ((result as Record<string, unknown>)._meta as Record<string, unknown>).yavio as {
+        token: string;
+        traceId: string;
+      };
+    const first = widgetMeta(await tool?.handler(mockExtra));
+    const second = widgetMeta(await tool?.handler({ ...mockExtra, requestId: "req-7" }));
 
-    // Second call — reuses cached token
-    const result2 = (await tool?.handler({
-      ...mockExtra,
-      requestId: "req-7",
-    })) as Record<string, unknown>;
-    expect(
-      ((result2._meta as Record<string, unknown>).yavio as Record<string, unknown>).token,
-    ).toBe("jwt_cached");
-
-    // mintWidgetToken should only have been called once
-    expect(mockedMint).toHaveBeenCalledTimes(1);
+    expect(mockedMint).toHaveBeenCalledTimes(2);
+    expect(first.token).toBe(`jwt_for_${first.traceId}`);
+    expect(second.token).toBe(`jwt_for_${second.traceId}`);
+    expect(second.traceId).not.toBe(first.traceId);
+    // The trace id the token is bound to is the one on the call's event.
+    const traces = transport.sent
+      .flat()
+      .filter((e) => e.event_type === "tool_call")
+      .map((e) => e.trace_id);
+    expect(traces).toEqual([first.traceId, second.traceId]);
   });
 });
 
