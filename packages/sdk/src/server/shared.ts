@@ -57,12 +57,19 @@ import type { Transport } from "../transport/types.js";
  *
  * Deadlines. Outside a signal every `client.shutdown()` is bounded by its
  * own client's `shutdownTimeoutMs`. The drain a signal starts is bounded by
- * the smallest value configured for the key — every `createYavio()` hold
- * and every `withYavio()` pin — because the deadline exists to stay under
- * the platform's grace period, which is per process, so the strictest
- * bound wins; a handler's `shutdown()` awaits that drain and so sees that
- * bound (#142 review round 2). `YAVIO_SHUTDOWN_TIMEOUT_MS` sets one value
- * for the whole process.
+ * the smallest value *set explicitly* (option, env or rc file) by any
+ * `createYavio()` hold or `withYavio()` pin on the key — because the
+ * deadline exists to stay under the platform's grace period, which is per
+ * process, so the strictest bound wins; a participant on the default adds
+ * no bound, so raising the deadline on one client is not undone by the
+ * others (review round 3: every resolved config carries a value, and
+ * registering the default capped a 12 s client at 10 s). With nothing set
+ * explicitly the transport's own value applies, 10 s unless its creator
+ * set one and released since. A handler's `shutdown()` awaits that drain
+ * and so sees that bound (#142 review round 2) — and, since the drain
+ * covers every key in the process, the other keys' drains too, capped by
+ * its own deadline. `YAVIO_SHUTDOWN_TIMEOUT_MS` counts as explicit for
+ * every participant in the process, so it sets one value for all of them.
  */
 
 export interface SharedSessions {
@@ -119,10 +126,11 @@ interface Entry {
   /** Distinct per transport: a hold on a cleared or stopped one must not release the next. */
   generation: number;
   /**
-   * The `shutdownTimeoutMs` of every live hold, one per hold (a client
-   * configured without one adds nothing), and the smallest among the
+   * The `shutdownTimeoutMs` of every live hold whose config set it
+   * explicitly (option, env or rc file), one per such hold — a client on
+   * the default adds nothing — and the smallest among the explicitly set
    * `withYavio()` pins: the signal drain runs under the smallest of them
-   * all, the transport's own when there is none.
+   * all, the transport's own when none set one (review round 3).
    */
   holdDeadlines: number[];
   pinDeadline: number | undefined;
@@ -132,7 +140,7 @@ interface Entry {
 export interface SharedHold {
   state: SharedState;
   generation: number;
-  /** The holder's `shutdownTimeoutMs` as registered, removed from the entry on release. */
+  /** The holder's explicitly set `shutdownTimeoutMs` as registered (undefined on the default), removed from the entry on release. */
   deadlineMs: number | undefined;
 }
 
@@ -141,17 +149,30 @@ const registry = new Map<string, Entry>();
 let generations = 0;
 
 /**
- * What the registry needs of a config: the key, and the drain deadline. The
- * first client or `withYavio()` call to create a key's transport sets the
- * transport's own deadline (the fallback); a `client.shutdown()` outside a
- * signal passes its own config's deadline into every release, drain and
- * transport shutdown it causes; the signal drain uses the smallest deadline
- * registered for the key by its holders and pins (#142 review).
+ * What the registry needs of a config: the key, the drain deadline and
+ * where the deadline came from. The first client or `withYavio()` call to
+ * create a key's transport sets the transport's own deadline (the
+ * fallback); a `client.shutdown()` outside a signal passes its own config's
+ * deadline into every release, drain and transport shutdown it causes; the
+ * signal drain uses the smallest deadline registered for the key by its
+ * holders and pins (#142 review), and only an explicitly set one is
+ * registered (review round 3).
  */
-type Key = Pick<YavioConfig, "endpoint" | "apiKey"> &
-  Partial<Pick<YavioConfig, "shutdownTimeoutMs">>;
+type Key = Pick<
+  YavioConfig,
+  "endpoint" | "apiKey" | "shutdownTimeoutMs" | "shutdownTimeoutMsSource"
+>;
 
 const keyOf = (config: Key): string => `${config.endpoint}\n${config.apiKey}`;
+
+/**
+ * The deadline a config registers for the signal drain: its
+ * `shutdownTimeoutMs` when the option, `YAVIO_SHUTDOWN_TIMEOUT_MS` or
+ * `.yaviorc.json` set it, nothing when it is the default — so a participant
+ * that set none does not lower the bound of one that did (review round 3).
+ */
+const explicitDeadline = (config: Key): number | undefined =>
+  config.shutdownTimeoutMsSource === "default" ? undefined : config.shutdownTimeoutMs;
 
 /**
  * Set by the signal handler, never cleared (outside tests): the process is
@@ -354,7 +375,7 @@ export function pinShared(
 ): SharedState {
   const entry = entryFor(config, sdkVersion, onEvict);
   entry.pinned = true;
-  entry.pinDeadline = minDeadline(entry.pinDeadline, config.shutdownTimeoutMs);
+  entry.pinDeadline = minDeadline(entry.pinDeadline, explicitDeadline(config));
   return entry.slot;
 }
 
@@ -363,9 +384,9 @@ const minDeadline = (a: number | undefined, b: number | undefined): number | und
 
 /**
  * The deadline of a key's signal drain: the smallest `shutdownTimeoutMs`
- * among its holders and pins, or undefined (the transport's own) when none
- * registered one. The deadline exists to stay under the platform's grace
- * period, which is per process, so the strictest configured bound wins.
+ * set explicitly by its holders and pins, or undefined (the transport's
+ * own) when none set one. The deadline exists to stay under the platform's
+ * grace period, which is per process, so the strictest explicit bound wins.
  */
 function signalDeadline(entry: Entry): number | undefined {
   return entry.holdDeadlines.reduce<number | undefined>(minDeadline, entry.pinDeadline);
@@ -382,7 +403,7 @@ export function acquireShared(
 ): SharedHold {
   const entry = entryFor(config, sdkVersion, onEvict);
   entry.holders++;
-  const deadlineMs = config.shutdownTimeoutMs;
+  const deadlineMs = explicitDeadline(config);
   if (deadlineMs !== undefined) entry.holdDeadlines.push(deadlineMs);
   return { state: entry.slot, generation: entry.generation, deadlineMs };
 }
@@ -404,7 +425,7 @@ export function isLiveHold(config: Key, hold: SharedHold): boolean {
  * everything this client queued delivered first. Every drain or stop this
  * causes runs under the releasing config's own `shutdownTimeoutMs`, not the
  * transport creator's — except the signal drain it awaits first, which runs
- * under the smallest deadline registered for the key.
+ * under the smallest deadline set explicitly for the key.
  */
 export async function releaseShared(config: Key, hold: SharedHold): Promise<void> {
   const key = keyOf(config);
@@ -444,7 +465,7 @@ export async function settleShared(config: Key): Promise<void> {
  * What the SIGTERM/SIGINT handler does: mark the process as draining, so
  * everything created or sent from now on goes out at once, then drain every
  * transport in the registry — each under the smallest `shutdownTimeoutMs`
- * its holders and `withYavio()` pins configured (`signalDeadline`), the
+ * its holders and `withYavio()` pins set explicitly (`signalDeadline`), the
  * transport's own value when none did. The drain is kept in `signalDrain`
  * for every release that follows; the returned promise is this signal's
  * drain alone.
@@ -459,7 +480,7 @@ export function beginProcessShutdown(): Promise<void> {
 
 /**
  * Drain every transport in the registry (`beginProcessShutdown`, tests),
- * each under the smallest deadline its holders and pins configured.
+ * each under the smallest deadline its holders and pins set explicitly.
  */
 export async function shutdownAllShared(): Promise<void> {
   const entries = [...registry.values()];

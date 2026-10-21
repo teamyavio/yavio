@@ -38,8 +38,10 @@ const instrumented = withYavio(server, {
   // An integer in [100, 2147483647] ms, default 10 s; env
   // YAVIO_SHUTDOWN_TIMEOUT_MS; also readable from .yaviorc.json. Anything
   // outside the range is one YAVIO-1006 warning and the default. Bounds
-  // this client's shutdown(); the SDK's own SIGTERM/SIGINT drain uses the
-  // value of the client or withYavio() call that created the key's transport.
+  // this client's shutdown(); the SDK's own SIGTERM/SIGINT drain runs under
+  // the smallest value set explicitly (option, env or file) by any client
+  // or withYavio() call for the key — unset participants do not lower it;
+  // with nothing set, 10 s.
   shutdownTimeoutMs: 10_000,
 });
 ```
@@ -171,7 +173,7 @@ The SDK buffers events in memory and flushes them to the Yavio ingestion API in 
 | Max buffer size | 10,000 events | Prevents memory exhaustion under extreme load. Oldest dropped with warning. |
 | Retry strategy | Exponential backoff: 1s, 2s, 4s, 8s, 16s (max 5 retries) | Handles transient network/ingestion failures |
 | Shutdown | Drain on `SIGTERM`/`SIGINT` (`shutdownTimeoutMs`, 10 s by default), then hand the signal back | The SDK removes its listeners after draining and re-raises the signal when nothing else listens, so the default exit (130/143) happens as without the SDK; an app with its own handler keeps control (#138) |
-| `client.shutdown()` | Delivers everything queued before the call, then releases the client's hold; resolves once ingest answered or at the client's own `shutdownTimeoutMs` | Awaits the signal drain already running and the transport a request finishing after the signal sent through, so the app handler `await http.close(cb); await shutdown(); process.exit(0)` exits with nothing in flight; a second or concurrent call waits for the first; `HttpTransport.shutdown()` is idempotent (#142). Outside a signal the deadline is per call: `HttpTransport.shutdown(deadlineMs)` / `drain(deadlineMs)` take the calling client's value, whichever client or `withYavio()` call created the shared transport (review round 1). The drain the SDK starts on `SIGTERM`/`SIGINT` is bounded by the smallest value configured for the key — its holders and its `withYavio()` calls — so a handler's `shutdown()`, which awaits that drain, sees that bound; the grace period is per process, so the strictest bound wins; `YAVIO_SHUTDOWN_TIMEOUT_MS` sets one value for the whole process (review round 2) |
+| `client.shutdown()` | Delivers everything queued before the call, then releases the client's hold; resolves once ingest answered or at the client's own `shutdownTimeoutMs` | Awaits the signal drain already running and the transport a request finishing after the signal sent through, so the app handler `await http.close(cb); await shutdown(); process.exit(0)` exits with nothing in flight; a second or concurrent call waits for the first; `HttpTransport.shutdown()` is idempotent (#142). Outside a signal the deadline is per call: `HttpTransport.shutdown(deadlineMs)` / `drain(deadlineMs)` take the calling client's value, whichever client or `withYavio()` call created the shared transport (review round 1). The drain the SDK starts on `SIGTERM`/`SIGINT` is bounded by the smallest value set explicitly (option, `YAVIO_SHUTDOWN_TIMEOUT_MS` or `.yaviorc.json`) by any client or `withYavio()` call for the key; unset participants do not lower it (`resolveConfig()` reports `shutdownTimeoutMsSource`, and the registry ignores `"default"`, review round 3); with nothing set, 10 s. A handler's `shutdown()`, which awaits that drain, sees that bound; the grace period is per process, so the strictest bound wins; `YAVIO_SHUTDOWN_TIMEOUT_MS` counts as explicit for every participant in the process, so it sets one value for all of them (review round 2) |
 | Authentication | `Authorization: Bearer <projectApiKey>` header | Stateless, validated by ingestion API against PostgreSQL. Server SDK always uses the project API key directly (JWTs are only for widget-side auth). |
 
 ### 3.3.2 Request Format

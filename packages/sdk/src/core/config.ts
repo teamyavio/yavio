@@ -4,6 +4,7 @@ import { ErrorCode } from "@yavio/shared/error-codes";
 import type {
   CaptureConfig,
   IntentConfig,
+  ShutdownTimeoutSource,
   ToolCaptureOverride,
   WithYavioOptions,
   YavioConfig,
@@ -206,13 +207,18 @@ function resolveBooleanFlag(path: string, value: unknown): boolean {
  * `shutdownTimeoutMs`: an integer number of milliseconds in
  * [`MIN_SHUTDOWN_TIMEOUT_MS`, `MAX_SHUTDOWN_TIMEOUT_MS`] — from code (a
  * number), the env var (a string of decimal digits) or the file (a number,
- * or the same string). An unset or empty value falls through to the next
- * source; anything else — a string `Number()` would take, `0x2710` or
- * `1e4`, included — is one `YAVIO-1006` warning and the default, because a
- * typo must not turn into a deadline that drops every event on shutdown.
+ * or the same string), tried in that order. An unset or empty value falls
+ * through to the next source; anything else — a string `Number()` would
+ * take, `0x2710` or `1e4`, included — is one `YAVIO-1006` warning and the
+ * default, because a typo must not turn into a deadline that drops every
+ * event on shutdown. Returns the source with the value: the signal drain
+ * is bounded only by values that were set explicitly, so a rejected value
+ * reports `"default"` like an unset one (#142 review round 3).
  */
-function resolveShutdownTimeout(...sources: unknown[]): number {
-  for (const value of sources) {
+function resolveShutdownTimeout(
+  sources: ReadonlyArray<readonly [Exclude<ShutdownTimeoutSource, "default">, unknown]>,
+): { ms: number; source: ShutdownTimeoutSource } {
+  for (const [source, value] of sources) {
     if (value === undefined || value === null) continue;
     if (typeof value === "string" && value.trim() === "") continue;
     const ms =
@@ -222,7 +228,7 @@ function resolveShutdownTimeout(...sources: unknown[]): number {
           ? Number(value)
           : Number.NaN;
     if (Number.isInteger(ms) && ms >= MIN_SHUTDOWN_TIMEOUT_MS && ms <= MAX_SHUTDOWN_TIMEOUT_MS) {
-      return ms;
+      return { ms, source };
     }
     if (!warnedInvalidFlags.has("shutdownTimeoutMs")) {
       warnedInvalidFlags.add("shutdownTimeoutMs");
@@ -230,9 +236,9 @@ function resolveShutdownTimeout(...sources: unknown[]): number {
         `[${ErrorCode.SDK.INVALID_CAPTURE_OPTION}] shutdownTimeoutMs must be an integer between ${MIN_SHUTDOWN_TIMEOUT_MS} and ${MAX_SHUTDOWN_TIMEOUT_MS} milliseconds, got ${JSON.stringify(value)} — using ${DEFAULT_SHUTDOWN_TIMEOUT_MS}. Shown once per process.`,
       );
     }
-    return DEFAULT_SHUTDOWN_TIMEOUT_MS;
+    return { ms: DEFAULT_SHUTDOWN_TIMEOUT_MS, source: "default" };
   }
-  return DEFAULT_SHUTDOWN_TIMEOUT_MS;
+  return { ms: DEFAULT_SHUTDOWN_TIMEOUT_MS, source: "default" };
 }
 
 /**
@@ -323,13 +329,22 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
   // No env-var form: the shape is nested. File first, code options win.
   const tools = resolveTools(fileConfig?.tools, options?.tools);
 
-  const shutdownTimeoutMs = resolveShutdownTimeout(
-    options?.shutdownTimeoutMs,
-    process.env.YAVIO_SHUTDOWN_TIMEOUT_MS,
-    fileConfig?.shutdownTimeoutMs,
-  );
+  const { ms: shutdownTimeoutMs, source: shutdownTimeoutMsSource } = resolveShutdownTimeout([
+    ["option", options?.shutdownTimeoutMs],
+    ["env", process.env.YAVIO_SHUTDOWN_TIMEOUT_MS],
+    ["file", fileConfig?.shutdownTimeoutMs],
+  ]);
 
-  return { apiKey, endpoint, capture, serverOnly, intent, tools, shutdownTimeoutMs };
+  return {
+    apiKey,
+    endpoint,
+    capture,
+    serverOnly,
+    intent,
+    tools,
+    shutdownTimeoutMs,
+    shutdownTimeoutMsSource,
+  };
 }
 
 /** The entries of `source` whose value is not undefined. */

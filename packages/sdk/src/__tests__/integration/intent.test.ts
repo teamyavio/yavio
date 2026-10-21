@@ -50,6 +50,7 @@ function makeConfig(intent: IntentConfig, tools: YavioConfig["tools"] = {}): Yav
     intent,
     tools,
     shutdownTimeoutMs: 10_000,
+    shutdownTimeoutMsSource: "default",
   };
 }
 

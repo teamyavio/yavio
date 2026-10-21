@@ -505,6 +505,105 @@ describe("shutdown() during the signal drain (#142)", () => {
     }
   });
 
+  it(
+    "a participant on the default does not lower the bound: the recipe with 11 s on the startup client and a plain withYavio() delivers at 10.5 s",
+    { timeout: 20_000 },
+    async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await withoutOtherListeners("SIGTERM", async () => {
+          // The README recipe with the deadline raised above the default on
+          // the shutdown client only. Every resolved config carries a
+          // value, and registering the withYavio() call's default capped
+          // the drain at 10 s (review round 3: 9985 ms, YAVIO-1205, the
+          // batch lost). Only values set explicitly bound the drain, so the
+          // batch ingest answers after 10.5 s is delivered. No way to scale
+          // this down: the cap an unset participant would add is the 10 s
+          // default itself.
+          ingest.respondAfterMs = 10_500;
+          const options = { apiKey: "yav_142_raised", endpoint: ingest.endpoint, serverOnly: true };
+          const analytics = createYavio({ ...options, shutdownTimeoutMs: 11_000 });
+          const raw = new McpServer({ name: "app", version: "1.0" });
+          withYavio(raw, options).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+          await callTool(raw, "get_price", { q: "x" });
+          let elapsed: number | undefined;
+          let answeredOnResolve: boolean | undefined;
+          const handled = new Promise<void>((resolve) => {
+            process.on("SIGTERM", async function app() {
+              process.off("SIGTERM", app);
+              const started = Date.now();
+              await analytics.shutdown();
+              elapsed = Date.now() - started;
+              answeredOnResolve = allAnswered();
+              resolve();
+            });
+          });
+          process.emit("SIGTERM", "SIGTERM");
+          await handled;
+          expect(answeredOnResolve).toBe(true);
+          expect(elapsed).toBeGreaterThanOrEqual(10_400);
+          expect(elapsed).toBeLessThan(12_000);
+          expect(toolCalls()).toHaveLength(1);
+          expect(warn.mock.calls.map((c) => String(c[0]))).not.toContainEqual(
+            expect.stringContaining("YAVIO-1205"),
+          );
+          expect(_sharedStateCount()).toBe(0);
+        });
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  );
+
+  it(
+    "two clients, one key, 11 s and the default: the signal drain is bounded by the 11 s, not capped at 10 s by the client that set none",
+    { timeout: 20_000 },
+    async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await withoutOtherListeners("SIGTERM", async () => {
+          // The two-holder case of the round-3 probe (9984 ms, the event lost).
+          ingest.respondAfterMs = 10_500;
+          const options = {
+            apiKey: "yav_142_raised2",
+            endpoint: ingest.endpoint,
+            serverOnly: true,
+          };
+          const a = createYavio({ ...options, shutdownTimeoutMs: 11_000 });
+          const b = createYavio(options);
+          const raw = new McpServer({ name: "app", version: "1.0" });
+          a.wrap(raw).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+          await callTool(raw, "get_price", { q: "x" });
+          let elapsed: number | undefined;
+          let answeredOnResolve: boolean | undefined;
+          const handled = new Promise<void>((resolve) => {
+            process.on("SIGTERM", async function app() {
+              process.off("SIGTERM", app);
+              const started = Date.now();
+              await a.shutdown();
+              elapsed = Date.now() - started;
+              answeredOnResolve = allAnswered();
+              resolve();
+            });
+          });
+          process.emit("SIGTERM", "SIGTERM");
+          await handled;
+          expect(answeredOnResolve).toBe(true);
+          expect(elapsed).toBeGreaterThanOrEqual(10_400);
+          expect(elapsed).toBeLessThan(12_000);
+          expect(toolCalls()).toHaveLength(1);
+          expect(warn.mock.calls.map((c) => String(c[0]))).not.toContainEqual(
+            expect.stringContaining("YAVIO-1205"),
+          );
+          await b.shutdown(); // nothing left to deliver: resolves at once
+          expect(_sharedStateCount()).toBe(0);
+        });
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  );
+
   it("withYavio() hosts: the recipe's shutdown client, created at startup, awaits the signal drain", async () => {
     await withoutOtherListeners("SIGTERM", async () => {
       // The documented recipe: withYavio() has no client of its own, so one

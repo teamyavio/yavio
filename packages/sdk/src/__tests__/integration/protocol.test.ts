@@ -54,6 +54,7 @@ function makeConfig(overrides: Partial<YavioConfig> = {}): YavioConfig {
     intent: INTENT_OFF,
     tools: {},
     shutdownTimeoutMs: 10_000,
+    shutdownTimeoutMsSource: "default",
     ...overrides,
   };
 }

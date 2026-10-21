@@ -530,6 +530,42 @@ describe("shutdownTimeoutMs (#142)", () => {
   it("an empty env var falls through to the default", () => {
     process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "";
     expect(resolveConfig()?.shutdownTimeoutMs).toBe(10_000);
+    expect(resolveConfig()?.shutdownTimeoutMsSource).toBe("default");
+  });
+
+  it("reports the source: option, env, file or default (review round 3)", () => {
+    expect(resolveConfig()?.shutdownTimeoutMsSource).toBe("default");
+    expect(resolveConfig({ shutdownTimeoutMs: 4_000 })?.shutdownTimeoutMsSource).toBe("option");
+    process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "2500";
+    expect(resolveConfig()?.shutdownTimeoutMsSource).toBe("env");
+    expect(resolveConfig({ shutdownTimeoutMs: 4_000 })?.shutdownTimeoutMsSource).toBe("option");
+    const tempDir = mkdtempSync(join(tmpdir(), "yavio-shutdown-source-test-"));
+    const originalCwd = process.cwd;
+    try {
+      writeFileSync(
+        join(tempDir, ".yaviorc.json"),
+        JSON.stringify({ apiKey: "file_key", shutdownTimeoutMs: 3_000 }),
+      );
+      process.cwd = () => tempDir;
+      expect(resolveConfig()?.shutdownTimeoutMsSource).toBe("env");
+      process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = undefined;
+      expect(resolveConfig()).toMatchObject({
+        shutdownTimeoutMs: 3_000,
+        shutdownTimeoutMsSource: "file",
+      });
+      // A rejected value is the default, not the file's value, and says so:
+      // the signal drain must not take it for a bound someone chose.
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "soon";
+      expect(resolveConfig()).toMatchObject({
+        shutdownTimeoutMs: 10_000,
+        shutdownTimeoutMsSource: "default",
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      process.cwd = originalCwd;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("accepts both bounds: 100 and 2147483647", () => {
@@ -564,7 +600,10 @@ describe("shutdownTimeoutMs (#142)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = value;
     expect(resolveConfig()?.shutdownTimeoutMs).toBe(10_000);
-    expect(resolveConfig()?.shutdownTimeoutMs).toBe(10_000);
+    expect(resolveConfig()).toMatchObject({
+      shutdownTimeoutMs: 10_000,
+      shutdownTimeoutMsSource: "default",
+    });
     const lines = warn.mock.calls
       .map((c) => String(c[0]))
       .filter((l) => l.includes("shutdownTimeoutMs"));
