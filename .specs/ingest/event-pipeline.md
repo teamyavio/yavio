@@ -215,7 +215,8 @@ The engine scans all string fields in the event, including nested JSON in the `m
 | **At-least-once delivery** | SDK retries failed HTTP requests. Ingestion API uses ClickHouse's `ReplacingMergeTree` for idempotent inserts if events carry a unique ID. |
 | **Ordering** | Events carry millisecond timestamps. ClickHouse sorts by `(project_id, event_type, timestamp)`. Within a batch, order is preserved. |
 | **No data loss on ingestion restart** | Failed ClickHouse writes are retried with exponential backoff. SDK-level retries provide additional recovery for prolonged outages. |
-| **No data loss on SDK shutdown** | Server SDK and Widget SDK do a synchronous final flush. |
+| **No data loss on SDK shutdown** | The server SDK drains on `SIGTERM`/`SIGINT` and on `client.shutdown()`, which resolves only once ingest answered (or at `shutdownTimeoutMs`), the signal's own drain included (#142); the widget SDK does a synchronous final flush. |
+| **Once-only events are once per process** | `connection` is emitted at least once per session per SDK process (a stateless fleet: one per instance that served the conversation), `tool_discovery` once per tool per process. Ingest stores them as they come; the read side counts sessions as `uniqExact(session_id)` over every event — never connection rows — and reads `tool_registry` with `FINAL`, so duplicates change no number (#142). |
 | **Backpressure** | The batch writer buffer (§6.2.7) doubles as the backpressure buffer. Events accumulate when ClickHouse is slow. When the buffer exceeds 100,000 events, the API returns `503 Service Unavailable` and SDKs retry with exponential backoff. |
 
 ## 6.5 Widget Event Validation

@@ -48,6 +48,7 @@ const instrumented = withYavio(server, {
 | `capture.geo` | `boolean \| "region" \| "country"` | `true` | End-user location: `true` keeps it as sent, `"region"` keeps the country and the state or province, `"country"` keeps only the country, `false` drops it |
 | `capture.rejectedInputValues` | `boolean` | `false` | Store the argument values of calls rejected before the handler runs (by default only their names and types) |
 | `tools` | `Record<string, ToolCaptureOverride>` | — | Per-tool overrides of the capture flags (`inputValues`, `outputValues`, `rejectedInputValues`, `intent`) |
+| `shutdownTimeoutMs` | `number` | `10000` | Deadline for delivering queued events on shutdown: bounds `shutdown()` and the SDK's own `SIGTERM`/`SIGINT` drain. Falls back to `YAVIO_SHUTDOWN_TIMEOUT_MS`. Set it below the platform's grace period (Cloud Run: 10 s in total; Fly.io: 5 s by default) |
 
 See [Configuration](/docs/02-sdk/03-configuration) for the full precedence chain.
 
@@ -79,6 +80,8 @@ When a client connects to your MCP server:
 - **Event type:** `connection`
 - **Session ID** derived from the transport
 - **Platform** detected from client signals
+- **Client name and version** from the protocol envelope (MCP 2026-07-28), else the `initialize` handshake, else the first product token of the request's `User-Agent` (so a stateless host, whose instance never saw `initialize`, still records `openai-mcp` / `1.0.0`; a library token such as `node` names no client); `metadata.client_info_source` says which. `protocol_version` is the request's `mcp-protocol-version` header
+- Emitted at least once per session **per process**: a conversation served by several instances has one connection event per instance. Sessions are counted as distinct `session_id`s, never as connection events
 
 ## No-op mode
 
@@ -99,7 +102,8 @@ The SDK batches events and flushes them to the ingestion API efficiently:
 - **Buffer cap:** 10,000 events (oldest events are dropped when full)
 - **Retry:** up to 5 attempts with exponential backoff (starting at 1 second)
 - **Request timeout:** 30 seconds per HTTP request
-- **Shutdown:** SIGTERM/SIGINT handlers drain remaining events (10-second timeout), then hand the signal back: the SDK removes its listeners and, if it was the only listener when the signal arrived, re-raises the signal so the process exits the way it would without the SDK (128 + the signal number: 130 after Ctrl-C, 143 after SIGTERM). An app with its own handler keeps control; a second Ctrl-C while draining ends the wait. A library that also waits to be the last listener (signal-exit, used by execa and ora) does not get its turn, so handle the signal yourself in that case
+- **Shutdown:** SIGTERM/SIGINT handlers drain remaining events (`shutdownTimeoutMs`, 10 s by default), then hand the signal back: the SDK removes its listeners and, if it was the only listener when the signal arrived, re-raises the signal so the process exits the way it would without the SDK (128 + the signal number: 130 after Ctrl-C, 143 after SIGTERM). An app with its own handler keeps control; a second Ctrl-C while draining ends the wait. A library that also waits to be the last listener (signal-exit, used by execa and ora) does not get its turn, so handle the signal yourself in that case
+- **Your own handler:** wait for the requests in flight, then `await analytics.shutdown()`, then exit. It resolves once ingest has every event queued before the call — the SDK's own drain included, however the listeners are ordered — or at the deadline; a second or concurrent call waits for the first. A `withYavio()` host creates a `createYavio()` client for the same key and endpoint and awaits its `shutdown()`. The README's "Stateless / per-request servers" section has the full pattern
 
 ## PII stripping
 
