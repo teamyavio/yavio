@@ -162,7 +162,7 @@ The SDK buffers events in memory and flushes them to the Yavio ingestion API in 
 | Max batch size | 100 events | Triggers early flush if buffer fills before interval |
 | Max buffer size | 10,000 events | Prevents memory exhaustion under extreme load. Oldest dropped with warning. |
 | Retry strategy | Exponential backoff: 1s, 2s, 4s, 8s, 16s (max 5 retries) | Handles transient network/ingestion failures |
-| Shutdown | Async final flush on `process.exit` / `SIGTERM` | Awaits all pending batches before resolving |
+| Shutdown | Drain on `SIGTERM`/`SIGINT` (10 s bound), then hand the signal back | The SDK removes its listeners after draining and re-raises the signal when nothing else listens, so the default exit (130/143) happens as without the SDK; an app with its own handler keeps control (#138) |
 | Authentication | `Authorization: Bearer <projectApiKey>` header | Stateless, validated by ingestion API against PostgreSQL. Server SDK always uses the project API key directly (JWTs are only for widget-side auth). |
 
 ### 3.3.2 Request Format
