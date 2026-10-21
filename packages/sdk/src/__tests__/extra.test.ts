@@ -18,6 +18,8 @@ describe("clientFromUserAgent", () => {
     ["my_client/2.0.0-beta.1+build.7", { name: "my_client", version: "2.0.0-beta.1+build.7" }],
     ["some-client/1.2 node-fetch/3.0", { name: "some-client", version: "1.2" }],
     ["client/v1 extra", { name: "client", version: "v1" }],
+    // A `;` after the version terminates the token too (review round 3).
+    ["Claude-User/1.0; +Claude-User@anthropic.com", { name: "Claude-User", version: "1.0" }],
     // A bare token that is the whole User-Agent (review round 2).
     ["Claude-User", { name: "Claude-User", version: undefined }],
     ["claude-ai", { name: "claude-ai", version: undefined }],

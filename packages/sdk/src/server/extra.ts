@@ -187,10 +187,12 @@ const GENERIC_AGENTS = new Set([
  * not a client identifying itself. A version must hold at least one digit
  * (`OpenAI/Python 1.40.0` is the SDK's name and its language, not a
  * version). A token on the generic list yields nothing (#142, review
- * round 2).
+ * round 2). Whitespace, `;` or the end terminates the token: the RFC 9110
+ * form is whitespace, and `Claude-User/1.0; +Claude-User@anthropic.com`
+ * puts a `;` after the version (review round 3).
  */
 const PRODUCT_TOKEN =
-  /^([A-Za-z][A-Za-z0-9._-]{0,63})(?:\/([0-9A-Za-z][0-9A-Za-z.+_-]{0,31}))?(?=\s|$)/;
+  /^([A-Za-z][A-Za-z0-9._-]{0,63})(?:\/([0-9A-Za-z][0-9A-Za-z.+_-]{0,31}))?(?=[\s;]|$)/;
 
 /**
  * The MCP client's own identity from its User-Agent, for a stateless host
