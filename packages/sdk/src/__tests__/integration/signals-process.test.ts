@@ -253,6 +253,9 @@ describe("a stateless host as a child process, SIGTERM (#142)", () => {
       const slowBatch = ingest.batches.find((b) => b.events.some((e) => e.event_name === "slow"));
       expect(slowBatch?.receivedAt).toBeGreaterThanOrEqual(signalAt);
       expect(exit.atExit.responded).toBe(exit.atExit.batches);
+      // ... and no batch arrived after the exit: the snapshot saw them all
+      // (a late batch read after the exit event would otherwise pass).
+      expect(ingest.batches.length).toBe(exit.atExit.batches);
       expectConnectionFromHeaders();
     },
   );
