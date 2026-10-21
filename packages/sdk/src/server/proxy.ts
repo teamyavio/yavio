@@ -45,20 +45,27 @@ function isMintResult(result: unknown): result is MintResult {
  * timeout (token.ts): a slow ingest costs the call at most that. Returns
  * null when minting fails or times out — the caller skips the injection,
  * the result is returned untouched, and the failure is logged once per
- * process (`YAVIO-1103`).
+ * process (`YAVIO-1103`). Resolves with null on every failure, its own
+ * included: it is started before the handler and may go unawaited (handler
+ * threw, non-object result), and an unawaited rejection would take the
+ * process down.
  */
 async function mintCallToken(
   config: YavioConfig,
   traceId: string,
   sessionId: string,
 ): Promise<string | null> {
-  const result = await mintWidgetToken(config.endpoint, config.apiKey, traceId, sessionId);
-  if (isMintResult(result)) return result.token;
-  logOnce(ErrorCode.SDK.WIDGET_TOKEN_MINTING_FAILED, () =>
-    console.warn(
-      `[${ErrorCode.SDK.WIDGET_TOKEN_MINTING_FAILED}] Widget token minting ${result && "status" in result ? `returned HTTP ${result.status}` : "failed or timed out"} — tool results are returned without _meta.yavio until it succeeds. Shown once per process.`,
-    ),
-  );
+  try {
+    const result = await mintWidgetToken(config.endpoint, config.apiKey, traceId, sessionId);
+    if (isMintResult(result)) return result.token;
+    logOnce(ErrorCode.SDK.WIDGET_TOKEN_MINTING_FAILED, () =>
+      console.warn(
+        `[${ErrorCode.SDK.WIDGET_TOKEN_MINTING_FAILED}] Widget token minting ${result && "status" in result ? `returned HTTP ${result.status}` : "failed or timed out"} — tool results are returned without _meta.yavio until it succeeds. Shown once per process.`,
+      ),
+    );
+  } catch {
+    // Not reachable by design (mintWidgetToken catches); belt and braces.
+  }
   return null;
 }
 
@@ -258,11 +265,13 @@ function wrapToolCallback(
     // The widget token's round trip hides behind the handler: started now
     // (trace and session are known), awaited once the result is in hand. A
     // mint whose result goes unused (non-object result, handler threw) is
-    // dropped — mintCallToken never rejects. Server-only mode mints nothing
-    // so the tool result is forwarded to the MCP client byte-for-byte.
+    // dropped, so it must never reject: mintCallToken resolves null on every
+    // failure, and the catch here guards the promise itself — an unhandled
+    // rejection would exit the process. Server-only mode mints nothing so
+    // the tool result is forwarded to the MCP client byte-for-byte.
     const mint = config.serverOnly
       ? null
-      : mintCallToken(config, store.traceId, store.session.sessionId);
+      : mintCallToken(config, store.traceId, store.session.sessionId).catch(() => null);
 
     const startTime = performance.now();
     try {

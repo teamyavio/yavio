@@ -108,7 +108,9 @@ const evictionHookFor =
 function wrapServer<T extends McpServerLike>(
   server: T,
   config: YavioConfig,
-  state: SharedState,
+  // Resolved only when a proxy is created: a re-wrap must not pin or hold
+  // a transport the existing proxy will never use.
+  state: () => SharedState,
   instrumentExisting: boolean,
   entry: EntryPoint,
 ): T {
@@ -118,9 +120,14 @@ function wrapServer<T extends McpServerLike>(
   }
   const existing = existingProxy(server);
   if (existing) {
+    const sameKey = existing.endpoint === config.endpoint && existing.apiKey === config.apiKey;
+    // The existing proxy delivers through its key's transport: a re-wrap
+    // for the same key after a shutdown() holds (or pins) it again, so the
+    // proxy's next call has somewhere to go. For another key the transport
+    // would go unused — nothing is pinned or held for it.
+    if (sameKey) state();
     const differs =
-      existing.endpoint !== config.endpoint ||
-      existing.apiKey !== config.apiKey ||
+      !sameKey ||
       existing.fingerprint !== configFingerprint(config) ||
       (instrumentExisting && !existing.instrumentExisting);
     if (differs) {
@@ -138,7 +145,8 @@ function wrapServer<T extends McpServerLike>(
     }
     return existing.proxy;
   }
-  return createProxy(server, config, state.transport, SDK_VERSION, state, { instrumentExisting });
+  const shared = state();
+  return createProxy(server, config, shared.transport, SDK_VERSION, shared, { instrumentExisting });
 }
 
 /**
@@ -208,7 +216,7 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
         rejectUnsupported(server, "createYavio().wrap()");
         return server;
       }
-      return wrapServer(server, config, state(), true, "createYavio().wrap()");
+      return wrapServer(server, config, state, true, "createYavio().wrap()");
     },
     shutdown: async () => {
       if (!hold) return;
@@ -252,7 +260,7 @@ export function withYavio<T extends McpServerLike>(server: T, options?: WithYavi
   return wrapServer(
     server,
     config,
-    pinShared(config, SDK_VERSION, evictionHookFor(config)),
+    () => pinShared(config, SDK_VERSION, evictionHookFor(config)),
     false,
     "withYavio()",
   );

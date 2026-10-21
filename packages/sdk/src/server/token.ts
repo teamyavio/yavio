@@ -8,8 +8,9 @@ export interface MintError {
 }
 
 /**
- * The mint runs inside the tool call, after the handler and before the
- * result reaches the client: a slow ingest must not hold the model's answer.
+ * The mint runs inside the tool call — started before the handler, awaited
+ * after it, before the result reaches the client: a slow ingest must not
+ * hold the model's answer.
  */
 export const WIDGET_TOKEN_TIMEOUT_MS = 2_000;
 
@@ -18,7 +19,9 @@ export const WIDGET_TOKEN_TIMEOUT_MS = 2_000;
  * Used when the proxy detects a widget response in tool return.
  *
  * Returns `{ token, expiresAt }` on success, `{ status }` on HTTP error,
- * or `null` on network/parse failure or when `timeoutMs` elapses.
+ * or `null` on network/parse failure, an endpoint that is not a URL, or when
+ * `timeoutMs` elapses. Never rejects: the caller may start it without
+ * awaiting it.
  */
 export async function mintWidgetToken(
   endpoint: string,
@@ -28,12 +31,12 @@ export async function mintWidgetToken(
   fetchFn: typeof globalThis.fetch = globalThis.fetch,
   timeoutMs: number = WIDGET_TOKEN_TIMEOUT_MS,
 ): Promise<MintResult | MintError | null> {
-  // Derive widget-tokens URL from events endpoint
-  const url = new URL(endpoint);
-  url.pathname = url.pathname.replace(/\/v1\/events\/?$/, "/v1/widget-tokens");
-  const tokenUrl = url.toString();
-
   try {
+    // Derive widget-tokens URL from events endpoint
+    const url = new URL(endpoint);
+    url.pathname = url.pathname.replace(/\/v1\/events\/?$/, "/v1/widget-tokens");
+    const tokenUrl = url.toString();
+
     const response = await fetchFn(tokenUrl, {
       method: "POST",
       headers: {

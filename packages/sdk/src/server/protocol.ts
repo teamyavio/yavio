@@ -137,6 +137,7 @@ export function installProtocolWrappers(
     };
 
     const originalSet = low.setRequestHandler.bind(low);
+    const handlers = low._requestHandlers;
     low.setRequestHandler = (...args: unknown[]) => {
       const method = requestMethod(args[0]);
       const list =
@@ -147,12 +148,23 @@ export function installProtocolWrappers(
       const index = args.length - 1;
       const handler = args[index];
       if (typeof handler !== "function") return originalSet(...args);
+      if (handlers instanceof Map && typeof method === "string") {
+        // Same layering as for a handler that was already present: the MCP
+        // SDK stores the handler with its own request parsing and result
+        // validation around it (v1 `Server.setRequestHandler`, v2
+        // `_wrapHandler`), and the wrappers go around THAT — so a result the
+        // SDK rejects on the wire reaches the status wrapper as a throw, on
+        // the lazy path exactly as on the in-place one.
+        const result = originalSet(...args);
+        const stored = handlers.get(method);
+        if (stored) handlers.set(method, compose(stored, list));
+        return result;
+      }
       const wrapped = [...args];
       wrapped[index] = compose(handler as RequestHandler, list);
       return originalSet(...wrapped);
     };
 
-    const handlers = low._requestHandlers;
     if (handlers instanceof Map) {
       const existingCall = handlers.get("tools/call");
       if (existingCall) handlers.set("tools/call", compose(existingCall, wrappers.call));

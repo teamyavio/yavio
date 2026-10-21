@@ -129,6 +129,30 @@ function warnInvalidFlag(path: string, accepted: string, value: unknown): void {
   );
 }
 
+/**
+ * The endpoint must be an http(s) URL: the transport and the widget-token
+ * mint both build URLs from it, and `new URL("")` throws. An empty value is
+ * what a compose file passes for an unset `YAVIO_ENDPOINT=`, and `??` keeps
+ * it. Warn once (`YAVIO-1002`) and use the default.
+ */
+function resolveEndpoint(value: unknown): string {
+  if (typeof value === "string" && value !== "") {
+    try {
+      const url = new URL(value);
+      if (url.protocol === "http:" || url.protocol === "https:") return value;
+    } catch {
+      // Not a URL — fall through to the warning.
+    }
+  }
+  if (!warnedInvalidFlags.has("endpoint")) {
+    warnedInvalidFlags.add("endpoint");
+    console.warn(
+      `[${ErrorCode.SDK.INVALID_ENDPOINT_URL}] endpoint must be an http(s) URL, got ${JSON.stringify(value)} — using ${DEFAULT_ENDPOINT}. Shown once per process.`,
+    );
+  }
+  return DEFAULT_ENDPOINT;
+}
+
 function resolveGeo(value: unknown): CaptureConfig["geo"] {
   if (value === true || value === false || value === "country" || value === "region") {
     return value;
@@ -201,8 +225,9 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
 
   if (!apiKey) return null;
 
-  const endpoint =
-    options?.endpoint ?? process.env.YAVIO_ENDPOINT ?? fileConfig?.endpoint ?? DEFAULT_ENDPOINT;
+  const endpoint = resolveEndpoint(
+    options?.endpoint ?? process.env.YAVIO_ENDPOINT ?? fileConfig?.endpoint ?? DEFAULT_ENDPOINT,
+  );
 
   // A field set to undefined is "not set" — untyped JS and computed options
   // (`geo: flag ? "country" : undefined`) produce one routinely — so it must

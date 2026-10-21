@@ -176,8 +176,11 @@ export class HttpTransport implements Transport {
       drained = true;
     };
 
+    // The timer must not outlive the drain: a host that awaits shutdown()
+    // and exits would otherwise stay up for the whole timeout.
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<void>((resolve) => {
-      setTimeout(() => {
+      timer = setTimeout(() => {
         if (!drained) {
           console.warn(
             `[${ErrorCode.SDK.SHUTDOWN_FLUSH_FAILED}] Shutdown timeout — events may have been dropped`,
@@ -186,9 +189,14 @@ export class HttpTransport implements Transport {
         }
         resolve();
       }, this.shutdownTimeoutMs);
+      if (timer && typeof timer === "object" && "unref" in timer) timer.unref();
     });
 
-    await Promise.race([drain(), timeout]);
+    try {
+      await Promise.race([drain(), timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async sendBatch(batch: BaseEvent[]): Promise<void> {

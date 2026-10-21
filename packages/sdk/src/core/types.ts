@@ -200,7 +200,8 @@ export interface YavioClient {
    */
   wrap<T extends McpServerLike>(server: T): T;
   /**
-   * Flush, then release this client's hold on the shared transport. The
+   * Drain (every queued batch, bounded by the transport's shutdown timeout),
+   * then release this client's hold on the shared transport. The
    * transport stops only when no other client with the same configuration
    * holds it and no `withYavio()` call pinned it; a later wrap by this client
    * holds it again, or starts a fresh one.
