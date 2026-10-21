@@ -55,6 +55,7 @@ const makeConfig = (overrides: Partial<YavioConfig> = {}): YavioConfig => ({
   serverOnly: true,
   intent: { enabled: false, required: true, description: "test" },
   tools: {},
+  shutdownTimeoutMs: 10_000,
   ...overrides,
 });
 

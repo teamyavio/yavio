@@ -34,6 +34,12 @@ export class HttpTransport implements Transport {
   private timer: ReturnType<typeof setInterval> | null = null;
   /** The batch send in flight, if any (one at a time). */
   private inflight: Promise<void> | null = null;
+  /**
+   * The shutdown in progress or done, once `shutdown()` ran: a second
+   * `shutdown()` or a `drain()` after it waits for the same sends instead of
+   * resolving at once with a batch still on its way out (#142).
+   */
+  private closing: Promise<void> | null = null;
   private stopped = false;
 
   private readonly endpoint: string;
@@ -130,7 +136,14 @@ export class HttpTransport implements Transport {
     });
     const loop = async () => {
       const rounds = Math.ceil(this.maxBufferSize / this.maxBatchSize) + 1;
-      for (let i = 0; i < rounds && !this.stopped && !expired; i++) {
+      for (let i = 0; i < rounds && !expired; i++) {
+        // A shutdown took over (a signal, the last holder): its sends are
+        // what this drain waits for.
+        if (this.closing) {
+          await this.closing;
+          return;
+        }
+        if (this.stopped) return;
         if (this.inflight) {
           await this.inflight.catch(() => {});
           continue;
@@ -150,7 +163,18 @@ export class HttpTransport implements Transport {
     }
   }
 
-  async shutdown(): Promise<void> {
+  /**
+   * Stop the timer and deliver everything queued, bounded by
+   * `shutdownTimeoutMs`. Idempotent: every call resolves with the one
+   * shutdown that is running, so two holders — or the signal handler and the
+   * app's handler — never see "done" with a batch still in flight.
+   */
+  shutdown(): Promise<void> {
+    if (!this.closing) this.closing = this.runShutdown();
+    return this.closing;
+  }
+
+  private async runShutdown(): Promise<void> {
     this.stopped = true;
     if (this.timer) {
       clearInterval(this.timer);
@@ -159,14 +183,18 @@ export class HttpTransport implements Transport {
 
     // Race the drain loop against a total shutdown timeout. The batch already
     // in flight first: resolving mid-send would let the process exit with a
-    // request half-way out.
+    // request half-way out. Every send goes through `inflight`, so a drain()
+    // that started earlier sees it too.
     let drained = false;
     const drain = async () => {
       if (this.inflight) await this.inflight.catch(() => {});
       while (this.buffer.length > 0) {
         const batch = this.buffer.splice(0, this.maxBatchSize);
+        this.inflight = this.sendBatch(batch).finally(() => {
+          this.inflight = null;
+        });
         try {
-          await this.sendBatch(batch);
+          await this.inflight;
         } catch {
           console.warn(
             `[${ErrorCode.SDK.SHUTDOWN_FLUSH_FAILED}] Failed to flush batch on shutdown`,

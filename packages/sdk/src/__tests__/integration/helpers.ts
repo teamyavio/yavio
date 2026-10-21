@@ -20,6 +20,15 @@ export interface ReceivedBatch {
   sent_at?: string;
 }
 
+export interface MockIngestOptions {
+  /**
+   * Answer every event batch this long after receiving it: a slow or remote
+   * ingest, so a shutdown() that resolves before the response is told from
+   * one that waits for it (#142). Events are recorded on receipt.
+   */
+  respondAfterMs?: number;
+}
+
 export interface MockIngest {
   /** `http://127.0.0.1:<port>/v1/events` — the widget-token endpoint sits next to it. */
   endpoint: string;
@@ -31,6 +40,10 @@ export interface MockIngest {
   mints: string[];
   /** While true, the widget-token endpoint never answers. */
   hangMints: boolean;
+  /** While true, the events endpoint records batches but never answers them. */
+  hangEvents: boolean;
+  /** Event batches answered so far (a batch counts once its response was written). */
+  responded: number;
   /** Events of one type, in order. */
   ofType(eventType: string): Event[];
   /** Cut every open connection, e.g. to fail a pending mint now. */
@@ -42,20 +55,25 @@ export interface MockIngest {
  * An ingest that accepts every batch and records it, and mints widget tokens
  * bound to the requesting call's trace id (`tok-<trace>`), like the real one.
  */
-export async function startMockIngest(): Promise<MockIngest> {
+export async function startMockIngest(options: MockIngestOptions = {}): Promise<MockIngest> {
   const batches: ReceivedBatch[] = [];
   const events: Event[] = [];
   const mints: string[] = [];
+  const pending = new Set<ReturnType<typeof setTimeout>>();
   const ingest: MockIngest = {
     endpoint: "",
     batches,
     events,
     mints,
     hangMints: false,
+    hangEvents: false,
+    responded: 0,
     ofType: (eventType) => events.filter((e) => e.event_type === eventType),
     dropConnections: () => server.closeAllConnections(),
     close: () =>
       new Promise<void>((resolve) => {
+        for (const timer of pending) clearTimeout(timer);
+        pending.clear();
         server.closeAllConnections();
         server.close(() => resolve());
       }),
@@ -96,8 +114,21 @@ export async function startMockIngest(): Promise<MockIngest> {
       const batch = parsed as Omit<ReceivedBatch, "authorization">;
       batches.push({ ...batch, authorization: req.headers.authorization });
       events.push(...batch.events);
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ accepted: batch.events.length, rejected: 0 }));
+      if (ingest.hangEvents) return;
+      const respond = () => {
+        ingest.responded++;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ accepted: batch.events.length, rejected: 0 }));
+      };
+      if (!options.respondAfterMs) {
+        respond();
+        return;
+      }
+      const timer = setTimeout(() => {
+        pending.delete(timer);
+        respond();
+      }, options.respondAfterMs);
+      pending.add(timer);
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

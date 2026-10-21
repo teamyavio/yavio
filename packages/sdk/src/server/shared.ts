@@ -41,6 +41,15 @@ import type { Transport } from "../transport/types.js";
  * keep flowing. The signal handlers drain everything regardless. The key's
  * state object outlives its transports: proxies keep it, and a re-acquire
  * after a stop puts a fresh transport behind the same facade.
+ *
+ * Shutdown from a signal handler (#142). The SDK's listener runs first and
+ * drains the registry; the app's handler then calls `client.shutdown()`,
+ * whose hold the signal already cleared. Every release therefore awaits the
+ * process-level `signalDrain` first, and a stale hold then drains the key's
+ * current transport — the immediate one a request finishing after the
+ * signal sent through — instead of returning. So `shutdown()` resolves only
+ * once everything queued before it reached ingest, however the handlers are
+ * ordered, and `process.exit()` after the await exits with nothing in flight.
  */
 
 export interface SharedSessions {
@@ -108,7 +117,14 @@ const slots = new Map<string, Slot>();
 const registry = new Map<string, Entry>();
 let generations = 0;
 
-type Key = Pick<YavioConfig, "endpoint" | "apiKey">;
+/**
+ * What the registry needs of a config: the key, and the drain deadline the
+ * transport is created with. The first client or `withYavio()` call to
+ * create a key's transport sets that transport's deadline; `client.shutdown()`
+ * applies its own config's deadline per call on top.
+ */
+type Key = Pick<YavioConfig, "endpoint" | "apiKey"> &
+  Partial<Pick<YavioConfig, "shutdownTimeoutMs">>;
 
 const keyOf = (config: Key): string => `${config.endpoint}\n${config.apiKey}`;
 
@@ -120,6 +136,16 @@ const keyOf = (config: Key): string => `${config.endpoint}\n${config.apiKey}`;
  * best effort, bounded by the fetch timeout and the buffer cap.
  */
 let draining = false;
+
+/**
+ * The signal handler's drain, running or done — accumulated when a signal is
+ * handled again after a hand-back. Awaited by every `releaseShared` and
+ * `settleShared`, so an app handler's `client.shutdown()` waits for the
+ * drain the SDK's listener started a tick earlier (#142). Cleared with the
+ * rest of the state only in tests: a process that got a signal stays on
+ * its way out.
+ */
+let signalDrain: Promise<void> | null = null;
 
 function noteDraining(): void {
   logOnce("draining", () =>
@@ -222,6 +248,7 @@ function newTransport(config: Key, sdkVersion: string): HttpTransport {
     endpoint: config.endpoint,
     apiKey: config.apiKey,
     sdkVersion,
+    shutdownTimeoutMs: config.shutdownTimeoutMs,
     immediate: draining,
   });
   if (draining) noteDraining();
@@ -260,7 +287,11 @@ function entryFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string)
   if (existing) return existing;
 
   const slot = slotFor(config, sdkVersion, onEvict);
-  const transport = newTransport(config, sdkVersion);
+  // After a signal the facade may already have started an immediate
+  // transport for a request finishing in the grace window: keep it, so the
+  // send it has in flight is what a later shutdown() awaits — a fresh one
+  // would orphan it mid-send (#142).
+  const transport = slot.live ?? newTransport(config, sdkVersion);
   slot.live = transport;
   const entry: Entry = { slot, holders: 0, pinned: false, generation: ++generations };
   registry.set(key, entry);
@@ -311,17 +342,24 @@ export function isLiveHold(config: Key, hold: SharedHold): boolean {
 }
 
 /**
- * Drain, then release one client's hold on a config's state. A hold on a
- * transport that is no longer live (a signal drained it, or it stopped and
- * a successor started) releases nothing. The transport stops — so a later
- * wrap starts afresh — only when no client holds it and no `withYavio()`
- * call pinned it; otherwise the other holders keep delivering through it,
- * with everything this client queued delivered first.
+ * Deliver everything queued before this call, then release one client's
+ * hold on a config's state. First the signal drain, if one is running or
+ * ran. A hold on a transport that is no longer live (a signal drained it,
+ * or it stopped and a successor started) releases nothing — but still
+ * drains the key's current transport, through which a request served after
+ * the signal sent its events (#142). The transport stops — so a later wrap
+ * starts afresh — only when no client holds it and no `withYavio()` call
+ * pinned it; otherwise the other holders keep delivering through it, with
+ * everything this client queued delivered first.
  */
 export async function releaseShared(config: Key, hold: SharedHold): Promise<void> {
   const key = keyOf(config);
+  if (signalDrain) await signalDrain;
   const entry = registry.get(key);
-  if (!entry || entry.generation !== hold.generation) return;
+  if (!entry || entry.generation !== hold.generation) {
+    await drainTransport(slots.get(key)?.live ?? null);
+    return;
+  }
   entry.holders = Math.max(0, entry.holders - 1);
   if (entry.holders > 0 || entry.pinned) {
     await drainTransport(entry.slot.live);
@@ -334,13 +372,27 @@ export async function releaseShared(config: Key, hold: SharedHold): Promise<void
 }
 
 /**
+ * A `shutdown()` without a hold to release (a second call; a signal drained
+ * the hold and nothing re-wrapped since): the signal drain, then whatever
+ * the key's live transport still carries (#142). Never stops anything.
+ */
+export async function settleShared(config: Key): Promise<void> {
+  if (signalDrain) await signalDrain;
+  await drainTransport(slots.get(keyOf(config))?.live ?? null);
+}
+
+/**
  * What the SIGTERM/SIGINT handler does: mark the process as draining, so
  * everything created or sent from now on goes out at once, then drain every
- * transport in the registry.
+ * transport in the registry. The drain is kept in `signalDrain` for every
+ * release that follows; the returned promise is this signal's drain alone.
  */
-export async function beginProcessShutdown(): Promise<void> {
+export function beginProcessShutdown(): Promise<void> {
   draining = true;
-  await shutdownAllShared();
+  const run = shutdownAllShared();
+  const previous = signalDrain;
+  signalDrain = previous ? Promise.all([previous, run]).then(() => {}) : run;
+  return run;
 }
 
 /** Drain every transport in the registry (`beginProcessShutdown`, tests). */
@@ -386,6 +438,7 @@ export function _resetSharedState(): void {
   registry.clear();
   slots.clear();
   draining = false;
+  signalDrain = null;
   signalInFlight = null;
   _setSignalReraise(null);
   loggedOnce.clear();

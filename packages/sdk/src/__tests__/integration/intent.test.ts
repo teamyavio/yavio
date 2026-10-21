@@ -49,6 +49,7 @@ function makeConfig(intent: IntentConfig, tools: YavioConfig["tools"] = {}): Yav
     serverOnly: true,
     intent,
     tools,
+    shutdownTimeoutMs: 10_000,
   };
 }
 

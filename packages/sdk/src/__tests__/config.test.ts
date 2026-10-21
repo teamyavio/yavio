@@ -497,3 +497,59 @@ describe("capture.geo validation", () => {
     }
   });
 });
+
+describe("shutdownTimeoutMs (#142)", () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    process.env.YAVIO_API_KEY = "yav_test";
+    process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = undefined;
+    _resetConfigWarnings();
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    vi.restoreAllMocks();
+  });
+
+  it("defaults to 10 s", () => {
+    expect(resolveConfig()?.shutdownTimeoutMs).toBe(10_000);
+  });
+
+  it("reads the code option", () => {
+    expect(resolveConfig({ shutdownTimeoutMs: 4_000 })?.shutdownTimeoutMs).toBe(4_000);
+  });
+
+  it("reads YAVIO_SHUTDOWN_TIMEOUT_MS, and the code option wins over it", () => {
+    process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "2500";
+    expect(resolveConfig()?.shutdownTimeoutMs).toBe(2_500);
+    expect(resolveConfig({ shutdownTimeoutMs: 4_000 })?.shutdownTimeoutMs).toBe(4_000);
+  });
+
+  it("an empty env var falls through to the default", () => {
+    process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "";
+    expect(resolveConfig()?.shutdownTimeoutMs).toBe(10_000);
+  });
+
+  it.each(["0", "-1", "soon", "NaN"])(
+    "rejects %s with one warning and uses the default",
+    (value) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = value;
+      expect(resolveConfig()?.shutdownTimeoutMs).toBe(10_000);
+      expect(resolveConfig()?.shutdownTimeoutMs).toBe(10_000);
+      const lines = warn.mock.calls
+        .map((c) => String(c[0]))
+        .filter((l) => l.includes("shutdownTimeoutMs"));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("YAVIO-1006");
+    },
+  );
+
+  it("rejects a zero code option the same way", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(resolveConfig({ shutdownTimeoutMs: 0 })?.shutdownTimeoutMs).toBe(10_000);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+});

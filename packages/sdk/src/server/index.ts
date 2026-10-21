@@ -18,6 +18,7 @@ import {
   logOnce,
   pinShared,
   releaseShared,
+  settleShared,
 } from "./shared.js";
 
 // Sent on every event batch. Defined in core/version.ts so the server and React
@@ -206,6 +207,10 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
   // a stale hold never counts against a successor.
   const onEvict = evictionHookFor(config);
   let hold: SharedHold | null = null;
+  // Every shutdown() so far, chained: a second or concurrent call (two
+  // handlers, a framework and the app) waits for the first instead of
+  // resolving with the batch still on its way (#142).
+  let closing: Promise<void> = Promise.resolve();
   const state = (): SharedState => {
     if (hold && isLiveHold(config, hold)) return hold.state;
     hold = acquireShared(config, SDK_VERSION, onEvict);
@@ -224,10 +229,24 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
       return wrapServer(server, config, state, true, "createYavio().wrap()");
     },
     shutdown: async () => {
-      if (!hold) return;
       const released = hold;
       hold = null;
-      await releaseShared(config, released);
+      // With a hold: deliver and release it. Without one (a second call, or
+      // a signal drained it and nothing re-wrapped since): deliver whatever
+      // the signal drain and the key's post-signal transport still carry.
+      const work = released ? releaseShared(config, released) : settleShared(config);
+      closing = Promise.all([closing, work.catch(() => {})]).then(() => {});
+      // One deadline per call, whatever the chain behind it waits for.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, config.shutdownTimeoutMs);
+        if (timer && typeof timer === "object" && "unref" in timer) timer.unref();
+      });
+      try {
+        await Promise.race([closing, deadline]);
+      } finally {
+        clearTimeout(timer);
+      }
     },
   };
 }

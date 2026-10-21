@@ -44,6 +44,7 @@ const testConfig: YavioConfig = {
   serverOnly: false,
   intent: { enabled: false, required: true, description: "test" },
   tools: {},
+  shutdownTimeoutMs: 10_000,
 };
 
 describe("createProxy", () => {

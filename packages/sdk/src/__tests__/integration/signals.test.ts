@@ -12,6 +12,8 @@ import { _resetGlobalState } from "../../server/proxy.js";
 import { _setSignalReraise, _sharedStateCount } from "../../server/shared.js";
 import { type MockIngest, callTool, startMockIngest } from "./helpers.js";
 
+const RESPONSE_DELAY_MS = 150;
+
 type Listener = (...args: unknown[]) => void;
 
 /**
@@ -189,5 +191,190 @@ describe("SIGTERM/SIGINT hand-back (#138)", () => {
       });
     }
     expect(process.listenerCount("SIGTERM")).toBe(sigterm + 1);
+  });
+});
+
+/**
+ * `shutdown()` called from the app's own signal handler (#142). The SDK's
+ * listener runs first and starts the drain; the app's handler then awaits
+ * `shutdown()` and exits. Before 0.5.2 that await resolved at once — the
+ * hold it would release was already cleared — and the exit killed the batch
+ * in flight. The mock ingest answers late, so "resolved after delivery"
+ * means after the response, not after the request went out.
+ */
+describe("shutdown() during the signal drain (#142)", () => {
+  let ingest: MockIngest;
+  const toolCalls = () => ingest.ofType("tool_call");
+  /** Every batch received was also answered: nothing is still on its way. */
+  const allAnswered = () => ingest.responded === ingest.batches.length && ingest.batches.length > 0;
+
+  function build(apiKey: string, options: { shutdownTimeoutMs?: number } = {}) {
+    const client = createYavio({ apiKey, endpoint: ingest.endpoint, serverOnly: true, ...options });
+    const raw = new McpServer({ name: "app", version: "1.0" });
+    client.wrap(raw).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+    return { client, raw };
+  }
+
+  beforeEach(async () => {
+    _resetGlobalState();
+    _setSignalReraise(() => {});
+    ingest = await startMockIngest({ respondAfterMs: RESPONSE_DELAY_MS });
+  });
+
+  afterEach(async () => {
+    _resetGlobalState();
+    await ingest.close();
+  });
+
+  it("the README handler: an app listener's await shutdown() resolves only after ingest answered the drained events", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client, raw } = build("yav_142_readme");
+      await callTool(raw, "get_price", { q: "x" });
+      let answeredOnResolve: boolean | undefined;
+      let elapsed = 0;
+      const handled = new Promise<void>((resolve) => {
+        process.on("SIGTERM", async function app() {
+          process.off("SIGTERM", app);
+          const started = Date.now();
+          await client.shutdown();
+          elapsed = Date.now() - started;
+          answeredOnResolve = allAnswered();
+          resolve();
+        });
+      });
+      process.emit("SIGTERM", "SIGTERM");
+      await handled;
+
+      expect(answeredOnResolve).toBe(true);
+      expect(elapsed).toBeGreaterThanOrEqual(RESPONSE_DELAY_MS - 10);
+      expect(toolCalls()).toHaveLength(1);
+      // #140 unchanged: the SDK stepped aside, the app's listener decided.
+      expect(process.listenerCount("SIGTERM")).toBe(0);
+      expect(_sharedStateCount()).toBe(0);
+    });
+  });
+
+  it("a request finishing after the signal, with no wrap, is delivered by a later shutdown()", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client, raw } = build("yav_142_late");
+      await callTool(raw, "get_price", { q: "before" });
+      process.emit("SIGTERM", "SIGTERM"); // the SDK drains; nothing else listens
+      // The in-flight request completes on the proxy wrapped before the
+      // signal: its event goes through the key's immediate transport.
+      await callTool(raw, "get_price", { q: "after" });
+      await client.shutdown();
+
+      expect(allAnswered()).toBe(true);
+      expect(toolCalls().map((e) => (e.input_values as { q: string }).q)).toEqual([
+        "before",
+        "after",
+      ]);
+    });
+  });
+
+  it("a post-signal transport is reused by the next wrap, not orphaned: both calls are delivered", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client, raw } = build("yav_142_reuse");
+      await callTool(raw, "get_price", { q: "before" });
+      process.emit("SIGTERM", "SIGTERM");
+      await vi.waitFor(() => expect(toolCalls()).toHaveLength(1));
+      // The old proxy sends first (an immediate transport, its send pending
+      // against the slow ingest), then a wrap re-acquires the key.
+      await callTool(raw, "get_price", { q: "old-proxy" });
+      const next = new McpServer({ name: "next", version: "1.0" });
+      client.wrap(next).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+      await callTool(next, "get_price", { q: "new-proxy" });
+      await client.shutdown();
+
+      expect(allAnswered()).toBe(true);
+      expect(toolCalls().map((e) => (e.input_values as { q: string }).q)).toEqual([
+        "before",
+        "old-proxy",
+        "new-proxy",
+      ]);
+      expect(_sharedStateCount()).toBe(0);
+    });
+  });
+
+  it("two concurrent shutdown() calls both resolve after delivery", async () => {
+    const { client, raw } = build("yav_142_twice");
+    await callTool(raw, "get_price", { q: "x" });
+    const started = Date.now();
+    const [first, second] = await Promise.all([
+      client.shutdown().then(() => ({ at: Date.now() - started, answered: allAnswered() })),
+      client.shutdown().then(() => ({ at: Date.now() - started, answered: allAnswered() })),
+    ]);
+    expect(first.answered).toBe(true);
+    expect(second.answered).toBe(true);
+    expect(first.at).toBeGreaterThanOrEqual(RESPONSE_DELAY_MS - 10);
+    expect(second.at).toBeGreaterThanOrEqual(RESPONSE_DELAY_MS - 10);
+    expect(toolCalls()).toHaveLength(1);
+  });
+
+  it("a later shutdown() after the first delivered waits for what was sent in between", async () => {
+    const { client, raw } = build("yav_142_again");
+    await callTool(raw, "get_price", { q: "first" });
+    await client.shutdown();
+    expect(allAnswered()).toBe(true);
+    // The process keeps serving on the existing proxy (no re-wrap): its next
+    // event re-acquires nothing — a second shutdown() still delivers it.
+    const next = new McpServer({ name: "next", version: "1.0" });
+    client.wrap(next).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+    await callTool(next, "get_price", { q: "second" });
+    await client.shutdown();
+    expect(allAnswered()).toBe(true);
+    expect(toolCalls().map((e) => (e.input_values as { q: string }).q)).toEqual([
+      "first",
+      "second",
+    ]);
+  });
+
+  it("against an ingest that never answers, shutdown() resolves at shutdownTimeoutMs", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      ingest.hangEvents = true;
+      const { client, raw } = build("yav_142_hang", { shutdownTimeoutMs: 300 });
+      await callTool(raw, "get_price", { q: "x" });
+      const started = Date.now();
+      await client.shutdown();
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeGreaterThanOrEqual(250);
+      expect(elapsed).toBeLessThan(5_000);
+      expect(ingest.batches).toHaveLength(1); // sent, never answered
+      expect(ingest.responded).toBe(0);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("withYavio() hosts: a createYavio() client with the same key awaits the signal drain", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      const raw = new McpServer({ name: "app", version: "1.0" });
+      withYavio(raw, {
+        apiKey: "yav_142_with",
+        endpoint: ingest.endpoint,
+        serverOnly: true,
+      }).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+      await callTool(raw, "get_price", { q: "x" });
+      let answeredOnResolve: boolean | undefined;
+      const handled = new Promise<void>((resolve) => {
+        process.on("SIGTERM", async function app() {
+          process.off("SIGTERM", app);
+          // The documented recipe: no client of its own, so create one for
+          // the same key and endpoint and await its shutdown().
+          await createYavio({
+            apiKey: "yav_142_with",
+            endpoint: ingest.endpoint,
+            serverOnly: true,
+          }).shutdown();
+          answeredOnResolve = allAnswered();
+          resolve();
+        });
+      });
+      process.emit("SIGTERM", "SIGTERM");
+      await handled;
+      expect(answeredOnResolve).toBe(true);
+      expect(toolCalls()).toHaveLength(1);
+    });
   });
 });
