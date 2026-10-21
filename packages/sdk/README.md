@@ -8,7 +8,7 @@ Instrument [MCP](https://modelcontextprotocol.io/) servers with analytics, sessi
 npm install @yavio/sdk
 ```
 
-Works with either MCP SDK generation, installed as an optional peer dependency: `@modelcontextprotocol/sdk` >=1.24.0 (v1) or `@modelcontextprotocol/server` 2.x (v2, the scoped package family). CI tests the v1 floor, the latest v1 release and the latest v2 release weekly.
+Works with either MCP SDK generation, installed as an optional peer dependency: `@modelcontextprotocol/sdk` >=1.24.0 (v1) or `@modelcontextprotocol/server` 2.x (v2, the scoped package family). CI tests the v1 floor, the latest v1 release, the v2 floor and the latest v2 release weekly.
 
 ## Quick Start
 
@@ -170,9 +170,9 @@ A call is an error when the handler **throws** or when it **returns a result wit
 | `error` | `tool_error` | The handler returned a result with `isError: true` (an expired reference, an invalid postal code, a missing field) |
 | `error` | `unknown` | The handler threw |
 | `error` | `validation` | The call failed **before** the handler ran: unknown or disabled tool, or arguments the tool's schema rejected. No `latency_ms` (nothing executed). By default the event has the names and types (`input_keys`, `input_types`) of the parameters the tool's schema declares, the `_`-prefixed request context in `input_values`, the client metadata and a value-free reason in `error_message` (McpServer's text as-is when it names only the tool — unknown, disabled — otherwise a fixed "Input validation error" reason), but **no argument values**, no key the model invented and no `output_content`. `rejectedInputValues: true` stores the raw arguments and McpServer's error text, to see what the model sent |
-| `error` | `server` | The handler returned, but its result failed the tool's own `outputSchema` |
+| `error` | `server` | The handler returned, but its result failed the tool's own `outputSchema` — or the MCP SDK's validation of the result on the wire |
 
-Only the literal boolean `true` counts as `isError`. The client sees the same shape in all four error cases (the MCP SDK converts throws and pre-handler failures into `isError` results), so the distinction is server-side only.
+Only the literal boolean `true` counts as `isError`. On v1 the client sees the same shape in all four error cases (the MCP SDK converts throws and pre-handler failures into `isError` results), so the distinction is server-side only. On v2 an unknown or disabled tool is a thrown JSON-RPC error instead of an `isError` result; it is still counted as `validation`.
 
 Every `tools/call` request the wrapped server receives is counted, including the ones the MCP SDK rejects before your handler runs — a call to a tool name that does not exist shows up as that name with a 100 % error rate, which is the honest signal. Under `withYavio()` a tool registered on the original, unwrapped server stays untracked either way; `createYavio().wrap()` instruments every tool on the server (see [Stateless / per-request servers](#stateless--per-request-servers)).
 

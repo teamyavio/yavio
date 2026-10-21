@@ -20,7 +20,7 @@ Everything that must survive across wraps lives in a module-level registry keyed
 |---|---|---|
 | the `HttpTransport` (one flush timer, one batch stream) | the connection's own session (calls without a session key) | `emittedConnections` — one `connection` per `(apiKey, session id)` |
 | `sessions` — the LRU of conversation states (identify, traits, step sequence), keyed by the derived session id | the current MCP transport reference | `emittedToolDiscoveries` — one `tool_discovery` per `(apiKey, tool name)` |
-| exactly one `SIGTERM`/`SIGINT` handler pair per process, draining every transport in the registry | `instrumentedTools` — the tools this instance wrapped | `proxiesByServer` / `proxies` — every proxy by the server it wraps (WeakMap/WeakSet), so a second wrap of the same server returns the first proxy |
+| exactly one `SIGTERM`/`SIGINT` handler pair per process, draining every transport in the registry | `instrumentedTools` — the tools this instance wrapped | `proxiesByServer` — every proxy by the server it wraps and by itself (WeakMap), with the options it was built with, so a second wrap of the same server returns the first proxy |
 | | the intent controller | `installedServers` — the low-level servers already patched; the warn-once sets |
 
 **Not shared: the widget token.** Ingest binds a widget JWT's `tid` to the trace id of the call that minted it and rejects a widget batch under any other trace (`WIDGET_TRACE_ID_MISMATCH`), and every tool call has its own trace id. A token is therefore minted per call and never cached — neither across instances (the first version of #133 shared one, which broke every widget call after the first for ~14 minutes) nor across calls on one instance (0.4.x cached per proxy, which had the same effect on a long-lived server's second call). The issue's acceptance item "one mint across instances" was wrong.
@@ -59,7 +59,8 @@ A stateless host builds the server — tools included — and wraps the finished
 | client identity | `server.server.getClientVersion()` (initialize handshake) | `ctx.mcpReq.envelope["io.modelcontextprotocol/clientInfo"]` on the 2026-07-28 era, then `getClientVersion()` |
 
 - Status wrapper: a thrown InvalidParams whose text is exactly `Tool <name> not found` / `Tool <name> disabled` (v2) is counted as a `validation` event like v1's `isError` text — same table as [protocol-layer-status.md](./protocol-layer-status.md) — and re-thrown unchanged. A throw that arrives *with* the callback's event in hand came from above the handler (v2's wire validation of the result, `Invalid tools/call result: …`, reached when the protocol layer wraps a handler v2 already stored — tools registered before a `wrap()`): the event is corrected to `status: error`, `error_category: server`, like v1's output-schema failure; a URL elicitation passes through unchanged.
-- The widget token's mint is started before the handler runs and awaited after it, so the round trip hides behind the handler; an unused mint (non-object result, handler threw) is dropped.
+- The widget token's mint is started before the handler runs and awaited after it, so the round trip hides behind the handler; an unused mint (non-object result, handler threw) is dropped, which is why the mint resolves null on every failure (an endpoint that is not a URL included) and never rejects. `resolveConfig()` rejects an empty or non-http(s) `endpoint` with one `YAVIO-1002` warning and uses the default.
+- The protocol wrappers go around the handler the MCP SDK *stored* (which carries its own request parsing and result validation), on the lazy registration path as on the in-place one, so a wire-rejected result reaches the status wrapper as a throw either way.
 - The 2026-07-28 era is negotiated only over Streamable HTTP; `InMemoryTransport` negotiates 2025-11-25.
 
 ### Fail closed (`YAVIO-1107`)
@@ -71,7 +72,7 @@ A value without a `registerTool` and a `connect` function (the two methods the p
 | Package | Change |
 |---|---|
 | sdk | `server/shared.ts` (new: registry with holds and pins, signal handlers, `logOnce`), `server/extra.ts` (new: `readCallExtra`), `server/index.ts` (`createYavio`, `withYavio`, the re-wrap guard, `YAVIO-1107`, warn-once `YAVIO-1000`), `server/proxy.ts` (shared sessions, per-call token mint, per-key dedup, optional `tool()`, opt-in pre-registered tool instrumentation, proxy registry, v2 thrown-InvalidParams rule, context reads through `extra.ts`), `server/protocol.ts` (string methods, last-argument wrapping), `core/types.ts` (`McpServerLike`, `YavioClient`), `package.json` (optional peers, v2 dev dependencies), `scripts/check-package.mjs` (a v2-only consumer), README. |
-| shared | `ErrorCode.SDK.UNSUPPORTED_SERVER` (`YAVIO-1107`). |
+| shared | `ErrorCode.SDK.UNSUPPORTED_SERVER` (`YAVIO-1107`), `ErrorCode.SDK.REWRAP_OPTIONS_IGNORED` (`YAVIO-1108`). |
 | docs | Setup and quickstart pages state both peers; error catalog row. |
 | ci | `sdk-mcp-compat.yml` gains the `server-v2-floor` leg (the declared `^X.Y.Z` peer floor of `@modelcontextprotocol/server`, with `client` and `node` pinned to the same version) and the `server-v2` leg (latest `server` + `client` + `node`). |
 | dashboard | **Follow-up, not in this change:** its `mcp-handler` route calls `withYavio()` per request and will share one transport once the dashboard's `@yavio/sdk` pin (`^0.3.0`, which the caret keeps below 0.5.0) is bumped to `^0.5.0` and the dashboard is deployed. Until then the route leaks as before. |
