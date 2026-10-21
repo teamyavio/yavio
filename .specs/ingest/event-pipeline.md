@@ -14,7 +14,7 @@ Both the server SDK and widget SDK buffer events in memory before flushing them 
 | Max batch size | 100 events | 20 events |
 | Max buffer size | 10,000 events | 200 events |
 | Backpressure | Drop oldest, log warning | Drop oldest, silent |
-| Shutdown | Synchronous `fetch` with `keepalive` on `SIGTERM` | `navigator.sendBeacon()` on `visibilitychange` / unload |
+| Shutdown | Async drain on `SIGTERM`/`SIGINT` (every queued batch, 10 s bound), then the signal is handed back: the SDK removes its listeners and re-raises when it was the only one, see `.specs/sdk/server-sdk.md` (#138) | `navigator.sendBeacon()` on `visibilitychange` / unload |
 | Retry | 5 retries, exponential backoff (1s–16s) | 3 retries, exponential backoff (1s–4s) |
 
 ### 6.1.2 SDK-Side Processing
