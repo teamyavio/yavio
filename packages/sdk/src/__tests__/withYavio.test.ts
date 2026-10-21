@@ -77,6 +77,55 @@ describe("withYavio", () => {
     _resetGlobalState();
   });
 
+  it("rejects a value with registerTool() but no connect() instead of throwing (YAVIO-1107)", () => {
+    _resetGlobalState();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const half = { registerTool() {} };
+    expect(() => withYavio(half as unknown as McpServer, { apiKey: "yav_test" })).not.toThrow();
+    expect(withYavio(half as unknown as McpServer, { apiKey: "yav_test" })).toBe(half);
+    const client = createYavio({ apiKey: "yav_half" });
+    expect(client.wrap(half as unknown as McpServer)).toBe(half);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0]?.[0]).toContain("YAVIO-1107");
+    expect(errorSpy.mock.calls[0]?.[0]).toContain("connect()");
+    errorSpy.mockRestore();
+    _resetGlobalState();
+  });
+
+  it("wrap() checks the shape before touching the shared state: no transport re-acquired after shutdown()", async () => {
+    _resetGlobalState();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const client = createYavio({ apiKey: "yav_after" });
+    expect(_sharedStateCount()).toBe(1);
+    await client.shutdown();
+    expect(_sharedStateCount()).toBe(0);
+    const notAServer = {};
+    expect(client.wrap(notAServer as unknown as McpServer)).toBe(notAServer);
+    expect(_sharedStateCount()).toBe(0);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    errorSpy.mockRestore();
+    _resetGlobalState();
+  });
+
+  it("runs the shape check in no-op mode too (both entry points)", () => {
+    _resetGlobalState();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const notAServer = { connect: async () => {} };
+    expect(createYavio().wrap(notAServer as unknown as McpServer)).toBe(notAServer);
+    expect(withYavio(notAServer as unknown as McpServer)).toBe(notAServer);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0]?.[0]).toContain("YAVIO-1107");
+    expect(errorSpy.mock.calls[0]?.[0]).toContain("createYavio().wrap()");
+    // A real server in no-op mode is still returned unchanged, without the error.
+    const server = new McpServer({ name: "test", version: "1.0" });
+    expect(createYavio().wrap(server)).toBe(server);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+    _resetGlobalState();
+  });
+
   it("warns about a missing API key once per process, not once per wrap", () => {
     _resetGlobalState();
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});

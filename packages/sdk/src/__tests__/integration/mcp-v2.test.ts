@@ -474,6 +474,37 @@ describe("MCP SDK v2 — 2026-07-28 era over Streamable HTTP, a new server per r
     expect(JSON.stringify(calls)).not.toContain("127.0.0.1");
   });
 
+  it("records v2's wire rejection of a malformed result as a server error, not a success", async () => {
+    // A tool registered before the wrap: the protocol layer wraps the handler
+    // v2 already stored, so the wire validation of the result throws through
+    // the status wrapper after the callback recorded a success.
+    const server = new McpServer({ name: "malformed", version: "1.0" });
+    server.registerTool(
+      "get_price",
+      { inputSchema: { sku: z.string() } },
+      async () => ({ content: "not an array" }) as unknown as { content: [] },
+    );
+    const transport = createMockTransport();
+    const proxy = createProxy(server, makeConfig(), transport, "0.5.0", undefined, {
+      instrumentExisting: true,
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await proxy.connect(serverTransport);
+    const client = new Client({ name: "c", version: "1.0" });
+    await client.connect(clientTransport);
+
+    await expect(client.callTool({ name: "get_price", arguments: { sku: "A1" } })).rejects.toThrow(
+      /Invalid tools\/call result/,
+    );
+
+    const events = toolCalls(transport.sent);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.status).toBe("error");
+    expect(events[0]?.error_category).toBe("server");
+    expect(events[0]?.error_message).toContain("Invalid tools/call result");
+    expect(typeof events[0]?.latency_ms).toBe("number");
+  });
+
   it("reads the client identity from the per-request envelope when no handshake is known", async () => {
     // A per-request instance never saw the initialize handshake, so
     // getClientVersion() is empty; the envelope is the only source. Fails

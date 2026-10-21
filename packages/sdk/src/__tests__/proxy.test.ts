@@ -272,6 +272,46 @@ describe("createProxy — widget config injection", () => {
     expect(meta.yavio).toBeDefined();
   });
 
+  it("starts the mint before the handler runs, so its round trip hides behind the handler", async () => {
+    let releaseMint: (() => void) | undefined;
+    mockedMint.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseMint = () => resolve({ token: "jwt_early", expiresAt: "2099-01-01T00:00:00Z" });
+        }),
+    );
+    let releaseHandler: (() => void) | undefined;
+    let mintCallsWhenHandlerRan = -1;
+
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("slow_tool", async () => {
+      mintCallsWhenHandlerRan = mockedMint.mock.calls.length;
+      await new Promise<void>((resolve) => {
+        releaseHandler = resolve;
+      });
+      return { content: [{ type: "text", text: "ok" }] };
+    });
+
+    const tool = getRegisteredTool(server, "slow_tool");
+    const call = tool?.handler({
+      signal: new AbortController().signal,
+      requestId: "req-early",
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+    }) as Promise<Record<string, unknown>>;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    // The mint was requested while the handler was still pending.
+    expect(mintCallsWhenHandlerRan).toBe(1);
+    releaseHandler?.();
+    releaseMint?.();
+    const result = await call;
+    expect(((result._meta as Record<string, unknown>).yavio as { token: string }).token).toBe(
+      "jwt_early",
+    );
+  });
+
   it("mints a token per call, bound to that call's trace id (never reused across calls)", async () => {
     // Ingest binds the JWT to the minting call's trace id and rejects a widget
     // batch under any other trace, so a cached token would break every call

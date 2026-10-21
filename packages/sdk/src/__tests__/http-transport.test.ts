@@ -381,6 +381,38 @@ describe("HttpTransport", () => {
   });
 });
 
+describe("HttpTransport.shutdown() and a send in flight", () => {
+  it("waits for the batch in flight before resolving, without sending it twice", async () => {
+    let release: (() => void) | undefined;
+    const fetch = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ status: 200, headers: { get: () => null }, json: () => ({}) });
+        }),
+    );
+    const transport = new HttpTransport({
+      endpoint: "http://test/v1/events",
+      apiKey: "yav_test",
+      sdkVersion: "0.0.1",
+      flushIntervalMs: 60_000,
+      shutdownTimeoutMs: 5_000,
+      fetch,
+    });
+    transport.send([fakeEvent()]);
+    const flushing = transport.flush(); // in flight, blocked on fetch
+    let done = false;
+    const shutdown = transport.shutdown().then(() => {
+      done = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(done).toBe(false);
+    release?.();
+    await Promise.all([flushing, shutdown]);
+    expect(done).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("HttpTransport.drain()", () => {
   it("delivers every queued batch without stopping, waiting for a send already in flight", async () => {
     const batches: number[] = [];

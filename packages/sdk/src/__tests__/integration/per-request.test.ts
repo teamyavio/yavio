@@ -13,7 +13,7 @@ import { z } from "zod";
 import { deriveSessionId } from "../../core/ids.js";
 import { createYavio, withYavio, yavio } from "../../server/index.js";
 import { _resetGlobalState } from "../../server/proxy.js";
-import { _sharedStateCount, shutdownAllShared } from "../../server/shared.js";
+import { _sharedStateCount, beginProcessShutdown, shutdownAllShared } from "../../server/shared.js";
 import { HttpTransport } from "../../transport/http.js";
 
 interface ReceivedBatch {
@@ -411,6 +411,38 @@ describe("per-request servers share one process-level state", () => {
       (e) => (e.output_content as { content: Array<{ text: string }> }).content[0]?.text,
     );
     expect(outputs).toEqual(["a", "b"]);
+  });
+
+  it("after the signal handler ran, requests still served send at once, best effort — new wraps and existing proxies alike", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const client = createYavio({ apiKey: "yav_sigterm", endpoint, serverOnly: true });
+    const before = client.wrap(new McpServer({ name: "before", version: "1.0" }));
+    before.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => ok("before"));
+    await callOnce(before);
+
+    await beginProcessShutdown(); // what SIGTERM does
+    expect(_sharedStateCount()).toBe(0);
+    const drainedCount = toolCallEvents().length;
+    expect(drainedCount).toBe(1);
+
+    // A request that arrives during the graceful-shutdown window.
+    const after = client.wrap(new McpServer({ name: "after", version: "1.0" }));
+    after.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => ok("after"));
+    await callOnce(after);
+    // And one on a server wrapped before the signal.
+    await callOnce(before);
+
+    // No timer, no shutdown: delivered on their own, promptly.
+    const deadline = Date.now() + 2_000;
+    while (toolCallEvents().length < 3 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const outputs = toolCallEvents().map(
+      (e) => (e.output_content as { content: Array<{ text: string }> }).content[0]?.text,
+    );
+    expect(outputs.sort()).toEqual(["after", "before", "before"]);
+    const lines = info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("best effort"));
+    expect(lines).toHaveLength(1);
   });
 
   it("shutdown() drains and forgets the state; a later wrap starts afresh", async () => {
