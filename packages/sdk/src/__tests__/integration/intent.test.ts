@@ -13,6 +13,7 @@ import { MAX_INTENT_LENGTH, createIntentController } from "../../server/intent.j
 import { installProtocolWrappers } from "../../server/protocol.js";
 import { _resetGlobalState, createProxy } from "../../server/proxy.js";
 import type { Transport } from "../../transport/types.js";
+import { registeredTools } from "./helpers.js";
 
 function createMockTransport(): Transport & { sent: BaseEvent[][] } {
   const sent: BaseEvent[][] = [];
@@ -620,8 +621,7 @@ describe("intent capture — enabled", () => {
       proxy.registerTool("good", { inputSchema: { q: z.string() } }, async () => ok("x"));
       // A hand-written/gateway-forwarded entry whose schema is not shaped as
       // the SDK expects must not take the whole listing down.
-      const tools = (proxy as unknown as { _registeredTools: Record<string, unknown> })
-        ._registeredTools;
+      const tools = registeredTools(proxy) as Record<string, unknown>;
       tools.weird = {
         inputSchema: { type: "object", properties: "all" },
         callback: async () => ok("x"),

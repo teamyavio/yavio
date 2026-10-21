@@ -3,8 +3,6 @@
  * wrap is shared per resolved configuration, so wrapping on every request of
  * a stateless host costs no transport, no listener and no session store.
  */
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -15,86 +13,29 @@ import { createYavio, withYavio, yavio } from "../../server/index.js";
 import { _resetGlobalState } from "../../server/proxy.js";
 import { _sharedStateCount, beginProcessShutdown, shutdownAllShared } from "../../server/shared.js";
 import { HttpTransport } from "../../transport/http.js";
-
-interface ReceivedBatch {
-  authorization: string | undefined;
-  events: Array<Record<string, unknown>>;
-}
+import { type MockIngest, callViaClient, startMockIngest } from "./helpers.js";
 
 const ok = (text: string) => ({ content: [{ type: "text" as const, text }] });
 
 describe("per-request servers share one process-level state", () => {
-  const received: ReceivedBatch[] = [];
-  /** The trace ids the widget-token endpoint was asked to bind, in order. */
-  const mints: string[] = [];
-  /** When set, the widget-token endpoint never answers. */
-  let hangMints = false;
-  let ingest: ReturnType<typeof createServer>;
+  let ingest: MockIngest;
   let endpoint: string;
 
   beforeEach(async () => {
     _resetGlobalState();
-    received.length = 0;
-    mints.length = 0;
-    hangMints = false;
-    ingest = createServer((req, res) => {
-      let body = "";
-      req.on("data", (chunk) => {
-        body += chunk;
-      });
-      req.on("end", () => {
-        if (req.url === "/v1/widget-tokens") {
-          const { traceId } = JSON.parse(body) as { traceId: string };
-          mints.push(traceId);
-          if (hangMints) return;
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(
-            JSON.stringify({
-              // Like ingest: the token is bound to the minting call's trace.
-              token: `tok-${traceId}`,
-              expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-            }),
-          );
-          return;
-        }
-        received.push({
-          authorization: req.headers.authorization,
-          events: (JSON.parse(body) as ReceivedBatch).events,
-        });
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ accepted: 1, rejected: 0 }));
-      });
-    });
-    await new Promise<void>((resolve) => {
-      ingest.listen(0, "127.0.0.1", () => {
-        endpoint = `http://127.0.0.1:${(ingest.address() as AddressInfo).port}/v1/events`;
-        resolve();
-      });
-    });
+    ingest = await startMockIngest();
+    endpoint = ingest.endpoint;
   });
 
   afterEach(async () => {
     _resetGlobalState();
-    ingest.closeAllConnections();
-    await new Promise<void>((resolve) => ingest.close(() => resolve()));
+    await ingest.close();
     vi.restoreAllMocks();
   });
 
-  const callOnce = async (wrapped: McpServer, meta?: Record<string, unknown>) => {
-    const [ct, st] = InMemoryTransport.createLinkedPair();
-    await wrapped.connect(st);
-    const mcpClient = new Client({ name: "c", version: "1.0" });
-    await mcpClient.connect(ct);
-    const result = await mcpClient.callTool({
-      name: "get_price",
-      arguments: { q: "x" },
-      _meta: meta,
-    });
-    await mcpClient.close();
-    return result;
-  };
-  const toolCallEvents = () =>
-    received.flatMap((b) => b.events).filter((e) => e.event_type === "tool_call");
+  const callOnce = (wrapped: McpServer, meta?: Record<string, unknown>) =>
+    callViaClient(wrapped, { name: "get_price", arguments: { q: "x" }, _meta: meta });
+  const toolCallEvents = () => ingest.ofType("tool_call");
 
   it("wrapping 1,000 servers creates one transport and at most one signal handler pair, with no MaxListenersExceededWarning", async () => {
     const warnings: Error[] = [];
@@ -165,7 +106,7 @@ describe("per-request servers share one process-level state", () => {
 
     await client.shutdown();
 
-    const events = received.flatMap((b) => b.events);
+    const events = ingest.events;
     const calls = events.filter((e) => e.event_type === "tool_call");
     expect(calls).toHaveLength(3);
     const sessionId = deriveSessionId("conv-shared");
@@ -178,7 +119,9 @@ describe("per-request servers share one process-level state", () => {
     expect(step?.session_id).toBe(sessionId);
     expect(step?.user_id).toBe("user-shared");
     // One stream: every batch carried the same key.
-    expect(new Set(received.map((b) => b.authorization))).toEqual(new Set(["Bearer yav_stream"]));
+    expect(new Set(ingest.batches.map((b) => b.authorization))).toEqual(
+      new Set(["Bearer yav_stream"]),
+    );
   });
 
   it("keeps two API keys apart: two transports, no cross-delivery, each its own discovery and connection", async () => {
@@ -210,7 +153,7 @@ describe("per-request servers share one process-level state", () => {
     await b.shutdown();
 
     const byKey = (key: string, type: string) =>
-      received
+      ingest.batches
         .filter((batch) => batch.authorization === `Bearer ${key}`)
         .flatMap((batch) => batch.events)
         .filter((e) => e.event_type === type);
@@ -250,11 +193,11 @@ describe("per-request servers share one process-level state", () => {
     }
     await client.shutdown();
 
-    expect(mints).toHaveLength(3);
+    expect(ingest.mints).toHaveLength(3);
     expect(new Set(seen.map((w) => w.traceId)).size).toBe(3);
     for (const widget of seen) expect(widget.token).toBe(`tok-${widget.traceId}`);
     // Each token's trace is the trace of the call's own event.
-    const traces = received
+    const traces = ingest.batches
       .flatMap((b) => b.events)
       .filter((e) => e.event_type === "tool_call")
       .map((e) => e.trace_id);
@@ -277,7 +220,7 @@ describe("per-request servers share one process-level state", () => {
   });
 
   it("a hanging widget-token endpoint delays the tool result by the mint timeout at most, with one YAVIO-1103 warning", async () => {
-    hangMints = true;
+    ingest.hangMints = true;
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const client = createYavio({ apiKey: "yav_hang", endpoint, serverOnly: false });
     const wrapped = client.wrap(new McpServer({ name: "w", version: "1.0" }));
@@ -292,7 +235,7 @@ describe("per-request servers share one process-level state", () => {
     expect(first._meta).toBeUndefined();
     await callOnce(wrapped);
     await client.shutdown();
-    expect(mints).toHaveLength(2);
+    expect(ingest.mints).toHaveLength(2);
     const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("YAVIO-1103"));
     expect(lines).toHaveLength(1);
     expect(toolCallEvents()).toHaveLength(2);
@@ -392,7 +335,7 @@ describe("per-request servers share one process-level state", () => {
     await callOnce(wrapped);
     await a.shutdown();
     // Delivered before shutdown() resolved: 250 track + 1 tool_call (+ connection).
-    const events = received.flatMap((batch) => batch.events);
+    const events = ingest.events;
     expect(events.filter((e) => e.event_type === "track")).toHaveLength(250);
     expect(events.filter((e) => e.event_type === "tool_call")).toHaveLength(1);
     expect(_sharedStateCount()).toBe(1);
@@ -459,7 +402,7 @@ describe("per-request servers share one process-level state", () => {
   it("never leaves an unhandled rejection when the mint fails under a throwing handler or a non-object result", async () => {
     // The mint endpoint drops the connection: the mint promise fails while
     // nothing awaits it (handler threw / non-object result).
-    hangMints = true;
+    ingest.hangMints = true;
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const rejections: unknown[] = [];
     const onRejection = (reason: unknown) => {
@@ -474,7 +417,7 @@ describe("per-request servers share one process-level state", () => {
       });
       const result = await callOnce(wrapped);
       expect(result.isError).toBe(true);
-      ingest.closeAllConnections(); // fail the pending mint now
+      ingest.dropConnections(); // fail the pending mint now
       for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
       await client.shutdown();
       expect(rejections).toEqual([]);
@@ -585,7 +528,7 @@ describe("per-request servers share one process-level state", () => {
     await second.shutdown();
     expect(_sharedStateCount()).toBe(0);
 
-    const outputs = received
+    const outputs = ingest.batches
       .flatMap((b) => b.events)
       .filter((e) => e.event_type === "tool_call")
       .map((e) => (e.output_content as { content: Array<{ text: string }> }).content[0]?.text);
@@ -631,7 +574,9 @@ describe("per-request servers share one process-level state", () => {
     await mcpClient.close();
     await client.shutdown();
 
-    const calls = received.flatMap((b) => b.events).filter((e) => e.event_type === "tool_call");
+    const calls = ingest.batches
+      .flatMap((b) => b.events)
+      .filter((e) => e.event_type === "tool_call");
     expect(calls).toHaveLength(1);
   });
 
@@ -651,8 +596,7 @@ describe("per-request servers share one process-level state", () => {
       await mcpClient.connect(ct);
       return mcpClient;
     };
-    const toolCalls = () =>
-      received.flatMap((b) => b.events).filter((e) => e.event_type === "tool_call");
+    const toolCalls = () => ingest.ofType("tool_call");
 
     it("withYavio() leaves them untracked, as before 0.5.0", async () => {
       let ran = 0;

@@ -14,41 +14,21 @@ import { z } from "zod";
 import { deriveSessionId } from "../../core/ids.js";
 import { createYavio } from "../../server/index.js";
 import { _resetGlobalState } from "../../server/proxy.js";
-
-interface ReceivedBatch {
-  events: Array<Record<string, unknown>>;
-}
+import { type MockIngest, startMockIngest } from "./helpers.js";
 
 describe("stateless Streamable HTTP, a new McpServer per request", () => {
-  const received: ReceivedBatch[] = [];
-  let ingest: ReturnType<typeof createServer>;
+  let ingest: MockIngest;
   let endpoint: string;
   let mcp: ReturnType<typeof createServer> | undefined;
 
   beforeEach(async () => {
     _resetGlobalState();
-    received.length = 0;
-    ingest = createServer((req, res) => {
-      let body = "";
-      req.on("data", (chunk) => {
-        body += chunk;
-      });
-      req.on("end", () => {
-        received.push(JSON.parse(body) as ReceivedBatch);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ accepted: 1, rejected: 0 }));
-      });
-    });
-    await new Promise<void>((resolve) => {
-      ingest.listen(0, "127.0.0.1", () => {
-        endpoint = `http://127.0.0.1:${(ingest.address() as AddressInfo).port}/v1/events`;
-        resolve();
-      });
-    });
+    ingest = await startMockIngest();
+    endpoint = ingest.endpoint;
   });
 
   afterEach(async () => {
-    await new Promise<void>((resolve) => ingest.close(() => resolve()));
+    await ingest.close();
     if (mcp) await new Promise<void>((resolve) => mcp?.close(() => resolve()));
     mcp = undefined;
     _resetGlobalState();
@@ -120,7 +100,7 @@ describe("stateless Streamable HTTP, a new McpServer per request", () => {
 
     await yavio.shutdown();
 
-    const events = received.flatMap((b) => b.events);
+    const events = ingest.events;
     const calls = events.filter((e) => e.event_type === "tool_call");
     const connections = events.filter((e) => e.event_type === "connection");
     const discoveries = events.filter((e) => e.event_type === "tool_discovery");
@@ -135,6 +115,6 @@ describe("stateless Streamable HTTP, a new McpServer per request", () => {
     expect(discoveries.map((e) => e.tool_name).sort()).toEqual(["get_price", "ping"]);
     // Every instance sent through the one shared transport: batches of up to
     // 100 events, not one request per instance.
-    expect(received.length).toBeLessThan(10);
+    expect(ingest.batches.length).toBeLessThan(10);
   });
 });
