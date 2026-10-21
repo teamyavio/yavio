@@ -237,7 +237,7 @@ export function InvocationsContent({
 
   return (
     <div className={`space-y-6 ${isRefetching ? "opacity-50 transition-opacity" : ""}`}>
-      <PageHeader title="Invocations">
+      <PageHeader title="Invocations" onRefresh={retry} refreshing={isRefetching}>
         <PlatformFilter selected={filters.platform} onChange={(p) => setFilter({ platform: p })} />
         <DateRangePicker
           from={filters.from}

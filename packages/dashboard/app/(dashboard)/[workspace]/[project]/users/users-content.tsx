@@ -136,7 +136,14 @@ export function UsersContent({ projectId }: { projectId: string }) {
 
   return (
     <div className={`space-y-6 ${isRefetching ? "opacity-50 transition-opacity" : ""}`}>
-      <PageHeader title="Users">
+      <PageHeader
+        title="Users"
+        onRefresh={() => {
+          listRetry();
+          activeRetry();
+        }}
+        refreshing={isRefetching}
+      >
         <DateRangePicker
           from={filters.from}
           to={filters.to}

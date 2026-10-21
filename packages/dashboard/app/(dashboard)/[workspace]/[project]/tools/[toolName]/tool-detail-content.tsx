@@ -194,7 +194,7 @@ export function ToolDetailContent({
         </BreadcrumbList>
       </Breadcrumb>
 
-      <PageHeader title={toolName}>
+      <PageHeader title={toolName} onRefresh={retry} refreshing={isRefetching}>
         <PlatformFilter selected={filters.platform} onChange={(p) => setFilter({ platform: p })} />
         <DateRangePicker
           from={filters.from}

@@ -26,7 +26,7 @@ export function FunnelsContent({ projectId }: { projectId: string }) {
 
   return (
     <div className={`space-y-6 ${isRefetching ? "opacity-50 transition-opacity" : ""}`}>
-      <PageHeader title="Funnels">
+      <PageHeader title="Funnels" onRefresh={retry} refreshing={isRefetching}>
         <DateRangePicker
           from={filters.from}
           to={filters.to}
