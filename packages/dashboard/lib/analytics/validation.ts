@@ -47,6 +47,22 @@ export const paginationSchema = z.object({
 export type PaginationParams = z.infer<typeof paginationSchema>;
 
 /**
+ * Extra filters of the invocation list (#44), on top of the analytics
+ * filters. `hasIntent` is a flag ("1"/"true"); anything else, including
+ * its absence, means "all invocations".
+ */
+export const invocationFiltersSchema = z.object({
+  tool: z.string().trim().min(1).max(200).optional(),
+  status: z.enum(["success", "error"]).optional(),
+  hasIntent: z
+    .string()
+    .optional()
+    .transform((v) => v === "1" || v === "true"),
+});
+
+export type InvocationFilters = z.infer<typeof invocationFiltersSchema>;
+
+/**
  * Parse analytics filters + pagination from URLSearchParams.
  */
 export function parseAnalyticsParams(searchParams: URLSearchParams) {

@@ -1,6 +1,7 @@
 import {
   analyticsFiltersSchema,
   granularityToClickHouse,
+  invocationFiltersSchema,
   paginationSchema,
   parseAnalyticsParams,
 } from "@/lib/analytics/validation";
@@ -53,6 +54,29 @@ describe("analyticsFiltersSchema", () => {
       granularity: "second",
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("invocationFiltersSchema (#44)", () => {
+  it("treats absence as 'all invocations'", () => {
+    const result = invocationFiltersSchema.parse({});
+    expect(result).toEqual({ hasIntent: false });
+  });
+
+  it("reads the has-intent flag and the status and tool filters", () => {
+    expect(invocationFiltersSchema.parse({ hasIntent: "1" }).hasIntent).toBe(true);
+    expect(invocationFiltersSchema.parse({ hasIntent: "true" }).hasIntent).toBe(true);
+    expect(invocationFiltersSchema.parse({ hasIntent: "0" }).hasIntent).toBe(false);
+    expect(invocationFiltersSchema.parse({ status: "error", tool: " search " })).toEqual({
+      hasIntent: false,
+      status: "error",
+      tool: "search",
+    });
+  });
+
+  it("rejects an unknown status and an overlong tool name", () => {
+    expect(invocationFiltersSchema.safeParse({ status: "pending" }).success).toBe(false);
+    expect(invocationFiltersSchema.safeParse({ tool: "x".repeat(201) }).success).toBe(false);
   });
 });
 

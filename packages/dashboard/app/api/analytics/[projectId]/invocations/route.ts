@@ -1,9 +1,10 @@
 import { withAnalyticsAuth } from "@/lib/analytics/auth";
-import { parseAnalyticsParams } from "@/lib/analytics/validation";
+import { invocationFiltersSchema, parseAnalyticsParams } from "@/lib/analytics/validation";
 import { AnalyticsQueryError } from "@/lib/clickhouse/analytics-client";
-import { queryIntentFeed, queryIntentKPIs } from "@/lib/queries/intents";
+import { queryIntentKPIs } from "@/lib/queries/intents";
+import { queryInvocationFeed } from "@/lib/queries/invocations";
 import { queryIntentStatus } from "@/lib/queries/tool-detail";
-import type { IntentsResponse } from "@/lib/queries/types";
+import type { InvocationsResponse } from "@/lib/queries/types";
 import { rateLimitConfigs } from "@/lib/rate-limit/config";
 import { RateLimiter } from "@/lib/rate-limit/rate-limiter";
 import { ErrorCode } from "@yavio/shared/error-codes";
@@ -12,6 +13,11 @@ import { NextResponse } from "next/server";
 const limiter = new RateLimiter(rateLimitConfigs.analytics);
 limiter.start();
 
+/**
+ * The merged invocation list (#44): every tool call in the range with its
+ * intent inline, plus the intent KPIs and capture status the Intents page
+ * used to carry.
+ */
 export const GET = withAnalyticsAuth("viewer")(async (request, ctx) => {
   const limit = limiter.consume(ctx.userId);
   if (!limit.allowed) {
@@ -23,8 +29,13 @@ export const GET = withAnalyticsAuth("viewer")(async (request, ctx) => {
 
   const url = new URL(request.url);
   const { filters, pagination } = parseAnalyticsParams(url.searchParams);
+  const extra = invocationFiltersSchema.safeParse({
+    tool: url.searchParams.get("tool") ?? undefined,
+    status: url.searchParams.get("status") ?? undefined,
+    hasIntent: url.searchParams.get("hasIntent") ?? undefined,
+  });
 
-  if (!filters.success) {
+  if (!filters.success || !extra.success) {
     return NextResponse.json(
       { error: "Invalid filters", code: ErrorCode.DASHBOARD.VALIDATION_FAILED },
       { status: 400 },
@@ -45,12 +56,12 @@ export const GET = withAnalyticsAuth("viewer")(async (request, ctx) => {
 
   try {
     const [feed, kpis, intentStatus] = await Promise.all([
-      queryIntentFeed(queryCtx, page, pageSize),
+      queryInvocationFeed(queryCtx, page, pageSize, extra.data),
       queryIntentKPIs(queryCtx),
       queryIntentStatus(queryCtx),
     ]);
 
-    const body: IntentsResponse = { ...feed, kpis, intentStatus };
+    const body: InvocationsResponse = { ...feed, kpis, intentStatus };
     return NextResponse.json(body);
   } catch (err) {
     if (err instanceof AnalyticsQueryError) return err.toResponse();
