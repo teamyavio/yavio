@@ -215,8 +215,12 @@ function openCallContext(
       },
       {
         // The wire protocol version the client sends on every Streamable HTTP
-        // request (allowlisted in `_requestInfo` as well).
-        protocolVersion: headerValue(ex.requestHeaders, "mcp-protocol-version"),
+        // request (allowlisted in `_requestInfo` as well). Only a date-shaped
+        // value is stored: a Streamable HTTP transport rejects anything else,
+        // a custom one may not, and the column is not a place for free text.
+        protocolVersion: protocolVersionHeader(
+          headerValue(ex.requestHeaders, "mcp-protocol-version"),
+        ),
         clientName: clientInfo?.name,
         clientVersion: clientInfo?.version,
         clientInfoSource: clientInfo?.name ? clientInfoSource : undefined,
@@ -227,6 +231,13 @@ function openCallContext(
   }
 
   return { traceId: generateTraceId(), session };
+}
+
+/** The MCP protocol versions are dates (`2025-06-18`); anything else is not recorded (#142 review). */
+const PROTOCOL_VERSION = /^\d{4}-\d{2}-\d{2}$/;
+
+function protocolVersionHeader(value: string | undefined): string | undefined {
+  return value !== undefined && PROTOCOL_VERSION.test(value) ? value : undefined;
 }
 
 /**

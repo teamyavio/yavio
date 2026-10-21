@@ -1402,6 +1402,34 @@ describe("createProxy — platform detection from HTTP request headers", () => {
     expect(toolCall.platform).toBe("cursor");
   });
 
+  it.each([
+    ["2025-06-18", "2025-06-18"],
+    ["<script>alert(1)</script>", undefined],
+    ["2025-06-18; drop", undefined],
+    ["latest", undefined],
+    ["", undefined],
+  ])(
+    "records the mcp-protocol-version header %s as protocol_version %s only when it is a date (#142)",
+    async (header, expected) => {
+      const server = new McpServer({ name: "test", version: "1.0" });
+      const transport = createMockTransport();
+      const proxy = createProxy(server, testConfig, transport, "0.0.1");
+      proxy.tool("pv_tool", () => ({ content: [{ type: "text", text: "ok" }] }));
+      await registeredTool(server, "pv_tool")?.handler({
+        signal: new AbortController().signal,
+        requestId: "req-pv-1",
+        sendNotification: async () => {},
+        sendRequest: async () => ({}),
+        requestInfo: { headers: { "mcp-protocol-version": header } },
+      });
+      const connection = transport.sent.flat().find((e) => e.event_type === "connection") as Record<
+        string,
+        unknown
+      >;
+      expect(connection.protocol_version).toBe(expected);
+    },
+  );
+
   it("detects the platform from the Origin header when nothing else matches", async () => {
     const server = new McpServer({ name: "test", version: "1.0" });
     const transport = createMockTransport();
