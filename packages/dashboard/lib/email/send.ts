@@ -10,7 +10,7 @@ export async function sendEmail(to: string, subject: string, html: string): Prom
 
   try {
     await transporter.sendMail({
-      from: process.env.SMTP_FROM ?? "noreply@yavio.dev",
+      from: process.env.SMTP_FROM ?? "noreply@yavio.ai",
       to,
       subject,
       html,
