@@ -154,7 +154,7 @@ What holds across instances: the same `session_id` and user for the same convers
 
 `analytics.shutdown()` drains (bounded by the transport's 10 s shutdown timeout) and releases this client's hold on the shared transport, for hosts with their own lifecycle; the transport stops once no client with the same key holds it (a `withYavio()` call never releases). The SDK also drains everything on `SIGTERM`/`SIGINT`. A `401` from ingest stops delivery for that key process-wide (`YAVIO-1203`): every wrap sharing the key is affected, which is what an invalid key means.
 
-A value that is not an `McpServer` (no `registerTool`) comes back unwrapped with one `YAVIO-1107` error per process, so a mis-wired integration keeps serving.
+A value that is not an `McpServer` (no `registerTool()` / `connect()`) comes back unwrapped with one `YAVIO-1107` error per process — in no-op mode too — so a mis-wired integration keeps serving. After `SIGTERM`/`SIGINT` the SDK drains every transport; requests still served during the graceful-shutdown window send their events at once, best effort.
 
 ## Captured data
 

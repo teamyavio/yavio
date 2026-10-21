@@ -29,6 +29,8 @@ Everything that must survive across wraps lives in a module-level registry keyed
 
 A hold names the transport's *generation*, so a hold on a transport a signal already drained releases nothing against its successor; a client whose hold is stale re-acquires on its next `wrap()`. Releasing a hold while others remain *drains* the transport (every queued batch, after any send in flight — `HttpTransport.drain()`), not just one flush; the drain is bounded by the transport's `shutdownTimeoutMs` (10 s) like `shutdown()`, and at the deadline it leaves the queue to the timer flush without stopping the transport. The key's state object (sessions, transport facade) outlives its transports: proxies keep it, and a re-acquire after a stop puts a fresh transport behind the same facade, so a re-wrap after the last holder's `shutdown()` — which returns the existing proxy — delivers through the new transport.
 
+**After the signal.** The handler marks the process as draining before it drains the registry. A transport created from then on — by a wrap during the graceful-shutdown window, or by an existing proxy's next `send()` — is *immediate*: it sends on every `send()` (what queues during a send goes with the next one), has no timer and is drained by nobody; bounded by the fetch timeout and the buffer cap, and announced by one `[yavio] Shutdown signal received` line. `HttpTransport.shutdown()` first awaits the batch already in flight, within the same `shutdownTimeoutMs`.
+
 `withYavio()` pins the state and creates it on first use; the mode log lines (`Server-only mode`, `Intent capture enabled`) and the no-key warning (`YAVIO-1000`) print once per process. The session LRU's eviction hook still drops the evicted session's connection-event mark (per key).
 
 ### `createYavio(options)` → `YavioClient { wrap(server), shutdown() }`
@@ -56,12 +58,13 @@ A stateless host builds the server — tools included — and wraps the finished
 | task id | `extra.taskId` | — |
 | client identity | `server.server.getClientVersion()` (initialize handshake) | `ctx.mcpReq.envelope["io.modelcontextprotocol/clientInfo"]` on the 2026-07-28 era, then `getClientVersion()` |
 
-- Status wrapper: a thrown InvalidParams whose text is exactly `Tool <name> not found` / `Tool <name> disabled` (v2) is counted as a `validation` event like v1's `isError` text — same table as [protocol-layer-status.md](./protocol-layer-status.md) — and re-thrown unchanged.
+- Status wrapper: a thrown InvalidParams whose text is exactly `Tool <name> not found` / `Tool <name> disabled` (v2) is counted as a `validation` event like v1's `isError` text — same table as [protocol-layer-status.md](./protocol-layer-status.md) — and re-thrown unchanged. A throw that arrives *with* the callback's event in hand came from above the handler (v2's wire validation of the result, `Invalid tools/call result: …`, reached when the protocol layer wraps a handler v2 already stored — tools registered before a `wrap()`): the event is corrected to `status: error`, `error_category: server`, like v1's output-schema failure; a URL elicitation passes through unchanged.
+- The widget token's mint is started before the handler runs and awaited after it, so the round trip hides behind the handler; an unused mint (non-object result, handler threw) is dropped.
 - The 2026-07-28 era is negotiated only over Streamable HTTP; `InMemoryTransport` negotiates 2025-11-25.
 
 ### Fail closed (`YAVIO-1107`)
 
-A value without a `registerTool` function is returned unwrapped with one `console.error` per process, decided in `withYavio()` **before** the configuration is resolved — no transport, no listeners. `createYavio().wrap()` makes the same decision; its client already holds the shared transport.
+A value without a `registerTool` and a `connect` function (the two methods the proxy binds) is returned unwrapped with one `console.error` per process, decided in `withYavio()` **before** the configuration is resolved — no transport, no listeners. `createYavio().wrap()` makes the same decision before it touches the shared state (so a `wrap(notAServer)` after `shutdown()` re-acquires nothing), and both entry points run it in no-op mode too.
 
 ## Changes
 
@@ -70,7 +73,7 @@ A value without a `registerTool` function is returned unwrapped with one `consol
 | sdk | `server/shared.ts` (new: registry with holds and pins, signal handlers, `logOnce`), `server/extra.ts` (new: `readCallExtra`), `server/index.ts` (`createYavio`, `withYavio`, the re-wrap guard, `YAVIO-1107`, warn-once `YAVIO-1000`), `server/proxy.ts` (shared sessions, per-call token mint, per-key dedup, optional `tool()`, opt-in pre-registered tool instrumentation, proxy registry, v2 thrown-InvalidParams rule, context reads through `extra.ts`), `server/protocol.ts` (string methods, last-argument wrapping), `core/types.ts` (`McpServerLike`, `YavioClient`), `package.json` (optional peers, v2 dev dependencies), `scripts/check-package.mjs` (a v2-only consumer), README. |
 | shared | `ErrorCode.SDK.UNSUPPORTED_SERVER` (`YAVIO-1107`). |
 | docs | Setup and quickstart pages state both peers; error catalog row. |
-| ci | `sdk-mcp-compat.yml` gains the `server-v2` leg (latest `@modelcontextprotocol/server` + `client` + `node`). |
+| ci | `sdk-mcp-compat.yml` gains the `server-v2-floor` leg (the declared `^X.Y.Z` peer floor of `@modelcontextprotocol/server`, with `client` and `node` pinned to the same version) and the `server-v2` leg (latest `server` + `client` + `node`). |
 | dashboard | **Follow-up, not in this change:** its `mcp-handler` route calls `withYavio()` per request and will share one transport once the dashboard's `@yavio/sdk` pin (`^0.3.0`, which the caret keeps below 0.5.0) is bumped to `^0.5.0` and the dashboard is deployed. Until then the route leaks as before. |
 
 ## Compatibility
