@@ -14,15 +14,11 @@ import { EmptyState } from "@/components/analytics/empty-state";
 import { ErrorAlert } from "@/components/analytics/error-alert";
 import { PageHeader } from "@/components/analytics/page-header";
 import { PLATFORM_META, platformLabel } from "@/components/analytics/platform-meta";
+import { Timestamp } from "@/components/analytics/timestamp";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAnalyticsFilters } from "@/hooks/use-analytics-filters";
 import { useAnalyticsQuery } from "@/hooks/use-analytics-query";
-import {
-  formatBucketLabel,
-  formatBucketTooltip,
-  formatNumber,
-  formatRelativeTime,
-} from "@/lib/analytics/format";
+import { formatBucketLabel, formatBucketTooltip, formatNumber } from "@/lib/analytics/format";
 import type { ActiveUsersPoint, NewVsReturningPoint, UserListItem } from "@/lib/queries/types";
 import type { Platform } from "@yavio/shared/platform";
 import { useState } from "react";
@@ -69,13 +65,13 @@ const userColumns: Column<UserListItem>[] = [
     key: "firstSeen",
     label: "First Seen",
     sortable: true,
-    render: (row: UserListItem) => formatRelativeTime(row.firstSeen),
+    render: (row: UserListItem) => <Timestamp value={row.firstSeen} show="relative" />,
   },
   {
     key: "lastSeen",
     label: "Last Seen",
     sortable: true,
-    render: (row: UserListItem) => formatRelativeTime(row.lastSeen),
+    render: (row: UserListItem) => <Timestamp value={row.lastSeen} show="relative" />,
   },
   {
     key: "totalSessions",

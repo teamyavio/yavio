@@ -19,6 +19,7 @@ import { KPICard } from "@/components/analytics/kpi-card";
 import { PageHeader } from "@/components/analytics/page-header";
 import { PlatformFilter } from "@/components/analytics/platform-filter";
 import { PLATFORM_META, platformLabel } from "@/components/analytics/platform-meta";
+import { Timestamp } from "@/components/analytics/timestamp";
 import { Badge } from "@/components/ui/badge";
 import {
   Breadcrumb,
@@ -45,7 +46,6 @@ import {
   formatLatency,
   formatNumber,
   formatPercent,
-  formatRelativeTime,
 } from "@/lib/analytics/format";
 import type {
   ErrorCategoryCount,
@@ -107,7 +107,7 @@ const invocationColumns: Column<ToolInvocation>[] = [
   {
     key: "timestamp",
     label: "Time",
-    render: (row: ToolInvocation) => formatRelativeTime(row.timestamp),
+    render: (row: ToolInvocation) => <Timestamp value={row.timestamp} />,
   },
   {
     key: "status",
@@ -486,9 +486,11 @@ function IntentsPanel({ intents, status }: { intents: RecentIntent[]; status?: I
                 error
               </Badge>
             )}
-            <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground">
-              {formatRelativeTime(row.timestamp)}
-            </span>
+            <Timestamp
+              value={row.timestamp}
+              show="relative"
+              className="shrink-0 whitespace-nowrap text-xs text-muted-foreground"
+            />
           </li>
         ))}
       </ul>

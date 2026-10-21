@@ -5,6 +5,7 @@ import { EmptyState } from "@/components/analytics/empty-state";
 import { EventBadge } from "@/components/analytics/event-badge";
 import { PageHeader } from "@/components/analytics/page-header";
 import { platformLabel } from "@/components/analytics/platform-meta";
+import { Timestamp } from "@/components/analytics/timestamp";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -13,7 +14,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { formatLatency, formatRelativeTime } from "@/lib/analytics/format";
+import { formatLatency } from "@/lib/analytics/format";
 import type { LiveEvent } from "@/lib/queries/types";
 import { cn } from "@/lib/utils";
 import { Pause, Play } from "lucide-react";
@@ -158,9 +159,11 @@ export function LiveContent({ projectId }: { projectId: string }) {
                 }}
                 onClick={() => setExpandedId(expandedId === event.eventId ? null : event.eventId)}
               >
-                <span className="w-20 shrink-0 text-xs text-muted-foreground">
-                  {formatRelativeTime(event.timestamp)}
-                </span>
+                <Timestamp
+                  value={event.timestamp}
+                  show="relative"
+                  className="w-20 shrink-0 text-xs text-muted-foreground"
+                />
                 <EventBadge eventType={event.eventType} />
                 <span className="flex-1 truncate font-mono text-xs">
                   {event.eventName ?? event.eventType}
@@ -176,7 +179,9 @@ export function LiveContent({ projectId }: { projectId: string }) {
                 <div className="ml-4 rounded-md border bg-muted/50 px-4 py-3 text-xs">
                   <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
                     <dt className="text-muted-foreground">Timestamp</dt>
-                    <dd className="font-mono">{event.timestamp}</dd>
+                    <dd className="font-mono">
+                      <Timestamp value={event.timestamp} />
+                    </dd>
                     <dt className="text-muted-foreground">Session</dt>
                     <dd className="font-mono">{event.sessionId}</dd>
                     <dt className="text-muted-foreground">Trace</dt>
