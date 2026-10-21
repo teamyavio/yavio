@@ -81,11 +81,12 @@ conversions, conversion_value
 - individuals = distinct people (or sessions where the app identifies no one)
   in that cell. NOT additive across days or cells.
 - events = rows, except in cells with event_type = 'connection', where it is
-  the distinct sessions that connected that day (SDK/ingest 0.5.2 on): NOT
-  additive across days. Months finished before that deploy still count
-  connection rows (one per session per server process), so a connection
-  figure spanning the deploy mixes the two; use uniqExact(session_id) over
-  events for sessions whenever the raw data is still there.
+  the distinct sessions that connected that day, from the stats runs after
+  the #142 ingest deploy: NOT additive across days. The first run after the
+  deploy recomputes the previous month too, so only months before that keep
+  counting connection rows (one per session per server process); a
+  connection figure spanning them mixes the two. Use uniqExact(session_id)
+  over events for sessions whenever the raw data is still there.
 - Average latency: sum(latency_sum) / sum(latency_count).
 
 ### stats_users_daily — day, dau, wau, mau (7/30 days ending that day)
