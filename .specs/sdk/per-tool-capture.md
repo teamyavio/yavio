@@ -13,6 +13,8 @@ Some tools take data that must never reach analytics — a booking tool with an 
 
 `stripPii()` is not a substitute: it matches emails, Luhn-valid card numbers, US SSNs and US phone formats — not IBANs, names, addresses or birth dates.
 
+> **Since 0.5.0 (#133):** the second option only exists under `withYavio()`. `createYavio().wrap()` instruments every tool on the server, including those registered before the wrap, so under `wrap()` the `tools` override is the only way to keep a tool's input out — see [per-request-servers.md](./per-request-servers.md).
+
 An integration runs the second option today, so its funnel ends at "compared" and the `booking_received` conversion never arrives (live 2026-08-26: 46 `switch_link_issued` conversions from the proxied tool, 0 `booking_received`; the switch-link tool has since been removed, which makes the booking the only conversion left).
 
 ## Decision

@@ -124,7 +124,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createYavio } from "@yavio/sdk";
 
 // Once per process: config, the HTTP transport to ingest, the shutdown hooks.
-const yavio = createYavio({ serverOnly: true, capture: { geo: "country" } });
+// (Named `analytics` here: `yavio` is the package's tracking singleton.)
+const analytics = createYavio({ serverOnly: true, capture: { geo: "country" } });
 
 function buildServer() {
   const server = new McpServer({ name: "example", version: "1.0.0" });
@@ -135,7 +136,7 @@ function buildServer() {
 const app = express().use(express.json());
 app.post("/mcp", async (req, res) => {
   // Per request: cheap and synchronous, no new transport, listeners or session store.
-  const server = yavio.wrap(buildServer());
+  const server = analytics.wrap(buildServer());
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   res.on("close", () => { void transport.close(); void server.close(); });
   await server.connect(transport);
@@ -143,11 +144,15 @@ app.post("/mcp", async (req, res) => {
 });
 ```
 
-On MCP SDK v2 only the imports differ: `McpServer` from `@modelcontextprotocol/server`, `NodeStreamableHTTPServerTransport` from `@modelcontextprotocol/node`, or `createMcpHandler((ctx) => yavio.wrap(buildServer()))`.
+On MCP SDK v2 only the imports differ: `McpServer` from `@modelcontextprotocol/server`, `NodeStreamableHTTPServerTransport` from `@modelcontextprotocol/node`, or `createMcpHandler((ctx) => analytics.wrap(buildServer()))`.
 
-What holds across instances: the same `session_id` and user for the same conversation (`Mcp-Session-Id` or ChatGPT's `openai/session`), one `connection` event per session, one `tool_discovery` per tool per process, and `yavio.identify()` on one request visible on the next. A client that sends neither session key gets one session per request. Tools registered before the wrap — as `buildServer()` does above — are instrumented like tools registered through the wrapped server.
+What holds across instances: the same `session_id` and user for the same conversation (`Mcp-Session-Id` or ChatGPT's `openai/session`), one `connection` event per session, one `tool_discovery` per tool per project per process, and `yavio.identify()` on one request visible on the next. A client that sends neither session key gets one session per request. Widget tokens are minted per tool call, as the ingest contract requires (a token is bound to the trace of the call that minted it).
 
-`withYavio(server, options)` is also safe to call per request: the transport, the session store and the shutdown hooks are shared per API key and endpoint. It resolves the configuration (environment, `.yaviorc.json`) on every call, which `createYavio()` does once. `yavio.shutdown()` drains the transport for hosts with their own lifecycle; the SDK also drains on `SIGTERM`/`SIGINT`.
+`wrap()` instruments **every tool on the server**, including the ones `buildServer()` registered before the wrap. That is the one behavioural difference to `withYavio()`, which tracks only the tools registered through the proxy it returns — a tool kept on the raw server on purpose stays untracked under `withYavio()`, and the way to limit capture for a sensitive tool under either entry point is the `tools` overrides.
+
+`withYavio(server, options)` is safe for a server created per request too: the transport, the session store and the shutdown hooks are shared per API key and endpoint. It resolves the configuration (environment, `.yaviorc.json`) on every call, which `createYavio()` does once. Wrapping the same long-lived server again — with either entry point — returns the existing proxy, so a host that wraps on every request never stacks instrumentation.
+
+`analytics.shutdown()` flushes and releases this client's hold on the shared transport, for hosts with their own lifecycle; the transport stops once no client with the same key holds it (a `withYavio()` call never releases). The SDK also drains everything on `SIGTERM`/`SIGINT`. A `401` from ingest stops delivery for that key process-wide (`YAVIO-1203`): every wrap sharing the key is affected, which is what an invalid key means.
 
 A value that is not an `McpServer` (no `registerTool`) comes back unwrapped with one `YAVIO-1107` error per process, so a mis-wired integration keeps serving.
 
@@ -169,7 +174,7 @@ A call is an error when the handler **throws** or when it **returns a result wit
 
 Only the literal boolean `true` counts as `isError`. The client sees the same shape in all four error cases (the MCP SDK converts throws and pre-handler failures into `isError` results), so the distinction is server-side only.
 
-Every `tools/call` request the wrapped server receives is counted, including the ones the MCP SDK rejects before your handler runs — a call to a tool name that does not exist shows up as that name with a 100 % error rate, which is the honest signal. A tool registered on the original, unwrapped server stays untracked either way.
+Every `tools/call` request the wrapped server receives is counted, including the ones the MCP SDK rejects before your handler runs — a call to a tool name that does not exist shows up as that name with a 100 % error rate, which is the honest signal. Under `withYavio()` a tool registered on the original, unwrapped server stays untracked either way; `createYavio().wrap()` instruments every tool on the server (see [Stateless / per-request servers](#stateless--per-request-servers)).
 
 `error_message` is the exception's message, or for an `isError` result the first `text` content item. Both are PII-stripped and clamped to 500 characters. The result text is output, so it is stored only while `outputValues` is on. A thrown message is developer-written, but messages routinely interpolate the arguments (`IBAN ${iban} rejected`) and the PII stripper does not recognise IBANs or customer numbers, so it is stored only while `inputValues` is on. `status` and `error_category` are recorded regardless.
 

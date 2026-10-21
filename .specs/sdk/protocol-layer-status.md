@@ -41,8 +41,8 @@ tools/call request
 | callback ran, result matches its event | yes | the callback's event, unchanged |
 | callback ran, its event says `success`, final result has `isError: true` | yes | the callback's event with `status: error`, `error_category: server`, `error_message` from the result — output validation failed after the handler |
 | callback never ran, final result has `isError: true`, tool is instrumented or unregistered | no | a new event: `status: error`, `error_category: validation` (see below) |
-| callback never ran, result is not an error | no | nothing — the tool is not instrumented at the callback level (registered on the unwrapped server, or a task-based tool), and that must stay untracked |
-| tool is **registered but not instrumented** (unwrapped server, task tool) | — | no frame at all: the wrapper calls straight through, so not even the session's connection event or platform detection runs for it *(code review 2026-10-13)* |
+| callback never ran, result is not an error | no | nothing — the tool is not instrumented at the callback level (registered on the unwrapped server under `withYavio()`, or a task-based tool), and that must stay untracked |
+| tool is **registered but not instrumented** (unwrapped server under `withYavio()`, task tool) | — | no frame at all: the wrapper calls straight through, so not even the session's connection event or platform detection runs for it *(code review 2026-10-13)* |
 | callback never ran, downstream threw | no | nothing — a JSON-RPC error the proxy has no business classifying (today: only `UrlElicitationRequired`) |
 
 "Instrumented" = the proxy wrapped the tool's callback (`instrumentedTools`, fed by both interceptors). "Unregistered" = the name is absent from the live registry (`_registeredTools`, the same private read `intent.ts` already does; when unreadable, treat as registered).
@@ -101,7 +101,7 @@ Status must be the inner wrapper: it then runs inside the intent store (so a pre
 6. Output validation failure → exactly one event, `status: error`, `server`, latency present.
 7. Intent on + validation failure with `context` sent → event has `intent_signals`, `input_values` has no `context`.
 8. Per-tool `inputValues: false` → the validation event carries no inputs, client meta, `error_message` or `output_content`; `outputValues: false` → no `error_message`, status/category kept. The override also applies to a name this deployment never registered.
-9. Tool registered on the **unwrapped** server → validation failure and success both produce **no** event, not even a connection event.
+9. Tool registered on the **unwrapped** server under `withYavio()` → validation failure and success both produce **no** event, not even a connection event. (Under `createYavio().wrap()` such a tool is instrumented at wrap time, see [per-request-servers.md](./per-request-servers.md).)
 10. Opening the call context throws → the client's call still succeeds, and the callback sends its event on its own.
 10. Direct handler invocation without a frame → event sent immediately (the existing `proxy.test.ts` suite).
 11. Server without the private API → callback path still emits (the existing Skybridge tests).

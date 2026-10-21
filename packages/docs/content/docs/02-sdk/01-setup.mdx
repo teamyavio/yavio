@@ -13,7 +13,7 @@ npm install @yavio/sdk
 
 The SDK works with either MCP SDK generation as an optional peer dependency: `@modelcontextprotocol/sdk` >= 1.24.0, or `@modelcontextprotocol/server` 2.x.
 
-Hosts that build a new `McpServer` per request (stateless Streamable HTTP, `createMcpHandler`, `mcp-handler`, Skybridge 2) create the client once with `createYavio(options)` and call `yavio.wrap(server)` per request; see the package README's "Stateless / per-request servers" section.
+Hosts that build a new `McpServer` per request (stateless Streamable HTTP, `createMcpHandler`, `mcp-handler`, Skybridge 2) create the client once with `const analytics = createYavio(options)` and call `analytics.wrap(server)` per request; see the package README's "Stateless / per-request servers" section. One difference to `withYavio()`: `wrap()` instruments every tool on the server, including those registered before the wrap, while `withYavio()` tracks only the tools registered through the proxy it returns. Wrapping the same server twice, with either entry point, returns the existing proxy.
 
 ## Wrapping your server
 

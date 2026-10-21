@@ -1,6 +1,6 @@
 # Per-Request Servers and MCP SDK v2
 
-**Status:** Implemented 2026-10-20 (#133) · **Packages:** sdk, shared (error code), docs · **Version:** @yavio/sdk 0.5.0 (new API `createYavio()`, peer dependencies changed, tools registered before the wrap are now instrumented) · **Depends on:** [protocol-layer-status.md](./protocol-layer-status.md) (#77), [per-tool-capture.md](./per-tool-capture.md) (#74)
+**Status:** Implemented 2026-10-20 (#133), review fixes 2026-10-21 · **Packages:** sdk, shared (error code), docs · **Version:** @yavio/sdk 0.5.0 (new API `createYavio()`, peer dependencies changed, `wrap()` instruments tools registered before the wrap) · **Depends on:** [protocol-layer-status.md](./protocol-layer-status.md) (#77), [per-tool-capture.md](./per-tool-capture.md) (#74)
 
 ## Problem
 
@@ -16,24 +16,28 @@
 
 Everything that must survive across wraps lives in a module-level registry keyed by the resolved `(endpoint, apiKey)`:
 
-| Shared per key | Per wrapped instance (`createProxy`) | Module level, as before |
+| Shared per key | Per wrapped instance (`createProxy`) | Module level |
 |---|---|---|
-| the `HttpTransport` (one flush timer, one batch stream) | the connection's own session (calls without a session key) | `emittedConnections` — one `connection` per session id |
-| `sessions` — the LRU of conversation states (identify, traits, step sequence), keyed by the derived session id | the current MCP transport reference | `emittedToolDiscoveries` — one `tool_discovery` per tool name |
-| the widget-token cache (expiry decides re-mints; no longer reset on `connect()`) | `instrumentedTools` — the tools this instance wrapped | `installedServers` — the low-level servers already patched |
-| exactly one `SIGTERM`/`SIGINT` handler pair per process, draining every transport in the registry | the intent controller | the warn-once sets |
+| the `HttpTransport` (one flush timer, one batch stream) | the connection's own session (calls without a session key) | `emittedConnections` — one `connection` per `(apiKey, session id)` |
+| `sessions` — the LRU of conversation states (identify, traits, step sequence), keyed by the derived session id | the current MCP transport reference | `emittedToolDiscoveries` — one `tool_discovery` per `(apiKey, tool name)` |
+| exactly one `SIGTERM`/`SIGINT` handler pair per process, draining every transport in the registry | `instrumentedTools` — the tools this instance wrapped | `proxiesByServer` / `proxies` — every proxy by the server it wraps (WeakMap/WeakSet), so a second wrap of the same server returns the first proxy |
+| | the intent controller | `installedServers` — the low-level servers already patched; the warn-once sets |
 
-`withYavio()` looks the state up and creates it on first use; the mode log lines (`Server-only mode`, `Intent capture enabled`) print once per process. The session LRU's eviction hook still drops the evicted session's connection-event mark.
+**Not shared: the widget token.** Ingest binds a widget JWT's `tid` to the trace id of the call that minted it and rejects a widget batch under any other trace (`WIDGET_TRACE_ID_MISMATCH`), and every tool call has its own trace id. A token is therefore minted per call and never cached — neither across instances (the first version of #133 shared one, which broke every widget call after the first for ~14 minutes) nor across calls on one instance (0.4.x cached per proxy, which had the same effect on a long-lived server's second call). The issue's acceptance item "one mint across instances" was wrong.
+
+**Lifetime.** A key's state is *held* by every `createYavio()` client bound to it (a counter) and *pinned* by the first `withYavio()` call for it. `client.shutdown()` flushes and releases that client's hold; the transport stops and the state is forgotten only when no client holds it and nothing pins it. A `withYavio()` state is never stopped before the process exits (that entry point has no shutdown), and the signal handlers drain everything. A `401` from ingest stops the transport for that key process-wide (`YAVIO-1203`): every wrap sharing the key stops delivering, which is what an invalid key means.
+
+`withYavio()` pins the state and creates it on first use; the mode log lines (`Server-only mode`, `Intent capture enabled`) and the no-key warning (`YAVIO-1000`) print once per process. The session LRU's eviction hook still drops the evicted session's connection-event mark (per key).
 
 ### `createYavio(options)` → `YavioClient { wrap(server), shutdown() }`
 
-Resolves the configuration **once** (no filesystem walk per request) and binds to the shared state. `wrap()` is synchronous and only does what `createProxy` does; it returns the server unchanged in no-op mode and for an unsupported value. `shutdown()` drains the transport and forgets the state, so a later wrap starts afresh. `withYavio(server, options)` is `createYavio(options).wrap(server)` — one implementation, two entry points.
+Resolves the configuration **once** (no filesystem walk per request) and holds the shared state. `wrap()` is synchronous and only does what `createProxy` does; it returns the server unchanged in no-op mode and for an unsupported value, and the existing proxy for a server that is already wrapped (or for a proxy itself) — a host that wraps its one long-lived server on every request must not stack a callback wrapper per request (N wraps gave N `tool_call` events per call in the first version). `shutdown()` flushes and releases the client's hold (see Lifetime); a wrap after `shutdown()` holds the state again, or starts a fresh transport. `withYavio(server, options)` resolves per call, pins the state and wraps with the same guard — one `createProxy`, two entry points that differ in exactly one thing:
 
-### Tools registered before the wrap
+### Tools registered before the wrap — `wrap()` only
 
-A stateless host builds the server — tools included — and wraps the finished server, so the `tool()`/`registerTool()` interceptors never see those registrations. At wrap time the proxy walks `_registeredTools` and instruments every function-handler tool in place through `RegisteredTool.update({ callback })`, public API on every supported MCP SDK (v1 since the 1.24 floor, v2), with the same callback wrapper, capture flags and intent classification the interceptors apply. Task tools (object handlers) stay out, as for the interceptors.
+A stateless host builds the server — tools included — and wraps the finished server, so the `tool()`/`registerTool()` interceptors never see those registrations. `createYavio().wrap()` walks `_registeredTools` at wrap time and instruments every function-handler tool in place through `RegisteredTool.update({ callback })`, public API on every supported MCP SDK (v1 since the 1.24 floor, v2), with the same callback wrapper, capture flags and intent classification the interceptors apply. `update()` is the only way on v2, whose tools/call executor captured the handler at registration; it also sends `notifications/tools/list_changed` when the server is already connected — one per tool, harmless, and a per-request host wraps before it connects. Task tools (object handlers) stay out, as for the interceptors; a tool whose `update()` throws is skipped and not counted as instrumented, the rest still are.
 
-This changes one documented behaviour: before #133, a tool registered on the raw server *before* `withYavio()` stayed untracked. It is now instrumented. A tool registered on the **unwrapped** server *after* wrapping is still untracked, and the `tools` overrides remain the way to limit capture for a sensitive tool.
+`withYavio()` keeps the 0.4 behaviour exactly: a tool registered on the raw server before the wrap stays untracked. Integrations that keep a sensitive tool on the raw server on purpose ([per-tool-capture.md](./per-tool-capture.md) documents one) are unaffected on upgrade. Under either entry point a tool registered on the **unwrapped** server *after* wrapping is untracked, and the `tools` overrides are the supported way to limit capture for a sensitive tool — under `wrap()` the only way.
 
 ### MCP SDK v2 (`server/extra.ts`, `protocol.ts`, `proxy.ts`)
 
@@ -46,7 +50,7 @@ This changes one documented behaviour: before #133, a tool registered on the raw
 |---|---|---|
 | session id | `extra.sessionId` | `ctx.sessionId` |
 | request `_meta` | `extra._meta` | `ctx.mcpReq._meta` |
-| HTTP headers / URL | `extra.requestInfo.headers` (record), `.url` | `ctx.http.req` — a web `Request`: `headers` is a `Headers` object (lower-cased into a record), `url` |
+| HTTP headers / URL | `extra.requestInfo.headers` (record), `.url` when a string (v1 transports pass a `URL` object, which is dropped) | `ctx.http.req` — a web `Request`: `headers` is a `Headers` object (lower-cased into a record); its `url` is **not read**, so v2 records what v1 records (a path can carry a secret as easily as the query string the sanitiser strips) |
 | task id | `extra.taskId` | — |
 | client identity | `server.server.getClientVersion()` (initialize handshake) | `ctx.mcpReq.envelope["io.modelcontextprotocol/clientInfo"]` on the 2026-07-28 era, then `getClientVersion()` |
 
@@ -55,30 +59,35 @@ This changes one documented behaviour: before #133, a tool registered on the raw
 
 ### Fail closed (`YAVIO-1107`)
 
-A value without a `registerTool` function is returned unwrapped with one `console.error` per process, decided in `withYavio()` **before** the configuration is resolved — no transport, no listeners.
+A value without a `registerTool` function is returned unwrapped with one `console.error` per process, decided in `withYavio()` **before** the configuration is resolved — no transport, no listeners. `createYavio().wrap()` makes the same decision; its client already holds the shared transport.
 
 ## Changes
 
 | Package | Change |
 |---|---|
-| sdk | `server/shared.ts` (new: registry, signal handlers, `logOnce`), `server/extra.ts` (new: `readCallExtra`), `server/index.ts` (`createYavio`, `withYavio` on top of it, `YAVIO-1107`), `server/proxy.ts` (shared sessions and token cache, optional `tool()`, pre-registered tool instrumentation, v2 thrown-InvalidParams rule, context reads through `extra.ts`), `server/protocol.ts` (string methods, last-argument wrapping), `core/types.ts` (`McpServerLike`, `YavioClient`), `package.json` (optional peers, v2 dev dependencies), `scripts/check-package.mjs` (a v2-only consumer), README. |
+| sdk | `server/shared.ts` (new: registry with holds and pins, signal handlers, `logOnce`), `server/extra.ts` (new: `readCallExtra`), `server/index.ts` (`createYavio`, `withYavio`, the re-wrap guard, `YAVIO-1107`, warn-once `YAVIO-1000`), `server/proxy.ts` (shared sessions, per-call token mint, per-key dedup, optional `tool()`, opt-in pre-registered tool instrumentation, proxy registry, v2 thrown-InvalidParams rule, context reads through `extra.ts`), `server/protocol.ts` (string methods, last-argument wrapping), `core/types.ts` (`McpServerLike`, `YavioClient`), `package.json` (optional peers, v2 dev dependencies), `scripts/check-package.mjs` (a v2-only consumer), README. |
 | shared | `ErrorCode.SDK.UNSUPPORTED_SERVER` (`YAVIO-1107`). |
 | docs | Setup and quickstart pages state both peers; error catalog row. |
 | ci | `sdk-mcp-compat.yml` gains the `server-v2` leg (latest `@modelcontextprotocol/server` + `client` + `node`). |
-| dashboard | None required: its `mcp-handler` route calls `withYavio()` per request and now shares one transport without a code change. |
+| dashboard | **Follow-up, not in this change:** its `mcp-handler` route calls `withYavio()` per request and will share one transport once the dashboard's `@yavio/sdk` pin (`^0.3.0`, which the caret keeps below 0.5.0) is bumped to `^0.5.0` and the dashboard is deployed. Until then the route leaks as before. |
 
 ## Compatibility
 
 - **Peer dependencies:** both MCP peers are optional. An app that installs neither gets no install-time warning and a `YAVIO-1107` at runtime if it passes something that is not an `McpServer`.
-- **Tools registered before the wrap** are now instrumented (see above). Release note.
-- **Widget token cache** is no longer cleared on `connect()`; a token is reused until 30 s before its expiry across reconnects and instances.
+- **`withYavio()` behaviour is unchanged**, including for tools registered before the wrap. `createYavio().wrap()` is new and instruments those (see above). Release note.
+- **Widget tokens are minted per call** (0.4.x cached one per proxy instance, see above): one more `POST /v1/widget-tokens` per widget-returning call on a long-lived non-serverOnly server. Release note.
+- **Wrapping the same server twice** returns the existing proxy instead of instrumenting it twice; the second call's options are ignored.
+- **Connection and discovery dedup are per API key**: two projects in one process each get their own `connection` and `tool_discovery` events.
+- **`createYavio().shutdown()`** releases a hold; it stops the transport only when nothing else uses it.
 - A client that sends neither `Mcp-Session-Id` nor `openai/session` to a per-request host gets one session per request — unchanged, and out of scope here (a `sessionKey(extra)` option is a follow-up).
 
 ## Tests
 
-- `integration/mcp-v2.test.ts` — real `@modelcontextprotocol/server` + `client`: wrap without throwing; `_meta` from `mcpReq`, client meta, `openai/session`-derived session id; `tool_discovery` from `tools/list` once per tool; schema-rejected, unknown and disabled tool → `validation`; thrown handler → `unknown`; intent advertised and stripped; per-tool override; fluent `registerTool(config, cb)` chain; tracking calls carry the session. Over HTTP with `createMcpHandler` + `toNodeHandler`: negotiated version `2026-07-28`, one session across per-request instances, client name from the envelope, allowlisted headers only.
-- `integration/per-request.test.ts` — 1,000 wraps → one transport, one signal handler pair, no `MaxListenersExceededWarning`; `wrap()` synchronous and reusing `withYavio()`'s state; three instances → one stream, one `connection`, one `tool_discovery`, `identify()` carried across instances; two keys → two transports, no cross-delivery; one widget-token mint across instances; mode lines once per process; `shutdown()` then a fresh transport.
+- `integration/mcp-v2.test.ts` — real `@modelcontextprotocol/server` + `client`: wrap without throwing; `_meta` from `mcpReq`, client meta, `openai/session`-derived session id; `tool_discovery` from `tools/list` once per tool; schema-rejected, unknown and disabled tool → `validation`; thrown handler → `unknown`; intent advertised and stripped; per-tool override; fluent `registerTool(config, cb)` chain; tracking calls carry the session. Over HTTP with `createMcpHandler` + `toNodeHandler`: negotiated version `2026-07-28`, one session across per-request instances, allowlisted headers only and no URL. The envelope read is tested on an instance that never saw a handshake (`getClientVersion()` empty): the connection event's client name comes from `mcpReq.envelope`.
+- `integration/per-request.test.ts` — 1,000 wraps → one transport, one signal handler pair, no `MaxListenersExceededWarning`; `wrap()` synchronous and reusing `withYavio()`'s state; three instances → one stream, one `connection`, one `tool_discovery`, `identify()` carried across instances; two keys with the same tool name and conversation → two transports, no cross-delivery, one `tool_discovery` and one `connection` per key; a widget token per call, each bound to its own call's trace id; mode lines once per process; `shutdown()` then a fresh transport; `shutdown()` of one client leaves the other client's transport running; a client never stops a `withYavio()` transport; wrapping the same server four times (both entry points, and the proxy itself) → the same proxy and one `tool_call` per call; tools registered before the wrap: untracked under `withYavio()`, under `wrap()` success, schema rejection and unknown tool counted.
+- `withYavio.test.ts` — the no-key warning once per process; an unsupported value adds no listener and no state.
+- `proxy.test.ts` — a token per call, bound to the call's trace id (replaces the 0.4.x "reuses cached token" test).
 - `integration/stateless-e2e.test.ts` — the README pattern with v1's stateless `StreamableHTTPServerTransport` over `node:http`: 50 calls from one conversation → 1 `connection`, 1 `tool_discovery` per tool, 1 `session_id`, 50 `tool_call`, batched.
 - `withYavio.test.ts` — unsupported values (`{}`, `{ connect }`) come back unwrapped with one `YAVIO-1107` and no transport.
-- `integration/intent.test.ts` — the pre-registered strict tool now yields one `tool_call` with its intent.
+- `integration/intent.test.ts` — the pre-registered strict tool, wrapped with `instrumentExisting` (the `wrap()` path), yields one `tool_call` with its intent.
 - `scripts/check-package.mjs` — a consumer with only `@modelcontextprotocol/server` installed (no v1) compiles against the packed typings.
