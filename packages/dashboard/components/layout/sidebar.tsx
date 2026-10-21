@@ -1,5 +1,6 @@
 "use client";
 
+import { McpConnectDialog } from "@/components/layout/mcp-connect-dialog";
 import { ScopeSwitcher } from "@/components/layout/scope-switcher";
 import { YavioLogo } from "@/components/layout/yavio-logo";
 import {
@@ -65,6 +66,8 @@ interface SidebarProps {
   workspaces: Workspace[];
   projects: Project[];
   user: { name: string | null; email: string };
+  /** This deployment's MCP server URL, resolved server-side (#53). */
+  mcpUrl: string;
 }
 
 const analyticsNavItems: {
@@ -94,7 +97,7 @@ const WIDE_VIEWPORT_QUERY = "(min-width: 1024px)";
 const LAST_WORKSPACE_KEY = "yavio.last-workspace";
 const lastProjectKey = (workspaceSlug: string) => `yavio.last-project.${workspaceSlug}`;
 
-export function Sidebar({ workspaces, projects, user }: SidebarProps) {
+export function Sidebar({ workspaces, projects, user, mcpUrl }: SidebarProps) {
   const pathname = usePathname();
   const params = useParams();
   const searchParams = useSearchParams();
@@ -394,7 +397,8 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
 
       <Separator />
 
-      <div className="p-2">
+      <div className="space-y-1 p-2">
+        <McpConnectDialog url={mcpUrl} collapsed={collapsed} />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button

@@ -1,6 +1,7 @@
 import { Sidebar } from "@/components/layout/sidebar";
 import { getServerSession } from "@/lib/auth/get-session";
 import { getDb } from "@/lib/db";
+import { mcpResourceUri } from "@/lib/oauth/constants";
 import { projects, users, workspaceMembers, workspaces } from "@yavio/db/schema";
 import { asc, eq, inArray } from "drizzle-orm";
 import { redirect } from "next/navigation";
@@ -52,6 +53,7 @@ export default async function DashboardLayout({ children }: { children: ReactNod
         workspaces={userWorkspaces}
         projects={userProjects}
         user={{ name: user?.name ?? null, email: user?.email ?? "" }}
+        mcpUrl={mcpResourceUri()}
       />
       <main className="min-w-0 flex-1 overflow-auto p-6">{children}</main>
     </div>
