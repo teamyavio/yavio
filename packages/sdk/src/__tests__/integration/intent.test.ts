@@ -715,7 +715,10 @@ describe("intent capture — connection event beacon", () => {
       await h.client.listTools();
       await h.client.callTool({ name: "t", arguments: { q: "x" } });
       const connection = h.events.flat().find((e) => e.event_type === "connection");
-      expect(connection?.metadata).toEqual({ intent_enabled: enabled });
+      expect(connection?.metadata).toEqual({
+        intent_enabled: enabled,
+        client_info_source: "initialize",
+      });
     }
   });
 });

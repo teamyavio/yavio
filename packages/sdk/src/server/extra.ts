@@ -101,6 +101,77 @@ export function readCallExtra(extra: unknown): CallExtra {
   return out;
 }
 
+/**
+ * HTTP libraries, runtimes and browsers that put their own name first in a
+ * User-Agent. Such a token names the transport, not the MCP client, so it is
+ * never recorded as one (#142).
+ */
+const GENERIC_AGENTS = new Set([
+  "mozilla",
+  "node",
+  "node-fetch",
+  "undici",
+  "axios",
+  "got",
+  "ky",
+  "python-httpx",
+  "python-requests",
+  "python-urllib",
+  "python-urllib3",
+  "httpx",
+  "aiohttp",
+  "okhttp",
+  "go-http-client",
+  "curl",
+  "wget",
+  "java",
+  "apache-httpclient",
+  "dart",
+  "ruby",
+  "php",
+  "guzzlehttp",
+  "bun",
+  "deno",
+  "electron",
+  "chrome",
+  "safari",
+  "firefox",
+  "edge",
+  "opera",
+  "libwww-perl",
+  "dotnet",
+  "rust",
+  "reqwest",
+  "hyper",
+]);
+
+/**
+ * The first product token of a User-Agent, as `name[/version]`, both
+ * constrained to what a product token holds. Only the first token: whatever
+ * follows is the library or platform the client runs on. A token on the
+ * generic list yields nothing.
+ */
+const PRODUCT_TOKEN =
+  /^([A-Za-z][A-Za-z0-9._-]{0,63})(?:\/([0-9A-Za-z][0-9A-Za-z.+_-]{0,31}))?(?=\s|$)/;
+
+/**
+ * The MCP client's own identity from its User-Agent, for a stateless host
+ * whose instance never saw `initialize` (#142): the envelope and
+ * `getClientVersion()` come first, this is the third source. A long-lived
+ * server records the initialize `clientInfo` for the same client, which can
+ * differ (ChatGPT's connector sends `openai-mcp/1.0.0` as its User-Agent and
+ * `codex-mcp-client` as the clientInfo name when Codex drives it), so the
+ * connection event records which source it used. Never throws.
+ */
+export function clientFromUserAgent(
+  userAgent: string | undefined,
+): { name: string; version?: string } | undefined {
+  if (typeof userAgent !== "string") return undefined;
+  const match = PRODUCT_TOKEN.exec(userAgent.trim());
+  if (!match || GENERIC_AGENTS.has(match[1].toLowerCase())) return undefined;
+  return match[2] ? { name: match[1], version: match[2] } : { name: match[1] };
+}
+
 /** Read a header from a record whose values are strings or string arrays. */
 export function headerValue(
   headers: Record<string, unknown> | undefined,
