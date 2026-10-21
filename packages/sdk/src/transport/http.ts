@@ -26,7 +26,8 @@ const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
 export class HttpTransport implements Transport {
   private buffer: BaseEvent[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
-  private flushing = false;
+  /** The batch send in flight, if any (one at a time). */
+  private inflight: Promise<void> | null = null;
   private stopped = false;
 
   private readonly endpoint: string;
@@ -84,16 +85,36 @@ export class HttpTransport implements Transport {
   }
 
   async flush(): Promise<void> {
-    if (this.stopped || this.flushing || this.buffer.length === 0) return;
+    if (this.stopped || this.inflight || this.buffer.length === 0) return;
 
-    this.flushing = true;
-    try {
-      // Atomic swap: take the batch and leave any concurrently-added events
-      const batch = this.buffer.slice(0, this.maxBatchSize);
-      this.buffer = this.buffer.slice(this.maxBatchSize);
-      await this.sendBatch(batch);
-    } finally {
-      this.flushing = false;
+    // Atomic swap: take the batch and leave any concurrently-added events
+    const batch = this.buffer.slice(0, this.maxBatchSize);
+    this.buffer = this.buffer.slice(this.maxBatchSize);
+    this.inflight = this.sendBatch(batch).finally(() => {
+      this.inflight = null;
+    });
+    await this.inflight;
+  }
+
+  /**
+   * Deliver everything queued so far: every batch, after any send already in
+   * flight, without stopping the transport. Bounded by the buffer cap, so a
+   * producer that keeps queueing cannot make it loop forever. What a holder's
+   * `shutdown()` does while other holders keep the transport (see shared.ts).
+   */
+  async drain(): Promise<void> {
+    const rounds = Math.ceil(this.maxBufferSize / this.maxBatchSize) + 1;
+    for (let i = 0; i < rounds && !this.stopped; i++) {
+      if (this.inflight) {
+        await this.inflight.catch(() => {});
+        continue;
+      }
+      if (this.buffer.length === 0) return;
+      try {
+        await this.flush();
+      } catch {
+        // sendBatch has already logged; the next batch still goes out.
+      }
     }
   }
 

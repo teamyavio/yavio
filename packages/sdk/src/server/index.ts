@@ -11,10 +11,11 @@ import { SDK_VERSION } from "../core/version.js";
 import { createYavioContext, markSdkActive } from "./context.js";
 import { createProxy, existingProxy, releaseConnectionMark } from "./proxy.js";
 import {
+  type SharedHold,
   type SharedState,
   acquireShared,
+  isLiveHold,
   logOnce,
-  peekShared,
   pinShared,
   releaseShared,
 } from "./shared.js";
@@ -38,7 +39,10 @@ function isSupportedServer(server: unknown): server is McpServerLike {
   );
 }
 
-function rejectUnsupported(server: unknown): void {
+/** The two entry points, named in messages so a log line says which one was called. */
+type EntryPoint = "withYavio()" | "createYavio().wrap()";
+
+function rejectUnsupported(server: unknown, entry: EntryPoint): void {
   logOnce(ErrorCode.SDK.UNSUPPORTED_SERVER, () => {
     const shape =
       server === null
@@ -47,7 +51,7 @@ function rejectUnsupported(server: unknown): void {
           ? typeof server
           : (server as { constructor?: { name?: string } }).constructor?.name || "object";
     console.error(
-      `[${ErrorCode.SDK.UNSUPPORTED_SERVER}] withYavio() expects an McpServer (@modelcontextprotocol/sdk >=1.24.0 or @modelcontextprotocol/server 2.x) and got ${shape} without registerTool() — returned unwrapped, nothing is instrumented. Shown once per process.`,
+      `[${ErrorCode.SDK.UNSUPPORTED_SERVER}] ${entry} expects an McpServer (@modelcontextprotocol/sdk >=1.24.0 or @modelcontextprotocol/server 2.x) and got ${shape} without registerTool() — returned unwrapped, nothing is instrumented. Shown once per process.`,
     );
   });
 }
@@ -94,26 +98,42 @@ const evictionHookFor =
  * Wrap one server. A server that is already wrapped — or a proxy itself —
  * comes back as the existing proxy: a host that wraps the same long-lived
  * server on every request must not stack a callback wrapper per request
- * (N wraps, N `tool_call` events per call).
+ * (N wraps, N `tool_call` events per call). The first wrap wins: a later
+ * call with another endpoint or key, or one that would instrument the
+ * pre-registered tools where the first did not, gets the existing proxy and
+ * one `YAVIO-1108` warning per process.
  */
 function wrapServer<T extends McpServerLike>(
   server: T,
   config: YavioConfig,
   state: SharedState,
   instrumentExisting: boolean,
+  entry: EntryPoint,
 ): T {
   if (!isSupportedServer(server)) {
-    rejectUnsupported(server);
+    rejectUnsupported(server, entry);
     return server;
   }
   const existing = existingProxy(server);
   if (existing) {
-    logOnce("rewrap", () =>
-      console.debug(
-        "[yavio] withYavio()/wrap() called on a server that is already wrapped — returning the existing proxy. Shown once per process.",
-      ),
-    );
-    return existing;
+    const differs =
+      existing.endpoint !== config.endpoint ||
+      existing.apiKey !== config.apiKey ||
+      (instrumentExisting && !existing.instrumentExisting);
+    if (differs) {
+      logOnce(ErrorCode.SDK.REWRAP_OPTIONS_IGNORED, () =>
+        console.warn(
+          `[${ErrorCode.SDK.REWRAP_OPTIONS_IGNORED}] ${entry} called on a server that is already wrapped with other options — the first wrap wins: its endpoint and API key stay, and tools registered before that first wrap are instrumented only if it was createYavio().wrap(). Returned the existing proxy. Shown once per process.`,
+        ),
+      );
+    } else {
+      logOnce("rewrap", () =>
+        console.debug(
+          `[yavio] ${entry} called on a server that is already wrapped — returning the existing proxy. Shown once per process.`,
+        ),
+      );
+    }
+    return existing.proxy;
   }
   return createProxy(server, config, state.transport, SDK_VERSION, state, { instrumentExisting });
 }
@@ -137,7 +157,9 @@ function wrapServer<T extends McpServerLike>(
  *
  * `wrap()` instruments every tool on the server, including the ones
  * `buildServer()` registered before the wrap — unlike `withYavio()`, which
- * tracks only tools registered through the proxy it returns.
+ * tracks only tools registered through the proxy it returns. A server that
+ * is already wrapped comes back as its existing proxy: the first wrap wins,
+ * later options are ignored (`YAVIO-1108` once when they differ).
  *
  * If no API key is found, `wrap()` returns every server unchanged
  * (transparent no-op) and `shutdown()` does nothing.
@@ -158,25 +180,28 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
   markSdkActive();
   logModes(config);
 
-  // This client's hold on the shared state: taken on creation, released by
-  // shutdown(), taken again by a wrap after shutdown() — which then finds the
-  // state other holders kept alive, or starts a fresh transport.
+  // This client's hold on the shared transport: taken on creation, released
+  // by shutdown(), taken again by a wrap after shutdown() — or after a signal
+  // drained everything — which then finds the transport other holders kept
+  // alive, or starts a fresh one. A hold names the transport's generation, so
+  // a stale hold never counts against a successor.
   const onEvict = evictionHookFor(config);
-  let held = false;
+  let hold: SharedHold | null = null;
   const state = (): SharedState => {
-    const live = held ? peekShared(config) : undefined;
-    if (live) return live;
-    held = true;
-    return acquireShared(config, SDK_VERSION, onEvict);
+    if (hold && isLiveHold(config, hold)) return hold.state;
+    hold = acquireShared(config, SDK_VERSION, onEvict);
+    return hold.state;
   };
   state();
 
   return {
-    wrap: <T extends McpServerLike>(server: T): T => wrapServer(server, config, state(), true),
+    wrap: <T extends McpServerLike>(server: T): T =>
+      wrapServer(server, config, state(), true, "createYavio().wrap()"),
     shutdown: async () => {
-      if (!held) return;
-      held = false;
-      await releaseShared(config);
+      if (!hold) return;
+      const released = hold;
+      hold = null;
+      await releaseShared(config, released);
     },
   };
 }
@@ -201,7 +226,7 @@ export function withYavio<T extends McpServerLike>(server: T, options?: WithYavi
   // Before the configuration is resolved and anything is created: an
   // unsupported value must not cost a transport (YAVIO-1107).
   if (!isSupportedServer(server)) {
-    rejectUnsupported(server);
+    rejectUnsupported(server, "withYavio()");
     return server;
   }
   const config = resolveConfig(options);
@@ -211,7 +236,13 @@ export function withYavio<T extends McpServerLike>(server: T, options?: WithYavi
   }
   markSdkActive();
   logModes(config);
-  return wrapServer(server, config, pinShared(config, SDK_VERSION, evictionHookFor(config)), false);
+  return wrapServer(
+    server,
+    config,
+    pinShared(config, SDK_VERSION, evictionHookFor(config)),
+    false,
+    "withYavio()",
+  );
 }
 
 /**

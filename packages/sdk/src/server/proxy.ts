@@ -1,3 +1,4 @@
+import { ErrorCode } from "@yavio/shared/error-codes";
 import type { ToolCallEvent, ToolDiscoveryEvent } from "@yavio/shared/events";
 import { normalizeRegionName } from "@yavio/shared/geo";
 import {
@@ -28,7 +29,7 @@ import {
   installProtocolWrappers,
   runInCallFrame,
 } from "./protocol.js";
-import { type SharedSessions, _resetSharedState, createSharedSessions } from "./shared.js";
+import { type SharedSessions, _resetSharedState, createSharedSessions, logOnce } from "./shared.js";
 import { type MintResult, mintWidgetToken } from "./token.js";
 
 function isMintResult(result: unknown): result is MintResult {
@@ -40,7 +41,11 @@ function isMintResult(result: unknown): result is MintResult {
  * this trace id and rejects a widget batch under any other trace
  * (`WIDGET_TRACE_ID_MISMATCH`), and every call has its own trace id — so
  * there is nothing to cache, across calls or across instances (#133 review).
- * Returns null if minting fails — callers should skip injection silently.
+ * Runs on every call of a non-serverOnly server, bounded by the mint's own
+ * timeout (token.ts): a slow ingest costs the call at most that. Returns
+ * null when minting fails or times out — the caller skips the injection,
+ * the result is returned untouched, and the failure is logged once per
+ * process (`YAVIO-1103`).
  */
 async function mintCallToken(
   config: YavioConfig,
@@ -48,7 +53,13 @@ async function mintCallToken(
   sessionId: string,
 ): Promise<string | null> {
   const result = await mintWidgetToken(config.endpoint, config.apiKey, traceId, sessionId);
-  return isMintResult(result) ? result.token : null;
+  if (isMintResult(result)) return result.token;
+  logOnce(ErrorCode.SDK.WIDGET_TOKEN_MINTING_FAILED, () =>
+    console.warn(
+      `[${ErrorCode.SDK.WIDGET_TOKEN_MINTING_FAILED}] Widget token minting ${result && "status" in result ? `returned HTTP ${result.status}` : "failed or timed out"} — tool results are returned without _meta.yavio until it succeeds. Shown once per process.`,
+    ),
+  );
+  return null;
 }
 
 /**
@@ -395,9 +406,16 @@ const emittedConnections = new LruMap<string, true>(MAX_EMITTED_CONNECTIONS);
  */
 const emittedToolDiscoveries = new Set<string>();
 
-/** Every proxy createProxy built, by the server it wraps, and the proxies themselves. */
-const proxiesByServer = new WeakMap<object, object>();
-const proxies = new WeakSet<object>();
+/** A proxy createProxy built, with the options that a later wrap of the same server would compete with. */
+export interface ExistingProxy<T = object> {
+  proxy: T;
+  endpoint: string;
+  apiKey: string;
+  instrumentExisting: boolean;
+}
+
+/** Every proxy createProxy built, by the server it wraps, and by the proxy itself. */
+const proxiesByServer = new WeakMap<object, ExistingProxy>();
 
 /** A NUL cannot occur in an API key, so the pair cannot collide with another. */
 const dedupKey = (apiKey: string, name: string): string => `${apiKey}\u0000${name}`;
@@ -411,9 +429,8 @@ export function releaseConnectionMark(apiKey: string, sessionId: string): void {
  * The proxy already wrapping this server (or the value itself when it is a
  * proxy), so wrapping twice never instruments twice.
  */
-export function existingProxy<T extends object>(server: T): T | undefined {
-  if (proxies.has(server)) return server;
-  return proxiesByServer.get(server) as T | undefined;
+export function existingProxy<T extends object>(server: T): ExistingProxy<T> | undefined {
+  return proxiesByServer.get(server) as ExistingProxy<T> | undefined;
 }
 
 /** @internal Reset global dedup state and the shared registry — exposed for testing only. */
@@ -1025,8 +1042,14 @@ export function createProxy<T extends McpServerLike>(
       return Reflect.get(target, prop, receiver);
     },
   });
-  proxiesByServer.set(server, proxy);
-  proxies.add(proxy);
+  const record: ExistingProxy = {
+    proxy,
+    endpoint: config.endpoint,
+    apiKey: config.apiKey,
+    instrumentExisting: options.instrumentExisting === true,
+  };
+  proxiesByServer.set(server, record);
+  proxiesByServer.set(proxy, record);
   return proxy;
 }
 
