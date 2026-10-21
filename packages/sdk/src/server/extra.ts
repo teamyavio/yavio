@@ -114,22 +114,44 @@ const GENERIC_AGENTS = new Set([
   "axios",
   "got",
   "ky",
+  "ofetch",
+  "superagent",
+  "needle",
+  "python",
   "python-httpx",
   "python-requests",
   "python-urllib",
   "python-urllib3",
   "httpx",
   "aiohttp",
+  "urllib3",
+  "pycurl",
   "okhttp",
+  "okhttp3",
   "go-http-client",
+  "go",
   "curl",
+  "libcurl",
   "wget",
+  "httpie",
   "java",
+  "java-http-client",
   "apache-httpclient",
+  "apache-httpasyncclient",
+  "reactornetty",
+  "vert.x-webclient",
+  "ktor-client",
+  "jersey",
+  "dalvik",
   "dart",
   "ruby",
+  "faraday",
+  "httparty",
+  "typhoeus",
+  "excon",
   "php",
   "guzzlehttp",
+  "symfony",
   "bun",
   "deno",
   "electron",
@@ -140,19 +162,31 @@ const GENERIC_AGENTS = new Set([
   "opera",
   "libwww-perl",
   "dotnet",
+  "restsharp",
   "rust",
   "reqwest",
   "hyper",
+  "ureq",
+  "swift",
+  "alamofire",
+  "cfnetwork",
+  "winhttp",
+  "wininet",
+  "postmanruntime",
+  "insomnia",
 ]);
 
 /**
- * The first product token of a User-Agent, as `name[/version]`, both
+ * The first product token of a User-Agent, as `name/version`, both
  * constrained to what a product token holds. Only the first token: whatever
- * follows is the library or platform the client runs on. A token on the
- * generic list yields nothing.
+ * follows is the library or platform the client runs on (`Python/3.12
+ * aiohttp/3.9.5` starts with the runtime). The version is required: a bare
+ * first word — `node`, or `Visual` from `Visual Studio Code/1.95` — is a
+ * runtime or a product whose name has spaces, not a client identifying
+ * itself as `name/version`. A token on the generic list yields nothing
+ * (#142).
  */
-const PRODUCT_TOKEN =
-  /^([A-Za-z][A-Za-z0-9._-]{0,63})(?:\/([0-9A-Za-z][0-9A-Za-z.+_-]{0,31}))?(?=\s|$)/;
+const PRODUCT_TOKEN = /^([A-Za-z][A-Za-z0-9._-]{0,63})\/([0-9A-Za-z][0-9A-Za-z.+_-]{0,31})(?=\s|$)/;
 
 /**
  * The MCP client's own identity from its User-Agent, for a stateless host
@@ -165,11 +199,11 @@ const PRODUCT_TOKEN =
  */
 export function clientFromUserAgent(
   userAgent: string | undefined,
-): { name: string; version?: string } | undefined {
+): { name: string; version: string } | undefined {
   if (typeof userAgent !== "string") return undefined;
   const match = PRODUCT_TOKEN.exec(userAgent.trim());
   if (!match || GENERIC_AGENTS.has(match[1].toLowerCase())) return undefined;
-  return match[2] ? { name: match[1], version: match[2] } : { name: match[1] };
+  return { name: match[1], version: match[2] };
 }
 
 /** Read a header from a record whose values are strings or string arrays. */

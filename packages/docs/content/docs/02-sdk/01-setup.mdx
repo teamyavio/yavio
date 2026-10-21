@@ -80,7 +80,7 @@ When a client connects to your MCP server:
 - **Event type:** `connection`
 - **Session ID** derived from the transport
 - **Platform** detected from client signals
-- **Client name and version** from the protocol envelope (MCP 2026-07-28), else the `initialize` handshake, else the first product token of the request's `User-Agent` (so a stateless host, whose instance never saw `initialize`, still records `openai-mcp` / `1.0.0`; a library token such as `node` names no client); `metadata.client_info_source` says which. `protocol_version` is the request's `mcp-protocol-version` header
+- **Client name and version** from the protocol envelope (MCP 2026-07-28), else the `initialize` handshake, else the first product token of the request's `User-Agent` when it has the `name/version` shape (so a stateless host, whose instance never saw `initialize`, still records `openai-mcp` / `1.0.0`; a bare token such as `node` or a library or runtime token such as `Python/3.12 aiohttp/3.9.5` names no client); `metadata.client_info_source` says which. `protocol_version` is the request's `mcp-protocol-version` header
 - Emitted at least once per session **per process**: a conversation served by several instances has one connection event per instance. Sessions are counted as distinct `session_id`s, never as connection events
 
 ## No-op mode
