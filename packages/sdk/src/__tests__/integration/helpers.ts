@@ -50,6 +50,12 @@ export interface MockIngest {
   hangMints: boolean;
   /** While true, the events endpoint records batches but never answers them. */
   hangEvents: boolean;
+  /**
+   * Answer every batch held back by `hangEvents` with 200 now, so the SDK's
+   * fetch settles instead of failing when `close()` cuts the socket — a
+   * failed fetch would retry (`YAVIO-1200`) into the next test's output.
+   */
+  answerHung(): Promise<void>;
   /** Event batches answered so far (a batch counts once its response was written). */
   responded: number;
   /** The delay before a batch is answered, as given to `startMockIngest`; may be changed per test. */
@@ -70,6 +76,7 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
   const events: Event[] = [];
   const mints: string[] = [];
   const pending = new Set<ReturnType<typeof setTimeout>>();
+  const hung: Array<() => void> = [];
   const ingest: MockIngest = {
     endpoint: "",
     batches,
@@ -81,6 +88,11 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
     respondAfterMs: options.respondAfterMs,
     ofType: (eventType) => events.filter((e) => e.event_type === eventType),
     dropConnections: () => server.closeAllConnections(),
+    answerHung: async () => {
+      for (const respond of hung.splice(0)) respond();
+      // Let the responses reach the client before the caller closes the server.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    },
     close: () =>
       new Promise<void>((resolve) => {
         for (const timer of pending) clearTimeout(timer);
@@ -130,13 +142,16 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
       };
       batches.push(received);
       events.push(...batch.events);
-      if (ingest.hangEvents) return;
       const respond = () => {
         ingest.responded++;
         received.answeredAt = Date.now();
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ accepted: batch.events.length, rejected: 0 }));
       };
+      if (ingest.hangEvents) {
+        hung.push(respond);
+        return;
+      }
       const delay =
         typeof ingest.respondAfterMs === "function"
           ? ingest.respondAfterMs(received)

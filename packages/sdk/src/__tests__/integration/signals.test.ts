@@ -361,6 +361,10 @@ describe("shutdown() during the signal drain (#142)", () => {
       expect(ingest.batches).toHaveLength(1); // sent, never answered
       expect(ingest.responded).toBe(0);
     } finally {
+      // The transport is stopped, but its fetch is still waiting: answer it
+      // before cleanup closes the socket, or the failed fetch retries into
+      // the next test's stderr (YAVIO-1200).
+      await ingest.answerHung();
       warn.mockRestore();
     }
   });
@@ -406,26 +410,23 @@ describe("shutdown() during the signal drain (#142)", () => {
     }
   });
 
-  it("withYavio() hosts: a createYavio() client with the same key awaits the signal drain", async () => {
+  it("withYavio() hosts: the recipe's shutdown client, created at startup, awaits the signal drain", async () => {
     await withoutOtherListeners("SIGTERM", async () => {
+      // The documented recipe: withYavio() has no client of its own, so one
+      // is created once at startup for the same key and endpoint, used only
+      // for shutdown(). Created inside the handler instead — after the SDK's
+      // listener handed the signal back — it would install the SDK's
+      // listeners again and leave them behind (review 8).
+      const options = { apiKey: "yav_142_with", endpoint: ingest.endpoint, serverOnly: true };
+      const analytics = createYavio(options);
       const raw = new McpServer({ name: "app", version: "1.0" });
-      withYavio(raw, {
-        apiKey: "yav_142_with",
-        endpoint: ingest.endpoint,
-        serverOnly: true,
-      }).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+      withYavio(raw, options).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
       await callTool(raw, "get_price", { q: "x" });
       let answeredOnResolve: boolean | undefined;
       const handled = new Promise<void>((resolve) => {
         process.on("SIGTERM", async function app() {
           process.off("SIGTERM", app);
-          // The documented recipe: no client of its own, so create one for
-          // the same key and endpoint and await its shutdown().
-          await createYavio({
-            apiKey: "yav_142_with",
-            endpoint: ingest.endpoint,
-            serverOnly: true,
-          }).shutdown();
+          await analytics.shutdown();
           answeredOnResolve = allAnswered();
           resolve();
         });
@@ -434,6 +435,43 @@ describe("shutdown() during the signal drain (#142)", () => {
       await handled;
       expect(answeredOnResolve).toBe(true);
       expect(toolCalls()).toHaveLength(1);
+      expect(process.listenerCount("SIGTERM")).toBe(0);
+      expect(_sharedStateCount()).toBe(0);
+    });
+  });
+
+  it("the recipe's await after http.close: a request served meanwhile is delivered and no SDK listener remains", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      const options = { apiKey: "yav_142_order", endpoint: ingest.endpoint, serverOnly: true };
+      const analytics = createYavio(options);
+      const raw = new McpServer({ name: "app", version: "1.0" });
+      withYavio(raw, options).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+      await callTool(raw, "get_price", { q: "before" });
+      let answeredOnResolve: boolean | undefined;
+      let listenersOnResolve: number | undefined;
+      const handled = new Promise<void>((resolve) => {
+        process.on("SIGTERM", async function app() {
+          process.off("SIGTERM", app);
+          // `await new Promise((r) => http.close(r))`: the request still being
+          // served finishes while the SDK's drain is already running.
+          await callTool(raw, "get_price", { q: "in-flight" });
+          await analytics.shutdown();
+          answeredOnResolve = allAnswered();
+          listenersOnResolve = process.listenerCount("SIGTERM");
+          resolve();
+        });
+      });
+      process.emit("SIGTERM", "SIGTERM");
+      await handled;
+      expect(answeredOnResolve).toBe(true);
+      expect(toolCalls().map((e) => (e.input_values as { q: string }).q)).toEqual([
+        "before",
+        "in-flight",
+      ]);
+      // The SDK stepped aside when its drain was done and nothing re-installed it.
+      expect(listenersOnResolve).toBe(0);
+      expect(process.listenerCount("SIGTERM")).toBe(0);
+      expect(_sharedStateCount()).toBe(0);
     });
   });
 });
