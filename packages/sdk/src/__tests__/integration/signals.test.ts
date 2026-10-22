@@ -274,7 +274,13 @@ describe("SIGTERM/SIGINT hand-back (#138)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       await withoutOtherListeners("SIGINT", async () => {
-        ingest.hangEvents = true;
+        // Cycle 1's batch is answered at t0 + 600 ms; the batch sent after
+        // the hand-back never is (its fetch is cut at the last cycle's
+        // deadline, t0 + 1 s, review round 4), so cycle 2's stop outlives
+        // cycle 1's drain.
+        const q = (batch: { events: Array<Record<string, unknown>> }) =>
+          batch.events.map((e) => (e.input_values as { q?: string } | undefined)?.q);
+        ingest.respondAfterMs = (batch) => (q(batch).includes("first") ? 600 : 60_000);
         const options = {
           apiKey: "yav_sig_cycles",
           endpoint: ingest.endpoint,
@@ -285,26 +291,28 @@ describe("SIGTERM/SIGINT hand-back (#138)", () => {
         withYavio(raw, options).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
         await callTool(raw, "get_price", { q: "first" });
         const t0 = Date.now();
-        process.emit("SIGINT", "SIGINT"); // cycle 1: its drain hangs until t0 + 1 s
+        process.emit("SIGINT", "SIGINT"); // cycle 1: its drain waits for the answer at t0 + 600 ms
         await new Promise((r) => setTimeout(r, 300));
         process.emit("SIGINT", "SIGINT"); // impatient: cycle 1 handed back now, its drain still running
         expect(reraised).toHaveLength(1);
 
         // The process survived (the re-raise is stubbed here, as with an app
         // listener elsewhere): a new wrap re-installs the listeners and the
-        // next signal starts cycle 2, with its own deadline at t0 + 1.3 s.
+        // next signal starts cycle 2, whose stop waits for the second batch
+        // until its fetch is cut at t0 + 1 s.
         const next = new McpServer({ name: "next", version: "1.0" });
         withYavio(next, options).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
         await callTool(next, "get_price", { q: "second" });
         expect(process.listenerCount("SIGINT")).toBe(1);
         process.emit("SIGINT", "SIGINT");
 
-        // At t0 + 1.1 s cycle 1's drain has ended; cycle 2 must still be running.
-        await new Promise((r) => setTimeout(r, 1_100 - (Date.now() - t0)));
+        // At t0 + 800 ms cycle 1's drain has ended; cycle 2 must still be running.
+        await new Promise((r) => setTimeout(r, 800 - (Date.now() - t0)));
+        expect(ingest.responded).toBe(1);
         expect(process.listenerCount("SIGINT")).toBe(1);
         expect(reraised).toHaveLength(1);
         await vi.waitFor(() => expect(reraised).toHaveLength(2), { timeout: 2_000 });
-        expect(Date.now() - t0).toBeGreaterThanOrEqual(1_250);
+        expect(Date.now() - t0).toBeGreaterThanOrEqual(950);
         expect(process.listenerCount("SIGINT")).toBe(0);
       });
     } finally {
