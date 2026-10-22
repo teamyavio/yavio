@@ -1535,6 +1535,43 @@ describe("loss accounting (#148)", () => {
     });
   });
 
+  it("a transport stop already in progress at the signal is cut at the cycle's deadline, not at its own: the last holder's 20 s shutdown() against a hanging ingest, then a signal with D = 2 s from another holder — the fetch aborted at signal + 2 s, the loss in the cycle's line", async () => {
+    _setSignalReraise(() => {});
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client: a, raw: rawA } = build("yav_148_cut_a", { shutdownTimeoutMs: 20_000 });
+      await callTool(rawA, "get_price", { q: "a" });
+      const { raw: rawB } = build("yav_148_cut_b", { shutdownTimeoutMs: 2_000 });
+      await callTool(rawB, "get_price", { q: "b" });
+      // A's last holder releases: its transport stops under A's own 20 s,
+      // its batch of two in flight against the hanging ingest.
+      const closing = a.shutdown();
+      await vi.waitFor(() => expect(ingest.batches).toHaveLength(1));
+      const inProgress = ingest.batches[0] as (typeof ingest.batches)[number];
+      const signalAt = Date.now();
+      process.emit("SIGTERM", "SIGTERM"); // D = 2 s: B's explicit value, the smallest
+      // Before the fix `shutdown(D)` on A's transport returned the stop
+      // already running under its 20 s: nothing aborted its fetch at
+      // signal + D, the socket was held 18 s past the process deadline,
+      // and its loss was nobody's but the exit hook's.
+      await vi.waitFor(() => expect(inProgress.abortedAt).toBeDefined(), { timeout: 5_000 });
+      const abortedAfter = (inProgress.abortedAt as number) - signalAt;
+      expect(abortedAfter).toBeGreaterThanOrEqual(1_900);
+      expect(abortedAfter).toBeLessThan(2_600);
+      await closing;
+      expect(Date.now() - signalAt).toBeLessThan(2_600);
+      await vi.waitFor(() => expect(process.listenerCount("SIGTERM")).toBe(0));
+      // One line, the cycle's, with A's two events and B's two — and
+      // once both stops have settled under the cycle, still one: A's loss
+      // is the cycle's, not a `shutdown()` line of its own.
+      expect(lines1205()).toHaveLength(1);
+      expect(lines1205()[0]).toContain("Shutdown deadline of 2000 ms");
+      expect(lines1205()[0]).toContain("4 events not delivered");
+      await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0), { timeout: 2_000 });
+      expect(lines1205()).toHaveLength(1);
+      expect(lines.some((l) => l.includes("shutdown() deadline"))).toBe(false);
+    });
+  }, 15_000);
+
   it("a client created and shut down per request leaves no transport behind, and its losses stay counted", async () => {
     // A stateless host that follows the README per request: before the fix
     // every transport stayed in the registry's set for the process lifetime.

@@ -287,10 +287,12 @@ let signalInFlight: SignalCycle | null = null;
 const SAME_DELIVERY_MS = 250;
 /**
  * Transport stops started outside a signal and still running (the last
- * holder's release): a signal arriving meanwhile awaits them too, instead
- * of finding an empty registry and re-raising mid-send (#148).
+ * holder's release), with the transport each one stops: a signal arriving
+ * meanwhile awaits them too, instead of finding an empty registry and
+ * re-raising mid-send (#148), and cuts their deadline to the cycle's
+ * (review round 6).
  */
-const stopsInProgress = new Set<Promise<void>>();
+const stopsInProgress = new Map<Promise<void>, Transport>();
 /**
  * The latest cycle's deadline timer: cuts every `shutdown()` await still
  * pending at signal + D, even after an early hand-back. Unref'd, so it
@@ -851,16 +853,16 @@ export async function releaseShared(config: Key, hold: SharedHold): Promise<void
     registry.delete(key);
     const live = entry.slot.live;
     entry.slot.live = null;
-    if (live) await trackStop(live.shutdown(boundedBy(ownMs)));
+    if (live) await trackStop(live, live.shutdown(boundedBy(ownMs)));
   } finally {
     done();
   }
 }
 
 /** Keep a transport stop in `stopsInProgress` until it settles. */
-function trackStop(stop: Promise<void>): Promise<void> {
+function trackStop(transport: Transport, stop: Promise<void>): Promise<void> {
   const tracked = stop.catch(() => {}).finally(() => stopsInProgress.delete(tracked));
-  stopsInProgress.add(tracked);
+  stopsInProgress.set(tracked, transport);
   return stop;
 }
 
@@ -917,10 +919,19 @@ export function beginProcessShutdown(): Promise<void> {
  * creator released (#142 review round 4), and not a per-key value: the
  * grace period is per process (#148). Stops already in progress — the last
  * holder's release when the signal arrived — are awaited too, within the
- * same deadline.
+ * same deadline, and their own deadline is cut to it: `shutdown(D)` on
+ * such a transport returns the stop already running under the releasing
+ * hold's value, and with D below that value nothing else would abort its
+ * fetch at signal + D — its socket outlived the process deadline and its
+ * loss was nobody's but the exit hook's (review round 6).
  */
 export async function shutdownAllShared(): Promise<void> {
   const deadlineMs = remainingMs() ?? processBudgetMs();
+  const deadlineAt = signalInFlight?.deadlineAt ?? Date.now() + deadlineMs;
+  for (const transport of stopsInProgress.values()) {
+    signalStops.add(transport); // what it gives up at the cut deadline is the cycle's loss, not a shutdown() line
+    transport.cutDeadline?.(deadlineAt);
+  }
   const entries = [...registry.values()];
   registry.clear();
   const stops = entries.map((entry) => {
@@ -930,7 +941,7 @@ export async function shutdownAllShared(): Promise<void> {
     signalStops.add(live); // its deadline loss is the cycle's, even after a hand-back
     return live.shutdown(deadlineMs).catch(() => {});
   });
-  const inProgress = [...stopsInProgress];
+  const inProgress = [...stopsInProgress.keys()];
   if (inProgress.length === 0) {
     await Promise.all(stops);
     return;

@@ -17,4 +17,12 @@ export interface Transport {
    * (the transport's own `shutdownTimeoutMs` when omitted).
    */
   shutdown(deadlineMs?: number): Promise<void>;
+  /**
+   * Move the deadline of a `shutdown()` in progress to the absolute time
+   * `atMs`, if that is earlier (never later): what a signal cycle does to a
+   * stop that was already running when the signal arrived, so it ends at
+   * signal + D with everything else (#148 review round 6). Optional; no-op
+   * before `shutdown()` or after its deadline.
+   */
+  cutDeadline?(atMs: number): void;
 }

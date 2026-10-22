@@ -161,6 +161,13 @@ export class HttpTransport implements Transport {
   /** Set by the shutdown deadline timer: nothing is sent from then on. */
   private deadlineReached = false;
   /**
+   * Resolvers of the shutdown's deadline race, so `cutDeadline()` can end
+   * it early; and the timer it arms for the earlier deadline (#148 review
+   * round 6).
+   */
+  private readonly shutdownWaiters = new Set<() => void>();
+  private cutTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
    * The backoff or `Retry-After` wait in progress, so the shutdown deadline
    * can end it: a sleep that outlasts the deadline would otherwise have its
    * batch counted as lost at the deadline and re-sent when the sleep ends
@@ -385,6 +392,53 @@ export class HttpTransport implements Transport {
     return this.closing;
   }
 
+  /**
+   * Move the deadline of the shutdown in progress to `atMs` (absolute), if
+   * that is earlier — never later. A stop that was already running when a
+   * signal arrived kept its own, longer deadline: `shutdown(D)` returned
+   * the running one, nothing cut its fetch at signal + D, and with D below
+   * that stop's value its socket outlived the process deadline and its
+   * loss was nobody's but the exit hook's (#148 review round 6). The
+   * earlier deadline does what the original does when it fires: the queue
+   * is dropped and counted, the fetch in flight aborted, a wait ended.
+   * No-op before `shutdown()`, once the drain is done, or after the
+   * deadline was reached.
+   */
+  cutDeadline(atMs: number): void {
+    if (!this.closing || this.drained || this.deadlineReached) return;
+    if (this.deadlineAt !== undefined && atMs >= this.deadlineAt) return;
+    this.deadlineAt = atMs;
+    clearTimeout(this.cutTimer);
+    this.cutTimer = setTimeout(
+      () => {
+        this.reachDeadline();
+        for (const release of [...this.shutdownWaiters]) release();
+      },
+      Math.max(0, atMs - Date.now()),
+    );
+    unref(this.cutTimer);
+  }
+
+  /**
+   * What the shutdown deadline does when it fires: nothing is sent from
+   * now on, the queue is the deadline's loss, the fetch in flight is
+   * aborted and a retry wait in progress ended. The batch in flight is not
+   * counted here: its outcome is a microtask away — the abort's rejection,
+   * or a 200 that had already arrived and whose continuation had not run
+   * yet — and is counted where it is known (`giveUp("deadline")` on the
+   * abort; nothing on a 200/207). Counting it here reported delivered
+   * events as lost (#148 review round 4).
+   */
+  private reachDeadline(): void {
+    this.deadlineReached = true;
+    if (this.drained) return;
+    this.dropQueue();
+    this.inflightController?.abort();
+    // A wait in progress ends now: the retry loop wakes, sees the
+    // deadline and gives up instead of sending after it.
+    this.pendingDelay?.resolve();
+  }
+
   private async runShutdown(deadlineMs: number): Promise<void> {
     this.stopped = true;
     this.deadlineAt = Date.now() + deadlineMs;
@@ -417,24 +471,12 @@ export class HttpTransport implements Transport {
     // deadline ends the sending too, so a host without process.exit() can
     // exit and a hanging ingest cannot keep the process alive (#148).
     const lostBefore = this.deadlineLost;
+    // `cutDeadline()` may end the race earlier through the waiters.
     await raceDeadline(drain(), deadlineMs, {
-      onTimeout: () => {
-        this.deadlineReached = true;
-        if (this.drained) return;
-        // The queue is the deadline's loss for certain. The batch in
-        // flight is not counted here: its outcome is a microtask away —
-        // the abort's rejection, or a 200 that had already arrived and
-        // whose continuation had not run yet — and is counted where it is
-        // known (`giveUp("deadline")` on the abort; nothing on a 200/207).
-        // Counting it here reported delivered events as lost (#148 review
-        // round 4).
-        this.dropQueue();
-        this.inflightController?.abort();
-        // A wait in progress ends now: the retry loop wakes, sees the
-        // deadline and gives up instead of sending after it.
-        this.pendingDelay?.resolve();
-      },
+      onTimeout: () => this.reachDeadline(),
+      waiters: this.shutdownWaiters,
     });
+    clearTimeout(this.cutTimer);
     if (this.deadlineReached && this.inflight) {
       // The aborted fetch settles at once with a compliant fetch; a fetch
       // that ignores its signal is given this long, then its batch is
