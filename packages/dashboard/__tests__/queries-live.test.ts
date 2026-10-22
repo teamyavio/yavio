@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockQueryAnalytics = vi.fn();
 
@@ -10,6 +10,7 @@ import {
   LIVE_MAX_PAGES,
   LIVE_PAGE,
   LIVE_RESEND_HORIZON_SECONDS,
+  LIVE_SEEN_CAP,
   LIVE_SKEW_ALLOWANCE_SECONDS,
   LIVE_STAMPS_CAP,
   initialLiveCursor,
@@ -84,6 +85,10 @@ function table(rows: Row[]) {
 describe("live queries (#148)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe("initialLiveCursor", () => {
@@ -166,27 +171,33 @@ describe("live queries (#148)", () => {
       expect(result.cursor.eventId).toBe("e2");
       expect(result.cursor.resume).toBeUndefined();
       expect(result.cursor.seen).toEqual([
-        { eventId: "e1", ingestedAt: "2025-01-01 12:00:01.000" },
-        { eventId: "e2", ingestedAt: "2025-01-01 12:00:02.000" },
+        { eventId: "e1", ingestedAt: "2025-01-01 12:00:01.000", readAt: expect.any(Number) },
+        { eventId: "e2", ingestedAt: "2025-01-01 12:00:02.000", readAt: expect.any(Number) },
       ]);
     });
 
-    it("keeps the cursor where it was when nothing was read; the query leaves out the blocks read inside the window, the cursor keeps the rows inside the resend horizon", async () => {
+    it("keeps the cursor where it was when nothing was read; the query leaves out the blocks read inside the window, the cursor keeps the rows read within the resend horizon or inside the window", async () => {
       mockQueryAnalytics.mockResolvedValue([]);
-      expect(LIVE_RESEND_HORIZON_SECONDS).toBe(60);
+      expect(LIVE_RESEND_HORIZON_SECONDS).toBe(200);
+      const now = Date.now();
       const seen = [
-        { eventId: "in-window", ingestedAt: "2025-01-01 11:59:55.000" },
-        { eventId: "in-window-too", ingestedAt: "2025-01-01 11:59:55.000" },
-        { eventId: "in-horizon", ingestedAt: "2025-01-01 11:59:30.000" },
-        { eventId: "forgotten", ingestedAt: "2025-01-01 11:58:00.000" },
+        // Its block is inside the window: kept however long ago it was read.
+        { eventId: "in-window", ingestedAt: "2025-01-01 11:59:55.000", readAt: now - 900_000 },
+        { eventId: "in-window-too", ingestedAt: "2025-01-01 11:59:55.000", readAt: now - 5_000 },
+        // Read 100 s ago: kept for the horizon, its block out of the window.
+        { eventId: "in-horizon", ingestedAt: "2025-01-01 11:59:30.000", readAt: now - 100_000 },
+        // Read 300 s ago, its block out of the window: forgotten.
+        { eventId: "forgotten", ingestedAt: "2025-01-01 11:58:00.000", readAt: now - 300_000 },
       ];
       const result = await pollLive(ctx, { ...cursor, eventId: "in-window-too", seen });
       expect(result.events).toEqual([]);
       expect(result.cursor.ingestedAt).toBe(cursor.ingestedAt);
       expect(result.cursor.eventId).toBe("in-window-too");
-      // Remembered for 60 s, not only for the 10 s window (#148 review
-      // round 5). The query leaves out the BLOCKS read inside the window —
-      // one stamp for the two rows — before the cursor, and takes
+      // Remembered for 200 s from the read — the SDK's five more attempts
+      // of a 30 s fetch plus a backoff, review round 6 — and for as long
+      // as the window covers the block, not only for the 10 s window
+      // (review round 5). The query leaves out the BLOCKS read inside the
+      // window — one stamp for the two rows — before the cursor, and takes
       // everything after it: an id list grew to a whole insert block of
       // up to 10 000 rows and went with every page (review round 6).
       expect(result.cursor.seen.map((r) => r.eventId)).toEqual([
@@ -213,7 +224,7 @@ describe("live queries (#148)", () => {
       const result = await pollLive(ctx, {
         ingestedAt: "2025-01-01 12:00:08.000",
         eventId: "shown",
-        seen: [{ eventId: "shown", ingestedAt: "2025-01-01 12:00:08.000" }],
+        seen: [{ eventId: "shown", ingestedAt: "2025-01-01 12:00:08.000", readAt: Date.now() }],
       });
       expect(mockQueryAnalytics.mock.calls[0][0].params.stamps).toEqual([
         "2025-01-01 12:00:08.000",
@@ -280,6 +291,79 @@ describe("live queries (#148)", () => {
       ]);
     });
 
+    it("a resend 63 s after the first read, the cursor having moved on twice meanwhile, is not shown again: the memory is keyed on when the row was read, for 200 s", async () => {
+      // The SDK resends a batch ingest had already stored after each fetch
+      // timeout (30 s) plus backoff: at about 31 s, then 63 s. Keyed on the
+      // cursor's stamp with a 60 s horizon (review round 5), `r` had left
+      // the memory once the cursor stood 63 s past its block, and the
+      // resend at 64 s was shown a second time.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2025-01-01T12:00:00.500Z"));
+      mockQueryAnalytics.mockResolvedValueOnce([
+        row({ eventId: "r", ingestedAt: "2025-01-01 12:00:00.000" }),
+      ]);
+      const first = await pollLive(ctx, cursor);
+      expect(first.events.map((e) => e.eventId)).toEqual(["r"]);
+      const readAt = Date.now();
+      vi.setSystemTime(new Date("2025-01-01T12:00:31.500Z"));
+      mockQueryAnalytics.mockResolvedValueOnce([
+        row({ eventId: "x", ingestedAt: "2025-01-01 12:00:31.000" }),
+      ]);
+      const second = await pollLive(ctx, first.cursor);
+      expect(second.events.map((e) => e.eventId)).toEqual(["x"]);
+      vi.setSystemTime(new Date("2025-01-01T12:01:03.500Z"));
+      mockQueryAnalytics.mockResolvedValueOnce([
+        row({ eventId: "z", ingestedAt: "2025-01-01 12:01:03.000" }),
+      ]);
+      const third = await pollLive(ctx, second.cursor);
+      expect(third.events.map((e) => e.eventId)).toEqual(["z"]);
+      expect(third.cursor.seen.map((r) => r.eventId).sort()).toEqual(["r", "x", "z"]);
+      vi.setSystemTime(new Date("2025-01-01T12:01:04.500Z"));
+      mockQueryAnalytics.mockResolvedValueOnce([
+        row({ eventId: "r", ingestedAt: "2025-01-01 12:01:04.000" }),
+      ]);
+      const fourth = await pollLive(ctx, third.cursor);
+      expect(fourth.events).toEqual([]);
+      // Remembered from the first read, then read again now: from this
+      // read, and from its new block.
+      expect(first.cursor.seen).toEqual([
+        { eventId: "r", ingestedAt: "2025-01-01 12:00:00.000", readAt },
+      ]);
+      expect(fourth.cursor.seen.find((r) => r.eventId === "r")).toEqual({
+        eventId: "r",
+        ingestedAt: "2025-01-01 12:01:04.000",
+        readAt: Date.now(),
+      });
+      // 200 s after the last read, with the window past its block, it is
+      // forgotten; the others went before it.
+      vi.setSystemTime(new Date("2025-01-01T12:04:25.000Z"));
+      mockQueryAnalytics.mockResolvedValueOnce([
+        row({ eventId: "w", ingestedAt: "2025-01-01 12:04:24.000" }),
+      ]);
+      const fifth = await pollLive(ctx, fourth.cursor);
+      expect(fifth.cursor.seen.map((r) => r.eventId)).toEqual(["w"]);
+    });
+
+    it("remembers at most LIVE_SEEN_CAP rows per feed: past the cap the rows read longest ago are forgotten first", async () => {
+      expect(LIVE_SEEN_CAP).toBe(50_000);
+      const now = Date.now();
+      // Every row inside the window (so nothing else would drop it), read
+      // at distinct times: the cap keeps the 50 000 most recently read.
+      const seen = Array.from({ length: LIVE_SEEN_CAP + 10 }, (_, i) => ({
+        eventId: `s${i}`,
+        ingestedAt: "2025-01-01 11:59:59.000",
+        readAt: now - i,
+      }));
+      mockQueryAnalytics.mockResolvedValue([]);
+      const result = await pollLive(ctx, { ...cursor, seen });
+      expect(result.cursor.seen).toHaveLength(LIVE_SEEN_CAP);
+      const kept = new Set(result.cursor.seen.map((r) => r.eventId));
+      expect(kept.has("s0")).toBe(true);
+      expect(kept.has(`s${LIVE_SEEN_CAP - 1}`)).toBe(true);
+      expect(kept.has(`s${LIVE_SEEN_CAP}`)).toBe(false);
+      expect(kept.has(`s${LIVE_SEEN_CAP + 9}`)).toBe(false);
+    });
+
     it("a stale page that repeats a seen row does not show it twice", async () => {
       mockQueryAnalytics.mockResolvedValue([
         row({ eventId: "shown", ingestedAt: "2025-01-01 12:00:08.000" }),
@@ -288,7 +372,7 @@ describe("live queries (#148)", () => {
       const result = await pollLive(ctx, {
         ingestedAt: "2025-01-01 12:00:08.000",
         eventId: "shown",
-        seen: [{ eventId: "shown", ingestedAt: "2025-01-01 12:00:08.000" }],
+        seen: [{ eventId: "shown", ingestedAt: "2025-01-01 12:00:08.000", readAt: Date.now() }],
       });
       expect(result.events.map((e) => e.eventId)).toEqual(["new"]);
       expect(result.cursor.seen.map((r) => r.eventId).sort()).toEqual(["new", "shown"]);

@@ -289,11 +289,10 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
     // last page read (49.9 s), and not to ClickHouse's clock (review round
     // 3), which ingest's clock may run behind by more than the overlap.
     expect(first.cursor.ingestedAt).toBe(far(69_900));
-    // The cursor remembers the rows read inside the resend horizon — the
-    // 60 s before 69.9 s: rows 99–499 — and the next query's parameter
-    // carries only the window's (the 10 s before): none of them.
-    expect(first.cursor.seen).toHaveLength(401);
-    expect(first.cursor.seen.every((r) => r.ingestedAt >= far(9_900))).toBe(true);
+    // The cursor remembers every row read — all within the 200 s resend
+    // horizon of this read — and the next query leaves out only the blocks
+    // of the window (the 10 s before 69.9 s): none of them.
+    expect(first.cursor.seen).toHaveLength(500);
 
     // The next poll reads the window the jump opened — the 10 s before the
     // newest row — rows 599–699; rows 500–598 are never shown.
@@ -319,11 +318,14 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
     expect(third.cursor.ingestedAt).toBe(now);
   });
 
-  it("an SDK resend stored 15 s later — a second row for the same event_id with a newer ingested_at — is not shown again", async () => {
+  it("an SDK resend stored 64 s later — a second row for the same event_id with a newer ingested_at, the cursor having moved on twice meanwhile — is not shown again", async () => {
     // The SDK re-sends a batch whose fetch timed out or saw a 5xx after
-    // ingest had written it, after a backoff of up to 16 s or a Retry-After
-    // of up to 30 s; the resend is a second row until a merge collapses it.
-    // Merges off, so the second row is there to be found.
+    // ingest had written it, after each 30 s fetch timeout plus a backoff:
+    // at about 31 s and again at 63 s; the resend is a second row until a
+    // merge collapses it. Merges off, so the second row is there to be
+    // found. Review round 5 remembered a row for 60 s of the CURSOR's
+    // stamp: once the cursor stood 63 s past the row's block, the row was
+    // forgotten and the resend at 64 s was shown again (round 6).
     const projectId = `p-${randomUUID().slice(0, 8)}`;
     const scope = { workspaceId: ws, projectId };
     const session = `s-${randomUUID().slice(0, 8)}`;
@@ -342,22 +344,32 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
       ]);
       const first = await q.pollLive(scope, from(at(0)), undefined);
       expect(first.events.map((e) => e.eventName)).toEqual(["once"]);
-      // Another row moves the cursor past the window that covers the first.
+      // Two more rows move the cursor on, to 63 s past the first row's block.
       await insert([
         {
           project_id: projectId,
           session_id: session,
           event_name: "next",
-          timestamp: at(11_000),
-          ingested_at: at(12_000),
+          timestamp: at(30_000),
+          ingested_at: at(31_100),
         },
       ]);
       const second = await q.pollLive(scope, first.cursor, undefined);
       expect(second.events.map((e) => e.eventName)).toEqual(["next"]);
-      expect(second.cursor.ingestedAt).toBe(at(12_000));
-      // The resend: the same event_id and timestamp, stored 15 s after the
-      // first row. Before the fix the first row's id had left the cursor
-      // with the window and the row was shown a second time.
+      expect(second.cursor.ingestedAt).toBe(at(31_100));
+      await insert([
+        {
+          project_id: projectId,
+          session_id: session,
+          event_name: "later",
+          timestamp: at(62_000),
+          ingested_at: at(63_100),
+        },
+      ]);
+      const third = await q.pollLive(scope, second.cursor, undefined);
+      expect(third.events.map((e) => e.eventName)).toEqual(["later"]);
+      // The resend: the same event_id and timestamp, stored 64 s after the
+      // first row.
       await insert([
         {
           event_id: resent,
@@ -365,12 +377,12 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
           session_id: session,
           event_name: "once",
           timestamp: at(0),
-          ingested_at: at(15_100),
+          ingested_at: at(64_100),
         },
       ]);
-      const third = await q.pollLive(scope, second.cursor, undefined);
-      expect(third.events).toEqual([]);
-      expect(third.cursor.ingestedAt).toBe(at(15_100));
+      const fourth = await q.pollLive(scope, third.cursor, undefined);
+      expect(fourth.events).toEqual([]);
+      expect(fourth.cursor.ingestedAt).toBe(at(64_100));
     } finally {
       await admin.command({ query: "SYSTEM START MERGES events" });
     }

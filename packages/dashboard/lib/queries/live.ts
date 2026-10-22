@@ -38,9 +38,10 @@ import type { LiveEvent } from "./types";
  * the same millisecond as a block already read is taken for read. A walk
  * the page cap ends inside the overlap (`LiveCursor.resume`) continues
  * there next poll, its partial block not excluded. The ids read are kept
- * in memory for `LIVE_RESEND_HORIZON` so a row read before is not shown
- * again: an SDK resend of a batch ingest had already stored is a new block
- * with a newer stamp, back inside the window (review round 5).
+ * in memory for `LIVE_RESEND_HORIZON` after they were read, and for as
+ * long as the window covers their block, so a row read before is not
+ * shown again: an SDK resend of a batch ingest had already stored is a new
+ * block with a newer stamp, back inside the window (review round 5).
  *
  * A backlog larger than one poll walks is given up when it reaches more
  * than one window behind the newest row (bounded catch-up, review round
@@ -70,18 +71,31 @@ import type { LiveEvent } from "./types";
 export const LIVE_OVERLAP_SECONDS = 10;
 const LIVE_OVERLAP_MS = LIVE_OVERLAP_SECONDS * 1_000;
 /**
- * How long a row read stays remembered after the window has moved past
- * it, in whole seconds. An SDK resend of a batch ingest had already stored
- * — the fetch timed out or saw a 5xx after the write — lands after a
- * backoff of up to 16 s or a `Retry-After` of up to 30 s as a NEW row with
- * a new `ingested_at` (the ReplacingMergeTree collapses it on a later
- * merge), inside the window again; remembered only for the window, its id
- * was emitted twice. 60 s covers the SDK's 1+2+4+8+16 s backoffs and the
- * 30 s `Retry-After` cap (#148 review round 5). Checked in memory; the
- * query leaves out blocks, not ids.
+ * How long a row stays remembered after it was read (wall clock), in whole
+ * seconds. An SDK resend of a batch ingest had already stored — the fetch
+ * timed out or saw a 5xx after the write — lands as a NEW row with a new
+ * `ingested_at` (the ReplacingMergeTree collapses it on a later merge),
+ * inside the window again; remembered only for the window, its id was
+ * emitted twice (#148 review round 5). The SDK's resends go on for up to
+ * five more attempts, each a 30 s fetch timeout plus a backoff of 1, 2,
+ * 4, 8 and 16 s (or a `Retry-After` of 30 s at most): about 180 s after
+ * the first store, so 200 s. Measured from when the row was read, not
+ * from the cursor: keyed on the cursor's stamp, 60 s of it had expired a
+ * row resent 63 s later once the cursor had moved on, and the row was
+ * shown twice (review round 6). Checked in memory; the query leaves out
+ * blocks, not ids — and a row is kept while the window still covers its
+ * block whatever the clock says, or its block would come back from the
+ * query.
  */
-export const LIVE_RESEND_HORIZON_SECONDS = 60;
+export const LIVE_RESEND_HORIZON_SECONDS = 200;
 const LIVE_RESEND_HORIZON_MS = LIVE_RESEND_HORIZON_SECONDS * 1_000;
+/**
+ * Rows remembered at most, per feed connection: the horizon's worth at the
+ * page cap (500 rows per 1.5 s poll for 200 s is about 67 000) is more
+ * than one viewer's feed will ever show; past the cap the rows read
+ * longest ago are forgotten first, window or not.
+ */
+export const LIVE_SEEN_CAP = 50_000;
 /**
  * How far an event's `timestamp` may lie behind its `ingested_at`, in
  * whole seconds: the SDK's 10 s flush, its retries (1/2/4/8/16 s backoff,
@@ -124,19 +138,20 @@ export interface LivePosition {
 /**
  * Where the feed has read up to: the newest position read so far, a walk
  * the page cap ended below it (resumed there next poll), and the rows
- * read whose `ingested_at` is still inside the resend horizon — the rows
- * a resend could bring back, and the blocks the next poll leaves out
- * while the window covers them.
+ * read within the resend horizon or inside the window — the rows a resend
+ * could bring back, and the blocks the next poll leaves out while the
+ * window covers them.
  */
 export interface LiveCursor extends LivePosition {
   resume?: LivePosition;
   seen: SeenRow[];
 }
 
-/** A row read, with its `ingested_at`: dropped from the cursor once the resend horizon has moved past it. */
+/** A row read: its `ingested_at` (its block) and when it was read (epoch ms); dropped once the horizon has passed the latter and the window the former. */
 export interface SeenRow {
   eventId: string;
   ingestedAt: string;
+  readAt: number;
 }
 
 export interface LivePoll {
@@ -255,12 +270,20 @@ interface ReadRow extends SeenRow {
   ms: number;
 }
 
-/** The rows read whose `ingested_at` lies within `spanMs` before `ingestedAt`: what the cursor keeps. */
-function readSince(read: Map<string, ReadRow>, ingestedAt: string, spanMs: number): SeenRow[] {
-  const start = ingestedAtMs(ingestedAt) - spanMs;
-  const rows: SeenRow[] = [];
-  for (const { eventId, ingestedAt: at, ms } of read.values()) {
-    if (ms >= start) rows.push({ eventId, ingestedAt: at });
+/**
+ * The rows the cursor keeps: read within the horizon, or in a block the
+ * window before `cursor` still covers; at most `LIVE_SEEN_CAP`, the rows
+ * read longest ago dropped first.
+ */
+function retained(read: Map<string, ReadRow>, cursor: LivePosition, now: number): SeenRow[] {
+  const windowStart = ingestedAtMs(cursor.ingestedAt) - LIVE_OVERLAP_MS;
+  const horizonStart = now - LIVE_RESEND_HORIZON_MS;
+  let rows: SeenRow[] = [];
+  for (const { eventId, ingestedAt, readAt, ms } of read.values()) {
+    if (readAt >= horizonStart || ms >= windowStart) rows.push({ eventId, ingestedAt, readAt });
+  }
+  if (rows.length > LIVE_SEEN_CAP) {
+    rows = rows.sort((a, b) => b.readAt - a.readAt).slice(0, LIVE_SEEN_CAP);
   }
   return rows;
 }
@@ -303,8 +326,8 @@ export async function pollLive(
   // comes back (a resend's new block, a stale page, the same event_id twice
   // in one page — a ReplacingMergeTree holds at-least-once duplicates until
   // it merges, review round 2), for as long as the resend horizon keeps
-  // the id. Rows older than the horizon cannot come back: the cursor never
-  // moves backwards.
+  // the id or the window its block.
+  const now = Date.now();
   const read = new Map<string, ReadRow>(
     cursor.seen.map((row) => [row.eventId, { ...row, ms: ingestedAtMs(row.ingestedAt) }]),
   );
@@ -323,20 +346,19 @@ export async function pollLive(
       const before = read.get(row.eventId);
       if (before) {
         // Read before (a resend's row, or a stale page): not shown again.
-        // Remembered from its newest ingested_at, so it stays in the
-        // cursor for as long as the horizon covers that.
+        // Remembered from now and from its newest block, so it stays in
+        // the cursor for as long as the horizon or the window covers that.
+        before.readAt = now;
         if (row.ingestedAt > before.ingestedAt) {
-          read.set(row.eventId, {
-            ...before,
-            ingestedAt: row.ingestedAt,
-            ms: ingestedAtMs(row.ingestedAt),
-          });
+          before.ingestedAt = row.ingestedAt;
+          before.ms = ingestedAtMs(row.ingestedAt);
         }
         continue;
       }
       read.set(row.eventId, {
         eventId: row.eventId,
         ingestedAt: row.ingestedAt,
+        readAt: now,
         ms: ingestedAtMs(row.ingestedAt),
       });
       if (row.eventType === "connection") {
@@ -378,7 +400,7 @@ export async function pollLive(
     cursor: {
       ...next,
       ...(resume ? { resume } : {}),
-      seen: readSince(read, next.ingestedAt, LIVE_RESEND_HORIZON_MS),
+      seen: retained(read, next, now),
     },
   };
 }
