@@ -7,11 +7,11 @@ vi.mock("@/lib/clickhouse/analytics-client", () => ({
 }));
 
 import {
+  LIVE_JUMP_LOOKBACK_SECONDS,
   LIVE_MAX_PAGES,
   LIVE_PAGE,
   LIVE_RESEND_HORIZON_SECONDS,
   LIVE_SEEN_CAP,
-  LIVE_SKEW_ALLOWANCE_SECONDS,
   LIVE_STAMPS_CAP,
   type LiveCursor,
   initialLiveCursor,
@@ -125,19 +125,18 @@ describe("live queries (#148)", () => {
   });
 
   describe("pollLive", () => {
-    it("tails ingested_at with the overlap, bounds timestamp to the skew allowance before the cursor within the day, reads the page oldest first", async () => {
+    it("tails ingested_at with the overlap within the day — no timestamp bound before the cursor — and reads the page oldest first", async () => {
       mockQueryAnalytics.mockResolvedValue([]);
       await pollLive(ctx, cursor);
       const call = mockQueryAnalytics.mock.calls[0][0];
       expect(call.query).toContain(
         "ingested_at >= {cursor:DateTime64(3, 'UTC')} - INTERVAL 10 SECOND",
       );
-      // ingested_at is outside the sort key: without this bound every poll
-      // sorted the project's whole last day (#148 review round 4).
-      expect(call.query).toContain(
-        `timestamp >= {cursor:DateTime64(3, 'UTC')} - INTERVAL ${10 + LIVE_SKEW_ALLOWANCE_SECONDS} SECOND`,
-      );
-      expect(LIVE_SKEW_ALLOWANCE_SECONDS).toBe(3_600);
+      // The minmax skip index on ingested_at (migration 0021) prunes by
+      // this bound. Review round 4 bounded timestamp an hour before the
+      // cursor instead, which hid every event of a host whose clock runs
+      // more than an hour slow (review round 6).
+      expect(call.query).not.toMatch(/timestamp >= \{cursor/);
       expect(call.query).toContain("timestamp >= now() - INTERVAL 1 DAY");
       // Oldest first, in the cursor's order: ClickHouse stamps one
       // ingested_at on a whole insert block, and a page of the newest 50
@@ -474,10 +473,12 @@ describe("live queries (#148)", () => {
       expect(jump.query).toContain("coalesce(maxOrNull(ingested_at), now64(3, 'UTC'))");
       expect(jump.query).toContain("argMaxOrNull(event_id, (ingested_at, event_id))");
       expect(jump.query).toContain("FROM events");
+      expect(LIVE_JUMP_LOOKBACK_SECONDS).toBe(3_600);
       expect(jump.query).toContain(
-        `timestamp >= now() - INTERVAL ${LIVE_SKEW_ALLOWANCE_SECONDS} SECOND`,
+        `ingested_at >= now64(3, 'UTC') - INTERVAL ${LIVE_JUMP_LOOKBACK_SECONDS} SECOND`,
       );
-      expect(jump.query).not.toContain("INTERVAL 1 DAY");
+      expect(jump.query).toContain("timestamp >= now() - INTERVAL 1 DAY");
+      expect(jump.query).not.toMatch(/timestamp >= now\(\) - INTERVAL \d+ SECOND/);
       expect(jump.params.eventType).toBeUndefined();
 
       mockQueryAnalytics.mockClear();
@@ -664,14 +665,12 @@ describe("live queries (#148)", () => {
         );
         // The candidates are the sessions with a connection row in the
         // polled window — the only ones the page can hold — not every
-        // session of the day: the same window as the page, with its
-        // timestamp bound (two cursor placeholders each).
+        // session of the day: the same window as the page (one cursor
+        // placeholder each).
         expect(call.query).toContain("AND session_id IN (");
-        expect(call.query.split("{cursor:DateTime64(3, 'UTC')}")).toHaveLength(5);
+        expect(call.query.split("{cursor:DateTime64(3, 'UTC')}")).toHaveLength(3);
         expect(
-          call.query.split(
-            `timestamp >= {cursor:DateTime64(3, 'UTC')} - INTERVAL ${10 + LIVE_SKEW_ALLOWANCE_SECONDS} SECOND`,
-          ),
+          call.query.split("ingested_at >= {cursor:DateTime64(3, 'UTC')} - INTERVAL 10 SECOND"),
         ).toHaveLength(3);
       }
     });

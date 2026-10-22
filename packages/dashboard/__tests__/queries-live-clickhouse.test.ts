@@ -165,6 +165,28 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
     expect(next.events.map((e) => e.eventName)).toEqual(["late"]);
   });
 
+  it("a row whose timestamp is three hours behind its ingested_at — a host with a slow clock — is shown live", async () => {
+    // Ingest clamps a client timestamp to [now − 72 h, now + 5 min], so the
+    // events of a host whose clock runs hours slow are stored with their
+    // old timestamps. Review round 4's bound — timestamp within an hour
+    // before the cursor, standing in for an index on ingested_at — hid
+    // every one of them; with the minmax skip index (migration 0021) the
+    // poll prunes by ingested_at itself and the bound is gone.
+    const projectId = `p-${randomUUID().slice(0, 8)}`;
+    const scope = { workspaceId: ws, projectId };
+    const session = `s-${randomUUID().slice(0, 8)}`;
+    const cursor = await q.initialLiveCursor(scope);
+    const behind = new Date(Date.now() - 3 * 3_600_000)
+      .toISOString()
+      .replace("T", " ")
+      .replace("Z", "");
+    await insert([
+      { project_id: projectId, session_id: session, event_name: "slow-clock", timestamp: behind },
+    ]);
+    const { events } = await q.pollLive(scope, cursor, undefined);
+    expect(events.map((e) => e.eventName)).toEqual(["slow-clock"]);
+  });
+
   it("two instances' rows for one session give one connection row", async () => {
     const session = `s-${randomUUID().slice(0, 8)}`;
     await insert([

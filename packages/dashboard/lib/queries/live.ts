@@ -52,13 +52,14 @@ import type { LiveEvent } from "./types";
  * a backlog within one window is walked out instead of dropped (round 6).
  *
  * `ingested_at` is outside the sort key `(workspace_id, project_id,
- * event_type, timestamp, event_id)` and has no skip index, so a bound on
- * it alone prunes nothing: every poll sorted the project's whole last day
- * (#148 review round 4). Every poll therefore also bounds `timestamp` —
- * the sort key's fourth column — to the last `LIVE_SKEW_ALLOWANCE` before
- * the cursor: an event's `timestamp` is at most SDK batching + retries +
- * clock skew behind its `ingested_at`. The 1-day bound stays as the outer
- * limit (the current partitions).
+ * event_type, timestamp, event_id)`; a minmax skip index on it (migration
+ * 0021) lets the window bound prune the day's granules. Before it, every
+ * poll sorted the project's whole last day (#148 review round 4), and the
+ * bound on `timestamp` that stood in for the index — an hour before the
+ * cursor — hid every event of a host whose clock runs more than an hour
+ * slow: ingest clamps a client timestamp to [now − 72 h, now + 5 min], so
+ * such events are stored and were never shown live (review round 6). The
+ * 1-day bound on `timestamp` stays as the outer limit (the partition).
  *
  * A `connection` row is shown only as its session's earliest in the
  * preceding 24 h — by `(ingested_at, event_id)`, so two rows of one block
@@ -100,17 +101,8 @@ const LIVE_RESEND_HORIZON_MS = LIVE_RESEND_HORIZON_SECONDS * 1_000;
  * longest ago are forgotten first, window or not.
  */
 export const LIVE_SEEN_CAP = 50_000;
-/**
- * How far an event's `timestamp` may lie behind its `ingested_at`, in
- * whole seconds: the SDK's 10 s flush, its retries (1/2/4/8/16 s backoff,
- * a `Retry-After` of 30 s at most), the batch writer's flush and retries
- * and the clock skew between an app and ClickHouse add up to minutes at
- * most; an hour is generous. Bounds `timestamp` — in the sort key — so a
- * poll does not sort the project's whole day (#148 review round 4).
- */
-export const LIVE_SKEW_ALLOWANCE_SECONDS = 3_600;
-/** The `timestamp` bound before the cursor: the overlap, then the allowance behind it. */
-const LIVE_LOOKBACK_SECONDS = LIVE_OVERLAP_SECONDS + LIVE_SKEW_ALLOWANCE_SECONDS;
+/** How far back a capped poll looks for the newest row to jump to, in whole seconds, by `ingested_at` (the skip index prunes). */
+export const LIVE_JUMP_LOOKBACK_SECONDS = 3_600;
 
 /** Rows per page, oldest first. */
 export const LIVE_PAGE = 50;
@@ -188,12 +180,12 @@ function after(a: LivePosition, b: LivePosition): boolean {
 
 /**
  * Where a capped poll jumps to: the newest position the feed would show
- * (the type filter applies) among the rows of the last
- * `LIVE_SKEW_ALLOWANCE` — by `timestamp`, so the sort key prunes — or
- * ClickHouse's clock when there are none. The newest row rather than the
- * clock: the backlog the jump gives up may end before the clock's window,
- * and the blocks of its last `LIVE_OVERLAP` seconds are what the next poll
- * shows (#148 review rounds 2 and 4).
+ * (the type filter applies) among the rows stored in the last
+ * `LIVE_JUMP_LOOKBACK` — by `ingested_at`, the skip index pruning, within
+ * the day — or ClickHouse's clock when there are none. The newest row
+ * rather than the clock: the backlog the jump gives up may end before the
+ * clock's window, and the blocks of its last `LIVE_OVERLAP` seconds are
+ * what the next poll shows (#148 review rounds 2 and 4).
  */
 async function latestCursor(ctx: QueryContext, eventType?: string): Promise<LivePosition> {
   const typeFilter = eventType ? "AND event_type = {eventType:String}" : "";
@@ -206,7 +198,8 @@ async function latestCursor(ctx: QueryContext, eventType?: string): Promise<Live
         argMaxOrNull(event_id, (ingested_at, event_id)) AS eventId
       FROM events
       WHERE project_id = {projectId:String}
-        AND timestamp >= now() - INTERVAL ${LIVE_SKEW_ALLOWANCE_SECONDS} SECOND
+        AND timestamp >= now() - INTERVAL 1 DAY
+        AND ingested_at >= now64(3, 'UTC') - INTERVAL ${LIVE_JUMP_LOOKBACK_SECONDS} SECOND
         ${typeFilter}
     `,
     params: { projectId: ctx.projectId, ...(eventType ? { eventType } : {}) },
@@ -239,11 +232,11 @@ export async function initialLiveCursor(ctx: QueryContext): Promise<LiveCursor> 
 }
 
 /**
- * The bounds every poll reads within: the partition bound, the `timestamp`
- * bound the sort key prunes by, and the overlap window before the cursor.
+ * The bounds every poll reads within: the partition bound on `timestamp`,
+ * and the overlap window before the cursor on `ingested_at`, which the
+ * skip index prunes by.
  */
 const WINDOW = `timestamp >= now() - INTERVAL 1 DAY
-        AND timestamp >= {cursor:DateTime64(3, 'UTC')} - INTERVAL ${LIVE_LOOKBACK_SECONDS} SECOND
         AND ingested_at >= {cursor:DateTime64(3, 'UTC')} - INTERVAL ${LIVE_OVERLAP_SECONDS} SECOND`;
 
 /**
