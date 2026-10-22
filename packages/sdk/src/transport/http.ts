@@ -153,6 +153,16 @@ export class HttpTransport implements Transport {
   private authRejected = false;
   /** `onClosed` runs once: a 401 closes the transport, and a `shutdown()` after it (or the drain the 401 ended) must not report it closed again (#148 review round 5). */
   private closed = false;
+  /**
+   * Set when the shutdown deadline refused a retry wait (`canWait`): ingest
+   * is rate-limiting or failing and the deadline leaves no room for a
+   * backoff, so the rest of the queue is given up with the batch — counted
+   * once, one line — and the drain ends. Before #148 review round 6 the
+   * drain went on to the next batch at once: every remaining batch was
+   * fired back-to-back with no backoff and `Retry-After` ignored, 100
+   * requests in the last second against a 429 ingest, all of them lost.
+   */
+  private sendingOver = false;
 
   private readonly endpoint: string;
   private readonly apiKey: string;
@@ -223,12 +233,16 @@ export class HttpTransport implements Transport {
       // healthy drain is not a deadline loss (#148 review round 2; before,
       // every send after shutdown() began was counted as one).
       const joinsDrain =
-        this.closing !== null && !this.drained && !this.deadlineReached && !this.authRejected;
+        this.closing !== null &&
+        !this.drained &&
+        !this.deadlineReached &&
+        !this.authRejected &&
+        !this.sendingOver;
       if (!joinsDrain) {
         // Refused after the deadline: the deadline's loss, counted so it is
         // reported. Stopped for good otherwise — a 401, or the drain is
         // over — and nothing will send them: a delivery failure.
-        if (this.deadlineReached) this.deadlineLost += events.length;
+        if (this.deadlineReached || this.sendingOver) this.deadlineLost += events.length;
         else this.failed += events.length;
         return;
       }
@@ -353,7 +367,9 @@ export class HttpTransport implements Transport {
       if (this.inflight) await this.inflight.catch(() => {});
       // A send() during the drain joins the queue and goes out here too. A
       // 401 ends the drain: delivery stopped for good, the queue is dropped.
-      while (this.buffer.length > 0 && !this.authRejected) {
+      // So does a retry wait the deadline refused: the queue was given up
+      // with the batch (`sendingOver`), nothing is fired after it.
+      while (this.buffer.length > 0 && !this.authRejected && !this.sendingOver) {
         await this.startBatch(this.buffer.splice(0, this.maxBatchSize)).catch(() => {});
       }
       this.drained = true;
@@ -376,8 +392,7 @@ export class HttpTransport implements Transport {
         // known (`giveUp("deadline")` on the abort; nothing on a 200/207).
         // Counting it here reported delivered events as lost (#148 review
         // round 4).
-        this.deadlineLost += this.buffer.length;
-        this.buffer.length = 0;
+        this.dropQueue();
         this.inflightController?.abort();
         // A wait in progress ends now: the retry loop wakes, sees the
         // deadline and gives up instead of sending after it.
@@ -613,7 +628,14 @@ export class HttpTransport implements Transport {
    */
   private async waitForRetry(delayMs: number, message: string): Promise<boolean> {
     if (!this.canWait(delayMs)) {
+      // The deadline leaves no room for this wait, so it leaves none for
+      // the batches behind this one either: a rate-limited or failing
+      // ingest will not take them in time, and firing them back-to-back
+      // with no backoff ignores the `Retry-After` it just sent. The whole
+      // queue is the deadline's loss, in one count (#148 review round 6).
       this.giveUp("deadline");
+      this.dropQueue();
+      this.sendingOver = true;
       return false;
     }
     console.warn(message);
@@ -638,6 +660,12 @@ export class HttpTransport implements Transport {
     if (cause === "deadline") this.deadlineLost += this.inflightSize;
     else this.failed += this.inflightSize;
     this.inflightSize = 0;
+  }
+
+  /** Everything queued is the deadline's loss: counted, and the queue emptied so the drain loop ends. */
+  private dropQueue(): void {
+    this.deadlineLost += this.buffer.length;
+    this.buffer.length = 0;
   }
 
   /**

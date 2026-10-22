@@ -864,6 +864,56 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       expect(error).toHaveBeenCalledTimes(1);
     });
 
+    it("a retry wait the deadline refuses gives up the whole queue: five batches, a 429 with Retry-After 5 s under a 1 s deadline — one request, every event counted lost once, one line", async () => {
+      // Every request is answered 429 after 100 ms: the first answer lands
+      // once the shutdown deadline is set, so it is the deadline refusing
+      // the wait that decides, not the deadline timer.
+      const fetch = vi.fn().mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            setTimeout(
+              () =>
+                resolve({
+                  status: 429,
+                  headers: { get: (name: string) => (name === "Retry-After" ? "5" : null) },
+                  json: () => ({}),
+                }),
+              100,
+            );
+          }),
+      );
+      const losses: Array<[number, number]> = [];
+      const transport = new HttpTransport({
+        ...base,
+        maxBatchSize: 1,
+        flushIntervalMs: 60_000,
+        maxRetries: 5,
+        fetch,
+        onShutdownLoss: (lost, deadlineMs) => losses.push([lost, deadlineMs]),
+      });
+      // Five events, one per batch (the early flush at the batch size sends
+      // the first at once; the deadline check is what matters).
+      transport.send(Array.from({ length: 5 }, () => fakeEvent()));
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const closing = transport.shutdown(1_000);
+      // At 100 ms the first batch's 5 s wait would end after the deadline:
+      // it is given up — and so is the queue behind it. Before the fix the
+      // drain went on to the next batch at once, firing the remaining four
+      // back-to-back with no backoff, the Retry-After ignored: five
+      // requests into the same 429 within the second, every one of them
+      // lost anyway.
+      await vi.advanceTimersByTimeAsync(2_000);
+      await closing;
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(transport.deadlineLostEvents()).toBe(5);
+      expect(transport.lostEvents()).toBe(5);
+      expect(transport.pendingEvents()).toBe(0);
+      expect(losses).toEqual([[5, 1_000]]);
+      // Nothing fired after the deadline either.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
     it("an oversized Retry-After waits the fetch timeout, not 1 ms and not forever", async () => {
       let calls = 0;
       const fetch = vi.fn().mockImplementation(() => {
