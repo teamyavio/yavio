@@ -15,25 +15,40 @@ import type { LiveEvent } from "./types";
  * seconds after a hanging first insert), so a row could become visible
  * after the overlap had moved past its `ingested_at` and was never shown;
  * stamped at insert, `ingested_at` is monotonic with visibility and the
- * overlap only has to cover the insert itself: every poll re-reads the
- * `LIVE_OVERLAP` window before its cursor and leaves out the rows it
- * already read, by `event_id`, in the query itself. The page is read oldest
- * first: ClickHouse stamps one `ingested_at` on a whole insert block (the
- * batch writer's flush, up to 10 000 rows), so a page of 50 newest-first
- * would return the same 50 rows of such a block on every poll and the rest
- * would never rank into a page; oldest first with the read ids excluded, the cursor walks through
- * a backlog page by page — within one poll, up to `LIVE_MAX_PAGES` pages
- * (bounded catch-up, #148 review round 2): one page per 1.5 s poll fell
- * behind for good above ~33 events/s, with the cursor's `seen` list growing
- * with the backlog. A backlog larger than the cap is given up: the cursor
- * jumps to the newest `ingested_at` the feed would show among the rows of
- * the last `LIVE_SKEW_ALLOWANCE` (see `latestCursor`), so the live view
- * shows what was ingested in the last `LIVE_OVERLAP` window before that
- * and after, and the rows between the last page read and that window are
- * never shown. The ids read are remembered for `LIVE_RESEND_HORIZON`
- * after the window has moved past them: an SDK resend of a batch ingest
- * had already stored is a new row with a newer `ingested_at`, back inside
- * the window (#148 review round 5).
+ * overlap only has to cover the insert itself.
+ *
+ * The cursor is a position `(ingested_at, event_id)` (review round 6).
+ * ClickHouse stamps ONE `ingested_at` on a whole insert block — the batch
+ * writer's flush, up to 10 000 rows — so a cursor on `ingested_at` alone
+ * sat still inside such a block and the pages could only walk it by
+ * leaving out every id read so far (`event_id NOT IN …`, a list that grew
+ * to the whole block and went with every page query). A page now reads
+ * the rows after the last row read, `(ingested_at, event_id) > (…)`,
+ * oldest first, up to `LIVE_MAX_PAGES` pages per poll; the cursor is the
+ * newest position read, and nothing is listed to walk.
+ *
+ * Out-of-order visibility: two inserts stamped T1 < T2 can become visible
+ * in the other order, so the rows at or before the cursor are not all
+ * read. Every poll therefore re-reads the `LIVE_OVERLAP` window before the
+ * cursor and leaves out, in the query, the blocks it has read: a block is
+ * one `ingested_at` stamp, visible as a whole, and once a row of it was
+ * read the walk read all of it — so the exclusion is by stamp, `ingested_at
+ * NOT IN {stamps}`, a handful of values per window (one per insert) however
+ * many rows they hold. The one case this misses: a late block stamped in
+ * the same millisecond as a block already read is taken for read. A walk
+ * the page cap ends inside the overlap (`LiveCursor.resume`) continues
+ * there next poll, its partial block not excluded. The ids read are kept
+ * in memory for `LIVE_RESEND_HORIZON` so a row read before is not shown
+ * again: an SDK resend of a batch ingest had already stored is a new block
+ * with a newer stamp, back inside the window (review round 5).
+ *
+ * A backlog larger than one poll walks is given up when it reaches more
+ * than one window behind the newest row (bounded catch-up, review round
+ * 2): the cursor jumps to the newest position (`latestCursor`), the rows
+ * between the last row read and that row's window are never shown, and
+ * the unread blocks inside the window come with the next poll. One page
+ * per 1.5 s poll fell behind for good above ~33 events/s before round 2;
+ * a backlog within one window is walked out instead of dropped (round 6).
  *
  * `ingested_at` is outside the sort key `(workspace_id, project_id,
  * event_type, timestamp, event_id)` and has no skip index, so a bound on
@@ -62,9 +77,8 @@ const LIVE_OVERLAP_MS = LIVE_OVERLAP_SECONDS * 1_000;
  * a new `ingested_at` (the ReplacingMergeTree collapses it on a later
  * merge), inside the window again; remembered only for the window, its id
  * was emitted twice. 60 s covers the SDK's 1+2+4+8+16 s backoffs and the
- * 30 s `Retry-After` cap (#148 review round 5). Only the ids still inside
- * the window go to the query's `NOT IN`, so the parameter stays bounded by
- * the window; the rest is checked in memory.
+ * 30 s `Retry-After` cap (#148 review round 5). Checked in memory; the
+ * query leaves out blocks, not ids.
  */
 export const LIVE_RESEND_HORIZON_SECONDS = 60;
 const LIVE_RESEND_HORIZON_MS = LIVE_RESEND_HORIZON_SECONDS * 1_000;
@@ -84,24 +98,38 @@ const LIVE_LOOKBACK_SECONDS = LIVE_OVERLAP_SECONDS + LIVE_SKEW_ALLOWANCE_SECONDS
 export const LIVE_PAGE = 50;
 /**
  * Pages one poll reads at most (`LIVE_PAGE` × this rows). A backlog still
- * full after that is dropped: the cursor jumps to ClickHouse's clock.
+ * full after that is walked on next poll, or given up when it reaches more
+ * than one window behind the newest row.
  */
 export const LIVE_MAX_PAGES = 10;
+/**
+ * Blocks (distinct `ingested_at` stamps) one page query leaves out at most.
+ * An insert is a block, so a window holds a few dozen at most; past the
+ * cap the oldest are left in and their rows come back to be dropped by the
+ * in-memory check.
+ */
+export const LIVE_STAMPS_CAP = 1_000;
 
 export interface QueryContext {
   workspaceId: string;
   projectId: string;
 }
 
-/**
- * Where the feed has read up to: the newest `ingested_at` read so far
- * (ClickHouse `DateTime64(3, 'UTC')` text, `YYYY-MM-DD HH:MM:SS.mmm`), and
- * the ids of the rows read whose `ingested_at` is still inside the resend
- * horizon — the rows a resend could bring back, and that the next poll
- * leaves out: in the query while the window covers them, in memory after.
- */
-export interface LiveCursor {
+/** A position in the feed's order: `ingested_at` (ClickHouse `DateTime64(3, 'UTC')` text, `YYYY-MM-DD HH:MM:SS.mmm`) and `event_id`. */
+export interface LivePosition {
   ingestedAt: string;
+  eventId: string;
+}
+
+/**
+ * Where the feed has read up to: the newest position read so far, a walk
+ * the page cap ended below it (resumed there next poll), and the rows
+ * read whose `ingested_at` is still inside the resend horizon — the rows
+ * a resend could bring back, and the blocks the next poll leaves out
+ * while the window covers them.
+ */
+export interface LiveCursor extends LivePosition {
+  resume?: LivePosition;
   seen: SeenRow[];
 }
 
@@ -127,22 +155,29 @@ function ingestedAtMs(text: string): number {
   return parseUtc(text).getTime();
 }
 
+/** Is `a` after `b` in the feed's order? The stamps share one format, so text order is time order. */
+function after(a: LivePosition, b: LivePosition): boolean {
+  return a.ingestedAt > b.ingestedAt || (a.ingestedAt === b.ingestedAt && a.eventId > b.eventId);
+}
+
 /**
- * Where a capped poll jumps to: the newest `ingested_at` the feed would
- * show (the type filter applies) among the rows of the last
+ * Where a capped poll jumps to: the newest position the feed would show
+ * (the type filter applies) among the rows of the last
  * `LIVE_SKEW_ALLOWANCE` — by `timestamp`, so the sort key prunes — or
- * ClickHouse's clock when there are none, as cursor text. The newest row
- * rather than the clock: the backlog the jump gives up may end before the
- * clock's window, and the rows of its last `LIVE_OVERLAP` seconds are what
- * the next poll shows (#148 review rounds 2 and 4).
+ * ClickHouse's clock when there are none. The newest row rather than the
+ * clock: the backlog the jump gives up may end before the clock's window,
+ * and the blocks of its last `LIVE_OVERLAP` seconds are what the next poll
+ * shows (#148 review rounds 2 and 4).
  */
-async function latestCursor(ctx: QueryContext, eventType?: string): Promise<string> {
+async function latestCursor(ctx: QueryContext, eventType?: string): Promise<LivePosition> {
   const typeFilter = eventType ? "AND event_type = {eventType:String}" : "";
-  const rows = await queryAnalytics<{ cursor: string }>({
+  const rows = await queryAnalytics<{ ingestedAt: string; eventId: string | null }>({
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
-      SELECT toString(coalesce(maxOrNull(ingested_at), now64(3, 'UTC'))) AS cursor
+      SELECT
+        toString(coalesce(maxOrNull(ingested_at), now64(3, 'UTC'))) AS ingestedAt,
+        argMaxOrNull(event_id, (ingested_at, event_id)) AS eventId
       FROM events
       WHERE project_id = {projectId:String}
         AND timestamp >= now() - INTERVAL ${LIVE_SKEW_ALLOWANCE_SECONDS} SECOND
@@ -150,13 +185,13 @@ async function latestCursor(ctx: QueryContext, eventType?: string): Promise<stri
     `,
     params: { projectId: ctx.projectId, ...(eventType ? { eventType } : {}) },
   });
-  const cursor = rows[0]?.cursor;
-  if (!cursor) throw new Error("ClickHouse returned no cursor");
-  return cursor;
+  const row = rows[0];
+  if (!row?.ingestedAt) throw new Error("ClickHouse returned no cursor");
+  return { ingestedAt: row.ingestedAt, eventId: row.eventId ?? "" };
 }
 
 /**
- * The feed's start: ClickHouse's clock, as cursor text, without an overlap
+ * The feed's start: ClickHouse's clock, as a position, without an overlap
  * of its own — the poll's window before the cursor is the overlap, so the
  * first poll shows what was stored in the last 10 s, not 20 (#148 review
  * rounds 2 and 4). The clock, not the newest `ingested_at` of the last
@@ -174,7 +209,7 @@ export async function initialLiveCursor(ctx: QueryContext): Promise<LiveCursor> 
   });
   const cursor = rows[0]?.cursor;
   if (!cursor) throw new Error("ClickHouse returned no cursor");
-  return { ingestedAt: cursor, seen: [] };
+  return { ingestedAt: cursor, eventId: "", seen: [] };
 }
 
 /**
@@ -220,7 +255,7 @@ interface ReadRow extends SeenRow {
   ms: number;
 }
 
-/** The rows read whose `ingested_at` lies within `spanMs` before `ingestedAt`: the window's for the query, the horizon's for the cursor. */
+/** The rows read whose `ingested_at` lies within `spanMs` before `ingestedAt`: what the cursor keeps. */
 function readSince(read: Map<string, ReadRow>, ingestedAt: string, spanMs: number): SeenRow[] {
   const start = ingestedAtMs(ingestedAt) - spanMs;
   const rows: SeenRow[] = [];
@@ -231,10 +266,30 @@ function readSince(read: Map<string, ReadRow>, ingestedAt: string, spanMs: numbe
 }
 
 /**
- * One poll: the rows ingested since the cursor (minus the overlap), oldest
- * first, page by page up to the cap, without the ones read before, and
- * with one connection per session. Pure: the caller keeps the returned
- * cursor.
+ * The blocks the overlap window still covers and the walk has read: their
+ * stamps, newest first, at most `LIVE_STAMPS_CAP` — less the block a
+ * capped walk stopped inside (`resume`), which is read only up to that
+ * row. Fixed for the whole poll: the pages walk by position, and a block
+ * read by one page must stay in the next page's result.
+ */
+function readStamps(
+  read: Map<string, ReadRow>,
+  cursor: LivePosition,
+  resume: LivePosition | undefined,
+): string[] {
+  const start = ingestedAtMs(cursor.ingestedAt) - LIVE_OVERLAP_MS;
+  const stamps = new Set<string>();
+  for (const { ingestedAt, ms } of read.values()) {
+    if (ms >= start && ingestedAt !== resume?.ingestedAt) stamps.add(ingestedAt);
+  }
+  return [...stamps].sort().reverse().slice(0, LIVE_STAMPS_CAP);
+}
+
+/**
+ * One poll: the rows after the cursor and the unread blocks of the window
+ * before it, oldest first, page by page up to the cap, without the rows
+ * read before, and with one connection per session. Pure: the caller
+ * keeps the returned cursor.
  */
 export async function pollLive(
   ctx: QueryContext,
@@ -244,36 +299,32 @@ export async function pollLive(
   const connectionSessions = new Set<string>();
   const events: LiveEvent[] = [];
   // Every row read so far — earlier polls' or this one's, shown or not —
-  // with its ingested_at, so the next page and the next poll leave it out
-  // while the window still covers it, and so a row read before is not
-  // shown again: a resend's new row carries the same event_id with a newer
-  // ingested_at, inside the window and outside the query's `NOT IN`, and
-  // is caught here for as long as the resend horizon keeps the id. Rows
-  // older than the horizon cannot come back: the cursor never moves
-  // backwards.
+  // with its ingested_at: a row read before is not shown again, however it
+  // comes back (a resend's new block, a stale page, the same event_id twice
+  // in one page — a ReplacingMergeTree holds at-least-once duplicates until
+  // it merges, review round 2), for as long as the resend horizon keeps
+  // the id. Rows older than the horizon cannot come back: the cursor never
+  // moves backwards.
   const read = new Map<string, ReadRow>(
     cursor.seen.map((row) => [row.eventId, { ...row, ms: ingestedAtMs(row.ingestedAt) }]),
   );
-  let newest = cursor.ingestedAt;
+  const start: LivePosition = { ingestedAt: cursor.ingestedAt, eventId: cursor.eventId };
+  const stamps = readStamps(read, start, cursor.resume);
+  // The walk's lower bound: where a capped walk stopped last poll, else the
+  // window's start; then the last row of each page.
+  let lower = cursor.resume;
+  let last: LivePosition | undefined;
   let full = false;
 
   for (let page = 0; page < LIVE_MAX_PAGES; page++) {
-    const rows = await readPage(
-      ctx,
-      { ingestedAt: newest, seen: readSince(read, newest, LIVE_OVERLAP_MS) },
-      eventType,
-    );
+    const rows = await readPage(ctx, { start, lower, stamps }, eventType);
     for (const row of rows) {
-      if (row.ingestedAt > newest) newest = row.ingestedAt;
-      // The query leaves out the rows read before; this also catches a
-      // stale page and the same event_id twice in one page (a
-      // ReplacingMergeTree holds at-least-once duplicates until it merges,
-      // #148 review round 2).
+      last = { ingestedAt: row.ingestedAt, eventId: row.eventId };
       const before = read.get(row.eventId);
       if (before) {
         // Read before (a resend's row, or a stale page): not shown again.
-        // Remembered from its newest ingested_at, so the query leaves the
-        // resend's row out for as long as the window covers it.
+        // Remembered from its newest ingested_at, so it stays in the
+        // cursor for as long as the horizon covers that.
         if (row.ingestedAt > before.ingestedAt) {
           read.set(row.eventId, {
             ...before,
@@ -295,40 +346,71 @@ export async function pollLive(
       const { ingestedAt: _ingestedAt, ...event } = row;
       events.push(event);
     }
+    if (last) lower = last;
     full = rows.length >= LIVE_PAGE;
     if (!full) break; // a short page: caught up
   }
 
+  // The next cursor: the newest position read, never backwards. A capped
+  // walk that is still inside the overlap resumes there next poll.
+  let next = start;
+  let resume: LivePosition | undefined;
+  if (last && after(last, start)) next = last;
+  else if (full && last) resume = last;
+
   if (full) {
-    // The cap: the backlog is larger than one poll walks. Give it up — the
-    // live view shows the latest events, not a tail that only falls
-    // further behind — by jumping to the newest `ingested_at` of the last
-    // hour: the next window is the `LIVE_OVERLAP` seconds before it. Rows
-    // between the last page read and that window are never shown; the
-    // rows inside it that were not read come with the next poll (the read
-    // ones stay excluded through `seen`). Never backwards: a jump behind
-    // the last page read (the filter's newest row older than it) keeps the
-    // cursor where the pages left it.
-    const jump = await latestCursor(ctx, eventType);
-    if (jump > newest) newest = jump;
+    // The cap, and the backlog reaches more than one window behind the
+    // newest row the feed would show: give it up — the live view shows
+    // the latest events, not a tail that only falls further behind — by
+    // jumping to that row. The rows between the last row read and its
+    // window are never shown; the unread blocks inside the window come
+    // with the next poll. Within one window the walk goes on next poll
+    // instead: a burst stored at one stamp is walked out, not cut.
+    const newest = await latestCursor(ctx, eventType);
+    if (ingestedAtMs(newest.ingestedAt) > ingestedAtMs(next.ingestedAt) + LIVE_OVERLAP_MS) {
+      next = newest;
+      resume = undefined;
+    }
   }
 
   return {
     events,
-    cursor: { ingestedAt: newest, seen: readSince(read, newest, LIVE_RESEND_HORIZON_MS) },
+    cursor: {
+      ...next,
+      ...(resume ? { resume } : {}),
+      seen: readSince(read, next.ingestedAt, LIVE_RESEND_HORIZON_MS),
+    },
   };
 }
 
-/** One page of rows ingested since `cursor` (minus the overlap), oldest first, without the ids in `cursor.seen` (the ones inside the window: the caller narrows the cursor's list). */
+/** What one page reads within: the poll's cursor (the window before it, and what is after it), the walk's lower bound, the blocks read. */
+interface PageBounds {
+  start: LivePosition;
+  lower: LivePosition | undefined;
+  stamps: string[];
+}
+
+/**
+ * One page: the rows after `lower` — or from the window's start — that are
+ * after the cursor or in a block of the window not read yet, oldest first.
+ */
 async function readPage(
   ctx: QueryContext,
-  cursor: LiveCursor,
+  { start, lower, stamps }: PageBounds,
   eventType?: string,
 ): Promise<LiveRow[]> {
   const typeFilter = eventType ? "AND event_type = {eventType:String}" : "";
-  // Read before and still inside the window: left out here, not only
-  // after the fact, so the page holds rows not read yet.
-  const seenFilter = cursor.seen.length > 0 ? "AND event_id NOT IN {seen:Array(String)}" : "";
+  const lowerFilter = lower
+    ? "AND (ingested_at, event_id) > ({lower:DateTime64(3, 'UTC')}, {lowerId:String})"
+    : "";
+  // Before the cursor only the blocks not read yet; after it everything.
+  const unreadFilter =
+    stamps.length > 0
+      ? `AND (
+          (ingested_at, event_id) > ({cursor:DateTime64(3, 'UTC')}, {cursorId:String})
+          OR ingested_at NOT IN {stamps:Array(DateTime64(3, 'UTC'))}
+        )`
+      : "";
 
   return queryAnalytics<LiveRow>({
     workspaceId: ctx.workspaceId,
@@ -351,17 +433,20 @@ async function readPage(
       FROM events
       WHERE project_id = {projectId:String}
         AND ${WINDOW}
+        ${lowerFilter}
+        ${unreadFilter}
         ${connectionFilter(eventType)}
         ${typeFilter}
-        ${seenFilter}
-      ORDER BY ingested_at ASC, timestamp ASC, event_id ASC
+      ORDER BY ingested_at ASC, event_id ASC
       LIMIT ${LIVE_PAGE}
     `,
     params: {
       projectId: ctx.projectId,
-      cursor: cursor.ingestedAt,
+      cursor: start.ingestedAt,
+      cursorId: start.eventId,
+      ...(lower ? { lower: lower.ingestedAt, lowerId: lower.eventId } : {}),
+      ...(stamps.length > 0 ? { stamps } : {}),
       ...(eventType ? { eventType } : {}),
-      ...(cursor.seen.length > 0 ? { seen: cursor.seen.map((row) => row.eventId) } : {}),
     },
   });
 }

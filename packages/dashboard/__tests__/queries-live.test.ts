@@ -11,6 +11,7 @@ import {
   LIVE_PAGE,
   LIVE_RESEND_HORIZON_SECONDS,
   LIVE_SKEW_ALLOWANCE_SECONDS,
+  LIVE_STAMPS_CAP,
   initialLiveCursor,
   pollLive,
 } from "@/lib/queries/live";
@@ -36,13 +37,48 @@ function row(overrides: Record<string, unknown>) {
   };
 }
 
-const cursor = { ingestedAt: "2025-01-01 12:00:00.000", seen: [] };
+const cursor = { ingestedAt: "2025-01-01 12:00:00.000", eventId: "", seen: [] };
 
-/** `n` rows of one request batch: one `ingested_at` for all of them (ingest stamps the batch). */
+/** `n` rows of one insert block: one `ingested_at` for all of them (ClickHouse stamps the block). */
 function batch(n: number, ingestedAt: string) {
   return Array.from({ length: n }, (_, i) =>
-    row({ eventId: `b${String(i).padStart(3, "0")}`, ingestedAt }),
+    row({ eventId: `b${String(i).padStart(4, "0")}`, ingestedAt }),
   );
+}
+
+type Row = ReturnType<typeof row>;
+type Call = { query: string; params: Record<string, unknown> };
+
+/**
+ * A table of rows that answers the feed's queries the way ClickHouse would:
+ * the window before the cursor, the walk's lower bound, the blocks left
+ * out (`stamps`), the ids left out (`seen`, the query before review round
+ * 6), the page limit, oldest first — and the jump query with the newest
+ * position (in both shapes).
+ */
+function table(rows: Row[]) {
+  const ms = (t: string) => Date.parse(`${t.replace(" ", "T")}Z`);
+  const key = (r: { ingestedAt: string; eventId: string }) => `${r.ingestedAt}\u0000${r.eventId}`;
+  const sorted = [...rows].sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+  return async ({ query, params }: Call) => {
+    if (query.includes("maxOrNull")) {
+      const newest = sorted[sorted.length - 1];
+      return [
+        { cursor: newest?.ingestedAt, ingestedAt: newest?.ingestedAt, eventId: newest?.eventId },
+      ];
+    }
+    const cursor = String(params.cursor);
+    const cursorKey = `${cursor}\u0000${String(params.cursorId ?? "")}`;
+    const lowerKey = params.lower ? `${params.lower}\u0000${params.lowerId}` : undefined;
+    const stamps = (params.stamps as string[] | undefined) ?? [];
+    const seen = (params.seen as string[] | undefined) ?? [];
+    return sorted
+      .filter((r) => ms(r.ingestedAt) >= ms(cursor) - 10_000)
+      .filter((r) => lowerKey === undefined || key(r) > lowerKey)
+      .filter((r) => stamps.length === 0 || key(r) > cursorKey || !stamps.includes(r.ingestedAt))
+      .filter((r) => !seen.includes(r.eventId))
+      .slice(0, LIVE_PAGE);
+  };
 }
 
 describe("live queries (#148)", () => {
@@ -55,7 +91,7 @@ describe("live queries (#148)", () => {
       mockQueryAnalytics.mockResolvedValue([{ cursor: "2025-01-01 12:00:00.000" }]);
       const result = await initialLiveCursor(ctx);
       // No overlap of its own: the poll's window before the cursor is the overlap.
-      expect(result).toEqual({ ingestedAt: "2025-01-01 12:00:00.000", seen: [] });
+      expect(result).toEqual({ ingestedAt: "2025-01-01 12:00:00.000", eventId: "", seen: [] });
       const call = mockQueryAnalytics.mock.calls[0][0];
       expect(call.query).toContain("now64(3, 'UTC')");
       expect(call.query).not.toContain("INTERVAL 10 SECOND");
@@ -92,16 +128,21 @@ describe("live queries (#148)", () => {
       );
       expect(LIVE_SKEW_ALLOWANCE_SECONDS).toBe(3_600);
       expect(call.query).toContain("timestamp >= now() - INTERVAL 1 DAY");
-      // Oldest first: ingest stamps one ingested_at on a whole request
-      // batch, and a page of the newest 50 would return the same rows of
-      // such a batch on every poll.
-      expect(call.query).toContain("ORDER BY ingested_at ASC, timestamp ASC, event_id ASC");
+      // Oldest first, in the cursor's order: ClickHouse stamps one
+      // ingested_at on a whole insert block, and a page of the newest 50
+      // would return the same rows of such a block on every poll.
+      expect(call.query).toContain("ORDER BY ingested_at ASC, event_id ASC");
       expect(call.query).not.toContain("ingested_at DESC");
       expect(call.query).not.toContain("timestamp > {since");
       expect(call.params.cursor).toBe("2025-01-01 12:00:00.000");
-      // No seen rows: no exclusion and no parameter.
+      expect(call.params.cursorId).toBe("");
+      // Nothing read yet: no block left out, no lower bound, no id list
+      // (review round 6: the query leaves out blocks, never ids).
       expect(call.query).not.toContain("NOT IN");
+      expect(call.query).not.toContain("{lower:");
+      expect(call.params.stamps).toBeUndefined();
       expect(call.params.seen).toBeUndefined();
+      expect(call.params.lower).toBeUndefined();
     });
 
     it("shows a connection row only when it is its session's first in the last day", async () => {
@@ -113,7 +154,7 @@ describe("live queries (#148)", () => {
       expect(call.query).toContain("GROUP BY session_id");
     });
 
-    it("returns the rows in the page's order without the ingestedAt column, and advances the cursor to the newest ingested_at", async () => {
+    it("returns the rows in the page's order without the ingestedAt column, and advances the cursor to the newest position read", async () => {
       mockQueryAnalytics.mockResolvedValue([
         row({ eventId: "e1", ingestedAt: "2025-01-01 12:00:01.000" }),
         row({ eventId: "e2", ingestedAt: "2025-01-01 12:00:02.000" }),
@@ -122,55 +163,77 @@ describe("live queries (#148)", () => {
       expect(result.events.map((e) => e.eventId)).toEqual(["e1", "e2"]);
       expect(result.events[0]).not.toHaveProperty("ingestedAt");
       expect(result.cursor.ingestedAt).toBe("2025-01-01 12:00:02.000");
+      expect(result.cursor.eventId).toBe("e2");
+      expect(result.cursor.resume).toBeUndefined();
       expect(result.cursor.seen).toEqual([
         { eventId: "e1", ingestedAt: "2025-01-01 12:00:01.000" },
         { eventId: "e2", ingestedAt: "2025-01-01 12:00:02.000" },
       ]);
     });
 
-    it("keeps the cursor where it was when nothing was read; the query leaves out the rows inside the window, the cursor keeps the ones inside the resend horizon", async () => {
+    it("keeps the cursor where it was when nothing was read; the query leaves out the blocks read inside the window, the cursor keeps the rows inside the resend horizon", async () => {
       mockQueryAnalytics.mockResolvedValue([]);
       expect(LIVE_RESEND_HORIZON_SECONDS).toBe(60);
       const seen = [
         { eventId: "in-window", ingestedAt: "2025-01-01 11:59:55.000" },
+        { eventId: "in-window-too", ingestedAt: "2025-01-01 11:59:55.000" },
         { eventId: "in-horizon", ingestedAt: "2025-01-01 11:59:30.000" },
         { eventId: "forgotten", ingestedAt: "2025-01-01 11:58:00.000" },
       ];
-      const result = await pollLive(ctx, { ...cursor, seen });
+      const result = await pollLive(ctx, { ...cursor, eventId: "in-window-too", seen });
       expect(result.events).toEqual([]);
       expect(result.cursor.ingestedAt).toBe(cursor.ingestedAt);
-      // Remembered for 60 s, not only for the 10 s window; the parameter
-      // carries only what the window covers, so it stays bounded by the
-      // window, not by the horizon (#148 review round 5).
-      expect(result.cursor.seen.map((r) => r.eventId)).toEqual(["in-window", "in-horizon"]);
+      expect(result.cursor.eventId).toBe("in-window-too");
+      // Remembered for 60 s, not only for the 10 s window (#148 review
+      // round 5). The query leaves out the BLOCKS read inside the window —
+      // one stamp for the two rows — before the cursor, and takes
+      // everything after it: an id list grew to a whole insert block of
+      // up to 10 000 rows and went with every page (review round 6).
+      expect(result.cursor.seen.map((r) => r.eventId)).toEqual([
+        "in-window",
+        "in-window-too",
+        "in-horizon",
+      ]);
       const call = mockQueryAnalytics.mock.calls[0][0];
-      expect(call.query).toContain("AND event_id NOT IN {seen:Array(String)}");
-      expect(call.params.seen).toEqual(["in-window"]);
+      expect(call.query).toContain("ingested_at NOT IN {stamps:Array(DateTime64(3, 'UTC'))}");
+      expect(call.query).toContain(
+        "(ingested_at, event_id) > ({cursor:DateTime64(3, 'UTC')}, {cursorId:String})",
+      );
+      expect(call.query).not.toContain("{seen:");
+      expect(call.params.stamps).toEqual(["2025-01-01 11:59:55.000"]);
+      expect(call.params.cursorId).toBe("in-window-too");
     });
 
-    it("leaves out the rows the previous poll read (the overlap window) in the query, and remembers the ones inside the resend horizon", async () => {
-      // `shown` is not in the page: the query excluded it.
+    it("leaves out the blocks the previous poll read (the overlap window) in the query, and remembers the rows inside the resend horizon", async () => {
+      // `shown` is not in the page: the query excluded its block.
       mockQueryAnalytics.mockResolvedValue([
         row({ eventId: "late", ingestedAt: "2025-01-01 12:00:03.000" }),
         row({ eventId: "new", ingestedAt: "2025-01-01 12:00:15.000" }),
       ]);
       const result = await pollLive(ctx, {
         ingestedAt: "2025-01-01 12:00:08.000",
+        eventId: "shown",
         seen: [{ eventId: "shown", ingestedAt: "2025-01-01 12:00:08.000" }],
       });
-      expect(mockQueryAnalytics.mock.calls[0][0].params.seen).toEqual(["shown"]);
-      // `late` was ingested after `shown` was read but carries an older
+      expect(mockQueryAnalytics.mock.calls[0][0].params.stamps).toEqual([
+        "2025-01-01 12:00:08.000",
+      ]);
+      // `late` became visible after `shown` was read but carries an older
       // ingested_at than the cursor: the overlap shows it, nothing is skipped.
       expect(result.events.map((e) => e.eventId)).toEqual(["late", "new"]);
       expect(result.cursor.ingestedAt).toBe("2025-01-01 12:00:15.000");
+      expect(result.cursor.eventId).toBe("new");
       // All three stay remembered (the horizon reaches back to 11:59:15);
       // the next window starts at 12:00:05, so the next query leaves out
-      // `shown` (12:00:08) and `new`, not `late` (12:00:03).
+      // the blocks of `shown` (12:00:08) and `new`, not `late`'s (12:00:03).
       expect(result.cursor.seen.map((r) => r.eventId).sort()).toEqual(["late", "new", "shown"]);
       mockQueryAnalytics.mockClear();
       mockQueryAnalytics.mockResolvedValue([]);
       await pollLive(ctx, result.cursor);
-      expect(mockQueryAnalytics.mock.calls[0][0].params.seen.sort()).toEqual(["new", "shown"]);
+      expect([...mockQueryAnalytics.mock.calls[0][0].params.stamps].sort()).toEqual([
+        "2025-01-01 12:00:08.000",
+        "2025-01-01 12:00:15.000",
+      ]);
     });
 
     it("an SDK resend — the same event_id stored again 15 s later with a newer ingested_at, outside the query's NOT IN — is not shown again", async () => {
@@ -194,20 +257,27 @@ describe("live queries (#148)", () => {
         row({ eventId: "y", ingestedAt: "2025-01-01 12:00:16.000" }),
       ]);
       const third = await pollLive(ctx, second.cursor);
-      // The window before 12:00:12 starts at 12:00:02: `r` is out of the
-      // parameter, and the resend's row comes back from the query. Before
-      // the fix `r` was forgotten with the window and emitted twice.
-      expect(mockQueryAnalytics.mock.calls[2][0].params.seen).toEqual(["x"]);
+      // The window before 12:00:12 starts at 12:00:02: `r`'s block is out
+      // of the parameter, and the resend's row — a new block after the
+      // cursor — comes back from the query. Before the round-5 fix `r` was
+      // forgotten with the window and emitted twice.
+      expect(mockQueryAnalytics.mock.calls[2][0].params.stamps).toEqual([
+        "2025-01-01 12:00:12.000",
+      ]);
       expect(third.events.map((e) => e.eventId)).toEqual(["y"]);
       expect(third.cursor.ingestedAt).toBe("2025-01-01 12:00:16.000");
       // Remembered from the resend's ingested_at: the next query leaves the
-      // resend's row out for as long as its window covers it.
+      // resend's block out for as long as its window covers it.
       expect(third.cursor.seen.find((r) => r.eventId === "r")?.ingestedAt).toBe(
         "2025-01-01 12:00:15.000",
       );
       mockQueryAnalytics.mockResolvedValueOnce([]);
       await pollLive(ctx, third.cursor);
-      expect(mockQueryAnalytics.mock.calls[3][0].params.seen.sort()).toEqual(["r", "x", "y"]);
+      expect([...mockQueryAnalytics.mock.calls[3][0].params.stamps].sort()).toEqual([
+        "2025-01-01 12:00:12.000",
+        "2025-01-01 12:00:15.000",
+        "2025-01-01 12:00:16.000",
+      ]);
     });
 
     it("a stale page that repeats a seen row does not show it twice", async () => {
@@ -217,6 +287,7 @@ describe("live queries (#148)", () => {
       ]);
       const result = await pollLive(ctx, {
         ingestedAt: "2025-01-01 12:00:08.000",
+        eventId: "shown",
         seen: [{ eventId: "shown", ingestedAt: "2025-01-01 12:00:08.000" }],
       });
       expect(result.events.map((e) => e.eventId)).toEqual(["new"]);
@@ -234,8 +305,8 @@ describe("live queries (#148)", () => {
       expect(result.cursor.seen.map((r) => r.eventId).sort()).toEqual(["dup", "other"]);
     });
 
-    it("walks a backlog within one poll: three pages, the third short — every row, each page leaving out the ones before, the cursor at the end", async () => {
-      // Three request batches, one ingested_at each, 120 rows in all.
+    it("walks a backlog within one poll: three pages, the third short — every row, each page after the last row of the one before, the cursor at the end", async () => {
+      // Three insert blocks, one ingested_at each, 120 rows in all.
       const pages = [
         batch(50, "2025-01-01 12:00:30.000").map((r, i) => ({ ...r, eventId: `p1-${i}` })),
         batch(50, "2025-01-01 12:00:31.000").map((r, i) => ({ ...r, eventId: `p2-${i}` })),
@@ -248,47 +319,65 @@ describe("live queries (#148)", () => {
       expect(result.events).toHaveLength(120);
       expect(mockQueryAnalytics).toHaveBeenCalledTimes(3);
       const calls = mockQueryAnalytics.mock.calls.map((c) => c[0]);
-      expect(calls[0].params.seen).toBeUndefined();
-      expect(calls[1].params.cursor).toBe("2025-01-01 12:00:30.000");
-      expect(calls[1].params.seen).toEqual(pages[0].map((r) => r.eventId));
-      expect(calls[2].params.cursor).toBe("2025-01-01 12:00:31.000");
-      expect(calls[2].params.seen).toHaveLength(100);
+      // The pages walk by position: the cursor stays the poll's, the lower
+      // bound is the last row of the page before, and no id list goes
+      // along (review round 6).
+      expect(calls[0].params.lower).toBeUndefined();
+      expect(calls[1].params.cursor).toBe("2025-01-01 12:00:00.000");
+      expect(calls[1].params.lower).toBe("2025-01-01 12:00:30.000");
+      expect(calls[1].params.lowerId).toBe("p1-49");
+      expect(calls[2].params.lower).toBe("2025-01-01 12:00:31.000");
+      expect(calls[2].params.lowerId).toBe("p2-49");
+      for (const call of calls) {
+        expect(call.params.seen).toBeUndefined();
+        expect(call.params.stamps).toBeUndefined();
+      }
       expect(result.cursor.ingestedAt).toBe("2025-01-01 12:00:32.000");
+      expect(result.cursor.eventId).toBe("p3-19");
+      expect(result.cursor.resume).toBeUndefined();
       expect(result.cursor.seen).toHaveLength(120);
       expect(new Set(result.events.map((e) => e.eventId)).size).toBe(120);
       // No jump query: the short page ended the poll.
       expect(calls.some((c) => c.query.includes("maxOrNull"))).toBe(false);
     });
 
-    it("gives a backlog beyond the cap up: after LIVE_MAX_PAGES full pages the cursor jumps to the newest ingested_at of the last hour; the next query leaves out only the window's rows", async () => {
-      // Every page full and fresh: page k ingested at 12:00:(10+k).
+    /** Ten full pages, page k stamped 12:00:(10+k), then the jump query answered with `newest`. */
+    function cappedPages(newest: { ingestedAt: string; eventId: string }) {
       let page = 0;
       mockQueryAnalytics.mockImplementation(async (call: { query: string }) => {
-        if (call.query.includes("maxOrNull")) {
-          return [{ cursor: "2025-01-01 12:00:25.000" }];
-        }
+        if (call.query.includes("maxOrNull")) return [newest];
         const at = `2025-01-01 12:00:${String(10 + page).padStart(2, "0")}.000`;
-        const rows = batch(LIVE_PAGE, at).map((r, i) => ({ ...r, eventId: `p${page}-${i}` }));
+        const rows = batch(LIVE_PAGE, at).map((r, i) => ({
+          ...r,
+          eventId: `p${page}-${String(i).padStart(2, "0")}`,
+        }));
         page++;
         return rows;
       });
+    }
+
+    it("gives a backlog beyond the cap up: after LIVE_MAX_PAGES full pages, with the newest row more than one window ahead, the cursor jumps to the newest position; the next query leaves out only the window's blocks", async () => {
+      cappedPages({ ingestedAt: "2025-01-01 12:00:35.000", eventId: "n" });
       const result = await pollLive(ctx, cursor);
       expect(mockQueryAnalytics).toHaveBeenCalledTimes(LIVE_MAX_PAGES + 1); // the pages, then the jump
       expect(result.events).toHaveLength(LIVE_PAGE * LIVE_MAX_PAGES);
       // The cursor is at the newest row, not at the last page read (12:00:19).
-      expect(result.cursor.ingestedAt).toBe("2025-01-01 12:00:25.000");
+      expect(result.cursor.ingestedAt).toBe("2025-01-01 12:00:35.000");
+      expect(result.cursor.eventId).toBe("n");
+      expect(result.cursor.resume).toBeUndefined();
       // Every row read is inside the resend horizon (12:00:10 to 12:00:19,
-      // the cursor at 12:00:25); the next query's parameter carries only
-      // the window's: pages ingested at 12:00:15 and later.
+      // the cursor at 12:00:35); the window before the cursor (12:00:25 on)
+      // holds none of their blocks, so the next query has no stamps.
       expect(result.cursor.seen).toHaveLength(LIVE_PAGE * LIVE_MAX_PAGES);
-      // The jump reads the newest ingested_at of the last hour by
-      // timestamp (the sort key prunes), the clock only with no rows: the
-      // backlog it gives up may end before the clock's window, and the
-      // rows of its last 10 s are what the next poll shows (review round
-      // 4) — and not `max(ingested_at)` over the day, a full scan on every
-      // capped poll (review round 3).
+      // The jump reads the newest position of the last hour by timestamp
+      // (the sort key prunes), the clock only with no rows: the backlog it
+      // gives up may end before the clock's window, and the blocks of its
+      // last 10 s are what the next poll shows (review round 4) — and not
+      // `max(ingested_at)` over the day, a full scan on every capped poll
+      // (review round 3).
       const jump = mockQueryAnalytics.mock.calls[LIVE_MAX_PAGES][0];
       expect(jump.query).toContain("coalesce(maxOrNull(ingested_at), now64(3, 'UTC'))");
+      expect(jump.query).toContain("argMaxOrNull(event_id, (ingested_at, event_id))");
       expect(jump.query).toContain("FROM events");
       expect(jump.query).toContain(
         `timestamp >= now() - INTERVAL ${LIVE_SKEW_ALLOWANCE_SECONDS} SECOND`,
@@ -299,26 +388,40 @@ describe("live queries (#148)", () => {
       mockQueryAnalytics.mockClear();
       mockQueryAnalytics.mockResolvedValue([]);
       await pollLive(ctx, result.cursor);
-      const inWindow = new Set(
-        result.cursor.seen
-          .filter((r) => r.ingestedAt >= "2025-01-01 12:00:15.000")
-          .map((r) => r.eventId),
+      const next = mockQueryAnalytics.mock.calls[0][0];
+      expect(next.params.cursor).toBe("2025-01-01 12:00:35.000");
+      expect(next.params.cursorId).toBe("n");
+      expect(next.params.stamps).toBeUndefined();
+      expect(next.params.lower).toBeUndefined();
+    });
+
+    it("walks a backlog on instead of giving it up while the newest row is within one window of the last row read: the cursor stays at that row and the next poll continues after it", async () => {
+      // The newest row at 12:00:25, the last page read at 12:00:19: six
+      // seconds behind, inside the window — nothing to skip. Before review
+      // round 6 every capped poll jumped, and the rows between were never
+      // shown.
+      cappedPages({ ingestedAt: "2025-01-01 12:00:25.000", eventId: "n" });
+      const result = await pollLive(ctx, cursor);
+      expect(mockQueryAnalytics).toHaveBeenCalledTimes(LIVE_MAX_PAGES + 1);
+      expect(result.cursor.ingestedAt).toBe("2025-01-01 12:00:19.000");
+      expect(result.cursor.eventId).toBe("p9-49");
+      expect(result.cursor.resume).toBeUndefined();
+
+      mockQueryAnalytics.mockClear();
+      mockQueryAnalytics.mockResolvedValue([]);
+      await pollLive(ctx, result.cursor);
+      const next = mockQueryAnalytics.mock.calls[0][0];
+      // After the cursor everything; before it (the window from 12:00:09)
+      // only the blocks not read: the ten pages' stamps are left out.
+      expect(next.params.cursor).toBe("2025-01-01 12:00:19.000");
+      expect(next.params.cursorId).toBe("p9-49");
+      expect([...next.params.stamps].sort()).toEqual(
+        Array.from({ length: 10 }, (_, k) => `2025-01-01 12:00:${10 + k}.000`),
       );
-      expect(inWindow.size).toBe(LIVE_PAGE * 5);
-      expect(new Set(mockQueryAnalytics.mock.calls[0][0].params.seen)).toEqual(inWindow);
     });
 
     it("the jump never moves the cursor backwards, and the pages and the jump keep the type filter", async () => {
-      let page = 0;
-      mockQueryAnalytics.mockImplementation(async (call: { query: string }) => {
-        if (call.query.includes("maxOrNull")) {
-          return [{ cursor: "2025-01-01 12:00:05.000" }]; // the filter's newest row, behind the last page read
-        }
-        const at = `2025-01-01 12:00:${String(10 + page).padStart(2, "0")}.000`;
-        const rows = batch(LIVE_PAGE, at).map((r, i) => ({ ...r, eventId: `p${page}-${i}` }));
-        page++;
-        return rows;
-      });
+      cappedPages({ ingestedAt: "2025-01-01 12:00:05.000", eventId: "n" }); // the filter's newest row, behind the last page read
       const result = await pollLive(ctx, cursor, "tool_call");
       expect(mockQueryAnalytics).toHaveBeenCalledTimes(LIVE_MAX_PAGES + 1);
       for (const [call] of mockQueryAnalytics.mock.calls) {
@@ -326,6 +429,45 @@ describe("live queries (#148)", () => {
         expect(call.params.eventType).toBe("tool_call");
       }
       expect(result.cursor.ingestedAt).toBe("2025-01-01 12:00:19.000");
+      expect(result.cursor.eventId).toBe("p9-49");
+    });
+
+    it("a 1 200-row insert block with one ingested_at is walked out over three polls, nothing twice, with no id list and at most one stamp in any query", async () => {
+      // ClickHouse stamps one ingested_at on a whole insert block (the
+      // batch writer flushes up to 10 000 rows). Before review round 6 the
+      // cursor was that stamp alone: it sat still inside the block, every
+      // page had to leave out every id read so far (`event_id NOT IN …`),
+      // and that list — the whole block in the end — went with every page
+      // query of every poll while the window covered the block.
+      mockQueryAnalytics.mockImplementation(table(batch(1_200, "2025-01-01 12:00:30.000")));
+      const shown: string[] = [];
+      let at = { ingestedAt: "2025-01-01 12:00:25.000", eventId: "", seen: [] } as Awaited<
+        ReturnType<typeof pollLive>
+      >["cursor"];
+      const polls: number[] = [];
+      for (let i = 0; i < 4; i++) {
+        const result = await pollLive(ctx, at);
+        polls.push(result.events.length);
+        shown.push(...result.events.map((e) => e.eventId));
+        at = result.cursor;
+      }
+      const pages = mockQueryAnalytics.mock.calls
+        .map(([call]) => call)
+        .filter((call) => !call.query.includes("maxOrNull"));
+      expect(pages.length).toBeGreaterThanOrEqual(25);
+      // No id list in any page query (before the fix: every id read so
+      // far, 1 150 of them on the last page of the third poll), and at
+      // most the block's one stamp.
+      expect(pages.map((call) => call.params.seen).filter(Boolean)).toEqual([]);
+      for (const call of pages) {
+        expect((call.params.stamps ?? []).length).toBeLessThanOrEqual(1);
+        expect((call.params.stamps ?? []).length).toBeLessThanOrEqual(LIVE_STAMPS_CAP);
+      }
+      expect(polls).toEqual([500, 500, 200, 0]);
+      expect(new Set(shown).size).toBe(1_200);
+      expect(at.ingestedAt).toBe("2025-01-01 12:00:30.000");
+      expect(at.eventId).toBe("b1199");
+      expect(at.resume).toBeUndefined();
     });
 
     it("shows one connection per session per poll: the earliest ingested", async () => {

@@ -33,6 +33,11 @@ function at(offsetMs: number): string {
   return new Date(base + offsetMs).toISOString().replace("T", " ").replace("Z", "");
 }
 
+/** A cursor at `ingestedAt`, before any row of that stamp, with nothing read. */
+function from(ingestedAt: string) {
+  return { ingestedAt, eventId: "", seen: [] };
+}
+
 async function insert(rows: Array<Record<string, unknown>>) {
   await admin.insert({
     table: "events",
@@ -153,7 +158,7 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
         ingested_at: later,
       },
     ]);
-    const capped = await q.pollLive(scopeB, { ingestedAt: far(0), seen: [] }, undefined);
+    const capped = await q.pollLive(scopeB, from(far(0)), undefined);
     expect(capped.events).toHaveLength(500);
     expect(capped.cursor.ingestedAt).toBe(later);
     const next = await q.pollLive(scopeB, capped.cursor, undefined);
@@ -179,19 +184,56 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
       },
       { session_id: session, timestamp: at(2_000), ingested_at: at(2_100) },
     ]);
-    const { events } = await q.pollLive(ctx, { ingestedAt: at(0), seen: [] }, undefined);
+    const { events } = await q.pollLive(ctx, from(at(0)), undefined);
     const ofSession = events.filter((e) => e.sessionId === session);
     expect(ofSession.map((e) => e.eventType)).toEqual(["connection", "tool_call"]);
     expect(ofSession[0]?.timestamp.startsWith(at(0).slice(0, 19))).toBe(true); // the earliest
     // Filtered to connections: the same one row; to tool calls: none of them.
-    const only = await q.pollLive(ctx, { ingestedAt: at(0), seen: [] }, "connection");
+    const only = await q.pollLive(ctx, from(at(0)), "connection");
     expect(only.events.filter((e) => e.sessionId === session).map((e) => e.eventId)).toEqual([
       ofSession[0]?.eventId,
     ]);
-    const calls = await q.pollLive(ctx, { ingestedAt: at(0), seen: [] }, "tool_call");
+    const calls = await q.pollLive(ctx, from(at(0)), "tool_call");
     expect(calls.events.filter((e) => e.sessionId === session).map((e) => e.eventType)).toEqual([
       "tool_call",
     ]);
+  });
+
+  it("a 1 200-row insert block with one ingested_at is walked out over three polls, nothing twice: the cursor is a position inside the block", async () => {
+    // Before review round 6 the cursor was the stamp alone: it sat still
+    // inside such a block, and the pages could only walk it by listing
+    // every id read so far in the query — the whole block in the end, with
+    // every page.
+    const projectId = `p-${randomUUID().slice(0, 8)}`;
+    const scope = { workspaceId: ws, projectId };
+    const session = `s-${randomUUID().slice(0, 8)}`;
+    const ids = Array.from({ length: 1_200 }, () => randomUUID()).sort();
+    await insert(
+      ids.map((event_id, i) => ({
+        event_id,
+        project_id: projectId,
+        session_id: session,
+        event_name: `call-${i}`,
+        timestamp: at(20_000 + i * 10),
+        ingested_at: at(30_000),
+      })),
+    );
+    const first = await q.pollLive(scope, from(at(25_000)), undefined);
+    expect(first.events).toHaveLength(500);
+    expect(first.cursor.ingestedAt).toBe(at(30_000));
+    expect(first.cursor.eventId).toBe(ids[499]);
+    expect(first.cursor.resume).toBeUndefined();
+    const second = await q.pollLive(scope, first.cursor, undefined);
+    expect(second.events).toHaveLength(500);
+    expect(second.cursor.eventId).toBe(ids[999]);
+    const third = await q.pollLive(scope, second.cursor, undefined);
+    expect(third.events).toHaveLength(200);
+    expect(third.cursor.eventId).toBe(ids[1_199]);
+    const fourth = await q.pollLive(scope, third.cursor, undefined);
+    expect(fourth.events).toEqual([]);
+    const shown = [...first.events, ...second.events, ...third.events].map((e) => e.eventId);
+    expect(new Set(shown).size).toBe(1_200);
+    expect(shown).toEqual(ids);
   });
 
   it("a 100-row batch with one ingested_at is shown in full in one poll, nothing twice", async () => {
@@ -214,7 +256,7 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
     // the batch's ingested_at, and the next poll ranked the same 50 first
     // again — the other 50 never showed. Round 2: one poll walks the pages
     // (two full ones, then an empty one) instead of one page per poll.
-    const first = await q.pollLive(scope, { ingestedAt: at(25_000), seen: [] }, undefined);
+    const first = await q.pollLive(scope, from(at(25_000)), undefined);
     expect(first.events).toHaveLength(100);
     expect(new Set(first.events.map((e) => e.eventId)).size).toBe(100);
     expect(first.cursor.ingestedAt).toBe(at(30_000));
@@ -240,7 +282,7 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
         ingested_at: far(i * 100),
       })),
     );
-    const first = await q.pollLive(scope, { ingestedAt: far(0), seen: [] }, undefined);
+    const first = await q.pollLive(scope, from(far(0)), undefined);
     expect(first.events).toHaveLength(500);
     expect(first.events[499]?.eventName).toBe("call-499");
     // The jump: to the newest row of the last hour (69.9 s) — not to the
@@ -298,7 +340,7 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
           ingested_at: at(100),
         },
       ]);
-      const first = await q.pollLive(scope, { ingestedAt: at(0), seen: [] }, undefined);
+      const first = await q.pollLive(scope, from(at(0)), undefined);
       expect(first.events.map((e) => e.eventName)).toEqual(["once"]);
       // Another row moves the cursor past the window that covers the first.
       await insert([
@@ -345,7 +387,7 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
         ingested_at: at(16_000),
       },
     ]);
-    const first = await q.pollLive(ctx, { ingestedAt: at(5_000), seen: [] }, undefined);
+    const first = await q.pollLive(ctx, from(at(5_000)), undefined);
     expect(first.events.filter((e) => e.sessionId === session).map((e) => e.eventName)).toEqual([
       "from-a",
     ]);
