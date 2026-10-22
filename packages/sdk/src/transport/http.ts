@@ -120,8 +120,14 @@ export class HttpTransport implements Transport {
    * or exit (#148 review round 2).
    */
   private deadlineLost = 0;
-  /** Events given up for a reason other than a deadline: after a batch's last attempt, or on an unexpected status. */
+  /** Events given up for a reason other than a deadline: after a batch's last attempt, on an unexpected status, on a 401, or a batch that cannot be serialized. */
   private failed = 0;
+  /**
+   * Set by a 401: nothing is ever sent again. The queue was dropped and
+   * counted there, a shutdown drain in progress ends, and a `send()` after
+   * it is a counted drop (#148 review round 3).
+   */
+  private authRejected = false;
 
   private readonly endpoint: string;
   private readonly apiKey: string;
@@ -184,7 +190,8 @@ export class HttpTransport implements Transport {
       // join the drain and go out with it — a request finishing during a
       // healthy drain is not a deadline loss (#148 review round 2; before,
       // every send after shutdown() began was counted as one).
-      const joinsDrain = this.closing !== null && !this.drained && !this.deadlineReached;
+      const joinsDrain =
+        this.closing !== null && !this.drained && !this.deadlineReached && !this.authRejected;
       if (!joinsDrain) {
         // Refused after the deadline: the deadline's loss, counted so it is
         // reported. Stopped for good otherwise — a 401, or the drain is
@@ -309,12 +316,16 @@ export class HttpTransport implements Transport {
     // request half-way out. Every send goes through `inflight`, so a drain()
     // that started earlier sees it too. `sendBatch` never rejects: a batch
     // that fails for good is logged there (YAVIO-1201) and the next one
-    // still goes out.
+    // still goes out — and should it ever reject, the catch keeps one bad
+    // batch from aborting the drain, which would leave `drained` unset, the
+    // transport in the registry and `shutdown()` rejecting (#148 review
+    // round 3: `JSON.stringify` ran outside the try and a BigInt did that).
     const drain = async () => {
       if (this.inflight) await this.inflight.catch(() => {});
-      // A send() during the drain joins the queue and goes out here too.
-      while (this.buffer.length > 0) {
-        await this.startBatch(this.buffer.splice(0, this.maxBatchSize));
+      // A send() during the drain joins the queue and goes out here too. A
+      // 401 ends the drain: delivery stopped for good, the queue is dropped.
+      while (this.buffer.length > 0 && !this.authRejected) {
+        await this.startBatch(this.buffer.splice(0, this.maxBatchSize)).catch(() => {});
       }
       this.drained = true;
     };
@@ -354,12 +365,24 @@ export class HttpTransport implements Transport {
     this.onClosed?.();
   }
 
+  /** Deliver one batch; resolves whatever happens — a batch given up is counted and logged here. */
   private async sendBatch(batch: BaseEvent[]): Promise<void> {
-    const body = JSON.stringify({
-      events: batch,
-      sdk_version: this.sdkVersion,
-      sent_at: new Date().toISOString(),
-    });
+    let body: string;
+    try {
+      body = JSON.stringify({
+        events: batch,
+        sdk_version: this.sdkVersion,
+        sent_at: new Date().toISOString(),
+      });
+    } catch (error) {
+      // A BigInt or a circular value in an event: nothing to send, a
+      // delivery failure with its own line. Before #148 review round 3 this
+      // threw out of sendBatch, which rejected the shutdown drain.
+      console.error(
+        `[${ErrorCode.SDK.FLUSH_FAILED_MAX_RETRIES}] Could not serialize a batch of ${batch.length} events — dropped: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return this.giveUp("failed");
+    }
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       // One controller per fetch, aborted by whichever comes first: the
@@ -400,10 +423,19 @@ export class HttpTransport implements Transport {
         }
 
         if (response.status === 401) {
-          console.error(
-            `[${ErrorCode.SDK.AUTH_REJECTED_PERMANENT}] API key rejected — stopping delivery`,
-          );
+          // For good: this batch, what is queued and every later send() are
+          // delivery failures, counted and announced once here — a shutdown
+          // drain no longer sends every remaining batch into the same 401
+          // with one line each (#148 review round 3).
+          this.authRejected = true;
           this.stopped = true;
+          const dropped = this.inflightSize + this.buffer.length;
+          this.failed += this.buffer.length;
+          this.buffer.length = 0;
+          this.giveUp("failed");
+          console.error(
+            `[${ErrorCode.SDK.AUTH_REJECTED_PERMANENT}] API key rejected — stopping delivery; ${dropped} events dropped`,
+          );
           return;
         }
 
@@ -489,7 +521,8 @@ export class HttpTransport implements Transport {
    * wait that would end past it, or the deadline itself ending a wait — so
    * an exit or a signal cycle can report what the deadline cost; or a
    * delivery failure — the last attempt (`YAVIO-1201`), an unexpected
-   * status — which has its own line and is not a deadline's loss.
+   * status, a 401, a batch that cannot be serialized — which has its own
+   * line and is not a deadline's loss.
    */
   private giveUp(cause: "deadline" | "failed"): void {
     if (cause === "deadline") this.deadlineLost += this.inflightSize;

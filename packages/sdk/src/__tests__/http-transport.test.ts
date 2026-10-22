@@ -991,6 +991,79 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       await flushing;
       expect(fetch).toHaveBeenCalledTimes(2);
     });
+
+    it("a batch that cannot be serialized — a BigInt in metadata — is dropped and counted with one 1201 line; shutdown() resolves, the other batches go out, onClosed runs", async () => {
+      const fetch = vi.fn().mockResolvedValue(ok);
+      const onClosed = vi.fn();
+      const transport = new HttpTransport({
+        ...base,
+        maxBatchSize: 1,
+        flushIntervalMs: 60_000,
+        fetch,
+        onClosed,
+      });
+      // Three batches of one: the first goes out at once, the second cannot
+      // be serialized, the third must still be delivered by the drain.
+      // Before the fix `JSON.stringify` ran outside sendBatch's try: the
+      // TypeError rejected the drain, shutdown() rejected, onClosed never
+      // ran and the transport stayed in the registry's set for good.
+      transport.send([
+        fakeEvent({ event_name: "first" }),
+        fakeEvent({ event_name: "second", metadata: { n: BigInt(1) } }),
+        fakeEvent({ event_name: "third" }),
+      ]);
+      await transport.shutdown();
+      const names = fetch.mock.calls.map(
+        ([, init]) =>
+          (JSON.parse((init as RequestInit).body as string).events[0] as BaseEvent).event_name,
+      );
+      expect(names).toEqual(["first", "third"]);
+      expect(onClosed).toHaveBeenCalledTimes(1);
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(error).toHaveBeenCalledWith(
+        expect.stringMatching(/YAVIO-1201\] Could not serialize a batch of 1 events/),
+      );
+      expect(transport.lostEvents()).toBe(1);
+      expect(transport.deadlineLostEvents()).toBe(0);
+      expect(transport.pendingEvents()).toBe(0);
+    });
+
+    it("a 401 during the drain ends it: one request, one 1203 line with the dropped count, the rest a counted failure, a later send() dropped and counted", async () => {
+      const fetch = createMockFetch(401);
+      const onClosed = vi.fn();
+      const losses: Array<[number, number]> = [];
+      const transport = new HttpTransport({
+        ...base,
+        maxBatchSize: 1,
+        flushIntervalMs: 60_000,
+        fetch,
+        onClosed,
+        onShutdownLoss: (lost, deadlineMs) => losses.push([lost, deadlineMs]),
+      });
+      // Five batches of one; the first is in flight when shutdown() is called
+      // and answers 401. Before the fix the 401 only set `stopped`: the drain
+      // loop sent the other four into the same 401, one YAVIO-1203 line
+      // each, and a send() during the drain still joined it.
+      for (let i = 0; i < 5; i++) transport.send([fakeEvent()]);
+      await transport.shutdown();
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const lines = error.mock.calls
+        .map((c) => String(c[0]))
+        .filter((l) => l.includes("YAVIO-1203"));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("5 events dropped");
+      expect(transport.lostEvents()).toBe(5);
+      expect(transport.deadlineLostEvents()).toBe(0); // no deadline was reached
+      expect(losses).toEqual([]);
+      expect(transport.pendingEvents()).toBe(0);
+      expect(onClosed).toHaveBeenCalledTimes(1);
+
+      transport.send([fakeEvent()]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(transport.lostEvents()).toBe(6);
+      expect(error).toHaveBeenCalledTimes(1); // no second line
+    });
   });
 
   it("retryAfterMs(): delay-seconds, an HTTP-date from now, undefined otherwise", () => {
