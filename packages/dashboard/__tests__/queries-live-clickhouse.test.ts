@@ -107,6 +107,38 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
     expect(ofSession[0]?.timestamp.startsWith(at(0).slice(0, 19))).toBe(true); // the earliest
   });
 
+  it("a 100-row batch with one ingested_at is shown in full over two polls, nothing twice", async () => {
+    // Ingest stamps one ingested_at on a request batch, and the SDK sends
+    // up to 100 events per batch. Its own project: the page must hold only
+    // this batch.
+    const projectId = `p-${randomUUID().slice(0, 8)}`;
+    const scope = { workspaceId: ws, projectId };
+    const session = `s-${randomUUID().slice(0, 8)}`;
+    await insert(
+      Array.from({ length: 100 }, (_, i) => ({
+        project_id: projectId,
+        session_id: session,
+        event_name: `call-${i}`,
+        timestamp: at(20_000 + i * 10),
+        ingested_at: at(30_000),
+      })),
+    );
+    const first = await q.pollLive(scope, { ingestedAt: at(25_000), seen: [] }, undefined);
+    expect(first.events).toHaveLength(50);
+    expect(first.cursor.ingestedAt).toBe(at(30_000));
+    // Before the fix the page was the 50 newest by timestamp, the cursor
+    // moved to the batch's ingested_at, and the next poll ranked the same
+    // 50 first again: the other 50 never showed, and after the overlap
+    // window they were gone for good.
+    const second = await q.pollLive(scope, first.cursor, undefined);
+    expect(second.events).toHaveLength(50);
+    const ids = new Set([...first.events, ...second.events].map((e) => e.eventId));
+    expect(ids.size).toBe(100);
+    expect(second.cursor.ingestedAt).toBe(at(30_000));
+    const third = await q.pollLive(scope, second.cursor, undefined);
+    expect(third.events).toEqual([]);
+  });
+
   it("interleaved batches skip nothing across two polls: an older-timestamp event ingested later is shown once", async () => {
     const session = `s-${randomUUID().slice(0, 8)}`;
     // Instance A's event: timestamp +15 s, ingested at +16 s.
