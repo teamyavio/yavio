@@ -14,6 +14,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import {
   type AnalyticsSection,
+  type LastView,
   analyticsFilterSearch,
   analyticsSection,
   lastViewKey,
@@ -104,6 +105,11 @@ export function Sidebar({ workspaces, projects, user, mcpUrl }: SidebarProps) {
   const [mounted, setMounted] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [isWide, setIsWide] = useState(true);
+  // Where the user last was in the current project (#43); settings pages
+  // return there, and links from a page without filters in its URL carry
+  // those filters. Read from localStorage after mount and whenever the
+  // effect below stores a new value, never during render.
+  const [lastView, setLastView] = useState<LastView | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -147,16 +153,16 @@ export function Sidebar({ workspaces, projects, user, mcpUrl }: SidebarProps) {
         localStorage.setItem(lastProjectKey(paramWorkspace), paramProject);
         if (paramSection) {
           // A page without filters in its URL (Live, a fresh link) keeps the
-          // filters remembered before it rather than clearing them.
+          // filters remembered before it rather than clearing them. Reading
+          // them back through parseLastView drops a window that went stale.
           const key = lastViewKey(paramWorkspace, paramProject);
           const previous = parseLastView(localStorage.getItem(key));
-          localStorage.setItem(
-            key,
-            serializeLastView({
-              section: paramSection,
-              search: filterSearch || previous?.search || "",
-            }),
-          );
+          const stored = serializeLastView({
+            section: paramSection,
+            search: filterSearch || previous?.search || "",
+          });
+          localStorage.setItem(key, stored);
+          setLastView(parseLastView(stored));
         }
       }
     }
@@ -191,13 +197,18 @@ export function Sidebar({ workspaces, projects, user, mcpUrl }: SidebarProps) {
       ? `/${currentWorkspaceSlug}/${currentProjectSlug}`
       : "";
 
-  // Where the user last was in this project; settings pages return there,
-  // and links from a page without filters in its URL carry those filters.
-  const lastView = parseLastView(
-    mounted && currentWorkspaceSlug && currentProjectSlug
-      ? localStorage.getItem(lastViewKey(currentWorkspaceSlug, currentProjectSlug))
-      : null,
-  );
+  // Settings pages carry no project in the URL, so the write effect above
+  // does not run there; the remembered view of the current project is read
+  // here instead (after the write effect, which is declared first).
+  useEffect(() => {
+    if (!mounted) return;
+    setLastView(
+      currentWorkspaceSlug && currentProjectSlug
+        ? parseLastView(localStorage.getItem(lastViewKey(currentWorkspaceSlug, currentProjectSlug)))
+        : null,
+    );
+  }, [mounted, currentWorkspaceSlug, currentProjectSlug]);
+
   const navSearch = filterSearch || lastView?.search || "";
   const currentSection = paramSection ?? lastView?.section ?? "overview";
 
