@@ -1,5 +1,6 @@
 import { ErrorCode } from "@yavio/shared/error-codes";
 import type { BaseEvent } from "@yavio/shared/events";
+import { DEFAULT_SHUTDOWN_TIMEOUT_MS } from "../core/config.js";
 import type { Transport } from "./types.js";
 
 export interface HttpTransportOptions {
@@ -27,7 +28,6 @@ const DEFAULT_MAX_BUFFER_SIZE = 10_000;
 const DEFAULT_MAX_RETRIES = 5;
 const BASE_RETRY_DELAY_MS = 1_000;
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
-const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
 
 export class HttpTransport implements Transport {
   private buffer: BaseEvent[] = [];
