@@ -1028,6 +1028,33 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       expect(transport.pendingEvents()).toBe(0);
     });
 
+    it("fetchBudgetMs() bounds each fetch, read per attempt and cut to fetchTimeoutMs", async () => {
+      const { fetch, aborted } = abortableFetch();
+      const budgets = [250, 5_000];
+      const transport = new HttpTransport({
+        ...base,
+        immediate: true,
+        maxRetries: 0,
+        fetchTimeoutMs: 1_000,
+        fetch,
+        fetchBudgetMs: () => budgets.shift() ?? 0,
+      });
+      // The first send: a 250 ms budget — what is left of a signal cycle.
+      transport.send([fakeEvent()]);
+      await vi.advanceTimersByTimeAsync(249);
+      expect(aborted()).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(aborted()).toBe(1);
+      expect(transport.deadlineLostEvents()).toBe(1); // the budget's cut on the one attempt
+      // The next send asks again: 5 s, cut to the 1 s fetch timeout.
+      transport.send([fakeEvent()]);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(aborted()).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(aborted()).toBe(2);
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
     it("a 401 during the drain ends it: one request, one 1203 line with the dropped count, the rest a counted failure, a later send() dropped and counted", async () => {
       const fetch = createMockFetch(401);
       const onClosed = vi.fn();
@@ -1048,8 +1075,8 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       await transport.shutdown();
       expect(fetch).toHaveBeenCalledTimes(1);
       const lines = error.mock.calls
-        .map((c) => String(c[0]))
-        .filter((l) => l.includes("YAVIO-1203"));
+        .map((c: unknown[]) => String(c[0]))
+        .filter((l: string) => l.includes("YAVIO-1203"));
       expect(lines).toHaveLength(1);
       expect(lines[0]).toContain("5 events dropped");
       expect(transport.lostEvents()).toBe(5);

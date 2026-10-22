@@ -529,6 +529,32 @@ describe("a stateless host as a child process: signals, handlers and budgets (#1
   );
 
   it(
+    "a handler without process.exit(), ingest hanging, a 1.5 s request in flight: its late send keeps nothing alive past the deadline — exit within D + 0.5 s",
+    { timeout: 30_000 },
+    async () => {
+      ingest.hangEvents = true;
+      const child = await start("noexit");
+      await drive(child.port);
+      const { done: slow } = await inFlight(child, 1_500);
+      child.kill("SIGTERM");
+      const exit = await child.exited;
+      await slow;
+
+      // The request finishes at signal + 1.5 s and its event goes out
+      // through the post-signal transport, whose fetch runs within what is
+      // left of the cycle. Before the fix that transport got a fetch timeout
+      // of min(30 s, D) = 4 s from its creation: the socket kept the process
+      // alive until signal + 5.5 s, past Fly.io's 5 s.
+      expect(exit, child.output()).toMatchObject({ code: 0, signal: null });
+      expect(exit.afterSignalMs).toBeGreaterThanOrEqual(3_900);
+      expect(exit.afterSignalMs).toBeLessThan(4_500);
+      expect(ingest.responded).toBe(0);
+      expect(ingest.events).toHaveLength(EVENTS_BEFORE_SIGNAL + 1);
+      expect(sum(child.lossLines())).toBe(EVENTS_BEFORE_SIGNAL + 1);
+    },
+  );
+
+  it(
     "YAVIO_SHUTDOWN_TIMEOUT_MS=8000 with an ingest answering after 6 s: delivered",
     { timeout: 30_000 },
     async () => {

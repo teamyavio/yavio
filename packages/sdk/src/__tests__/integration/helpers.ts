@@ -18,6 +18,8 @@ export interface ReceivedBatch {
   /** `Date.now()` when the batch was received, and when its response was written. */
   receivedAt: number;
   answeredAt?: number;
+  /** `Date.now()` when the client closed the connection before any response was written: its fetch was aborted (#148 review round 3). */
+  abortedAt?: number;
   events: Event[];
   sdk_version?: string;
   sent_at?: string;
@@ -156,6 +158,9 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
       };
       batches.push(received);
       events.push(...batch.events);
+      res.on("close", () => {
+        if (received.answeredAt === undefined) received.abortedAt = Date.now();
+      });
       const respond = () => {
         ingest.responded++;
         received.answeredAt = Date.now();

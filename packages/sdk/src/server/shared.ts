@@ -4,7 +4,7 @@ import { DEFAULT_SHUTDOWN_TIMEOUT_MS, shutdownTimeoutFromEnv } from "../core/con
 import { LruMap } from "../core/lru.js";
 import { raceDeadline, unref } from "../core/timers.js";
 import type { SessionState, YavioConfig } from "../core/types.js";
-import { DEFAULT_FETCH_TIMEOUT_MS, HttpTransport } from "../transport/http.js";
+import { HttpTransport } from "../transport/http.js";
 import type { Transport } from "../transport/types.js";
 
 /**
@@ -303,6 +303,25 @@ function remainingMs(): number | undefined {
 }
 
 /**
+ * The least a post-signal transport's fetch may run: a send right at the
+ * deadline is still attempted, not aborted before the request is out.
+ */
+const MIN_LATE_FETCH_MS = 100;
+
+/**
+ * How long a fetch of a post-signal transport started now may run: what is
+ * left of the cycle, or D after the hand-back. Read per fetch, not fixed
+ * when the transport is created: that transport starts on the first send
+ * after the signal and is reused, and a timeout of min(30 s, D) from its
+ * creation let a request finishing at signal + D − ε keep its socket — and
+ * a host without `process.exit()` — alive until signal + 2D, past Fly.io's
+ * 5 s (#148 review round 3).
+ */
+function lateFetchBudgetMs(): number {
+  return Math.max(MIN_LATE_FETCH_MS, remainingMs() ?? currentBudgetMs());
+}
+
+/**
  * The deadline a drain or stop started now runs under: the caller's own
  * value, cut to what the signal cycle leaves, or to D after a hand-back.
  */
@@ -558,10 +577,9 @@ export function _setSignalReraise(fn: ((signal: "SIGTERM" | "SIGINT") => void) |
 
 function newTransport(config: Key, sdkVersion: string): HttpTransport {
   // After the signal, a transport sends at once with one attempt and a
-  // fetch that gives up within the process budget: a request finishing
-  // late still delivers its events, and never keeps the process alive for
-  // the 30 s default (#148).
-  const budgetMs = draining ? currentBudgetMs() : undefined;
+  // fetch that gives up within what is left of the process budget: a
+  // request finishing late still delivers its events, and never keeps the
+  // process alive for the 30 s default or past the deadline (#148).
   const transport = new HttpTransport({
     endpoint: config.endpoint,
     apiKey: config.apiKey,
@@ -576,9 +594,7 @@ function newTransport(config: Key, sdkVersion: string): HttpTransport {
       if (!transports.delete(transport)) return;
       lostFromClosed += transport.deadlineLostEvents();
     },
-    ...(budgetMs !== undefined
-      ? { maxRetries: 0, fetchTimeoutMs: Math.min(DEFAULT_FETCH_TIMEOUT_MS, budgetMs) }
-      : {}),
+    ...(draining ? { maxRetries: 0, fetchBudgetMs: lateFetchBudgetMs } : {}),
   });
   transports.add(transport);
   if (draining) noteDraining();

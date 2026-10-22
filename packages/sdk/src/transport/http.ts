@@ -19,11 +19,22 @@ export interface HttpTransportOptions {
    * Send on every `send()` instead of on the timer: for a transport created
    * after the process began shutting down, when no timer will fire and no
    * shutdown will drain it (see shared.ts). Still batched by the buffer cap.
-   * Such a transport lives within the process budget — its fetch timeout is
-   * cut to it — so a fetch of its that is aborted on its last attempt is
-   * the deadline's loss, not a delivery failure (#148 review round 2).
+   * Such a transport lives within the process budget — each fetch is cut
+   * to `fetchBudgetMs()` — so a fetch of its that is aborted on its last
+   * attempt is the deadline's loss, not a delivery failure (#148 review
+   * round 2).
    */
   immediate?: boolean;
+  /**
+   * How long a fetch started now may run, read per attempt and cut to
+   * `fetchTimeoutMs`: for a post-signal transport, what is left of the
+   * signal cycle, or D after the hand-back (see shared.ts). A timeout fixed
+   * when the transport was created — min(30 s, D) — let a send near the
+   * deadline run for up to another D past signal + D, its socket keeping a
+   * host without `process.exit()` alive past the platform's grace period
+   * (#148 review round 3).
+   */
+  fetchBudgetMs?: () => number;
   /**
    * Called once a `shutdown()` whose deadline gave events up has settled,
    * with the count and the deadline (#148). Without it the transport logs
@@ -140,11 +151,13 @@ export class HttpTransport implements Transport {
   private readonly shutdownTimeoutMs: number;
   private readonly _fetch: typeof globalThis.fetch;
   private readonly immediate: boolean;
+  private readonly fetchBudgetMs: (() => number) | undefined;
   private readonly onShutdownLoss: ((lost: number, deadlineMs: number) => void) | undefined;
   private readonly onClosed: (() => void) | undefined;
 
   constructor(options: HttpTransportOptions) {
     this.immediate = options.immediate === true;
+    this.fetchBudgetMs = options.fetchBudgetMs;
     this.onShutdownLoss = options.onShutdownLoss;
     this.onClosed = options.onClosed;
     this.endpoint = options.endpoint;
@@ -392,7 +405,10 @@ export class HttpTransport implements Transport {
       const controller = new AbortController();
       try {
         this.inflightController = controller;
-        const timer = setTimeout(() => controller.abort(), this.fetchTimeoutMs);
+        const budgetMs = this.fetchBudgetMs?.();
+        const timeoutMs =
+          budgetMs === undefined ? this.fetchTimeoutMs : Math.min(this.fetchTimeoutMs, budgetMs);
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
         unref(timer);
         let response: Response;
         try {
@@ -497,9 +513,9 @@ export class HttpTransport implements Transport {
         console.error(
           `[${ErrorCode.SDK.FLUSH_FAILED_MAX_RETRIES}] Giving up after ${attempt + 1} attempts`,
         );
-        // A post-signal transport's fetch timeout is the process budget: a
-        // fetch it cut on the transport's one attempt is the deadline's
-        // loss. A refused or failed connection is not.
+        // A post-signal transport's fetch budget is what is left of the
+        // process deadline: a fetch it cut on the transport's one attempt
+        // is the deadline's loss. A refused or failed connection is not.
         return this.giveUp(this.immediate && controller.signal.aborted ? "deadline" : "failed");
       }
     }

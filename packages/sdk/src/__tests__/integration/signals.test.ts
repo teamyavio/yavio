@@ -1049,6 +1049,35 @@ describe("one process deadline from the signal (#148)", () => {
     });
   });
 
+  it("a send at signal + D − 100 ms against a hanging ingest: the post-signal transport's fetch is cut at the cycle's deadline, not D after its send", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client, raw } = build("yav_148_late_fetch", { shutdownTimeoutMs: 1_000 });
+      await callTool(raw, "get_price", { q: "before" });
+      const handled = onSigterm(async () => {
+        // `await closeWithin(http, …)`: the request in flight finishes just
+        // before the deadline and sends through the immediate transport.
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        await callTool(raw, "get_price", { q: "late" });
+        await client.shutdown();
+      });
+      const signalAt = Date.now();
+      process.emit("SIGTERM", "SIGTERM");
+      await handled;
+      await vi.waitFor(() => expect(ingest.batches).toHaveLength(2));
+      const late = ingest.batches[1] as (typeof ingest.batches)[number];
+      // Each fetch of that transport runs within what is left of the cycle
+      // (100 ms at least), so the socket is gone by about signal + D and
+      // nothing keeps a host without process.exit() alive. Before the fix
+      // the transport, created at signal + 900 ms, got a fetch timeout of
+      // min(30 s, D) = 1 s from then: aborted at signal + 1.9 s — up to
+      // signal + 2D in general, past Fly.io's 5 s with the 4 s default.
+      await vi.waitFor(() => expect(late.abortedAt).toBeDefined(), { timeout: 3_000 });
+      const abortedAfter = (late.abortedAt as number) - signalAt;
+      expect(abortedAfter).toBeGreaterThanOrEqual(950);
+      expect(abortedAfter).toBeLessThan(1_400);
+    });
+  });
+
   it("YAVIO_SHUTDOWN_TIMEOUT_MS counts even when no participant set a value: a plain client is bounded by it", async () => {
     await withoutOtherListeners("SIGTERM", async () => {
       const saved = process.env.YAVIO_SHUTDOWN_TIMEOUT_MS;
