@@ -1183,7 +1183,15 @@ describe("loss accounting (#148)", () => {
       const handled = new Promise<void>((resolve) => {
         process.on("SIGTERM", async function app() {
           process.off("SIGTERM", app);
-          await callTool(raw, "get_price", { q: "late" }); // finishes after the signal, hangs in flight
+          // The request finishes at signal + 250 ms and hangs in flight. Its
+          // fetch runs within what is left of the cycle, 100 ms at least
+          // (review round 3): sent later than signal + D − 100 ms it is cut
+          // 50 ms AFTER the deadline, so the cycle's line at the deadline
+          // cannot hold it and it is the exit hook's for certain. Sent right
+          // at the signal it was cut at the same instant the cycle ended,
+          // and which line counted it depended on timer order.
+          await new Promise((r) => setTimeout(r, 250));
+          await callTool(raw, "get_price", { q: "late" });
           await client.shutdown();
           resolve();
         });
