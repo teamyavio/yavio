@@ -1,6 +1,7 @@
 import { ErrorCode } from "@yavio/shared/error-codes";
 import type { BaseEvent } from "@yavio/shared/events";
 import { DEFAULT_SHUTDOWN_TIMEOUT_MS } from "../core/config.js";
+import { unref } from "../core/timers.js";
 import type { Transport } from "./types.js";
 
 export interface HttpTransportOptions {
@@ -35,10 +36,6 @@ const DEFAULT_MAX_BUFFER_SIZE = 10_000;
 const DEFAULT_MAX_RETRIES = 5;
 const BASE_RETRY_DELAY_MS = 1_000;
 export const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
-
-const unref = (timer: ReturnType<typeof setTimeout>): void => {
-  if (timer && typeof timer === "object" && "unref" in timer) timer.unref();
-};
 
 /**
  * A `Retry-After` value as a wait in milliseconds: delay-seconds, or an

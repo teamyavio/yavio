@@ -1,6 +1,7 @@
 import os from "node:os";
 import { DEFAULT_SHUTDOWN_TIMEOUT_MS, shutdownTimeoutFromEnv } from "../core/config.js";
 import { LruMap } from "../core/lru.js";
+import { unref } from "../core/timers.js";
 import type { SessionState, YavioConfig } from "../core/types.js";
 import { DEFAULT_FETCH_TIMEOUT_MS, HttpTransport } from "../transport/http.js";
 import type { Transport } from "../transport/types.js";
@@ -262,10 +263,6 @@ let lastBudgetMs: number | undefined;
 const inProgressDeadlines: number[] = [];
 /** Resolvers of the `shutdown()` awaits to cut at the next cycle's deadline. */
 const deadlineWaiters = new Set<() => void>();
-
-const unref = (timer: ReturnType<typeof setTimeout>): void => {
-  if (timer && typeof timer === "object" && "unref" in timer) timer.unref();
-};
 
 /**
  * D for a signal arriving now: the smallest `shutdownTimeoutMs` set
