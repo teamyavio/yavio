@@ -133,28 +133,35 @@ interface Entry {
   pinned: boolean;
   /** Distinct per transport: a hold on a cleared or stopped one must not release the next. */
   generation: number;
-  /**
-   * The `shutdownTimeoutMs` of every live hold whose config set it
-   * explicitly (option, env or rc file), one per such hold — a client on
-   * the default adds nothing — and the smallest among the explicitly set
-   * `withYavio()` pins: inputs of the process deadline a signal fixes, the
-   * smallest of them all across every key, the default when none set one.
-   */
-  holdDeadlines: number[];
-  pinDeadline: number | undefined;
 }
 
 /** A hold on a key's live transport, released by `releaseShared(config, hold)`. */
 export interface SharedHold {
   state: SharedState;
   generation: number;
-  /** The holder's explicitly set `shutdownTimeoutMs` as registered (undefined on the default), removed from the entry on release. */
+  /** The holder's explicitly set `shutdownTimeoutMs` as registered (undefined on the default), removed from `holdDeadlines` on release. */
   deadlineMs: number | undefined;
 }
 
 const slots = new Map<string, Slot>();
 const registry = new Map<string, Entry>();
 let generations = 0;
+/**
+ * The `shutdownTimeoutMs` of every live `createYavio()` hold whose config
+ * set it explicitly (option, env or rc file), one entry per such hold — a
+ * client on the default adds nothing — and, per key, the smallest among
+ * the explicitly set `withYavio()` pins: the inputs of the process
+ * deadline a signal fixes (`processBudgetMs`), the smallest of them all
+ * across every key. Kept here, not on the registry entry: a signal cycle
+ * clears the registry, but the holds and pins live on — a hold is released
+ * by its own `shutdown()`, a pin never — and a second cycle in a process
+ * that survived the first (an app listener; a later wrap reinstalled the
+ * handlers) must still see them. On the entry they went with the first
+ * drain, and the second cycle fell back to the 4 s default over a client
+ * that had set 25 s (#148 review round 6).
+ */
+const holdDeadlines: number[] = [];
+const pinDeadlines = new Map<string, number>();
 /**
  * Every transport this process created and not yet shut down, for the loss
  * accounting (#148). A transport leaves the set when its `shutdown()` has
@@ -324,7 +331,8 @@ const deadlineWaiters = new Set<() => void>();
  */
 export function processBudgetMs(): number {
   let budget = shutdownTimeoutFromEnv();
-  for (const entry of registry.values()) budget = minDeadline(budget, signalDeadline(entry));
+  for (const ms of holdDeadlines) budget = minDeadline(budget, ms);
+  for (const ms of pinDeadlines.values()) budget = minDeadline(budget, ms);
   for (const ms of inProgressDeadlines) budget = minDeadline(budget, ms);
   return budget ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
 }
@@ -742,14 +750,7 @@ function entryFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string)
   // would orphan it mid-send (#142).
   const transport = slot.live ?? newTransport(config, sdkVersion);
   slot.live = transport;
-  const entry: Entry = {
-    slot,
-    holders: 0,
-    pinned: false,
-    generation: ++generations,
-    holdDeadlines: [],
-    pinDeadline: undefined,
-  };
+  const entry: Entry = { slot, holders: 0, pinned: false, generation: ++generations };
   registry.set(key, entry);
   installSignalHandlers();
   return entry;
@@ -778,21 +779,16 @@ export function pinShared(
 ): SharedState {
   const entry = entryFor(config, sdkVersion, onEvict);
   entry.pinned = true;
-  entry.pinDeadline = minDeadline(entry.pinDeadline, explicitDeadline(config));
+  const ms = explicitDeadline(config);
+  if (ms !== undefined) {
+    const key = keyOf(config);
+    pinDeadlines.set(key, minDeadline(pinDeadlines.get(key), ms) as number);
+  }
   return entry.slot;
 }
 
 const minDeadline = (a: number | undefined, b: number | undefined): number | undefined =>
   a === undefined ? b : b === undefined ? a : Math.min(a, b);
-
-/**
- * The smallest `shutdownTimeoutMs` set explicitly by a key's holders and
- * pins, or undefined when none set one: one input of the process deadline
- * (`processBudgetMs`), which takes the smallest across every key.
- */
-function signalDeadline(entry: Entry): number | undefined {
-  return entry.holdDeadlines.reduce<number | undefined>(minDeadline, entry.pinDeadline);
-}
 
 /**
  * The shared state for a resolved config, held by one more client. Each hold
@@ -806,7 +802,7 @@ export function acquireShared(
   const entry = entryFor(config, sdkVersion, onEvict);
   entry.holders++;
   const deadlineMs = explicitDeadline(config);
-  if (deadlineMs !== undefined) entry.holdDeadlines.push(deadlineMs);
+  if (deadlineMs !== undefined) holdDeadlines.push(deadlineMs);
   return { state: entry.slot, generation: entry.generation, deadlineMs };
 }
 
@@ -833,6 +829,13 @@ export function isLiveHold(config: Key, hold: SharedHold): boolean {
 export async function releaseShared(config: Key, hold: SharedHold): Promise<void> {
   const key = keyOf(config);
   const ownMs = config.shutdownTimeoutMs;
+  // The hold's value leaves the live set now — whether or not its transport
+  // is still the key's — and counts on through `noteInProgress` until the
+  // call resolves.
+  if (hold.deadlineMs !== undefined) {
+    const at = holdDeadlines.indexOf(hold.deadlineMs);
+    if (at >= 0) holdDeadlines.splice(at, 1);
+  }
   const done = noteInProgress(config);
   try {
     if (signalDrain) await signalDrain;
@@ -842,10 +845,6 @@ export async function releaseShared(config: Key, hold: SharedHold): Promise<void
       return;
     }
     entry.holders = Math.max(0, entry.holders - 1);
-    if (hold.deadlineMs !== undefined) {
-      const at = entry.holdDeadlines.indexOf(hold.deadlineMs);
-      if (at >= 0) entry.holdDeadlines.splice(at, 1);
-    }
     if (entry.holders > 0 || entry.pinned) {
       await drainTransport(entry.slot.live, boundedBy(ownMs));
       return;
@@ -996,6 +995,8 @@ export function _resetSharedState(): void {
   lastBudgetMs = undefined;
   lastDeadlineAt = undefined;
   inProgressDeadlines.length = 0;
+  holdDeadlines.length = 0;
+  pinDeadlines.clear();
   releaseWaiters();
   transports.clear();
   lostFromClosed = 0;

@@ -1194,6 +1194,61 @@ describe("one process deadline from the signal (#148)", () => {
     },
   );
 
+  it("after a first cycle the explicit values of the holds still live count: an explicit 25 s hold, a signal next to an app listener, a second key, a second signal — D is 25 s, the handler's shutdown() is not cut at 4 s", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      const app = () => {};
+      process.on("SIGTERM", app); // not the sole listener: the process survives the first cycle
+      try {
+        ingest.hangEvents = false;
+        const { client: x, raw: rawX } = build("yav_148_second_x", { shutdownTimeoutMs: 25_000 });
+        await callTool(rawX, "get_price", { q: "x" });
+        process.emit("SIGTERM", "SIGTERM");
+        await vi.waitFor(() => expect(process.listenerCount("SIGTERM")).toBe(1), {
+          timeout: 2_000,
+        });
+        expect(ingest.responded).toBe(1);
+        // X never called shutdown(): its hold, with its 25 s, lives on. A
+        // second key acquires — the handlers are installed again — and its
+        // call's first batch (the connection event; the tool_call is queued
+        // behind it) hangs at ingest until 4.5 s after the next signal, when
+        // ingest answers everything.
+        ingest.hangEvents = true;
+        const { raw: rawY } = build("yav_148_second_y");
+        await callTool(rawY, "get_price", { q: "y" });
+        await vi.waitFor(() => expect(ingest.batches).toHaveLength(2));
+        expect(process.listenerCount("SIGTERM")).toBe(2);
+        let answeredOnResolve = false;
+        const handled = onSigterm(async () => {
+          await x.shutdown();
+          answeredOnResolve = ingest.responded === ingest.batches.length;
+        });
+        const answer = setTimeout(() => {
+          ingest.hangEvents = false;
+          void ingest.answerHung();
+        }, 4_500);
+        process.emit("SIGTERM", "SIGTERM");
+        try {
+          // Before the fix the first drain had cleared the registry and the
+          // explicit values with it: the second cycle fell back to 4 s, cut
+          // X's shutdown() at signal + 4 s with Y's batch unanswered and
+          // counted it lost.
+          const { fromSignal } = await handled;
+          expect(fromSignal).toBeGreaterThanOrEqual(4_300);
+          expect(fromSignal).toBeLessThan(6_000);
+          expect(answeredOnResolve).toBe(true);
+          expect(ingest.batches[1]?.abortedAt).toBeUndefined();
+          expect(warn.mock.calls.map((c: unknown[]) => String(c[0]))).not.toContainEqual(
+            expect.stringContaining("YAVIO-1205"),
+          );
+        } finally {
+          clearTimeout(answer);
+        }
+      } finally {
+        process.off("SIGTERM", app);
+      }
+    });
+  }, 15_000);
+
   it("YAVIO_SHUTDOWN_TIMEOUT_MS counts even when no participant set a value: a plain client is bounded by it", async () => {
     await withoutOtherListeners("SIGTERM", async () => {
       const saved = process.env.YAVIO_SHUTDOWN_TIMEOUT_MS;
