@@ -1,24 +1,91 @@
 import { queryAnalytics } from "@/lib/clickhouse/analytics-client";
 import type { LiveEvent } from "./types";
 
-/** Strip trailing "Z" and "T" separator — ClickHouse DateTime64 rejects the timezone suffix. */
-function toClickHouseDateTime(iso: string): string {
-  return iso.replace("T", " ").replace("Z", "");
-}
+/**
+ * The live feed's read side (#148, Decision F).
+ *
+ * The feed tails `ingested_at` — when ingest received the event — not the
+ * event's own `timestamp`. On a fleet, an instance whose 10 s batch lands
+ * after a newer event from another instance would otherwise have its
+ * events skipped for good. `ingested_at` is set before the batch writer's
+ * 1 s flush and before any write retry (1/2/4 s), so a row becomes visible
+ * a few seconds after its `ingested_at`: every poll re-reads the
+ * `LIVE_OVERLAP` window before its cursor and drops the rows it already
+ * showed by `event_id`. `ingested_at` is outside the sort and partition
+ * keys, so every poll also keeps a `timestamp` bound to stay within the
+ * current partitions.
+ *
+ * A `connection` row is shown only if its session has no connection row
+ * with an earlier `ingested_at` in the preceding 24 h, and within one poll
+ * only the earliest per session: a stateless fleet emits one connection
+ * per instance that served a session (the SDK's once-only events are per
+ * process), and the ids are random, so nothing collapses them on write.
+ */
 
-interface QueryContext {
+/** How far before the cursor a poll re-reads, in whole seconds (SQL `INTERVAL n SECOND`). */
+export const LIVE_OVERLAP_SECONDS = 10;
+const LIVE_OVERLAP_MS = LIVE_OVERLAP_SECONDS * 1_000;
+
+/** Rows per poll (the newest first; the client gets them oldest first). */
+const LIVE_PAGE = 50;
+
+export interface QueryContext {
   workspaceId: string;
   projectId: string;
 }
 
-export async function queryRecentEvents(
+/**
+ * Where the feed has read up to: the newest `ingested_at` shown so far
+ * (ClickHouse `DateTime64(3, 'UTC')` text, `YYYY-MM-DD HH:MM:SS.mmm`), and
+ * the ids of the rows shown whose `ingested_at` is still inside the
+ * overlap window — the rows the next poll will read again.
+ */
+export interface LiveCursor {
+  ingestedAt: string;
+  seen: string[];
+}
+
+export interface LivePoll {
+  /** Oldest first, deduplicated, one connection per session. */
+  events: LiveEvent[];
+  cursor: LiveCursor;
+}
+
+/** A row as the query returns it: the event plus where to resume from. */
+interface LiveRow extends LiveEvent {
+  ingestedAt: string;
+}
+
+/** `YYYY-MM-DD HH:MM:SS.mmm` (UTC) as epoch milliseconds. */
+function ingestedAtMs(text: string): number {
+  return Date.parse(`${text.replace(" ", "T")}Z`);
+}
+
+/** The feed's start: ClickHouse's clock, one overlap window ago, so nothing is skipped on connect. */
+export async function initialLiveCursor(ctx: QueryContext): Promise<LiveCursor> {
+  const rows = await queryAnalytics<{ cursor: string }>({
+    workspaceId: ctx.workspaceId,
+    projectId: ctx.projectId,
+    query: `SELECT toString(now64(3, 'UTC') - INTERVAL ${LIVE_OVERLAP_SECONDS} SECOND) AS cursor`,
+  });
+  const cursor = rows[0]?.cursor;
+  if (!cursor) throw new Error("ClickHouse returned no clock");
+  return { ingestedAt: cursor, seen: [] };
+}
+
+/**
+ * One poll: the rows ingested since the cursor (minus the overlap), oldest
+ * first, without the ones the previous poll showed, and with one
+ * connection per session. Pure: the caller keeps the returned cursor.
+ */
+export async function pollLive(
   ctx: QueryContext,
-  since: string,
+  cursor: LiveCursor,
   eventType?: string,
-): Promise<LiveEvent[]> {
+): Promise<LivePoll> {
   const typeFilter = eventType ? " AND event_type = {eventType:String}" : "";
 
-  return queryAnalytics<LiveEvent>({
+  const rows = await queryAnalytics<LiveRow>({
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
@@ -34,18 +101,58 @@ export async function queryRecentEvents(
         status,
         latency_ms AS latencyMs,
         error_category AS errorCategory,
-        error_message AS errorMessage
+        error_message AS errorMessage,
+        toString(ingested_at) AS ingestedAt
       FROM events
       WHERE project_id = {projectId:String}
-        AND timestamp > {since:DateTime64(3)}
+        AND timestamp >= now() - INTERVAL 1 DAY
+        AND ingested_at >= {cursor:DateTime64(3, 'UTC')} - INTERVAL ${LIVE_OVERLAP_SECONDS} SECOND
+        AND (
+          event_type != 'connection'
+          OR (session_id, ingested_at) IN (
+            SELECT session_id, min(ingested_at)
+            FROM events
+            WHERE project_id = {projectId:String}
+              AND event_type = 'connection'
+              AND timestamp >= now() - INTERVAL 1 DAY
+            GROUP BY session_id
+          )
+        )
         ${typeFilter}
-      ORDER BY timestamp DESC
-      LIMIT 50
+      ORDER BY ingested_at DESC, timestamp DESC
+      LIMIT ${LIVE_PAGE}
     `,
     params: {
       projectId: ctx.projectId,
-      since: toClickHouseDateTime(since),
+      cursor: cursor.ingestedAt,
       ...(eventType ? { eventType } : {}),
     },
   });
+
+  const seen = new Set(cursor.seen);
+  const connectionSessions = new Set<string>();
+  const events: LiveEvent[] = [];
+  for (const row of [...rows].reverse()) {
+    if (seen.has(row.eventId)) continue;
+    if (row.eventType === "connection") {
+      if (connectionSessions.has(row.sessionId)) continue;
+      connectionSessions.add(row.sessionId);
+    }
+    const { ingestedAt: _ingestedAt, ...event } = row;
+    events.push(event);
+  }
+
+  let newest = cursor.ingestedAt;
+  for (const row of rows) if (row.ingestedAt > newest) newest = row.ingestedAt;
+  const windowStart = ingestedAtMs(newest) - LIVE_OVERLAP_MS;
+  return {
+    events,
+    cursor: {
+      ingestedAt: newest,
+      // Every row this poll read that the next one will read again — shown
+      // or not — so none is shown twice. Rows older than the window cannot
+      // come back: the cursor never moves backwards.
+      seen: rows.filter((row) => ingestedAtMs(row.ingestedAt) >= windowStart).map((r) => r.eventId),
+    },
+  };
 }

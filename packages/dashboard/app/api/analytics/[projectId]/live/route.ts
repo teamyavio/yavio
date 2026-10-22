@@ -1,6 +1,5 @@
 import { withAnalyticsAuth } from "@/lib/analytics/auth";
-import { AnalyticsQueryError } from "@/lib/clickhouse/analytics-client";
-import { queryRecentEvents } from "@/lib/queries/live";
+import { type LiveCursor, initialLiveCursor, pollLive } from "@/lib/queries/live";
 import { ErrorCode } from "@yavio/shared/error-codes";
 import { NextResponse } from "next/server";
 
@@ -26,7 +25,11 @@ export const GET = withAnalyticsAuth("viewer")(async (request, ctx) => {
 
   connectionCounts.set(userId, currentCount + 1);
 
-  let lastTimestamp = new Date(Date.now() - 10_000).toISOString();
+  const query = { workspaceId: ctx.workspaceId, projectId: ctx.projectId };
+  // The feed's position lives in the query module (#148): the route only
+  // keeps the cursor the last poll returned.
+  let cursor: LiveCursor | undefined;
+  let polling = false;
   let closed = false;
 
   const stream = new ReadableStream({
@@ -46,22 +49,19 @@ export const GET = withAnalyticsAuth("viewer")(async (request, ctx) => {
       };
 
       const poll = async () => {
-        if (closed) return;
+        // One poll at a time: a slow one must not run next to the next tick
+        // with the same cursor.
+        if (closed || polling) return;
+        polling = true;
         try {
-          const events = await queryRecentEvents(
-            { workspaceId: ctx.workspaceId, projectId: ctx.projectId },
-            lastTimestamp,
-            eventType,
-          );
-
-          for (const event of events.reverse()) {
-            send("event", JSON.stringify(event));
-            if (event.timestamp > lastTimestamp) {
-              lastTimestamp = event.timestamp;
-            }
-          }
+          cursor ??= await initialLiveCursor(query);
+          const result = await pollLive(query, cursor, eventType);
+          cursor = result.cursor;
+          for (const event of result.events) send("event", JSON.stringify(event));
         } catch {
           // Silently skip poll errors
+        } finally {
+          polling = false;
         }
       };
 
