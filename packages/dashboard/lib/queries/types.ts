@@ -207,18 +207,6 @@ export interface IntentKPIs {
 }
 
 /**
- * Response contract of GET /api/analytics/[projectId]/intents. Shared by the
- * route and the page so a rename on either side is a compile error rather
- * than a silently undefined field at runtime.
- */
-export interface IntentsResponse {
-  intents: IntentFeedItem[];
-  total: number;
-  kpis: IntentKPIs;
-  intentStatus: IntentStatus;
-}
-
-/**
  * One row of the project-wide invocation list (#44): every tool call in the
  * range, newest first, with its intent inline when one was captured.
  */
