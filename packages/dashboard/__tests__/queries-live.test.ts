@@ -6,7 +6,7 @@ vi.mock("@/lib/clickhouse/analytics-client", () => ({
   queryAnalytics: (...args: unknown[]) => mockQueryAnalytics(...args),
 }));
 
-import { initialLiveCursor, pollLive } from "@/lib/queries/live";
+import { LIVE_MAX_PAGES, LIVE_PAGE, initialLiveCursor, pollLive } from "@/lib/queries/live";
 
 const ctx = { workspaceId: "ws_1", projectId: "proj_1" };
 
@@ -153,22 +153,73 @@ describe("live queries (#148)", () => {
       expect(result.cursor.seen.map((r) => r.eventId).sort()).toEqual(["dup", "other"]);
     });
 
-    it("walks a backlog larger than a page: a 100-row batch with one ingested_at is read in two pages, the second leaving out the first", async () => {
-      const at = "2025-01-01 12:00:30.000";
-      mockQueryAnalytics.mockResolvedValueOnce(batch(100, at).slice(0, 50));
-      const first = await pollLive(ctx, cursor);
-      expect(first.events).toHaveLength(50);
-      expect(first.cursor.ingestedAt).toBe(at);
-      expect(first.cursor.seen).toHaveLength(50);
+    it("walks a backlog within one poll: three pages, the third short — every row, each page leaving out the ones before, the cursor at the end", async () => {
+      // Three request batches, one ingested_at each, 120 rows in all.
+      const pages = [
+        batch(50, "2025-01-01 12:00:30.000").map((r, i) => ({ ...r, eventId: `p1-${i}` })),
+        batch(50, "2025-01-01 12:00:31.000").map((r, i) => ({ ...r, eventId: `p2-${i}` })),
+        batch(20, "2025-01-01 12:00:32.000").map((r, i) => ({ ...r, eventId: `p3-${i}` })),
+      ];
+      for (const page of pages) mockQueryAnalytics.mockResolvedValueOnce(page);
+      const result = await pollLive(ctx, cursor);
+      // Before the fix one poll read one page: 50 rows per 1.5 s, and the
+      // cursor fell behind for good above ~33 events/s.
+      expect(result.events).toHaveLength(120);
+      expect(mockQueryAnalytics).toHaveBeenCalledTimes(3);
+      const calls = mockQueryAnalytics.mock.calls.map((c) => c[0]);
+      expect(calls[0].params.seen).toBeUndefined();
+      expect(calls[1].params.cursor).toBe("2025-01-01 12:00:30.000");
+      expect(calls[1].params.seen).toEqual(pages[0].map((r) => r.eventId));
+      expect(calls[2].params.cursor).toBe("2025-01-01 12:00:31.000");
+      expect(calls[2].params.seen).toHaveLength(100);
+      expect(result.cursor.ingestedAt).toBe("2025-01-01 12:00:32.000");
+      expect(result.cursor.seen).toHaveLength(120);
+      expect(new Set(result.events.map((e) => e.eventId)).size).toBe(120);
+      // No jump query: the short page ended the poll.
+      expect(calls.some((c) => c.query.includes("max(ingested_at)"))).toBe(false);
+    });
 
-      mockQueryAnalytics.mockResolvedValueOnce(batch(100, at).slice(50));
-      const second = await pollLive(ctx, first.cursor);
-      const call = mockQueryAnalytics.mock.calls[1][0];
-      expect(call.params.seen).toEqual(first.cursor.seen.map((r) => r.eventId));
-      expect(second.events).toHaveLength(50);
-      expect(second.cursor.seen).toHaveLength(100);
-      const ids = new Set([...first.events, ...second.events].map((e) => e.eventId));
-      expect(ids.size).toBe(100);
+    it("gives a backlog beyond the cap up: after LIVE_MAX_PAGES full pages the cursor jumps to the newest row and seen keeps only the window", async () => {
+      // Every page full and fresh: page k ingested at 12:00:(10+k).
+      let page = 0;
+      mockQueryAnalytics.mockImplementation(async (call: { query: string }) => {
+        if (call.query.includes("max(ingested_at)")) {
+          return [{ newest: "2025-01-01 12:00:25.000", rows: "100000" }];
+        }
+        const at = `2025-01-01 12:00:${String(10 + page).padStart(2, "0")}.000`;
+        const rows = batch(LIVE_PAGE, at).map((r, i) => ({ ...r, eventId: `p${page}-${i}` }));
+        page++;
+        return rows;
+      });
+      const result = await pollLive(ctx, cursor);
+      expect(mockQueryAnalytics).toHaveBeenCalledTimes(LIVE_MAX_PAGES + 1); // the pages, then the jump
+      expect(result.events).toHaveLength(LIVE_PAGE * LIVE_MAX_PAGES);
+      // The cursor is at the newest row of the window, not at the last page read (12:00:19).
+      expect(result.cursor.ingestedAt).toBe("2025-01-01 12:00:25.000");
+      // `seen` is bounded to the new window: pages ingested at 12:00:15 and later.
+      expect(result.cursor.seen).toHaveLength(LIVE_PAGE * 5);
+      expect(result.cursor.seen.every((r) => r.ingestedAt >= "2025-01-01 12:00:15.000")).toBe(true);
+      const jump = mockQueryAnalytics.mock.calls[LIVE_MAX_PAGES][0];
+      expect(jump.query).toContain("timestamp >= now() - INTERVAL 1 DAY");
+      expect(jump.query).not.toContain("event_type = {eventType:String}");
+    });
+
+    it("the jump honours the type filter and never moves the cursor backwards", async () => {
+      let page = 0;
+      mockQueryAnalytics.mockImplementation(async (call: { query: string }) => {
+        if (call.query.includes("max(ingested_at)")) {
+          return [{ newest: "2025-01-01 12:00:05.000", rows: "7" }]; // older than the last page read
+        }
+        const at = `2025-01-01 12:00:${String(10 + page).padStart(2, "0")}.000`;
+        const rows = batch(LIVE_PAGE, at).map((r, i) => ({ ...r, eventId: `p${page}-${i}` }));
+        page++;
+        return rows;
+      });
+      const result = await pollLive(ctx, cursor, "tool_call");
+      const jump = mockQueryAnalytics.mock.calls[LIVE_MAX_PAGES][0];
+      expect(jump.query).toContain("event_type = {eventType:String}");
+      expect(jump.params.eventType).toBe("tool_call");
+      expect(result.cursor.ingestedAt).toBe("2025-01-01 12:00:19.000");
     });
 
     it("shows one connection per session per poll: the earliest ingested", async () => {

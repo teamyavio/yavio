@@ -16,9 +16,15 @@ import type { LiveEvent } from "./types";
  * 100 events), so a page of 50 newest-first would return the same 50 rows
  * of such a batch on every poll and the other 50 would never rank into a
  * page; oldest first with the read ids excluded, the cursor walks through
- * a backlog page by page. `ingested_at` is outside the sort and partition
- * keys, so every poll also keeps a `timestamp` bound to stay within the
- * current partitions.
+ * a backlog page by page — within one poll, up to `LIVE_MAX_PAGES` pages
+ * (bounded catch-up, #148 review round 2): one page per 1.5 s poll fell
+ * behind for good above ~33 events/s, with the cursor's `seen` list growing
+ * with the backlog. A backlog larger than the cap is given up: the cursor
+ * jumps to the newest `ingested_at` the feed would show, so the live view
+ * shows the latest events and the rows between the last page read and the
+ * new window are never shown. `ingested_at` is outside the sort and
+ * partition keys, so every poll also keeps a `timestamp` bound to stay
+ * within the current partitions.
  *
  * A `connection` row is shown only if its session has no connection row
  * with an earlier `ingested_at` in the preceding 24 h, and within one poll
@@ -31,8 +37,13 @@ import type { LiveEvent } from "./types";
 export const LIVE_OVERLAP_SECONDS = 10;
 const LIVE_OVERLAP_MS = LIVE_OVERLAP_SECONDS * 1_000;
 
-/** Rows per poll, oldest first: a backlog larger than a page is walked over the next polls. */
-const LIVE_PAGE = 50;
+/** Rows per page, oldest first. */
+export const LIVE_PAGE = 50;
+/**
+ * Pages one poll reads at most (`LIVE_PAGE` × this rows). A backlog still
+ * full after that is dropped: the cursor jumps to the newest row.
+ */
+export const LIVE_MAX_PAGES = 10;
 
 export interface QueryContext {
   workspaceId: string;
@@ -118,9 +129,15 @@ function connectionFilter(eventType: string | undefined): string {
         )`;
 }
 
+/** The ids read whose `ingested_at` the window before `ingestedAt` covers again. */
+function withinWindow(read: Map<string, SeenRow>, ingestedAt: string): SeenRow[] {
+  const windowStart = ingestedAtMs(ingestedAt) - LIVE_OVERLAP_MS;
+  return [...read.values()].filter((row) => ingestedAtMs(row.ingestedAt) >= windowStart);
+}
+
 /**
- * One poll: the next page of rows ingested since the cursor (minus the
- * overlap), oldest first, without the ones the previous poll read, and
+ * One poll: the rows ingested since the cursor (minus the overlap), oldest
+ * first, page by page up to the cap, without the ones read before, and
  * with one connection per session. Pure: the caller keeps the returned
  * cursor.
  */
@@ -129,12 +146,91 @@ export async function pollLive(
   cursor: LiveCursor,
   eventType?: string,
 ): Promise<LivePoll> {
+  const seen = new Set(cursor.seen.map((row) => row.eventId));
+  const connectionSessions = new Set<string>();
+  const events: LiveEvent[] = [];
+  // Every row read so far — earlier polls' or this one's, shown or not —
+  // with its ingested_at, so the next page and the next poll leave it out
+  // while the window still covers it. Rows older than the window cannot
+  // come back: the cursor never moves backwards.
+  const read = new Map(cursor.seen.map((row) => [row.eventId, row]));
+  let newest = cursor.ingestedAt;
+  let full = false;
+
+  for (let page = 0; page < LIVE_MAX_PAGES; page++) {
+    const rows = await readPage(
+      ctx,
+      { ingestedAt: newest, seen: withinWindow(read, newest) },
+      eventType,
+    );
+    for (const row of rows) {
+      read.set(row.eventId, { eventId: row.eventId, ingestedAt: row.ingestedAt });
+      if (row.ingestedAt > newest) newest = row.ingestedAt;
+      // The query leaves out the rows read before; this also catches a
+      // stale page and the same event_id twice in one page (a
+      // ReplacingMergeTree holds at-least-once duplicates until it merges,
+      // #148 review round 2).
+      if (seen.has(row.eventId)) continue;
+      seen.add(row.eventId);
+      if (row.eventType === "connection") {
+        if (connectionSessions.has(row.sessionId)) continue;
+        connectionSessions.add(row.sessionId);
+      }
+      const { ingestedAt: _ingestedAt, ...event } = row;
+      events.push(event);
+    }
+    full = rows.length >= LIVE_PAGE;
+    if (!full) break; // a short page: caught up
+  }
+
+  if (full) {
+    // The cap: the backlog is larger than one poll walks. Give it up — the
+    // live view shows the latest events, not a tail that only falls
+    // further behind — by jumping to the newest row the feed would show.
+    // Rows between the last page read and the new window are never shown;
+    // the rows inside the window that were not read come with the next
+    // poll (the read ones stay excluded through `seen`).
+    const jump = await newestIngestedAt(ctx, eventType);
+    if (jump !== undefined && jump > newest) newest = jump;
+  }
+
+  return { events, cursor: { ingestedAt: newest, seen: withinWindow(read, newest) } };
+}
+
+/** The newest `ingested_at` the feed would show, or undefined when there is no row. */
+async function newestIngestedAt(
+  ctx: QueryContext,
+  eventType?: string,
+): Promise<string | undefined> {
   const typeFilter = eventType ? "AND event_type = {eventType:String}" : "";
-  // Read in the previous poll and still inside the window: left out here,
-  // not only after the fact, so the page holds rows not read yet.
+  const rows = await queryAnalytics<{ newest: string; rows: string }>({
+    workspaceId: ctx.workspaceId,
+    projectId: ctx.projectId,
+    query: `
+      SELECT toString(max(ingested_at)) AS newest, toString(count()) AS rows
+      FROM events
+      WHERE project_id = {projectId:String}
+        AND timestamp >= now() - INTERVAL 1 DAY
+        ${typeFilter}
+    `,
+    params: { projectId: ctx.projectId, ...(eventType ? { eventType } : {}) },
+  });
+  const row = rows[0];
+  return row && Number(row.rows) > 0 ? row.newest : undefined;
+}
+
+/** One page of rows ingested since `cursor` (minus the overlap), oldest first, without the ids in `cursor.seen`. */
+async function readPage(
+  ctx: QueryContext,
+  cursor: LiveCursor,
+  eventType?: string,
+): Promise<LiveRow[]> {
+  const typeFilter = eventType ? "AND event_type = {eventType:String}" : "";
+  // Read before and still inside the window: left out here, not only
+  // after the fact, so the page holds rows not read yet.
   const seenFilter = cursor.seen.length > 0 ? "AND event_id NOT IN {seen:Array(String)}" : "";
 
-  const rows = await queryAnalytics<LiveRow>({
+  return queryAnalytics<LiveRow>({
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
     query: `
@@ -168,38 +264,4 @@ export async function pollLive(
       ...(cursor.seen.length > 0 ? { seen: cursor.seen.map((row) => row.eventId) } : {}),
     },
   });
-
-  const seen = new Set(cursor.seen.map((row) => row.eventId));
-  const connectionSessions = new Set<string>();
-  const events: LiveEvent[] = [];
-  for (const row of rows) {
-    // The query leaves out the rows read before; this also catches a stale
-    // page and the same event_id twice in one page (a ReplacingMergeTree
-    // holds at-least-once duplicates until it merges, #148 review round 2).
-    if (seen.has(row.eventId)) continue;
-    seen.add(row.eventId);
-    if (row.eventType === "connection") {
-      if (connectionSessions.has(row.sessionId)) continue;
-      connectionSessions.add(row.sessionId);
-    }
-    const { ingestedAt: _ingestedAt, ...event } = row;
-    events.push(event);
-  }
-
-  let newest = cursor.ingestedAt;
-  for (const row of rows) if (row.ingestedAt > newest) newest = row.ingestedAt;
-  const windowStart = ingestedAtMs(newest) - LIVE_OVERLAP_MS;
-  // Every row read so far — this poll's or earlier, shown or not — whose
-  // ingested_at the next window covers again, so none is read twice. Rows
-  // older than the window cannot come back: the cursor never moves
-  // backwards.
-  const read = new Map(cursor.seen.map((row) => [row.eventId, row]));
-  for (const { eventId, ingestedAt } of rows) read.set(eventId, { eventId, ingestedAt });
-  return {
-    events,
-    cursor: {
-      ingestedAt: newest,
-      seen: [...read.values()].filter((row) => ingestedAtMs(row.ingestedAt) >= windowStart),
-    },
-  };
 }

@@ -116,9 +116,9 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
     ]);
   });
 
-  it("a 100-row batch with one ingested_at is shown in full over two polls, nothing twice", async () => {
+  it("a 100-row batch with one ingested_at is shown in full in one poll, nothing twice", async () => {
     // Ingest stamps one ingested_at on a request batch, and the SDK sends
-    // up to 100 events per batch. Its own project: the page must hold only
+    // up to 100 events per batch. Its own project: the pages must hold only
     // this batch.
     const projectId = `p-${randomUUID().slice(0, 8)}`;
     const scope = { workspaceId: ws, projectId };
@@ -132,18 +132,52 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
         ingested_at: at(30_000),
       })),
     );
+    // Round 1: the page was the 50 newest by timestamp, the cursor moved to
+    // the batch's ingested_at, and the next poll ranked the same 50 first
+    // again — the other 50 never showed. Round 2: one poll walks the pages
+    // (two full ones, then an empty one) instead of one page per poll.
     const first = await q.pollLive(scope, { ingestedAt: at(25_000), seen: [] }, undefined);
-    expect(first.events).toHaveLength(50);
+    expect(first.events).toHaveLength(100);
+    expect(new Set(first.events.map((e) => e.eventId)).size).toBe(100);
     expect(first.cursor.ingestedAt).toBe(at(30_000));
-    // Before the fix the page was the 50 newest by timestamp, the cursor
-    // moved to the batch's ingested_at, and the next poll ranked the same
-    // 50 first again: the other 50 never showed, and after the overlap
-    // window they were gone for good.
+    expect(first.cursor.seen).toHaveLength(100);
     const second = await q.pollLive(scope, first.cursor, undefined);
-    expect(second.events).toHaveLength(50);
-    const ids = new Set([...first.events, ...second.events].map((e) => e.eventId));
-    expect(ids.size).toBe(100);
+    expect(second.events).toEqual([]);
     expect(second.cursor.ingestedAt).toBe(at(30_000));
+  });
+
+  it("a backlog beyond the cap is given up: 700 rows over 70 s show the first 500, then the cursor jumps and the rows before the new window never show", async () => {
+    const projectId = `p-${randomUUID().slice(0, 8)}`;
+    const scope = { workspaceId: ws, projectId };
+    const session = `s-${randomUUID().slice(0, 8)}`;
+    // One row every 100 ms: the cap (10 pages of 50) covers the first 50 s.
+    await insert(
+      Array.from({ length: 700 }, (_, i) => ({
+        project_id: projectId,
+        session_id: session,
+        event_name: `call-${i}`,
+        timestamp: at(i * 100 - 50),
+        ingested_at: at(i * 100),
+      })),
+    );
+    const first = await q.pollLive(scope, { ingestedAt: at(0), seen: [] }, undefined);
+    expect(first.events).toHaveLength(500);
+    expect(first.events[499]?.eventName).toBe("call-499");
+    // The jump: to the newest row (69.9 s), not to the last page read (49.9 s).
+    expect(first.cursor.ingestedAt).toBe(at(69_900));
+    // `seen` keeps only the rows read inside the new window (59.9 s on):
+    // none — the last page read ends at 49.9 s.
+    expect(first.cursor.seen).toHaveLength(0);
+
+    // The next poll reads the window the jump opened: rows 599–699. Rows
+    // 500–598 are never shown.
+    const second = await q.pollLive(scope, first.cursor, undefined);
+    expect(second.events).toHaveLength(101);
+    expect(second.events[0]?.eventName).toBe("call-599");
+    expect(second.events[100]?.eventName).toBe("call-699");
+    expect(second.cursor.ingestedAt).toBe(at(69_900));
+    const shown = new Set([...first.events, ...second.events].map((e) => e.eventId));
+    expect(shown.size).toBe(601);
     const third = await q.pollLive(scope, second.cursor, undefined);
     expect(third.events).toEqual([]);
   });
