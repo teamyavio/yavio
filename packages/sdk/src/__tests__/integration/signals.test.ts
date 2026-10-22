@@ -15,6 +15,7 @@ import {
   _sharedStateCount,
   _trackedTransportCount,
 } from "../../server/shared.js";
+import { restoreEnv } from "../env.js";
 import { type MockIngest, callTool, startMockIngest } from "./helpers.js";
 
 const RESPONSE_DELAY_MS = 150;
@@ -40,16 +41,6 @@ async function withoutOtherListeners(
 }
 
 const ok = async () => ({ content: [{ type: "text" as const, text: "ok" }] });
-
-/**
- * Put an environment variable back as it was. Not `process.env.X =
- * undefined`: Node coerces the value to the string "undefined", which the
- * next test reads as a set, invalid value (#148 review round 2).
- */
-function restoreEnv(name: string, value: string | undefined): void {
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
-}
 
 /**
  * The cycle's line before a re-raise is written with `fs.writeSync(2, …)`

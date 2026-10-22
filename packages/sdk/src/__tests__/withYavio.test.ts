@@ -6,16 +6,7 @@ import { SDK_VERSION as REACT_SDK_VERSION } from "../react/constants.js";
 import { SDK_VERSION, createYavio, withYavio, yavio } from "../server/index.js";
 import { _resetGlobalState } from "../server/proxy.js";
 import { _sharedStateCount } from "../server/shared.js";
-
-/**
- * A copy of `env` without `keys`. Not `process.env.X = undefined`, which
- * Node stores as the string "undefined" on the real env, and not `delete`
- * (Biome's `noDelete`): the describe blocks below replace `process.env`
- * with a copy and put the original back (#148 review round 2).
- */
-function without(env: NodeJS.ProcessEnv, ...keys: string[]): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(env).filter(([key]) => !keys.includes(key)));
-}
+import { without } from "./env.js";
 
 describe("withYavio", () => {
   const originalEnv = process.env;

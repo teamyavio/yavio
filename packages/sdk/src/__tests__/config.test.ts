@@ -8,16 +8,7 @@ import {
   resolveConfig,
   shutdownTimeoutFromEnv,
 } from "../core/config.js";
-
-/**
- * A copy of `env` without `keys`. Not `process.env.X = undefined`, which
- * Node stores as the string "undefined" on the real env, and not `delete`
- * (Biome's `noDelete`): the describe blocks below replace `process.env`
- * with a copy and put the original back (#148 review round 2).
- */
-function without(env: NodeJS.ProcessEnv, ...keys: string[]): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(env).filter(([key]) => !keys.includes(key)));
-}
+import { without } from "./env.js";
 
 describe("resolveConfig", () => {
   const originalEnv = process.env;
