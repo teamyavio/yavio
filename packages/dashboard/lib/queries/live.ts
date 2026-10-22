@@ -20,14 +20,20 @@ import type { LiveEvent } from "./types";
  * (bounded catch-up, #148 review round 2): one page per 1.5 s poll fell
  * behind for good above ~33 events/s, with the cursor's `seen` list growing
  * with the backlog. A backlog larger than the cap is given up: the cursor
- * jumps to ClickHouse's clock, so the live view shows what was ingested in
- * the last `LIVE_OVERLAP` window and after, and the rows between the last
- * page read and that window are never shown (not to `max(ingested_at)` of
- * the day, which scanned every row of the day on each capped poll — during
- * the very load spike that causes the backlog, `ingested_at` being outside
- * the sort key; #148 review round 3). `ingested_at` is outside the sort and
- * partition keys, so every poll also keeps a `timestamp` bound to stay
- * within the current partitions.
+ * jumps to the newest `ingested_at` the feed would show among the rows of
+ * the last `LIVE_SKEW_ALLOWANCE` (see `latestCursor`), so the live view
+ * shows what was ingested in the last `LIVE_OVERLAP` window before that
+ * and after, and the rows between the last page read and that window are
+ * never shown.
+ *
+ * `ingested_at` is outside the sort key `(workspace_id, project_id,
+ * event_type, timestamp, event_id)` and has no skip index, so a bound on
+ * it alone prunes nothing: every poll sorted the project's whole last day
+ * (#148 review round 4). Every poll therefore also bounds `timestamp` —
+ * the sort key's fourth column — to the last `LIVE_SKEW_ALLOWANCE` before
+ * the cursor: an event's `timestamp` is at most SDK batching + retries +
+ * clock skew behind its `ingested_at`. The 1-day bound stays as the outer
+ * limit (the current partitions).
  *
  * A `connection` row is shown only if its session has no connection row
  * with an earlier `ingested_at` in the preceding 24 h, and within one poll
@@ -39,6 +45,17 @@ import type { LiveEvent } from "./types";
 /** How far before the cursor a poll re-reads, in whole seconds (SQL `INTERVAL n SECOND`). */
 export const LIVE_OVERLAP_SECONDS = 10;
 const LIVE_OVERLAP_MS = LIVE_OVERLAP_SECONDS * 1_000;
+/**
+ * How far an event's `timestamp` may lie behind its `ingested_at`, in
+ * whole seconds: the SDK's 10 s flush, its retries (1/2/4/8/16 s backoff,
+ * a `Retry-After` of 30 s at most) and the clock skew between an app and
+ * ingest add up to minutes at most; an hour is generous. Bounds
+ * `timestamp` — in the sort key — so a poll does not sort the project's
+ * whole day (#148 review round 4).
+ */
+export const LIVE_SKEW_ALLOWANCE_SECONDS = 3_600;
+/** The `timestamp` bound before the cursor: the overlap, then the allowance behind it. */
+const LIVE_LOOKBACK_SECONDS = LIVE_OVERLAP_SECONDS + LIVE_SKEW_ALLOWANCE_SECONDS;
 
 /** Rows per page, oldest first. */
 export const LIVE_PAGE = 50;
@@ -107,8 +124,12 @@ export async function initialLiveCursor(ctx: QueryContext): Promise<LiveCursor> 
   return { ingestedAt: await clockCursor(ctx, LIVE_OVERLAP_SECONDS), seen: [] };
 }
 
-/** The bounds every poll reads within: the partition bound and the overlap window before the cursor. */
+/**
+ * The bounds every poll reads within: the partition bound, the `timestamp`
+ * bound the sort key prunes by, and the overlap window before the cursor.
+ */
 const WINDOW = `timestamp >= now() - INTERVAL 1 DAY
+        AND timestamp >= {cursor:DateTime64(3, 'UTC')} - INTERVAL ${LIVE_LOOKBACK_SECONDS} SECOND
         AND ingested_at >= {cursor:DateTime64(3, 'UTC')} - INTERVAL ${LIVE_OVERLAP_SECONDS} SECOND`;
 
 /**

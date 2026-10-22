@@ -6,7 +6,13 @@ vi.mock("@/lib/clickhouse/analytics-client", () => ({
   queryAnalytics: (...args: unknown[]) => mockQueryAnalytics(...args),
 }));
 
-import { LIVE_MAX_PAGES, LIVE_PAGE, initialLiveCursor, pollLive } from "@/lib/queries/live";
+import {
+  LIVE_MAX_PAGES,
+  LIVE_PAGE,
+  LIVE_SKEW_ALLOWANCE_SECONDS,
+  initialLiveCursor,
+  pollLive,
+} from "@/lib/queries/live";
 
 const ctx = { workspaceId: "ws_1", projectId: "proj_1" };
 
@@ -55,13 +61,19 @@ describe("live queries (#148)", () => {
   });
 
   describe("pollLive", () => {
-    it("tails ingested_at with the overlap, keeps the timestamp partition bound, reads the page oldest first", async () => {
+    it("tails ingested_at with the overlap, bounds timestamp to the skew allowance before the cursor within the day, reads the page oldest first", async () => {
       mockQueryAnalytics.mockResolvedValue([]);
       await pollLive(ctx, cursor);
       const call = mockQueryAnalytics.mock.calls[0][0];
       expect(call.query).toContain(
         "ingested_at >= {cursor:DateTime64(3, 'UTC')} - INTERVAL 10 SECOND",
       );
+      // ingested_at is outside the sort key: without this bound every poll
+      // sorted the project's whole last day (#148 review round 4).
+      expect(call.query).toContain(
+        `timestamp >= {cursor:DateTime64(3, 'UTC')} - INTERVAL ${10 + LIVE_SKEW_ALLOWANCE_SECONDS} SECOND`,
+      );
+      expect(LIVE_SKEW_ALLOWANCE_SECONDS).toBe(3_600);
       expect(call.query).toContain("timestamp >= now() - INTERVAL 1 DAY");
       // Oldest first: ingest stamps one ingested_at on a whole request
       // batch, and a page of the newest 50 would return the same rows of
@@ -275,9 +287,15 @@ describe("live queries (#148)", () => {
         expect(call.query).toContain("SELECT session_id, min(ingested_at)");
         // The candidates are the sessions with a connection row in the
         // polled window — the only ones the page can hold — not every
-        // session of the day.
+        // session of the day: the same window as the page, with its
+        // timestamp bound (two cursor placeholders each).
         expect(call.query).toContain("AND session_id IN (");
-        expect(call.query.split("{cursor:DateTime64(3, 'UTC')}")).toHaveLength(3);
+        expect(call.query.split("{cursor:DateTime64(3, 'UTC')}")).toHaveLength(5);
+        expect(
+          call.query.split(
+            `timestamp >= {cursor:DateTime64(3, 'UTC')} - INTERVAL ${10 + LIVE_SKEW_ALLOWANCE_SECONDS} SECOND`,
+          ),
+        ).toHaveLength(3);
       }
     });
 
