@@ -371,15 +371,25 @@ export class HttpTransport implements Transport {
         }
 
         if (response.status === 429) {
-          // Delay-seconds or an HTTP-date; anything else falls back to the backoff.
-          const delayMs =
-            retryAfterMs(response.headers.get("Retry-After")) ?? BASE_RETRY_DELAY_MS * 2 ** attempt;
-          if (!this.canWait(delayMs)) return this.giveUp();
-          console.warn(
-            `[${ErrorCode.SDK.FLUSH_RATE_LIMITED}] Rate limited, retrying in ${delayMs}ms`,
+          if (attempt < this.maxRetries) {
+            // Delay-seconds or an HTTP-date; anything else falls back to the backoff.
+            const delayMs =
+              retryAfterMs(response.headers.get("Retry-After")) ??
+              BASE_RETRY_DELAY_MS * 2 ** attempt;
+            if (!this.canWait(delayMs)) return this.giveUp();
+            console.warn(
+              `[${ErrorCode.SDK.FLUSH_RATE_LIMITED}] Rate limited, retrying in ${delayMs}ms`,
+            );
+            await this.delay(delayMs);
+            continue;
+          }
+          // The last allowed attempt: the batch is given up like a 5xx on
+          // its last attempt — counted and logged, with no wait that nothing
+          // would retry after (#148 review round 1).
+          console.error(
+            `[${ErrorCode.SDK.FLUSH_FAILED_MAX_RETRIES}] Giving up after ${attempt + 1} attempts`,
           );
-          await this.delay(delayMs);
-          continue;
+          return this.giveUp();
         }
 
         // 5xx — retry with backoff

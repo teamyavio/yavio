@@ -723,6 +723,46 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       expect(fetch).toHaveBeenCalledTimes(1);
     });
 
+    it("a 429 on the last allowed attempt is given up: counted lost, one 1201 line, no sleep", async () => {
+      const fetch = vi.fn().mockResolvedValue({
+        status: 429,
+        headers: { get: (name: string) => (name === "Retry-After" ? "5" : null) },
+        json: () => ({}),
+      });
+      // A post-signal transport: one attempt. Before the fix the 429 branch
+      // had no last-attempt guard: it logged "retrying in 5000ms", slept the
+      // full Retry-After, left the loop and dropped the batch uncounted.
+      const transport = new HttpTransport({ ...base, maxRetries: 0, fetch });
+      transport.send([fakeEvent()]);
+      const flushing = transport.flush();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(transport.lostEvents()).toBe(1);
+      expect(transport.pendingEvents()).toBe(0);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("YAVIO-1201"));
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("retrying in"));
+      await vi.advanceTimersByTimeAsync(10_000);
+      await flushing;
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("a 429 before the last attempt still waits for Retry-After, and the last one gives up", async () => {
+      const fetch = vi.fn().mockResolvedValue({
+        status: 429,
+        headers: { get: (name: string) => (name === "Retry-After" ? "2" : null) },
+        json: () => ({}),
+      });
+      const transport = new HttpTransport({ ...base, maxRetries: 1, fetch });
+      transport.send([fakeEvent()]);
+      const flushing = transport.flush();
+      await vi.advanceTimersByTimeAsync(1_900);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(200);
+      await flushing;
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(transport.lostEvents()).toBe(1);
+      expect(error).toHaveBeenCalledTimes(1);
+    });
+
     it("an oversized Retry-After waits the fetch timeout, not 1 ms and not forever", async () => {
       let calls = 0;
       const fetch = vi.fn().mockImplementation(() => {
