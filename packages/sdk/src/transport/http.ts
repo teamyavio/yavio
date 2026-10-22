@@ -88,6 +88,8 @@ export class HttpTransport implements Transport {
    */
   private closing: Promise<void> | null = null;
   private stopped = false;
+  /** Set by `runShutdown` once its drain delivered everything queued: a `send()` after that has nothing to join. */
+  private drained = false;
   /** The controller of the fetch in flight: aborted by the fetch timeout or by the shutdown deadline (#148). */
   private inflightController: AbortController | null = null;
   /** Events in the batch in flight, until ingest answered or the batch was given up. */
@@ -178,9 +180,19 @@ export class HttpTransport implements Transport {
 
   send(events: BaseEvent[]): void {
     if (this.stopped) {
-      // Refused after a shutdown deadline: counted, so the loss is reported.
-      if (this.deadlineAt !== undefined) this.deadlineLost += events.length;
-      return;
+      // A shutdown() still draining, its deadline not reached: the events
+      // join the drain and go out with it — a request finishing during a
+      // healthy drain is not a deadline loss (#148 review round 2; before,
+      // every send after shutdown() began was counted as one).
+      const joinsDrain = this.closing !== null && !this.drained && !this.deadlineReached;
+      if (!joinsDrain) {
+        // Refused after the deadline: the deadline's loss, counted so it is
+        // reported. Stopped for good otherwise — a 401, or the drain is
+        // over — and nothing will send them: a delivery failure.
+        if (this.deadlineReached) this.deadlineLost += events.length;
+        else this.failed += events.length;
+        return;
+      }
     }
 
     this.buffer.push(...events);
@@ -306,13 +318,13 @@ export class HttpTransport implements Transport {
     // that started earlier sees it too. `sendBatch` never rejects: a batch
     // that fails for good is logged there (YAVIO-1201) and the next one
     // still goes out.
-    let drained = false;
     const drain = async () => {
       if (this.inflight) await this.inflight.catch(() => {});
+      // A send() during the drain joins the queue and goes out here too.
       while (this.buffer.length > 0) {
         await this.startBatch(this.buffer.splice(0, this.maxBatchSize));
       }
-      drained = true;
+      this.drained = true;
     };
 
     // The timer must not outlive the drain: a host that awaits shutdown()
@@ -324,7 +336,7 @@ export class HttpTransport implements Transport {
     const timeout = new Promise<void>((resolve) => {
       timer = setTimeout(() => {
         this.deadlineReached = true;
-        if (!drained) {
+        if (!this.drained) {
           this.deadlineLost += this.buffer.length + this.inflightSize;
           this.inflightSize = 0;
           this.buffer.length = 0;

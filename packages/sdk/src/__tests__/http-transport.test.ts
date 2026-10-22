@@ -889,6 +889,54 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       expect(transport.pendingEvents()).toBe(0);
     });
 
+    it("a send() after shutdown() began but before its deadline joins the drain; after the drain it is a counted drop; after the deadline the deadline's loss", async () => {
+      const fetch = vi.fn().mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            setTimeout(() => resolve(ok), 200);
+          }),
+      );
+      const losses: Array<[number, number]> = [];
+      const transport = new HttpTransport({
+        ...base,
+        shutdownTimeoutMs: 1_000,
+        flushIntervalMs: 60_000,
+        fetch,
+        onShutdownLoss: (lost, deadlineMs) => losses.push([lost, deadlineMs]),
+      });
+      transport.send([fakeEvent()]);
+      const closing = transport.shutdown();
+      await vi.advanceTimersByTimeAsync(50); // the first batch is in flight
+      // A request finishing during the healthy drain: before the fix this
+      // was refused and counted as "refused after a shutdown deadline" —
+      // the deadline was set, not reached — and reported as 1 lost.
+      transport.send([fakeEvent()]);
+      await vi.advanceTimersByTimeAsync(500);
+      await closing;
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(losses).toEqual([]);
+      expect(transport.deadlineLostEvents()).toBe(0);
+      expect(transport.lostEvents()).toBe(0);
+      expect(transport.pendingEvents()).toBe(0);
+
+      // The drain is over, the deadline never reached: dropped and counted,
+      // not as the deadline's.
+      transport.send([fakeEvent()]);
+      expect(transport.deadlineLostEvents()).toBe(0);
+      expect(transport.lostEvents()).toBe(1);
+
+      // A transport whose deadline was reached refuses: the deadline's loss.
+      const { fetch: hanging } = abortableFetch();
+      const late = new HttpTransport({ ...base, fetch: hanging, onShutdownLoss: () => {} });
+      late.send([fakeEvent()]);
+      const closingLate = late.shutdown(100);
+      await vi.advanceTimersByTimeAsync(100);
+      await closingLate;
+      expect(late.deadlineLostEvents()).toBe(1);
+      late.send([fakeEvent(), fakeEvent()]);
+      expect(late.deadlineLostEvents()).toBe(3);
+    });
+
     it("a post-signal transport: a fetch its budget cuts on its one attempt is a deadline loss, a refused connection a delivery failure", async () => {
       // `newTransport` after a signal: immediate, one attempt, a fetch
       // timeout of min(30 s, D). The exit hook reports the first; the
