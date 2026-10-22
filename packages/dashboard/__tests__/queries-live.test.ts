@@ -142,6 +142,17 @@ describe("live queries (#148)", () => {
       expect(result.cursor.seen.map((r) => r.eventId).sort()).toEqual(["new", "shown"]);
     });
 
+    it("the same event_id twice in one page — at-least-once duplicates before a merge — is shown once", async () => {
+      mockQueryAnalytics.mockResolvedValue([
+        row({ eventId: "dup", ingestedAt: "2025-01-01 12:00:01.000" }),
+        row({ eventId: "dup", ingestedAt: "2025-01-01 12:00:01.000" }),
+        row({ eventId: "other", ingestedAt: "2025-01-01 12:00:02.000" }),
+      ]);
+      const result = await pollLive(ctx, cursor);
+      expect(result.events.map((e) => e.eventId)).toEqual(["dup", "other"]);
+      expect(result.cursor.seen.map((r) => r.eventId).sort()).toEqual(["dup", "other"]);
+    });
+
     it("walks a backlog larger than a page: a 100-row batch with one ingested_at is read in two pages, the second leaving out the first", async () => {
       const at = "2025-01-01 12:00:30.000";
       mockQueryAnalytics.mockResolvedValueOnce(batch(100, at).slice(0, 50));

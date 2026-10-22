@@ -173,7 +173,11 @@ export async function pollLive(
   const connectionSessions = new Set<string>();
   const events: LiveEvent[] = [];
   for (const row of rows) {
-    if (seen.has(row.eventId)) continue; // the query leaves them out; a guard against a stale page
+    // The query leaves out the rows read before; this also catches a stale
+    // page and the same event_id twice in one page (a ReplacingMergeTree
+    // holds at-least-once duplicates until it merges, #148 review round 2).
+    if (seen.has(row.eventId)) continue;
+    seen.add(row.eventId);
     if (row.eventType === "connection") {
       if (connectionSessions.has(row.sessionId)) continue;
       connectionSessions.add(row.sessionId);
