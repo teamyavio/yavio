@@ -9,13 +9,21 @@ import {
   shutdownTimeoutFromEnv,
 } from "../core/config.js";
 
+/**
+ * A copy of `env` without `keys`. Not `process.env.X = undefined`, which
+ * Node stores as the string "undefined" on the real env, and not `delete`
+ * (Biome's `noDelete`): the describe blocks below replace `process.env`
+ * with a copy and put the original back (#148 review round 2).
+ */
+function without(env: NodeJS.ProcessEnv, ...keys: string[]): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([key]) => !keys.includes(key)));
+}
+
 describe("resolveConfig", () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
-    process.env = { ...originalEnv };
-    delete process.env.YAVIO_API_KEY;
-    delete process.env.YAVIO_ENDPOINT;
+    process.env = without(originalEnv, "YAVIO_API_KEY", "YAVIO_ENDPOINT");
   });
 
   afterEach(() => {
@@ -188,8 +196,7 @@ describe("per-tool capture overrides (tools)", () => {
   let tempDir: string;
 
   beforeEach(() => {
-    process.env = { ...originalEnv };
-    delete process.env.YAVIO_API_KEY;
+    process.env = without(originalEnv, "YAVIO_API_KEY");
     tempDir = mkdtempSync(join(tmpdir(), "yavio-tools-test-"));
   });
 
@@ -308,8 +315,7 @@ describe("per-tool capture overrides (tools)", () => {
 describe("endpoint validation", () => {
   const originalEnv = process.env;
   beforeEach(() => {
-    process.env = { ...originalEnv, YAVIO_API_KEY: "yav_test" };
-    delete process.env.YAVIO_ENDPOINT;
+    process.env = { ...without(originalEnv, "YAVIO_ENDPOINT"), YAVIO_API_KEY: "yav_test" };
     _resetConfigWarnings();
   });
   afterEach(() => {
@@ -507,9 +513,8 @@ describe("shutdownTimeoutMs (#142)", () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
-    process.env = { ...originalEnv };
+    process.env = without(originalEnv, "YAVIO_SHUTDOWN_TIMEOUT_MS");
     process.env.YAVIO_API_KEY = "yav_test";
-    delete process.env.YAVIO_SHUTDOWN_TIMEOUT_MS;
     _resetConfigWarnings();
   });
 
@@ -553,7 +558,7 @@ describe("shutdownTimeoutMs (#142)", () => {
       );
       process.cwd = () => tempDir;
       expect(resolveConfig()?.shutdownTimeoutMsSource).toBe("env");
-      delete process.env.YAVIO_SHUTDOWN_TIMEOUT_MS;
+      process.env = without(process.env, "YAVIO_SHUTDOWN_TIMEOUT_MS");
       expect(resolveConfig()).toMatchObject({
         shutdownTimeoutMs: 3_000,
         shutdownTimeoutMsSource: "file",
