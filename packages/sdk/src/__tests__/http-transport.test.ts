@@ -677,6 +677,57 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       expect(fetch).toHaveBeenCalledTimes(2);
     });
 
+    it("cuts a backoff sleep already running when the deadline arrives: no send after it, the loss counted once", async () => {
+      const fetch = vi
+        .fn()
+        .mockResolvedValue({ status: 503, headers: { get: () => null }, json: () => ({}) });
+      const losses: Array<[number, number]> = [];
+      const transport = new HttpTransport({
+        ...base,
+        maxRetries: 5,
+        fetch,
+        onShutdownLoss: (lost, deadlineMs) => losses.push([lost, deadlineMs]),
+      });
+      transport.send([fakeEvent()]);
+      const flushing = transport.flush();
+      // 503 at 0, 1, 3 and 7 s; the fourth schedules an 8 s backoff (ends at 15 s).
+      await vi.advanceTimersByTimeAsync(7_050);
+      expect(fetch).toHaveBeenCalledTimes(4);
+
+      // shutdown() with a 1 s deadline during that sleep: before the fix
+      // the deadline counted the batch as lost and reported it, then the
+      // sleep ran on and the batch was sent a fifth time at 15 s.
+      const shutdown = transport.shutdown(1_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await shutdown;
+      expect(transport.lostEvents()).toBe(1);
+      expect(losses).toEqual([[1, 1_000]]);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(fetch).toHaveBeenCalledTimes(4); // nothing sent after the deadline
+      await flushing; // the retry loop woke at the deadline and gave up
+      expect(transport.lostEvents()).toBe(1);
+      expect(transport.pendingEvents()).toBe(0);
+    });
+
+    it("cuts a Retry-After sleep the same way", async () => {
+      const fetch = vi.fn().mockResolvedValue({
+        status: 429,
+        headers: { get: (name: string) => (name === "Retry-After" ? "20" : null) },
+        json: () => ({}),
+      });
+      const transport = new HttpTransport({ ...base, maxRetries: 3, fetch });
+      transport.send([fakeEvent()]);
+      const flushing = transport.flush();
+      await vi.advanceTimersByTimeAsync(50); // the 20 s wait is scheduled
+      const shutdown = transport.shutdown(500);
+      await vi.advanceTimersByTimeAsync(500);
+      await shutdown;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      await flushing;
+      expect(transport.lostEvents()).toBe(1);
+    });
+
     it("honours Retry-After as an HTTP-date", async () => {
       let calls = 0;
       const fetch = vi.fn().mockImplementation(() => {

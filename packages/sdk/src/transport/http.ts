@@ -89,6 +89,15 @@ export class HttpTransport implements Transport {
    * deadline stops the waiting, not only the awaiting (#148).
    */
   private deadlineAt: number | undefined;
+  /** Set by the shutdown deadline timer: nothing is sent from then on. */
+  private deadlineReached = false;
+  /**
+   * The backoff or `Retry-After` wait in progress, so the shutdown deadline
+   * can end it: a sleep that outlasts the deadline would otherwise have its
+   * batch counted as lost at the deadline and re-sent when the sleep ends
+   * (#148 review round 1).
+   */
+  private pendingDelay: { timer: ReturnType<typeof setTimeout>; resolve: () => void } | null = null;
   /** Events given up — at a shutdown deadline (queued, in flight, refused after it) or after a batch's last attempt: what `YAVIO-1205` counts (#148). */
   private lost = 0;
 
@@ -287,11 +296,15 @@ export class HttpTransport implements Transport {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<void>((resolve) => {
       timer = setTimeout(() => {
+        this.deadlineReached = true;
         if (!drained) {
           this.lost += this.buffer.length + this.inflightSize;
           this.inflightSize = 0;
           this.buffer.length = 0;
           this.inflightController?.abort();
+          // A wait in progress ends now: the retry loop wakes, sees the
+          // deadline and gives up instead of sending after it.
+          this.pendingDelay?.resolve();
         }
         resolve();
       }, deadlineMs);
@@ -381,6 +394,7 @@ export class HttpTransport implements Transport {
               `[${ErrorCode.SDK.FLUSH_RATE_LIMITED}] Rate limited, retrying in ${delayMs}ms`,
             );
             await this.delay(delayMs);
+            if (this.deadlineReached) return this.giveUp();
             continue;
           }
           // The last allowed attempt: the batch is given up like a 5xx on
@@ -401,6 +415,7 @@ export class HttpTransport implements Transport {
               `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Server error ${response.status}, retry ${attempt + 1}/${this.maxRetries}`,
             );
             await this.delay(delayMs);
+            if (this.deadlineReached) return this.giveUp();
             continue;
           }
           console.error(
@@ -420,6 +435,7 @@ export class HttpTransport implements Transport {
             `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Network error, retry ${attempt + 1}/${this.maxRetries}`,
           );
           await this.delay(delayMs);
+          if (this.deadlineReached) return this.giveUp();
           continue;
         }
         console.error(
@@ -436,6 +452,7 @@ export class HttpTransport implements Transport {
    * instead of being re-sent after the process was meant to be gone (#148).
    */
   private canWait(ms: number): boolean {
+    if (this.deadlineReached) return false;
     return this.deadlineAt === undefined || Date.now() + ms < this.deadlineAt;
   }
 
@@ -449,10 +466,21 @@ export class HttpTransport implements Transport {
     this.inflightSize = 0;
   }
 
+  /**
+   * Sleep `ms`, or less: the shutdown deadline ends the wait early through
+   * `pendingDelay` (the caller then checks `deadlineReached`). One wait at
+   * a time — the retry loop is sequential.
+   */
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => {
-      const timer = setTimeout(resolve, ms);
+      const done = () => {
+        clearTimeout(timer);
+        this.pendingDelay = null;
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
       unref(timer);
+      this.pendingDelay = { timer, resolve: done };
     });
   }
 }
