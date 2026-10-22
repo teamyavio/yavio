@@ -280,6 +280,12 @@ let cycleTimer: ReturnType<typeof setTimeout> | undefined;
 /** D of the last cycle that ended: after the hand-back a `shutdown()` waits at most this long from its call. */
 let lastBudgetMs: number | undefined;
 /**
+ * The absolute deadline (signal + D) of the last cycle that ended: a
+ * post-signal fetch started after an early hand-back still runs within it
+ * (`lateFetchBudgetMs`), not for D from its own start (#148 review round 4).
+ */
+let lastDeadlineAt: number | undefined;
+/**
  * The explicit `shutdownTimeoutMs` of every `shutdown()` call in progress
  * (a release or a settle), kept until the call resolves: a hold that is
  * releasing when the signal arrives still counts towards D.
@@ -318,15 +324,24 @@ const MIN_LATE_FETCH_MS = 100;
 
 /**
  * How long a fetch of a post-signal transport started now may run: what is
- * left of the cycle, or D after the hand-back. Read per fetch, not fixed
- * when the transport is created: that transport starts on the first send
- * after the signal and is reused, and a timeout of min(30 s, D) from its
- * creation let a request finishing at signal + D − ε keep its socket — and
- * a host without `process.exit()` — alive until signal + 2D, past Fly.io's
- * 5 s (#148 review round 3).
+ * left until signal + D — of the cycle running, or of the last one that
+ * ended, while that is still ahead — and D from the call only once
+ * signal + D has passed. Read per fetch, not fixed when the transport is
+ * created: that transport starts on the first send after the signal and is
+ * reused, and a timeout of min(30 s, D) from its creation let a request
+ * finishing at signal + D − ε keep its socket — and a host without
+ * `process.exit()` — alive until signal + 2D, past Fly.io's 5 s (#148
+ * review round 3). The same held after an early, healthy hand-back: the
+ * cycle was gone, so a request finishing at signal + 3 s sent with a 4 s
+ * budget and held the socket until signal + 7 s (review round 4).
  */
 function lateFetchBudgetMs(): number {
-  return Math.max(MIN_LATE_FETCH_MS, remainingMs() ?? currentBudgetMs());
+  const deadlineAt = signalInFlight?.deadlineAt ?? lastDeadlineAt;
+  if (deadlineAt !== undefined) {
+    const left = deadlineAt - Date.now();
+    if (signalInFlight || left > 0) return Math.max(MIN_LATE_FETCH_MS, left);
+  }
+  return currentBudgetMs();
 }
 
 /**
@@ -551,6 +566,7 @@ function finishSignal(cycle: SignalCycle): void {
   if (signalInFlight !== cycle) return; // handed back already, or a later cycle is running
   signalInFlight = null;
   lastBudgetMs = cycle.budgetMs;
+  lastDeadlineAt = cycle.deadlineAt;
   reportCycleLoss(cycle, "hand-back"); // before the re-raise: a POSIX re-raise skips `exit` listeners
   removeSignalHandlers();
   if (!cycle.sole) return;
@@ -891,6 +907,7 @@ export function _resetSharedState(): void {
   cycleTimer = undefined;
   signalInFlight = null;
   lastBudgetMs = undefined;
+  lastDeadlineAt = undefined;
   inProgressDeadlines.length = 0;
   releaseWaiters();
   transports.clear();

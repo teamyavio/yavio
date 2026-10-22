@@ -1078,6 +1078,41 @@ describe("one process deadline from the signal (#148)", () => {
     });
   });
 
+  it(
+    "after an early, healthy hand-back a send at signal + 3 s with D = 4 s still runs within signal + D: the fetch is cut by the last cycle's deadline, not D after its send",
+    { timeout: 15_000 },
+    async () => {
+      await withoutOtherListeners("SIGTERM", async () => {
+        // Ingest healthy at the signal: the drain ends within a few ms and
+        // the SDK — the only listener — hands back long before the deadline.
+        ingest.hangEvents = false;
+        const { raw } = build("yav_148_late_after_handback", { shutdownTimeoutMs: 4_000 });
+        await callTool(raw, "get_price", { q: "before" });
+        const signalAt = Date.now();
+        process.emit("SIGTERM", "SIGTERM");
+        await vi.waitFor(() => expect(process.listenerCount("SIGTERM")).toBe(0), {
+          timeout: 2_000,
+        });
+        expect(Date.now() - signalAt).toBeLessThan(1_000);
+        // The process goes on (a host without process.exit(), the platform
+        // not yet at its grace period): a request finishes at signal + 3 s
+        // and ingest hangs by then.
+        ingest.hangEvents = true;
+        await new Promise((resolve) => setTimeout(resolve, 3_000 - (Date.now() - signalAt)));
+        await callTool(raw, "get_price", { q: "late" });
+        await vi.waitFor(() => expect(ingest.batches).toHaveLength(2));
+        const late = ingest.batches[1] as (typeof ingest.batches)[number];
+        // Before the fix the cycle was gone, so the budget fell back to D
+        // from the send: the socket was held until signal + 7 s, past
+        // Fly.io's 5 s, for a host without process.exit().
+        await vi.waitFor(() => expect(late.abortedAt).toBeDefined(), { timeout: 8_000 });
+        const abortedAfter = (late.abortedAt as number) - signalAt;
+        expect(abortedAfter).toBeGreaterThanOrEqual(3_900);
+        expect(abortedAfter).toBeLessThan(4_600);
+      });
+    },
+  );
+
   it("YAVIO_SHUTDOWN_TIMEOUT_MS counts even when no participant set a value: a plain client is bounded by it", async () => {
     await withoutOtherListeners("SIGTERM", async () => {
       const saved = process.env.YAVIO_SHUTDOWN_TIMEOUT_MS;

@@ -20,7 +20,7 @@ import { readFileSync } from "node:fs";
 import { Agent, request } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type MockIngest, refusedEndpoint, startMockIngest } from "./helpers.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -551,6 +551,34 @@ describe("a stateless host as a child process: signals, handlers and budgets (#1
       expect(ingest.responded).toBe(0);
       expect(ingest.events).toHaveLength(EVENTS_BEFORE_SIGNAL + 1);
       expect(sum(child.lossLines())).toBe(EVENTS_BEFORE_SIGNAL + 1);
+    },
+  );
+
+  it(
+    "a handler without process.exit(), ingest healthy at the signal then hanging, a 2.5 s request in flight: its late send is cut at signal + D after the early hand-back — exit within D + 0.5 s",
+    { timeout: 30_000 },
+    async () => {
+      const child = await start("noexit");
+      await drive(child.port);
+      const { done: slow } = await inFlight(child, 2_500);
+      child.kill("SIGTERM");
+      // The drain's batch is answered at once and the SDK hands back early;
+      // ingest hangs from then on, so the late send at signal + 2.5 s never
+      // gets an answer.
+      await vi.waitFor(() => expect(ingest.responded).toBeGreaterThan(0), { timeout: 2_000 });
+      ingest.hangEvents = true;
+      const exit = await child.exited;
+      await slow;
+
+      // Before the fix the post-signal transport's fetch ran for D from its
+      // send once the cycle was gone: the socket held the process until
+      // signal + 6.5 s, past Fly.io's 5 s.
+      expect(exit, child.output()).toMatchObject({ code: 0, signal: null });
+      expect(exit.afterSignalMs).toBeGreaterThanOrEqual(2_400);
+      expect(exit.afterSignalMs).toBeLessThan(4_500);
+      expect(ingest.events).toHaveLength(EVENTS_BEFORE_SIGNAL + 1);
+      expect(ingest.batches.length - ingest.responded).toBe(1); // the late batch, never answered
+      expect(sum(child.lossLines())).toBe(1);
     },
   );
 
