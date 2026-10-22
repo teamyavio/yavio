@@ -249,8 +249,18 @@ interface SignalCycle {
 /**
  * The signal being handled. A second signal while this is set means "stop
  * waiting" — unless it is the same signal within `SAME_DELIVERY_MS` of the
- * first, which is one delivery arriving twice: `npm run` forwards the
- * terminal's Ctrl-C to a script that already received it (#148).
+ * first, which is taken for one delivery arriving twice: `npm run` forwards
+ * the terminal's Ctrl-C to a script that already received it, a few
+ * milliseconds apart (#148, Decision E).
+ *
+ * A heuristic on the wall clock, not a fact about the delivery: Node gives
+ * a listener no way to tell a forwarded signal from a new one. Its limits:
+ * a deliberate second `SIGTERM` within 250 ms (a supervisor that escalates
+ * at once) is swallowed and the drain goes on to the deadline; a forward
+ * that arrives after 250 ms on a loaded host ends the drain early and some
+ * events are given up, counted in the cycle's `YAVIO-1205` line. Neither
+ * costs more than the deadline, and a DIFFERENT signal always hands back
+ * at once (#148 review round 3).
  */
 let signalInFlight: SignalCycle | null = null;
 const SAME_DELIVERY_MS = 250;
@@ -487,7 +497,8 @@ let reraise: (signal: HandledSignal) => void = defaultReraise;
  * hands the signal back (`finishSignal`); a second one while that is still
  * running hands it back at once, so a second Ctrl-C still ends the process
  * the way it does without the SDK — except the same signal within 250 ms,
- * which is the first one delivered twice. Whether to re-raise is decided
+ * taken for the first one delivered twice (a heuristic, see
+ * `SAME_DELIVERY_MS`). Whether to re-raise is decided
  * when the signal ARRIVES: an app listener registered with `process.once`
  * is gone by the time the drain is done, and that app must not be killed in
  * the middle of its own shutdown. Each cycle is its own object, and
