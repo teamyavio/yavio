@@ -54,7 +54,7 @@ export const GET = withAnalyticsAuth("viewer")(async (request, ctx) => {
         if (closed || polling) return;
         polling = true;
         try {
-          cursor ??= await initialLiveCursor(query, eventType);
+          cursor ??= await initialLiveCursor(query);
           const result = await pollLive(query, cursor, eventType);
           cursor = result.cursor;
           for (const event of result.events) send("event", JSON.stringify(event));

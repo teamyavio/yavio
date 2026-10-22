@@ -50,23 +50,19 @@ describe("live queries (#148)", () => {
   });
 
   describe("initialLiveCursor", () => {
-    it("starts at the newest ingested_at of the last hour — ClickHouse's clock only with no rows — and the first window is the 10 s overlap, not 20", async () => {
+    it("starts at ClickHouse's clock — no table read, no replay — and the first window is the 10 s overlap, not 20", async () => {
       mockQueryAnalytics.mockResolvedValue([{ cursor: "2025-01-01 12:00:00.000" }]);
-      const result = await initialLiveCursor(ctx, "tool_call");
+      const result = await initialLiveCursor(ctx);
       // No overlap of its own: the poll's window before the cursor is the overlap.
       expect(result).toEqual({ ingestedAt: "2025-01-01 12:00:00.000", seen: [] });
       const call = mockQueryAnalytics.mock.calls[0][0];
-      // ingested_at is stamped by ingest's clock: a cursor taken from
-      // ClickHouse's hid every row once the two differed by more than the
-      // overlap (#148 review round 4).
-      expect(call.query).toContain("coalesce(maxOrNull(ingested_at), now64(3, 'UTC'))");
-      expect(call.query).toContain("FROM events");
-      expect(call.query).toContain(
-        `timestamp >= now() - INTERVAL ${LIVE_SKEW_ALLOWANCE_SECONDS} SECOND`,
-      );
-      expect(call.query).toContain("event_type = {eventType:String}");
-      expect(call.params).toEqual({ projectId: "proj_1", eventType: "tool_call" });
+      expect(call.query).toContain("now64(3, 'UTC')");
       expect(call.query).not.toContain("INTERVAL 10 SECOND");
+      // Not the newest ingested_at of the last hour (review round 4), which
+      // replayed up to an hour-old events on every (re)connect: ingested_at
+      // is on ClickHouse's clock since it stamps it at insert (round 5).
+      expect(call.query).not.toContain("FROM events");
+      expect(call.query).not.toContain("maxOrNull");
       expect(call.projectId).toBe("proj_1");
 
       mockQueryAnalytics.mockClear();
@@ -77,11 +73,6 @@ describe("live queries (#148)", () => {
       expect(poll.query).toContain(
         "ingested_at >= {cursor:DateTime64(3, 'UTC')} - INTERVAL 10 SECOND",
       );
-
-      mockQueryAnalytics.mockClear();
-      mockQueryAnalytics.mockResolvedValue([{ cursor: "2025-01-01 12:00:01.000" }]);
-      await initialLiveCursor(ctx);
-      expect(mockQueryAnalytics.mock.calls[0][0].query).not.toContain("eventType");
     });
   });
 
@@ -237,9 +228,10 @@ describe("live queries (#148)", () => {
       expect(result.cursor.seen).toHaveLength(LIVE_PAGE * 5);
       expect(result.cursor.seen.every((r) => r.ingestedAt >= "2025-01-01 12:00:15.000")).toBe(true);
       // The jump reads the newest ingested_at of the last hour by
-      // timestamp (the sort key prunes), the clock only with no rows — not
-      // the clock alone, which ingest's clock may run behind (review round
-      // 4), and not `max(ingested_at)` over the day, a full scan on every
+      // timestamp (the sort key prunes), the clock only with no rows: the
+      // backlog it gives up may end before the clock's window, and the
+      // rows of its last 10 s are what the next poll shows (review round
+      // 4) — and not `max(ingested_at)` over the day, a full scan on every
       // capped poll (review round 3).
       const jump = mockQueryAnalytics.mock.calls[LIVE_MAX_PAGES][0];
       expect(jump.query).toContain("coalesce(maxOrNull(ingested_at), now64(3, 'UTC'))");

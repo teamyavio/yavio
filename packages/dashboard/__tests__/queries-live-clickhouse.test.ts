@@ -75,50 +75,68 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
     await admin.close();
   });
 
-  it("starts at ClickHouse's clock when the project has no recent rows", async () => {
+  it("starts at ClickHouse's clock: a burst stored 50 minutes ago is not replayed on connect", async () => {
+    const projectId = `p-${randomUUID().slice(0, 8)}`;
+    const scope = { workspaceId: ws, projectId };
+    const session = `s-${randomUUID().slice(0, 8)}`;
+    const old = (ms: number) =>
+      new Date(Date.now() - 50 * 60_000 + ms).toISOString().replace("T", " ").replace("Z", "");
+    await insert(
+      Array.from({ length: 20 }, (_, i) => ({
+        project_id: projectId,
+        session_id: session,
+        event_name: `old-${i}`,
+        timestamp: old(i * 100),
+        ingested_at: old(i * 100 + 50),
+      })),
+    );
     const before = Date.now();
-    const cursor = await q.initialLiveCursor(ctx); // nothing inserted for this project yet
+    const cursor = await q.initialLiveCursor(scope);
     const startedAt = Date.parse(`${cursor.ingestedAt.replace(" ", "T")}Z`);
     expect(startedAt).toBeGreaterThanOrEqual(before - 2_000);
     expect(startedAt).toBeLessThanOrEqual(Date.now() + 2_000);
     expect(cursor.seen).toEqual([]);
+    // Review round 4 started at the newest ingested_at of the last hour,
+    // against a skew between ingest's clock and ClickHouse's: every
+    // (re)connect replayed the burst as live. ClickHouse stamps ingested_at
+    // at insert now (round 5), so the clock is the start and the burst stays
+    // in the past.
+    const first = await q.pollLive(scope, cursor, undefined);
+    expect(first.events).toEqual([]);
   });
 
-  it("a row stamped 25 s behind ClickHouse's clock — ingest's clock, not ClickHouse's — is found on connect and after a jump", async () => {
-    // ingested_at is stamped by the ingest process; a skew between its
-    // clock and ClickHouse's larger than the 10 s overlap hid every row for
-    // good when the cursor came from the clock (#148 review round 4).
+  it("a row inserted 25 s after its event timestamp is found on connect — ingested_at is the insert time — and a late row is found after a jump", async () => {
+    // The SDK's batching and retries, and the batch writer's own, put an
+    // event's timestamp behind its insert by seconds; ClickHouse stamps
+    // ingested_at when the row is stored (no value sent here, the column
+    // DEFAULT), so it is inside the window the clock cursor opens.
     const projectId = `p-${randomUUID().slice(0, 8)}`;
     const scope = { workspaceId: ws, projectId };
     const session = `s-${randomUUID().slice(0, 8)}`;
     const behind = (ms: number) =>
       new Date(Date.now() - ms).toISOString().replace("T", " ").replace("Z", "");
-    const skewed = behind(25_000);
+    const cursor = await q.initialLiveCursor(scope);
     await insert([
       {
         project_id: projectId,
         session_id: session,
-        event_name: "skewed",
-        timestamp: skewed,
-        ingested_at: skewed,
+        event_name: "delayed",
+        timestamp: behind(25_000),
       },
     ]);
-    // On connect: the cursor is the newest ingested_at, so the first
-    // window holds the row. Before the fix the cursor was the clock minus
-    // the overlap, the window 20 s: the row at −25 s was never shown.
-    const cursor = await q.initialLiveCursor(scope);
     const first = await q.pollLive(scope, cursor, undefined);
-    expect(first.events.map((e) => e.eventName)).toEqual(["skewed"]);
-    expect(cursor.ingestedAt).toBe(skewed);
+    expect(first.events.map((e) => e.eventName)).toEqual(["delayed"]);
+    const stamped = Date.parse(`${first.cursor.ingestedAt.replace(" ", "T")}Z`);
+    expect(Math.abs(stamped - Date.now())).toBeLessThan(5_000);
 
     // After a jump, in a project of its own: a backlog beyond the cap two
-    // minutes ago, then one row at −25 s. The jump lands on that row (the
-    // newest of the last hour), not on the clock, whose window — the last
-    // 10 s — did not hold it.
+    // minutes ago, then one row stored at −25 s. The jump lands on that row
+    // (the newest of the last hour), not on the clock, whose window — the
+    // last 10 s — did not hold it (review round 4).
+    const later = behind(25_000);
     const projectB = `p-${randomUUID().slice(0, 8)}`;
     const scopeB = { workspaceId: ws, projectId: projectB };
     const far = (ms: number) => at(ms - 60_000);
-    const later = behind(25_000);
     await insert([
       ...Array.from({ length: 600 }, (_, i) => ({
         project_id: projectB,
@@ -130,7 +148,7 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
       {
         project_id: projectB,
         session_id: session,
-        event_name: "skewed-2",
+        event_name: "late",
         timestamp: later,
         ingested_at: later,
       },
@@ -139,7 +157,7 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
     expect(capped.events).toHaveLength(500);
     expect(capped.cursor.ingestedAt).toBe(later);
     const next = await q.pollLive(scopeB, capped.cursor, undefined);
-    expect(next.events.map((e) => e.eventName)).toEqual(["skewed-2"]);
+    expect(next.events.map((e) => e.eventName)).toEqual(["late"]);
   });
 
   it("two instances' rows for one session give one connection row", async () => {
