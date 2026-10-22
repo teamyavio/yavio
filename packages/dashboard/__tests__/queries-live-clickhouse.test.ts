@@ -35,7 +35,7 @@ function at(offsetMs: number): string {
 
 /** A cursor at `ingestedAt`, before any row of that stamp, with nothing read. */
 function from(ingestedAt: string) {
-  return { ingestedAt, eventId: "", seen: [] };
+  return { ingestedAt, eventId: "", seen: [], connections: [] };
 }
 
 async function insert(rows: Array<Record<string, unknown>>) {
@@ -197,6 +197,95 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
     expect(calls.events.filter((e) => e.sessionId === session).map((e) => e.eventType)).toEqual([
       "tool_call",
     ]);
+  });
+
+  it("two connection rows of one session in one insert block, split by the page cap across two polls, give one connection", async () => {
+    // One block: a connection row that sorts first, 550 tool calls, and a
+    // second connection row of the same session that sorts last — the page
+    // cap (500) puts them in different polls. Before review round 6 both
+    // passed the query's `(session_id, min(ingested_at))` filter (one
+    // stamp), and the per-poll check could not tell.
+    const projectId = `p-${randomUUID().slice(0, 8)}`;
+    const scope = { workspaceId: ws, projectId };
+    const session = `s-${randomUUID().slice(0, 8)}`;
+    const firstId = `0000-${randomUUID()}`;
+    const lastId = `ffff-${randomUUID()}`;
+    await insert([
+      {
+        event_id: firstId,
+        event_type: "connection",
+        event_name: null,
+        project_id: projectId,
+        session_id: session,
+        timestamp: at(20_000),
+        ingested_at: at(30_000),
+      },
+      ...Array.from({ length: 550 }, (_, i) => ({
+        project_id: projectId,
+        session_id: session,
+        event_name: `call-${i}`,
+        timestamp: at(20_000 + i * 10),
+        ingested_at: at(30_000),
+      })),
+      {
+        event_id: lastId,
+        event_type: "connection",
+        event_name: null,
+        project_id: projectId,
+        session_id: session,
+        timestamp: at(21_000),
+        ingested_at: at(30_000),
+      },
+    ]);
+    const first = await q.pollLive(scope, from(at(25_000)), undefined);
+    const second = await q.pollLive(scope, first.cursor, undefined);
+    const connections = [...first.events, ...second.events].filter(
+      (e) => e.eventType === "connection",
+    );
+    expect(connections.map((e) => e.eventId)).toEqual([firstId]);
+    expect(first.events.length + second.events.length).toBe(551);
+  });
+
+  it("an earlier connection row of a session in a block visible after the session's connection was shown is not a second connection", async () => {
+    // Poll 1 shows the session's connection (block +5 s). Then a block
+    // stamped +1 s becomes visible (an insert that took longer) with an
+    // earlier connection row of the same session: it is the session's
+    // earliest now and passes the query; the cursor remembers the session
+    // for the window and it is not shown again.
+    const projectId = `p-${randomUUID().slice(0, 8)}`;
+    const scope = { workspaceId: ws, projectId };
+    const session = `s-${randomUUID().slice(0, 8)}`;
+    await insert([
+      {
+        event_type: "connection",
+        event_name: null,
+        project_id: projectId,
+        session_id: session,
+        timestamp: at(4_000),
+        ingested_at: at(5_000),
+      },
+    ]);
+    const first = await q.pollLive(scope, from(at(0)), undefined);
+    expect(first.events.map((e) => e.eventType)).toEqual(["connection"]);
+    await insert([
+      {
+        event_type: "connection",
+        event_name: null,
+        project_id: projectId,
+        session_id: session,
+        timestamp: at(0),
+        ingested_at: at(1_000),
+      },
+      {
+        project_id: projectId,
+        session_id: session,
+        event_name: "after",
+        timestamp: at(6_000),
+        ingested_at: at(7_000),
+      },
+    ]);
+    const second = await q.pollLive(scope, first.cursor, undefined);
+    expect(second.events.map((e) => e.eventType)).toEqual(["tool_call"]);
   });
 
   it("a 1 200-row insert block with one ingested_at is walked out over three polls, nothing twice: the cursor is a position inside the block", async () => {

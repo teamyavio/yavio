@@ -38,7 +38,7 @@ function row(overrides: Record<string, unknown>) {
   };
 }
 
-const cursor = { ingestedAt: "2025-01-01 12:00:00.000", eventId: "", seen: [] };
+const cursor = { ingestedAt: "2025-01-01 12:00:00.000", eventId: "", seen: [], connections: [] };
 
 /** `n` rows of one insert block: one `ingested_at` for all of them (ClickHouse stamps the block). */
 function batch(n: number, ingestedAt: string) {
@@ -96,7 +96,12 @@ describe("live queries (#148)", () => {
       mockQueryAnalytics.mockResolvedValue([{ cursor: "2025-01-01 12:00:00.000" }]);
       const result = await initialLiveCursor(ctx);
       // No overlap of its own: the poll's window before the cursor is the overlap.
-      expect(result).toEqual({ ingestedAt: "2025-01-01 12:00:00.000", eventId: "", seen: [] });
+      expect(result).toEqual({
+        ingestedAt: "2025-01-01 12:00:00.000",
+        eventId: "",
+        seen: [],
+        connections: [],
+      });
       const call = mockQueryAnalytics.mock.calls[0][0];
       expect(call.query).toContain("now64(3, 'UTC')");
       expect(call.query).not.toContain("INTERVAL 10 SECOND");
@@ -150,12 +155,15 @@ describe("live queries (#148)", () => {
       expect(call.params.lower).toBeUndefined();
     });
 
-    it("shows a connection row only when it is its session's first in the last day", async () => {
+    it("shows a connection row only when it is its session's first in the last day — by (ingested_at, event_id), so two rows of one block cannot both pass", async () => {
       mockQueryAnalytics.mockResolvedValue([]);
       await pollLive(ctx, cursor);
       const call = mockQueryAnalytics.mock.calls[0][0];
       expect(call.query).toContain("event_type != 'connection'");
-      expect(call.query).toContain("SELECT session_id, min(ingested_at)");
+      expect(call.query).toContain("(session_id, ingested_at, event_id) IN (");
+      expect(call.query).toContain(
+        "SELECT session_id, min(ingested_at), argMin(event_id, (ingested_at, event_id))",
+      );
       expect(call.query).toContain("GROUP BY session_id");
     });
 
@@ -225,6 +233,7 @@ describe("live queries (#148)", () => {
         ingestedAt: "2025-01-01 12:00:08.000",
         eventId: "shown",
         seen: [{ eventId: "shown", ingestedAt: "2025-01-01 12:00:08.000", readAt: Date.now() }],
+        connections: [],
       });
       expect(mockQueryAnalytics.mock.calls[0][0].params.stamps).toEqual([
         "2025-01-01 12:00:08.000",
@@ -373,6 +382,7 @@ describe("live queries (#148)", () => {
         ingestedAt: "2025-01-01 12:00:08.000",
         eventId: "shown",
         seen: [{ eventId: "shown", ingestedAt: "2025-01-01 12:00:08.000", readAt: Date.now() }],
+        connections: [],
       });
       expect(result.events.map((e) => e.eventId)).toEqual(["new"]);
       expect(result.cursor.seen.map((r) => r.eventId).sort()).toEqual(["new", "shown"]);
@@ -525,9 +535,7 @@ describe("live queries (#148)", () => {
       // query of every poll while the window covered the block.
       mockQueryAnalytics.mockImplementation(table(batch(1_200, "2025-01-01 12:00:30.000")));
       const shown: string[] = [];
-      let at = { ingestedAt: "2025-01-01 12:00:25.000", eventId: "", seen: [] } as Awaited<
-        ReturnType<typeof pollLive>
-      >["cursor"];
+      let at = { ...cursor, ingestedAt: "2025-01-01 12:00:25.000" };
       const polls: number[] = [];
       for (let i = 0; i < 4; i++) {
         const result = await pollLive(ctx, at);
@@ -552,6 +560,58 @@ describe("live queries (#148)", () => {
       expect(at.ingestedAt).toBe("2025-01-01 12:00:30.000");
       expect(at.eventId).toBe("b1199");
       expect(at.resume).toBeUndefined();
+    });
+
+    it("carries the sessions shown with a connection across polls for the window: an earlier row of the session in a block visible late is not a second connection", async () => {
+      // Poll 1: the session's connection c2 (block 12:00:05). Poll 2: a
+      // block stamped 12:00:01 becomes visible with c1 of the same session
+      // — now the session's earliest, so it passes the query's filter — and
+      // must not be shown as a second connection. Before review round 6
+      // the sessions shown were known per poll only.
+      mockQueryAnalytics.mockResolvedValueOnce([
+        row({
+          eventId: "c2",
+          eventType: "connection",
+          sessionId: "s",
+          ingestedAt: "2025-01-01 12:00:05.000",
+        }),
+      ]);
+      const first = await pollLive(ctx, cursor);
+      expect(first.events.map((e) => e.eventId)).toEqual(["c2"]);
+      mockQueryAnalytics.mockResolvedValueOnce([
+        row({
+          eventId: "c1",
+          eventType: "connection",
+          sessionId: "s",
+          ingestedAt: "2025-01-01 12:00:01.000",
+        }),
+        row({
+          eventId: "t",
+          eventType: "tool_call",
+          sessionId: "s",
+          ingestedAt: "2025-01-01 12:00:06.000",
+        }),
+      ]);
+      const second = await pollLive(ctx, first.cursor);
+      expect(second.events.map((e) => e.eventId)).toEqual(["t"]);
+      // Carried in the cursor while the window covers the block shown;
+      // gone once the cursor has moved more than the window past it.
+      expect(first.cursor.connections).toEqual([
+        { sessionId: "s", ingestedAt: "2025-01-01 12:00:05.000" },
+      ]);
+      expect(second.cursor.connections).toEqual([
+        { sessionId: "s", ingestedAt: "2025-01-01 12:00:05.000" },
+      ]);
+      mockQueryAnalytics.mockResolvedValueOnce([
+        row({
+          eventId: "u",
+          eventType: "tool_call",
+          sessionId: "s",
+          ingestedAt: "2025-01-01 12:00:16.000",
+        }),
+      ]);
+      const third = await pollLive(ctx, second.cursor);
+      expect(third.cursor.connections).toEqual([]);
     });
 
     it("shows one connection per session per poll: the earliest ingested", async () => {
@@ -591,14 +651,16 @@ describe("live queries (#148)", () => {
       const typed = mockQueryAnalytics.mock.calls[0][0];
       // A type that is never a connection: no subquery at all (before the
       // fix it ran on every poll of every type).
-      expect(typed.query).not.toContain("min(ingested_at)");
+      expect(typed.query).not.toContain("argMin(");
       expect(typed.query).not.toContain("event_type != 'connection'");
 
       for (const type of [undefined, "connection"]) {
         mockQueryAnalytics.mockClear();
         await pollLive(ctx, cursor, type);
         const call = mockQueryAnalytics.mock.calls[0][0];
-        expect(call.query).toContain("SELECT session_id, min(ingested_at)");
+        expect(call.query).toContain(
+          "SELECT session_id, min(ingested_at), argMin(event_id, (ingested_at, event_id))",
+        );
         // The candidates are the sessions with a connection row in the
         // polled window — the only ones the page can hold — not every
         // session of the day: the same window as the page, with its

@@ -60,11 +60,15 @@ import type { LiveEvent } from "./types";
  * clock skew behind its `ingested_at`. The 1-day bound stays as the outer
  * limit (the current partitions).
  *
- * A `connection` row is shown only if its session has no connection row
- * with an earlier `ingested_at` in the preceding 24 h, and within one poll
- * only the earliest per session: a stateless fleet emits one connection
- * per instance that served a session (the SDK's once-only events are per
- * process), and the ids are random, so nothing collapses them on write.
+ * A `connection` row is shown only as its session's earliest in the
+ * preceding 24 h — by `(ingested_at, event_id)`, so two rows of one block
+ * (the same stamp) cannot both pass — and only once per session for as
+ * long as the window covers the one shown (`LiveCursor.connections`): a
+ * block visible late with an earlier row of the session would otherwise
+ * pass as the new earliest and be shown as a second one. A stateless
+ * fleet emits one connection per instance that served a session (the
+ * SDK's once-only events are per process), and the ids are random, so
+ * nothing collapses them on write.
  */
 
 /** How far before the cursor a poll re-reads, in whole seconds (SQL `INTERVAL n SECOND`). */
@@ -145,6 +149,13 @@ export interface LivePosition {
 export interface LiveCursor extends LivePosition {
   resume?: LivePosition;
   seen: SeenRow[];
+  /** The sessions whose connection row was shown, with its block, while the window still covers that block. */
+  connections: SeenConnection[];
+}
+
+export interface SeenConnection {
+  sessionId: string;
+  ingestedAt: string;
 }
 
 /** A row read: its `ingested_at` (its block) and when it was read (epoch ms); dropped once the horizon has passed the latter and the window the former. */
@@ -224,7 +235,7 @@ export async function initialLiveCursor(ctx: QueryContext): Promise<LiveCursor> 
   });
   const cursor = rows[0]?.cursor;
   if (!cursor) throw new Error("ClickHouse returned no cursor");
-  return { ingestedAt: cursor, eventId: "", seen: [] };
+  return { ingestedAt: cursor, eventId: "", seen: [], connections: [] };
 }
 
 /**
@@ -237,18 +248,21 @@ const WINDOW = `timestamp >= now() - INTERVAL 1 DAY
 
 /**
  * A `connection` row passes only as its session's earliest in the last
- * day. The candidates are the sessions with a connection row in the polled
- * window — the only ones whose rows the poll can return, so the result is
- * the same as over every session of the day, without ranking a day of
- * connection rows on every poll. Left out when the type filter excludes
- * connections altogether.
+ * day, by `(ingested_at, event_id)`: with `min(ingested_at)` alone, two
+ * connection rows of one session stored in one insert block — the same
+ * stamp — both passed, and a page cap or a jump between them showed two
+ * connections for the session (#148 review round 6). The candidates are
+ * the sessions with a connection row in the polled window — the only ones
+ * whose rows the poll can return, so the result is the same as over every
+ * session of the day, without ranking a day of connection rows on every
+ * poll. Left out when the type filter excludes connections altogether.
  */
 function connectionFilter(eventType: string | undefined): string {
   if (eventType !== undefined && eventType !== "connection") return "";
   return `AND (
           event_type != 'connection'
-          OR (session_id, ingested_at) IN (
-            SELECT session_id, min(ingested_at)
+          OR (session_id, ingested_at, event_id) IN (
+            SELECT session_id, min(ingested_at), argMin(event_id, (ingested_at, event_id))
             FROM events
             WHERE project_id = {projectId:String}
               AND event_type = 'connection'
@@ -319,7 +333,11 @@ export async function pollLive(
   cursor: LiveCursor,
   eventType?: string,
 ): Promise<LivePoll> {
-  const connectionSessions = new Set<string>();
+  // The sessions whose connection row was shown — by earlier polls, while
+  // the window still covers it, and by this one — with that row's block.
+  const connections = new Map<string, { ingestedAt: string; ms: number }>(
+    cursor.connections.map((c) => [c.sessionId, { ...c, ms: ingestedAtMs(c.ingestedAt) }]),
+  );
   const events: LiveEvent[] = [];
   // Every row read so far — earlier polls' or this one's, shown or not —
   // with its ingested_at: a row read before is not shown again, however it
@@ -362,8 +380,11 @@ export async function pollLive(
         ms: ingestedAtMs(row.ingestedAt),
       });
       if (row.eventType === "connection") {
-        if (connectionSessions.has(row.sessionId)) continue;
-        connectionSessions.add(row.sessionId);
+        if (connections.has(row.sessionId)) continue;
+        connections.set(row.sessionId, {
+          ingestedAt: row.ingestedAt,
+          ms: ingestedAtMs(row.ingestedAt),
+        });
       }
       const { ingestedAt: _ingestedAt, ...event } = row;
       events.push(event);
@@ -395,12 +416,16 @@ export async function pollLive(
     }
   }
 
+  const windowStart = ingestedAtMs(next.ingestedAt) - LIVE_OVERLAP_MS;
   return {
     events,
     cursor: {
       ...next,
       ...(resume ? { resume } : {}),
       seen: retained(read, next, now),
+      connections: [...connections]
+        .filter(([, c]) => c.ms >= windowStart)
+        .map(([sessionId, c]) => ({ sessionId, ingestedAt: c.ingestedAt })),
     },
   };
 }
