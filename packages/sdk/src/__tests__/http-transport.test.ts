@@ -1,6 +1,6 @@
 import type { BaseEvent } from "@yavio/shared/events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HttpTransport, retryAfterMs } from "../transport/http.js";
+import { HttpTransport, MAX_RETRY_AFTER_MS, retryAfterMs } from "../transport/http.js";
 
 function createMockFetch(status = 200, body = {}, headers?: Record<string, string>) {
   return vi.fn().mockResolvedValue({
@@ -723,6 +723,30 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       expect(fetch).toHaveBeenCalledTimes(1);
     });
 
+    it("an oversized Retry-After waits the fetch timeout, not 1 ms and not forever", async () => {
+      let calls = 0;
+      const fetch = vi.fn().mockImplementation(() => {
+        calls++;
+        if (calls === 1) {
+          return Promise.resolve({
+            status: 429,
+            // 3 000 000 s: as milliseconds, past what setTimeout takes (Node clamps it to 1 ms).
+            headers: { get: (name: string) => (name === "Retry-After" ? "3000000" : null) },
+            json: () => ({}),
+          });
+        }
+        return Promise.resolve(ok);
+      });
+      const transport = new HttpTransport({ ...base, fetch });
+      transport.send([fakeEvent()]);
+      const flushing = transport.flush();
+      await vi.advanceTimersByTimeAsync(29_900);
+      expect(fetch).toHaveBeenCalledTimes(1); // not retried at 1 ms
+      await vi.advanceTimersByTimeAsync(200);
+      await flushing;
+      expect(fetch).toHaveBeenCalledTimes(2); // and not held for 35 days
+    });
+
     it("an unparsable Retry-After falls back to the backoff, never to an immediate retry", async () => {
       let calls = 0;
       const fetch = vi.fn().mockImplementation(() => {
@@ -758,6 +782,22 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       expect(retryAfterMs("soon")).toBeUndefined();
       expect(retryAfterMs("1.5")).toBeUndefined();
       expect(retryAfterMs(null)).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retryAfterMs(): capped at the fetch timeout, as seconds and as a date — a value past 2^31−1 ms would be a 1 ms timer", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    try {
+      expect(retryAfterMs("2147484")).toBe(30_000); // 2 147 484 000 ms: past the setTimeout range
+      expect(MAX_RETRY_AFTER_MS).toBe(30_000);
+      expect(retryAfterMs("31")).toBe(30_000);
+      expect(retryAfterMs("99999999999999")).toBe(30_000);
+      expect(retryAfterMs("Sat, 03 Jan 2026 00:00:00 GMT")).toBe(30_000); // two days out
+      expect(retryAfterMs("30")).toBe(30_000);
+      expect(retryAfterMs("29")).toBe(29_000);
     } finally {
       vi.useRealTimers();
     }

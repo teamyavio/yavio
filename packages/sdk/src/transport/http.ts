@@ -38,21 +38,32 @@ const BASE_RETRY_DELAY_MS = 1_000;
 export const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 
 /**
+ * The longest `Retry-After` wait honoured: the fetch timeout, the longest
+ * the transport waits on ingest for anything. A longer value is not worth
+ * holding a buffered batch for — the next attempt gets a fresh answer —
+ * and must not reach `setTimeout` as is: above 2^31−1 ms Node clamps a
+ * timer to 1 ms, which turned one oversized header into a retry storm
+ * (#148 review round 1).
+ */
+export const MAX_RETRY_AFTER_MS = DEFAULT_FETCH_TIMEOUT_MS;
+
+/**
  * A `Retry-After` value as a wait in milliseconds: delay-seconds, or an
- * HTTP-date (counted from now, never negative). Undefined when the header
- * is missing or unparsable, so the caller falls back to its backoff — not
- * to `Number("Wed, …") * 1000`, which is NaN and meant an immediate retry
+ * HTTP-date (counted from now, never negative), either capped at
+ * `MAX_RETRY_AFTER_MS`. Undefined when the header is missing or
+ * unparsable, so the caller falls back to its backoff — not to
+ * `Number("Wed, …") * 1000`, which is NaN and meant an immediate retry
  * (#148).
  */
 export function retryAfterMs(header: string | null): number | undefined {
   if (header === null) return undefined;
   const value = header.trim();
-  if (/^\d+$/.test(value)) return Number(value) * 1000;
+  if (/^\d+$/.test(value)) return Math.min(MAX_RETRY_AFTER_MS, Number(value) * 1000);
   // Every HTTP-date form (IMF-fixdate, RFC 850, asctime) starts with a day
   // name; without that guard `Date.parse` reads "1.5" as a date.
   if (!/^[A-Za-z]{3}/.test(value)) return undefined;
   const at = Date.parse(value);
-  return Number.isNaN(at) ? undefined : Math.max(0, at - Date.now());
+  return Number.isNaN(at) ? undefined : Math.min(MAX_RETRY_AFTER_MS, Math.max(0, at - Date.now()));
 }
 
 export class HttpTransport implements Transport {
