@@ -146,40 +146,55 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
     expect(second.cursor.ingestedAt).toBe(at(30_000));
   });
 
-  it("a backlog beyond the cap is given up: 700 rows over 70 s show the first 500, then the cursor jumps and the rows before the new window never show", async () => {
+  it("a backlog beyond the cap is given up: 700 rows over 70 s show the first 500, then the cursor jumps to the clock and the rows before its window never show", async () => {
     const projectId = `p-${randomUUID().slice(0, 8)}`;
     const scope = { workspaceId: ws, projectId };
     const session = `s-${randomUUID().slice(0, 8)}`;
-    // One row every 100 ms: the cap (10 pages of 50) covers the first 50 s.
+    // One row every 100 ms, two minutes ago — all of it older than the
+    // window the jump opens: the cap (10 pages of 50) covers the first 50 s.
+    const far = (ms: number) => at(ms - 60_000);
     await insert(
       Array.from({ length: 700 }, (_, i) => ({
         project_id: projectId,
         session_id: session,
         event_name: `call-${i}`,
-        timestamp: at(i * 100 - 50),
-        ingested_at: at(i * 100),
+        timestamp: far(i * 100 - 50),
+        ingested_at: far(i * 100),
       })),
     );
-    const first = await q.pollLive(scope, { ingestedAt: at(0), seen: [] }, undefined);
+    const before = Date.now();
+    const first = await q.pollLive(scope, { ingestedAt: far(0), seen: [] }, undefined);
     expect(first.events).toHaveLength(500);
     expect(first.events[499]?.eventName).toBe("call-499");
-    // The jump: to the newest row (69.9 s), not to the last page read (49.9 s).
-    expect(first.cursor.ingestedAt).toBe(at(69_900));
-    // `seen` keeps only the rows read inside the new window (59.9 s on):
-    // none — the last page read ends at 49.9 s.
+    // The jump: to ClickHouse's clock — not to the last page read (49.9 s)
+    // and not to the newest row (69.9 s), which review round 2 found with
+    // max(ingested_at) over the whole day on every capped poll.
+    const jumpedTo = Date.parse(`${first.cursor.ingestedAt.replace(" ", "T")}Z`);
+    expect(jumpedTo).toBeGreaterThanOrEqual(before - 2_000);
+    expect(jumpedTo).toBeLessThanOrEqual(Date.now() + 2_000);
+    // `seen` keeps only the rows read inside the new window: none.
     expect(first.cursor.seen).toHaveLength(0);
 
-    // The next poll reads the window the jump opened: rows 599–699. Rows
-    // 500–598 are never shown.
+    // The next poll reads the window the jump opened — the last 10 s —
+    // which holds none of the backlog: rows 500–699 are never shown.
     const second = await q.pollLive(scope, first.cursor, undefined);
-    expect(second.events).toHaveLength(101);
-    expect(second.events[0]?.eventName).toBe("call-599");
-    expect(second.events[100]?.eventName).toBe("call-699");
-    expect(second.cursor.ingestedAt).toBe(at(69_900));
-    const shown = new Set([...first.events, ...second.events].map((e) => e.eventId));
-    expect(shown.size).toBe(601);
+    expect(second.events).toEqual([]);
+    expect(second.cursor.ingestedAt).toBe(first.cursor.ingestedAt);
+
+    // A row ingested now is shown: the feed is live again.
+    const now = new Date().toISOString().replace("T", " ").replace("Z", "");
+    await insert([
+      {
+        project_id: projectId,
+        session_id: session,
+        event_name: "call-fresh",
+        timestamp: now,
+        ingested_at: now,
+      },
+    ]);
     const third = await q.pollLive(scope, second.cursor, undefined);
-    expect(third.events).toEqual([]);
+    expect(third.events.map((e) => e.eventName)).toEqual(["call-fresh"]);
+    expect(third.cursor.ingestedAt).toBe(now);
   });
 
   it("interleaved batches skip nothing across two polls: an older-timestamp event ingested later is shown once", async () => {

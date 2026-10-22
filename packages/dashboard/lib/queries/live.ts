@@ -20,9 +20,12 @@ import type { LiveEvent } from "./types";
  * (bounded catch-up, #148 review round 2): one page per 1.5 s poll fell
  * behind for good above ~33 events/s, with the cursor's `seen` list growing
  * with the backlog. A backlog larger than the cap is given up: the cursor
- * jumps to the newest `ingested_at` the feed would show, so the live view
- * shows the latest events and the rows between the last page read and the
- * new window are never shown. `ingested_at` is outside the sort and
+ * jumps to ClickHouse's clock, so the live view shows what was ingested in
+ * the last `LIVE_OVERLAP` window and after, and the rows between the last
+ * page read and that window are never shown (not to `max(ingested_at)` of
+ * the day, which scanned every row of the day on each capped poll — during
+ * the very load spike that causes the backlog, `ingested_at` being outside
+ * the sort key; #148 review round 3). `ingested_at` is outside the sort and
  * partition keys, so every poll also keeps a `timestamp` bound to stay
  * within the current partitions.
  *
@@ -41,7 +44,7 @@ const LIVE_OVERLAP_MS = LIVE_OVERLAP_SECONDS * 1_000;
 export const LIVE_PAGE = 50;
 /**
  * Pages one poll reads at most (`LIVE_PAGE` × this rows). A backlog still
- * full after that is dropped: the cursor jumps to the newest row.
+ * full after that is dropped: the cursor jumps to ClickHouse's clock.
  */
 export const LIVE_MAX_PAGES = 10;
 
@@ -83,16 +86,25 @@ function ingestedAtMs(text: string): number {
   return Date.parse(`${text.replace(" ", "T")}Z`);
 }
 
-/** The feed's start: ClickHouse's clock, one overlap window ago, so nothing is skipped on connect. */
-export async function initialLiveCursor(ctx: QueryContext): Promise<LiveCursor> {
+/**
+ * ClickHouse's clock — not this process's: `ingested_at` is stamped by
+ * ingest on the same clock — `secondsAgo` before now, as cursor text.
+ */
+async function clockCursor(ctx: QueryContext, secondsAgo: number): Promise<string> {
+  const clock = "now64(3, 'UTC')";
   const rows = await queryAnalytics<{ cursor: string }>({
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
-    query: `SELECT toString(now64(3, 'UTC') - INTERVAL ${LIVE_OVERLAP_SECONDS} SECOND) AS cursor`,
+    query: `SELECT toString(${secondsAgo > 0 ? `${clock} - INTERVAL ${secondsAgo} SECOND` : clock}) AS cursor`,
   });
   const cursor = rows[0]?.cursor;
   if (!cursor) throw new Error("ClickHouse returned no clock");
-  return { ingestedAt: cursor, seen: [] };
+  return cursor;
+}
+
+/** The feed's start: ClickHouse's clock, one overlap window ago, so nothing is skipped on connect. */
+export async function initialLiveCursor(ctx: QueryContext): Promise<LiveCursor> {
+  return { ingestedAt: await clockCursor(ctx, LIVE_OVERLAP_SECONDS), seen: [] };
 }
 
 /** The bounds every poll reads within: the partition bound and the overlap window before the cursor. */
@@ -186,37 +198,17 @@ export async function pollLive(
   if (full) {
     // The cap: the backlog is larger than one poll walks. Give it up — the
     // live view shows the latest events, not a tail that only falls
-    // further behind — by jumping to the newest row the feed would show.
-    // Rows between the last page read and the new window are never shown;
-    // the rows inside the window that were not read come with the next
-    // poll (the read ones stay excluded through `seen`).
-    const jump = await newestIngestedAt(ctx, eventType);
-    if (jump !== undefined && jump > newest) newest = jump;
+    // further behind — by jumping to ClickHouse's clock: the next window
+    // is the last `LIVE_OVERLAP` seconds. Rows between the last page read
+    // and that window are never shown; the rows inside it that were not
+    // read come with the next poll (the read ones stay excluded through
+    // `seen`). Never backwards: a clock behind the last page read (rows
+    // stamped in the future) keeps the cursor where the pages left it.
+    const jump = await clockCursor(ctx, 0);
+    if (jump > newest) newest = jump;
   }
 
   return { events, cursor: { ingestedAt: newest, seen: withinWindow(read, newest) } };
-}
-
-/** The newest `ingested_at` the feed would show, or undefined when there is no row. */
-async function newestIngestedAt(
-  ctx: QueryContext,
-  eventType?: string,
-): Promise<string | undefined> {
-  const typeFilter = eventType ? "AND event_type = {eventType:String}" : "";
-  const rows = await queryAnalytics<{ newest: string; rows: string }>({
-    workspaceId: ctx.workspaceId,
-    projectId: ctx.projectId,
-    query: `
-      SELECT toString(max(ingested_at)) AS newest, toString(count()) AS rows
-      FROM events
-      WHERE project_id = {projectId:String}
-        AND timestamp >= now() - INTERVAL 1 DAY
-        ${typeFilter}
-    `,
-    params: { projectId: ctx.projectId, ...(eventType ? { eventType } : {}) },
-  });
-  const row = rows[0];
-  return row && Number(row.rows) > 0 ? row.newest : undefined;
 }
 
 /** One page of rows ingested since `cursor` (minus the overlap), oldest first, without the ids in `cursor.seen`. */

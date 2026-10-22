@@ -176,15 +176,15 @@ describe("live queries (#148)", () => {
       expect(result.cursor.seen).toHaveLength(120);
       expect(new Set(result.events.map((e) => e.eventId)).size).toBe(120);
       // No jump query: the short page ended the poll.
-      expect(calls.some((c) => c.query.includes("max(ingested_at)"))).toBe(false);
+      expect(calls.some((c) => c.query.includes("now64"))).toBe(false);
     });
 
-    it("gives a backlog beyond the cap up: after LIVE_MAX_PAGES full pages the cursor jumps to the newest row and seen keeps only the window", async () => {
+    it("gives a backlog beyond the cap up: after LIVE_MAX_PAGES full pages the cursor jumps to ClickHouse's clock and seen keeps only the window", async () => {
       // Every page full and fresh: page k ingested at 12:00:(10+k).
       let page = 0;
       mockQueryAnalytics.mockImplementation(async (call: { query: string }) => {
-        if (call.query.includes("max(ingested_at)")) {
-          return [{ newest: "2025-01-01 12:00:25.000", rows: "100000" }];
+        if (call.query.includes("now64")) {
+          return [{ cursor: "2025-01-01 12:00:25.000" }];
         }
         const at = `2025-01-01 12:00:${String(10 + page).padStart(2, "0")}.000`;
         const rows = batch(LIVE_PAGE, at).map((r, i) => ({ ...r, eventId: `p${page}-${i}` }));
@@ -194,21 +194,25 @@ describe("live queries (#148)", () => {
       const result = await pollLive(ctx, cursor);
       expect(mockQueryAnalytics).toHaveBeenCalledTimes(LIVE_MAX_PAGES + 1); // the pages, then the jump
       expect(result.events).toHaveLength(LIVE_PAGE * LIVE_MAX_PAGES);
-      // The cursor is at the newest row of the window, not at the last page read (12:00:19).
+      // The cursor is at the clock, not at the last page read (12:00:19).
       expect(result.cursor.ingestedAt).toBe("2025-01-01 12:00:25.000");
       // `seen` is bounded to the new window: pages ingested at 12:00:15 and later.
       expect(result.cursor.seen).toHaveLength(LIVE_PAGE * 5);
       expect(result.cursor.seen.every((r) => r.ingestedAt >= "2025-01-01 12:00:15.000")).toBe(true);
+      // The jump reads the clock, not `max(ingested_at)` over the day — a
+      // full scan on every capped poll, during the spike that causes the
+      // backlog (#148 review round 3).
       const jump = mockQueryAnalytics.mock.calls[LIVE_MAX_PAGES][0];
-      expect(jump.query).toContain("timestamp >= now() - INTERVAL 1 DAY");
-      expect(jump.query).not.toContain("event_type = {eventType:String}");
+      expect(jump.query).toContain("SELECT toString(now64(3, 'UTC')) AS cursor");
+      expect(jump.query).not.toContain("FROM events");
+      expect(jump.query).not.toContain("max(ingested_at)");
     });
 
-    it("the jump honours the type filter and never moves the cursor backwards", async () => {
+    it("the jump never moves the cursor backwards, and the pages keep the type filter", async () => {
       let page = 0;
       mockQueryAnalytics.mockImplementation(async (call: { query: string }) => {
-        if (call.query.includes("max(ingested_at)")) {
-          return [{ newest: "2025-01-01 12:00:05.000", rows: "7" }]; // older than the last page read
+        if (call.query.includes("now64")) {
+          return [{ cursor: "2025-01-01 12:00:05.000" }]; // a clock behind the last page read
         }
         const at = `2025-01-01 12:00:${String(10 + page).padStart(2, "0")}.000`;
         const rows = batch(LIVE_PAGE, at).map((r, i) => ({ ...r, eventId: `p${page}-${i}` }));
@@ -216,9 +220,11 @@ describe("live queries (#148)", () => {
         return rows;
       });
       const result = await pollLive(ctx, cursor, "tool_call");
-      const jump = mockQueryAnalytics.mock.calls[LIVE_MAX_PAGES][0];
-      expect(jump.query).toContain("event_type = {eventType:String}");
-      expect(jump.params.eventType).toBe("tool_call");
+      expect(mockQueryAnalytics).toHaveBeenCalledTimes(LIVE_MAX_PAGES + 1);
+      for (const [call] of mockQueryAnalytics.mock.calls.slice(0, LIVE_MAX_PAGES)) {
+        expect(call.query).toContain("event_type = {eventType:String}");
+        expect(call.params.eventType).toBe("tool_call");
+      }
       expect(result.cursor.ingestedAt).toBe("2025-01-01 12:00:19.000");
     });
 
