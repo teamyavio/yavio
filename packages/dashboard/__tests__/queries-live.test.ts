@@ -50,13 +50,38 @@ describe("live queries (#148)", () => {
   });
 
   describe("initialLiveCursor", () => {
-    it("starts one overlap window before ClickHouse's clock", async () => {
-      mockQueryAnalytics.mockResolvedValue([{ cursor: "2025-01-01 11:59:50.000" }]);
-      const result = await initialLiveCursor(ctx);
-      expect(result).toEqual({ ingestedAt: "2025-01-01 11:59:50.000", seen: [] });
+    it("starts at the newest ingested_at of the last hour — ClickHouse's clock only with no rows — and the first window is the 10 s overlap, not 20", async () => {
+      mockQueryAnalytics.mockResolvedValue([{ cursor: "2025-01-01 12:00:00.000" }]);
+      const result = await initialLiveCursor(ctx, "tool_call");
+      // No overlap of its own: the poll's window before the cursor is the overlap.
+      expect(result).toEqual({ ingestedAt: "2025-01-01 12:00:00.000", seen: [] });
       const call = mockQueryAnalytics.mock.calls[0][0];
-      expect(call.query).toContain("now64(3, 'UTC') - INTERVAL 10 SECOND");
+      // ingested_at is stamped by ingest's clock: a cursor taken from
+      // ClickHouse's hid every row once the two differed by more than the
+      // overlap (#148 review round 4).
+      expect(call.query).toContain("coalesce(maxOrNull(ingested_at), now64(3, 'UTC'))");
+      expect(call.query).toContain("FROM events");
+      expect(call.query).toContain(
+        `timestamp >= now() - INTERVAL ${LIVE_SKEW_ALLOWANCE_SECONDS} SECOND`,
+      );
+      expect(call.query).toContain("event_type = {eventType:String}");
+      expect(call.params).toEqual({ projectId: "proj_1", eventType: "tool_call" });
+      expect(call.query).not.toContain("INTERVAL 10 SECOND");
       expect(call.projectId).toBe("proj_1");
+
+      mockQueryAnalytics.mockClear();
+      mockQueryAnalytics.mockResolvedValue([]);
+      await pollLive(ctx, result);
+      const poll = mockQueryAnalytics.mock.calls[0][0];
+      expect(poll.params.cursor).toBe("2025-01-01 12:00:00.000");
+      expect(poll.query).toContain(
+        "ingested_at >= {cursor:DateTime64(3, 'UTC')} - INTERVAL 10 SECOND",
+      );
+
+      mockQueryAnalytics.mockClear();
+      mockQueryAnalytics.mockResolvedValue([{ cursor: "2025-01-01 12:00:01.000" }]);
+      await initialLiveCursor(ctx);
+      expect(mockQueryAnalytics.mock.calls[0][0].query).not.toContain("eventType");
     });
   });
 
@@ -188,14 +213,14 @@ describe("live queries (#148)", () => {
       expect(result.cursor.seen).toHaveLength(120);
       expect(new Set(result.events.map((e) => e.eventId)).size).toBe(120);
       // No jump query: the short page ended the poll.
-      expect(calls.some((c) => c.query.includes("now64"))).toBe(false);
+      expect(calls.some((c) => c.query.includes("maxOrNull"))).toBe(false);
     });
 
-    it("gives a backlog beyond the cap up: after LIVE_MAX_PAGES full pages the cursor jumps to ClickHouse's clock and seen keeps only the window", async () => {
+    it("gives a backlog beyond the cap up: after LIVE_MAX_PAGES full pages the cursor jumps to the newest ingested_at of the last hour and seen keeps only the window", async () => {
       // Every page full and fresh: page k ingested at 12:00:(10+k).
       let page = 0;
       mockQueryAnalytics.mockImplementation(async (call: { query: string }) => {
-        if (call.query.includes("now64")) {
+        if (call.query.includes("maxOrNull")) {
           return [{ cursor: "2025-01-01 12:00:25.000" }];
         }
         const at = `2025-01-01 12:00:${String(10 + page).padStart(2, "0")}.000`;
@@ -206,25 +231,31 @@ describe("live queries (#148)", () => {
       const result = await pollLive(ctx, cursor);
       expect(mockQueryAnalytics).toHaveBeenCalledTimes(LIVE_MAX_PAGES + 1); // the pages, then the jump
       expect(result.events).toHaveLength(LIVE_PAGE * LIVE_MAX_PAGES);
-      // The cursor is at the clock, not at the last page read (12:00:19).
+      // The cursor is at the newest row, not at the last page read (12:00:19).
       expect(result.cursor.ingestedAt).toBe("2025-01-01 12:00:25.000");
       // `seen` is bounded to the new window: pages ingested at 12:00:15 and later.
       expect(result.cursor.seen).toHaveLength(LIVE_PAGE * 5);
       expect(result.cursor.seen.every((r) => r.ingestedAt >= "2025-01-01 12:00:15.000")).toBe(true);
-      // The jump reads the clock, not `max(ingested_at)` over the day — a
-      // full scan on every capped poll, during the spike that causes the
-      // backlog (#148 review round 3).
+      // The jump reads the newest ingested_at of the last hour by
+      // timestamp (the sort key prunes), the clock only with no rows — not
+      // the clock alone, which ingest's clock may run behind (review round
+      // 4), and not `max(ingested_at)` over the day, a full scan on every
+      // capped poll (review round 3).
       const jump = mockQueryAnalytics.mock.calls[LIVE_MAX_PAGES][0];
-      expect(jump.query).toContain("SELECT toString(now64(3, 'UTC')) AS cursor");
-      expect(jump.query).not.toContain("FROM events");
-      expect(jump.query).not.toContain("max(ingested_at)");
+      expect(jump.query).toContain("coalesce(maxOrNull(ingested_at), now64(3, 'UTC'))");
+      expect(jump.query).toContain("FROM events");
+      expect(jump.query).toContain(
+        `timestamp >= now() - INTERVAL ${LIVE_SKEW_ALLOWANCE_SECONDS} SECOND`,
+      );
+      expect(jump.query).not.toContain("INTERVAL 1 DAY");
+      expect(jump.params.eventType).toBeUndefined();
     });
 
-    it("the jump never moves the cursor backwards, and the pages keep the type filter", async () => {
+    it("the jump never moves the cursor backwards, and the pages and the jump keep the type filter", async () => {
       let page = 0;
       mockQueryAnalytics.mockImplementation(async (call: { query: string }) => {
-        if (call.query.includes("now64")) {
-          return [{ cursor: "2025-01-01 12:00:05.000" }]; // a clock behind the last page read
+        if (call.query.includes("maxOrNull")) {
+          return [{ cursor: "2025-01-01 12:00:05.000" }]; // the filter's newest row, behind the last page read
         }
         const at = `2025-01-01 12:00:${String(10 + page).padStart(2, "0")}.000`;
         const rows = batch(LIVE_PAGE, at).map((r, i) => ({ ...r, eventId: `p${page}-${i}` }));
@@ -233,7 +264,7 @@ describe("live queries (#148)", () => {
       });
       const result = await pollLive(ctx, cursor, "tool_call");
       expect(mockQueryAnalytics).toHaveBeenCalledTimes(LIVE_MAX_PAGES + 1);
-      for (const [call] of mockQueryAnalytics.mock.calls.slice(0, LIVE_MAX_PAGES)) {
+      for (const [call] of mockQueryAnalytics.mock.calls) {
         expect(call.query).toContain("event_type = {eventType:String}");
         expect(call.params.eventType).toBe("tool_call");
       }

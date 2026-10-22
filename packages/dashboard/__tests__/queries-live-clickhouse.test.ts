@@ -73,13 +73,71 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
     await admin.close();
   });
 
-  it("starts one overlap window before ClickHouse's clock", async () => {
+  it("starts at ClickHouse's clock when the project has no recent rows", async () => {
     const before = Date.now();
-    const cursor = await q.initialLiveCursor(ctx);
+    const cursor = await q.initialLiveCursor(ctx); // nothing inserted for this project yet
     const startedAt = Date.parse(`${cursor.ingestedAt.replace(" ", "T")}Z`);
-    expect(startedAt).toBeGreaterThanOrEqual(before - 10_000 - 2_000);
-    expect(startedAt).toBeLessThanOrEqual(Date.now() - 10_000 + 2_000);
+    expect(startedAt).toBeGreaterThanOrEqual(before - 2_000);
+    expect(startedAt).toBeLessThanOrEqual(Date.now() + 2_000);
     expect(cursor.seen).toEqual([]);
+  });
+
+  it("a row stamped 25 s behind ClickHouse's clock — ingest's clock, not ClickHouse's — is found on connect and after a jump", async () => {
+    // ingested_at is stamped by the ingest process; a skew between its
+    // clock and ClickHouse's larger than the 10 s overlap hid every row for
+    // good when the cursor came from the clock (#148 review round 4).
+    const projectId = `p-${randomUUID().slice(0, 8)}`;
+    const scope = { workspaceId: ws, projectId };
+    const session = `s-${randomUUID().slice(0, 8)}`;
+    const behind = (ms: number) =>
+      new Date(Date.now() - ms).toISOString().replace("T", " ").replace("Z", "");
+    const skewed = behind(25_000);
+    await insert([
+      {
+        project_id: projectId,
+        session_id: session,
+        event_name: "skewed",
+        timestamp: skewed,
+        ingested_at: skewed,
+      },
+    ]);
+    // On connect: the cursor is the newest ingested_at, so the first
+    // window holds the row. Before the fix the cursor was the clock minus
+    // the overlap, the window 20 s: the row at −25 s was never shown.
+    const cursor = await q.initialLiveCursor(scope);
+    const first = await q.pollLive(scope, cursor, undefined);
+    expect(first.events.map((e) => e.eventName)).toEqual(["skewed"]);
+    expect(cursor.ingestedAt).toBe(skewed);
+
+    // After a jump, in a project of its own: a backlog beyond the cap two
+    // minutes ago, then one row at −25 s. The jump lands on that row (the
+    // newest of the last hour), not on the clock, whose window — the last
+    // 10 s — did not hold it.
+    const projectB = `p-${randomUUID().slice(0, 8)}`;
+    const scopeB = { workspaceId: ws, projectId: projectB };
+    const far = (ms: number) => at(ms - 60_000);
+    const later = behind(25_000);
+    await insert([
+      ...Array.from({ length: 600 }, (_, i) => ({
+        project_id: projectB,
+        session_id: session,
+        event_name: `call-${i}`,
+        timestamp: far(i * 100 - 50),
+        ingested_at: far(i * 100),
+      })),
+      {
+        project_id: projectB,
+        session_id: session,
+        event_name: "skewed-2",
+        timestamp: later,
+        ingested_at: later,
+      },
+    ]);
+    const capped = await q.pollLive(scopeB, { ingestedAt: far(0), seen: [] }, undefined);
+    expect(capped.events).toHaveLength(500);
+    expect(capped.cursor.ingestedAt).toBe(later);
+    const next = await q.pollLive(scopeB, capped.cursor, undefined);
+    expect(next.events.map((e) => e.eventName)).toEqual(["skewed-2"]);
   });
 
   it("two instances' rows for one session give one connection row", async () => {
@@ -146,7 +204,7 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
     expect(second.cursor.ingestedAt).toBe(at(30_000));
   });
 
-  it("a backlog beyond the cap is given up: 700 rows over 70 s show the first 500, then the cursor jumps to the clock and the rows before its window never show", async () => {
+  it("a backlog beyond the cap is given up: 700 rows over 70 s show the first 500, then the cursor jumps to the newest row and the rows before its window never show", async () => {
     const projectId = `p-${randomUUID().slice(0, 8)}`;
     const scope = { workspaceId: ws, projectId };
     const session = `s-${randomUUID().slice(0, 8)}`;
@@ -162,24 +220,23 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
         ingested_at: far(i * 100),
       })),
     );
-    const before = Date.now();
     const first = await q.pollLive(scope, { ingestedAt: far(0), seen: [] }, undefined);
     expect(first.events).toHaveLength(500);
     expect(first.events[499]?.eventName).toBe("call-499");
-    // The jump: to ClickHouse's clock — not to the last page read (49.9 s)
-    // and not to the newest row (69.9 s), which review round 2 found with
-    // max(ingested_at) over the whole day on every capped poll.
-    const jumpedTo = Date.parse(`${first.cursor.ingestedAt.replace(" ", "T")}Z`);
-    expect(jumpedTo).toBeGreaterThanOrEqual(before - 2_000);
-    expect(jumpedTo).toBeLessThanOrEqual(Date.now() + 2_000);
+    // The jump: to the newest row of the last hour (69.9 s) — not to the
+    // last page read (49.9 s), and not to ClickHouse's clock (review round
+    // 3), which ingest's clock may run behind by more than the overlap.
+    expect(first.cursor.ingestedAt).toBe(far(69_900));
     // `seen` keeps only the rows read inside the new window: none.
     expect(first.cursor.seen).toHaveLength(0);
 
-    // The next poll reads the window the jump opened — the last 10 s —
-    // which holds none of the backlog: rows 500–699 are never shown.
+    // The next poll reads the window the jump opened — the 10 s before the
+    // newest row — rows 599–699; rows 500–598 are never shown.
     const second = await q.pollLive(scope, first.cursor, undefined);
-    expect(second.events).toEqual([]);
-    expect(second.cursor.ingestedAt).toBe(first.cursor.ingestedAt);
+    expect(second.events.map((e) => e.eventName)).toEqual(
+      Array.from({ length: 101 }, (_, i) => `call-${599 + i}`),
+    );
+    expect(second.cursor.ingestedAt).toBe(far(69_900));
 
     // A row ingested now is shown: the feed is live again.
     const now = new Date().toISOString().replace("T", " ").replace("Z", "");

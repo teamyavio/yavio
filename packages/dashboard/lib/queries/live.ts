@@ -104,24 +104,43 @@ function ingestedAtMs(text: string): number {
 }
 
 /**
- * ClickHouse's clock — not this process's: `ingested_at` is stamped by
- * ingest on the same clock — `secondsAgo` before now, as cursor text.
+ * Where the feed starts, and where a capped poll jumps to: the newest
+ * `ingested_at` the feed would show (the type filter applies) among the
+ * rows of the last `LIVE_SKEW_ALLOWANCE` — by `timestamp`, so the sort key
+ * prunes — or ClickHouse's clock when there are none, as cursor text.
+ * `ingested_at` is stamped by the ingest process's clock, not ClickHouse's:
+ * a cursor taken from the clock hid every row for good once the two
+ * differed by more than the overlap (#148 review round 4).
  */
-async function clockCursor(ctx: QueryContext, secondsAgo: number): Promise<string> {
-  const clock = "now64(3, 'UTC')";
+async function latestCursor(ctx: QueryContext, eventType?: string): Promise<string> {
+  const typeFilter = eventType ? "AND event_type = {eventType:String}" : "";
   const rows = await queryAnalytics<{ cursor: string }>({
     workspaceId: ctx.workspaceId,
     projectId: ctx.projectId,
-    query: `SELECT toString(${secondsAgo > 0 ? `${clock} - INTERVAL ${secondsAgo} SECOND` : clock}) AS cursor`,
+    query: `
+      SELECT toString(coalesce(maxOrNull(ingested_at), now64(3, 'UTC'))) AS cursor
+      FROM events
+      WHERE project_id = {projectId:String}
+        AND timestamp >= now() - INTERVAL ${LIVE_SKEW_ALLOWANCE_SECONDS} SECOND
+        ${typeFilter}
+    `,
+    params: { projectId: ctx.projectId, ...(eventType ? { eventType } : {}) },
   });
   const cursor = rows[0]?.cursor;
-  if (!cursor) throw new Error("ClickHouse returned no clock");
+  if (!cursor) throw new Error("ClickHouse returned no cursor");
   return cursor;
 }
 
-/** The feed's start: ClickHouse's clock, one overlap window ago, so nothing is skipped on connect. */
-export async function initialLiveCursor(ctx: QueryContext): Promise<LiveCursor> {
-  return { ingestedAt: await clockCursor(ctx, LIVE_OVERLAP_SECONDS), seen: [] };
+/**
+ * The feed's start: the newest `ingested_at` of the last hour (the clock
+ * with no rows), without an overlap of its own — the poll's window before
+ * the cursor is the overlap, so the first poll shows the last 10 s, not 20.
+ */
+export async function initialLiveCursor(
+  ctx: QueryContext,
+  eventType?: string,
+): Promise<LiveCursor> {
+  return { ingestedAt: await latestCursor(ctx, eventType), seen: [] };
 }
 
 /**
@@ -233,13 +252,14 @@ export async function pollLive(
   if (full) {
     // The cap: the backlog is larger than one poll walks. Give it up — the
     // live view shows the latest events, not a tail that only falls
-    // further behind — by jumping to ClickHouse's clock: the next window
-    // is the last `LIVE_OVERLAP` seconds. Rows between the last page read
-    // and that window are never shown; the rows inside it that were not
-    // read come with the next poll (the read ones stay excluded through
-    // `seen`). Never backwards: a clock behind the last page read (rows
-    // stamped in the future) keeps the cursor where the pages left it.
-    const jump = await clockCursor(ctx, 0);
+    // further behind — by jumping to the newest `ingested_at` of the last
+    // hour: the next window is the `LIVE_OVERLAP` seconds before it. Rows
+    // between the last page read and that window are never shown; the
+    // rows inside it that were not read come with the next poll (the read
+    // ones stay excluded through `seen`). Never backwards: a jump behind
+    // the last page read (the filter's newest row older than it) keeps the
+    // cursor where the pages left it.
+    const jump = await latestCursor(ctx, eventType);
     if (jump > newest) newest = jump;
   }
 
