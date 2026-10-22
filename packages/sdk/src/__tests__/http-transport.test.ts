@@ -1122,6 +1122,37 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       expect(transport.pendingEvents()).toBe(0);
     });
 
+    it("a 207 whose body cannot be read is delivered — the status said accepted — not re-sent as a network error", async () => {
+      const fetch = vi.fn().mockResolvedValue({
+        status: 207,
+        headers: { get: () => null },
+        json: () => Promise.reject(new SyntaxError("Unexpected end of JSON input")),
+      });
+      const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+      try {
+        const transport = new HttpTransport({ ...base, flushIntervalMs: 60_000, fetch });
+        transport.send([fakeEvent()]);
+        const flushing = transport.flush();
+        // Before the fix the failed body read fell into the network-error
+        // branch: the accepted batch was re-sent at 1, 3, 7, 15 and 31 s,
+        // then given up with a 1201 line.
+        await vi.advanceTimersByTimeAsync(40_000);
+        await flushing;
+        expect(fetch).toHaveBeenCalledTimes(1);
+        expect(transport.lostEvents()).toBe(0);
+        expect(transport.pendingEvents()).toBe(0);
+        expect(warn).not.toHaveBeenCalled();
+        expect(debug).toHaveBeenCalledWith(expect.stringContaining("207 body unreadable"));
+        // Under a deadline it is not the deadline's loss either.
+        transport.send([fakeEvent()]);
+        await transport.shutdown(500);
+        expect(fetch).toHaveBeenCalledTimes(2);
+        expect(transport.deadlineLostEvents()).toBe(0);
+      } finally {
+        debug.mockRestore();
+      }
+    });
+
     it("a 401 during the drain ends it: one request, one 1203 line with the dropped count, the rest a counted failure, a later send() dropped and counted", async () => {
       const fetch = createMockFetch(401);
       const onClosed = vi.fn();

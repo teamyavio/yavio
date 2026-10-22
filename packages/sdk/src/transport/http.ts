@@ -456,8 +456,19 @@ export class HttpTransport implements Transport {
         if (response.status === 200) return;
 
         if (response.status === 207) {
-          const data = (await response.json()) as { rejected?: number; errors?: unknown[] };
-          if (data.rejected) {
+          // Accepted: the status says so, the body only says how many
+          // were rejected. A body that cannot be read is not a network
+          // error — before #148 review round 4 it re-sent the accepted
+          // batch, and under a deadline counted it as lost.
+          let data: { rejected?: number; errors?: unknown[] } | undefined;
+          try {
+            data = (await response.json()) as typeof data;
+          } catch (error) {
+            console.debug(
+              `[yavio] 207 body unreadable, batch accepted: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+          if (data?.rejected) {
             console.warn(
               `[${ErrorCode.SDK.PARTIAL_BATCH_REJECTION}] ${data.rejected} events rejected`,
             );
