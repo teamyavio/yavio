@@ -1139,6 +1139,56 @@ describe("loss accounting (#148)", () => {
     expect(lines1205()).toHaveLength(1);
   });
 
+  it("a cycle handed back early, as the only listener: the stops' later deadline loss adds no second line", async () => {
+    _setSignalReraise(() => {});
+    await withoutOtherListeners("SIGTERM", async () => {
+      await withoutOtherListeners("SIGINT", async () => {
+        const { raw } = build("yav_148_late_sole", { shutdownTimeoutMs: 600 });
+        await callTool(raw, "get_price", { q: "x" });
+        process.emit("SIGTERM", "SIGTERM"); // the cycle: its stop hangs until the 600 ms deadline
+        await new Promise((r) => setTimeout(r, 300));
+        process.emit("SIGINT", "SIGINT"); // a different signal: handed back at once
+        // The cycle's line, with the two events in flight the re-raise would cut.
+        expect(lines1205()).toHaveLength(1);
+        expect(lines1205()[0]).toContain("Shutdown deadline of 600 ms");
+        expect(lines1205()[0]).toContain("2 events not delivered");
+        // The stop reaches its deadline after the hand-back: before the fix
+        // that printed a second line, "shutdown() deadline of 600 ms reached
+        // — 2 events", for events the cycle's line had already counted.
+        await new Promise((r) => setTimeout(r, 500));
+        expect(lines1205()).toHaveLength(1);
+      });
+    });
+  });
+
+  it("a cycle handed back early, next to an app listener: the stops' later deadline loss is one line with the cycle's wording", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      await withoutOtherListeners("SIGINT", async () => {
+        const app = vi.fn();
+        process.on("SIGTERM", app);
+        try {
+          const { raw } = build("yav_148_late_app", { shutdownTimeoutMs: 600 });
+          await callTool(raw, "get_price", { q: "x" });
+          process.emit("SIGTERM", "SIGTERM");
+          await new Promise((r) => setTimeout(r, 300));
+          process.emit("SIGINT", "SIGINT"); // handed back; nothing lost yet, so no line
+          expect(lines1205()).toHaveLength(0);
+          await new Promise((r) => setTimeout(r, 500));
+          // The two events the stop gave up at the cycle's deadline, once,
+          // as the cycle's — not as a per-transport "shutdown() deadline".
+          expect(lines1205()).toHaveLength(1);
+          expect(lines1205()[0]).toContain("Shutdown deadline of 600 ms");
+          expect(lines1205()[0]).toContain("2 events not delivered");
+          expect(lines1205()[0]).not.toContain("shutdown() deadline");
+          exitHooks()[0]?.call(process, 0);
+          expect(lines1205()).toHaveLength(1); // nothing left unreported
+        } finally {
+          process.off("SIGTERM", app);
+        }
+      });
+    });
+  });
+
   it("a client created and shut down per request leaves no transport behind, and its losses stay counted", async () => {
     // A stateless host that follows the README per request: before the fix
     // every transport stayed in the registry's set for the process lifetime.

@@ -237,6 +237,13 @@ interface SignalCycle {
   startedAt: number;
   budgetMs: number;
   deadlineAt: number;
+  /**
+   * Events the cycle's line counted as "in flight when the re-raise is
+   * about to end the process". Lost for good only if the process goes on
+   * (a test's stubbed re-raise): a later count of the cycle's stops leaves
+   * them out, so no event is in two lines.
+   */
+  pendingReported: number;
 }
 
 /**
@@ -346,10 +353,18 @@ function releaseWaiters(): void {
  * that, which covers an app calling `process.exit()` before its
  * `shutdown()` resolved. The exit hook is armed only after a signal or a
  * started `shutdown()`: a plain exit (tests, CLIs) stays quiet.
+ *
+ * A cycle handed back early (a second signal) ends before the stops it
+ * started reach their deadline. What those stops give up afterwards is
+ * still the cycle's: one more line with the cycle's wording and budget
+ * when the drain settles — not one `shutdown()` line per transport, which
+ * is what a stop the registry started outside a signal gets (#148 review
+ * round 1). `signalStops` marks the transports a cycle stopped.
  */
 let reportedLost = 0;
 let exitHookArmed = false;
 let exitReported = false;
+const signalStops = new WeakSet<Transport>();
 
 const lostTotal = (): number =>
   [...transports].reduce((n, t) => n + t.lostEvents(), lostFromClosed);
@@ -376,20 +391,36 @@ export function armExitHook(): void {
   process.on("exit", yavioReportAtExit);
 }
 
-/** The cycle's one line: everything the deadline gave up, plus what the re-raise is about to cut. */
-function reportCycleLoss(cycle: SignalCycle): void {
+/**
+ * The cycle's one line: everything the deadline gave up, plus — at the
+ * hand-back — what the re-raise is about to cut. Called again when a drain
+ * settles after its cycle was handed back early, for what the cycle's stops
+ * gave up since (`pendingReported` left out).
+ */
+function reportCycleLoss(cycle: SignalCycle, at: "hand-back" | "drain-settled"): void {
   const total = lostTotal();
-  const n = total - reportedLost + (cycle.sole ? pendingTotal() : 0);
+  let n = total - reportedLost;
   reportedLost = total;
+  if (at === "hand-back") {
+    if (cycle.sole) cycle.pendingReported = pendingTotal();
+    n += cycle.pendingReported;
+  } else {
+    n -= cycle.pendingReported;
+  }
   if (n <= 0) return;
   console.warn(
     `[YAVIO-1205] Shutdown deadline of ${cycle.budgetMs} ms reached — ${n} events not delivered (queued, in flight or refused after the deadline). ${RAISE_HINT}`,
   );
 }
 
-/** A non-signal `shutdown()` whose deadline gave events up: its own line, its own count. */
-function reportCallLoss(lost: number, deadlineMs: number): void {
-  if (signalInFlight) return; // the cycle's line covers it
+/**
+ * A `shutdown()` whose deadline gave events up: its own line, its own
+ * count — unless a signal cycle started it (the cycle's line covers it,
+ * at the hand-back or when its drain settles) or one is running (its line
+ * counts every loss until it ends).
+ */
+function reportCallLoss(transport: Transport, lost: number, deadlineMs: number): void {
+  if (signalInFlight || signalStops.has(transport)) return;
   reportedLost += lost;
   console.warn(
     `[YAVIO-1205] shutdown() deadline of ${deadlineMs} ms reached — ${lost} events not delivered. ${RAISE_HINT}`,
@@ -443,6 +474,7 @@ function onSignal(signal: HandledSignal): void {
     startedAt,
     budgetMs,
     deadlineAt: startedAt + budgetMs,
+    pendingReported: 0,
   };
   signalInFlight = cycle;
   clearTimeout(cycleTimer);
@@ -451,7 +483,13 @@ function onSignal(signal: HandledSignal): void {
   armExitHook();
   beginProcessShutdown()
     .catch(() => {})
-    .then(() => finishSignal(cycle));
+    .then(() => {
+      // Still this cycle: end it. Handed back already: its stops have
+      // settled now, and what they gave up since the hand-back is reported
+      // as the cycle's, in one line.
+      if (signalInFlight === cycle) finishSignal(cycle);
+      else reportCycleLoss(cycle, "drain-settled");
+    });
 }
 
 /**
@@ -467,7 +505,7 @@ function finishSignal(cycle: SignalCycle): void {
   if (signalInFlight !== cycle) return; // handed back already, or a later cycle is running
   signalInFlight = null;
   lastBudgetMs = cycle.budgetMs;
-  reportCycleLoss(cycle); // before the re-raise: a POSIX re-raise skips `exit` listeners
+  reportCycleLoss(cycle, "hand-back"); // before the re-raise: a POSIX re-raise skips `exit` listeners
   removeSignalHandlers();
   if (cycle.sole) reraise(cycle.signal);
 }
@@ -506,7 +544,7 @@ function newTransport(config: Key, sdkVersion: string): HttpTransport {
     sdkVersion,
     shutdownTimeoutMs: config.shutdownTimeoutMs,
     immediate: draining,
-    onShutdownLoss: reportCallLoss,
+    onShutdownLoss: (lost, deadlineMs) => reportCallLoss(transport, lost, deadlineMs),
     onClosed: () => {
       // Settled: nothing is pending, and nothing reaches it any more (the
       // registry unhooks a transport from its slot before stopping it), so
@@ -747,7 +785,9 @@ export async function shutdownAllShared(): Promise<void> {
   const stops = entries.map((entry) => {
     const live = entry.slot.live;
     entry.slot.live = null;
-    return live?.shutdown(deadlineMs).catch(() => {});
+    if (!live) return undefined;
+    signalStops.add(live); // its deadline loss is the cycle's, even after a hand-back
+    return live.shutdown(deadlineMs).catch(() => {});
   });
   const inProgress = [...stopsInProgress];
   if (inProgress.length === 0) {
