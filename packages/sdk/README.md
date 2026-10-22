@@ -61,7 +61,7 @@ withYavio(server, {
   tools: {               // per-tool overrides of the capture flags (default: none)
     "book-contract": { inputValues: false, outputValues: false, intent: false },
   },
-  shutdownTimeoutMs: 10_000, // deadline for delivering queued events on shutdown: an integer in [100, 2147483647] ms (default: 10 s); on SIGTERM/SIGINT the smallest value set explicitly for the key wins, see Stateless
+  shutdownTimeoutMs: 4_000, // deadline for delivering queued events on shutdown: an integer in [100, 2147483647] ms (default: 4 s); on SIGTERM/SIGINT one deadline for the whole process, the smallest value set explicitly, see Stateless
 });
 ```
 
@@ -203,7 +203,7 @@ withYavio(server, { apiKey, endpoint });               // per server, as before
 
 Created inside the handler instead, after the SDK handed the signal back, it would install the SDK's signal listeners again and they would stay.
 
-Without a handler the SDK drains everything on `SIGTERM`/`SIGINT`, then hands the signal back: it removes its own listeners and, if it was the only listener when the signal arrived, re-raises the signal so Node's default exit runs (128 + the signal number: 130 after Ctrl-C, 143 after `SIGTERM`; set by hand on Windows) — an app with its own handler keeps control, and a second Ctrl-C while draining ends the wait. A library that also waits to be the last listener (signal-exit, used by execa and ora) does not get its turn, so an app that depends on it should handle the signal itself. A `401` from ingest stops delivery for that key process-wide (`YAVIO-1203`): every wrap sharing the key is affected, which is what an invalid key means.
+Without a handler the SDK drains everything on `SIGTERM`/`SIGINT` within the deadline, prints what it had to give up (one `YAVIO-1205` line), then hands the signal back: it removes its own listeners and, if it was the only listener when the signal arrived, re-raises the signal so Node's default exit runs (128 + the signal number: 130 after Ctrl-C, 143 after `SIGTERM`; set by hand on Windows) — an app with its own handler keeps control, and a second Ctrl-C more than 250 ms after the first ends the wait (one within 250 ms is the same keypress, which `npm run` forwards twice). An app that calls `process.exit()` before its `shutdown()` resolved gets one `YAVIO-1205` line at exit with what was still undelivered. A library that also waits to be the last listener (signal-exit, used by execa and ora) does not get its turn, so an app that depends on it should handle the signal itself. A `401` from ingest stops delivery for that key process-wide (`YAVIO-1203`): every wrap sharing the key is affected, which is what an invalid key means.
 
 A value that is not an `McpServer` (no `registerTool()` / `connect()`) comes back unwrapped with one `YAVIO-1107` error per process — in no-op mode too — so a mis-wired integration keeps serving. After `SIGTERM`/`SIGINT` requests still served during the graceful-shutdown window send their events at once; a `shutdown()` after them waits for those sends too.
 
