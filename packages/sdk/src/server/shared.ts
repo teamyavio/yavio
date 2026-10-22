@@ -806,6 +806,18 @@ export function acquireShared(
   return { state: entry.slot, generation: entry.generation, deadlineMs };
 }
 
+/**
+ * Take a hold's explicit value out of `holdDeadlines`: on its release, and
+ * when `createYavio()` replaces a hold a signal made stale with a new one —
+ * the new hold registers the value again, and the stale one's would
+ * otherwise count towards D for the rest of the process (#148 review round 7).
+ */
+export function dropHoldDeadline(hold: SharedHold): void {
+  if (hold.deadlineMs === undefined) return;
+  const at = holdDeadlines.indexOf(hold.deadlineMs);
+  if (at >= 0) holdDeadlines.splice(at, 1);
+}
+
 /** Is this hold on the transport that is live for its config right now? */
 export function isLiveHold(config: Key, hold: SharedHold): boolean {
   return registry.get(keyOf(config))?.generation === hold.generation;
@@ -832,10 +844,7 @@ export async function releaseShared(config: Key, hold: SharedHold): Promise<void
   // The hold's value leaves the live set now — whether or not its transport
   // is still the key's — and counts on through `noteInProgress` until the
   // call resolves.
-  if (hold.deadlineMs !== undefined) {
-    const at = holdDeadlines.indexOf(hold.deadlineMs);
-    if (at >= 0) holdDeadlines.splice(at, 1);
-  }
+  dropHoldDeadline(hold);
   const done = noteInProgress(config);
   try {
     if (signalDrain) await signalDrain;

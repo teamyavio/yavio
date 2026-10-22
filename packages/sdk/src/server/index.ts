@@ -16,6 +16,7 @@ import {
   acquireShared,
   armExitHook,
   awaitBounded,
+  dropHoldDeadline,
   isLiveHold,
   logOnce,
   pinShared,
@@ -215,6 +216,10 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
   let closing: Promise<void> = Promise.resolve();
   const state = (): SharedState => {
     if (hold && isLiveHold(config, hold)) return hold.state;
+    // A stale hold is replaced, not released: its explicit value leaves the
+    // live set here, or it would count towards D after this client's
+    // shutdown() released the new one (#148 review round 7).
+    if (hold) dropHoldDeadline(hold);
     hold = acquireShared(config, SDK_VERSION, onEvict);
     return hold.state;
   };

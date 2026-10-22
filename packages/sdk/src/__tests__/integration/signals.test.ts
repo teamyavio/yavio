@@ -14,6 +14,7 @@ import {
   _setSignalReraise,
   _sharedStateCount,
   _trackedTransportCount,
+  processBudgetMs,
 } from "../../server/shared.js";
 import { restoreEnv } from "../env.js";
 import { type MockIngest, callTool, startMockIngest } from "./helpers.js";
@@ -1248,6 +1249,31 @@ describe("one process deadline from the signal (#148)", () => {
       }
     });
   }, 15_000);
+
+  it("a hold the signal made stale and a wrap replaced leaves no value behind: an explicit 300 ms client re-wraps after a cycle and shuts down — D is the other client's 3 s again", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      const app = () => {};
+      process.on("SIGTERM", app); // not the sole listener: the process survives the cycle
+      try {
+        ingest.hangEvents = false;
+        const { client: a } = build("yav_148_stale_a", { shutdownTimeoutMs: 300 });
+        build("yav_148_stale_b", { shutdownTimeoutMs: 3_000 });
+        expect(processBudgetMs()).toBe(300);
+        process.emit("SIGTERM", "SIGTERM");
+        await vi.waitFor(() => expect(process.listenerCount("SIGTERM")).toBe(1), {
+          timeout: 2_000,
+        });
+        // A serves again after the signal: its wrap replaces the stale hold
+        // with a new one, which its shutdown() then releases.
+        a.wrap(new McpServer({ name: "app", version: "1.0" }));
+        await a.shutdown();
+        // Before the fix the stale hold's 300 ms stayed registered: D 300.
+        expect(processBudgetMs()).toBe(3_000);
+      } finally {
+        process.off("SIGTERM", app);
+      }
+    });
+  });
 
   it("YAVIO_SHUTDOWN_TIMEOUT_MS counts even when no participant set a value: a plain client is bounded by it", async () => {
     await withoutOtherListeners("SIGTERM", async () => {
