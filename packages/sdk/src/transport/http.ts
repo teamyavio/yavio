@@ -678,14 +678,18 @@ export class HttpTransport implements Transport {
           }
           continue;
         }
-        console.error(
-          `[${ErrorCode.SDK.FLUSH_FAILED_MAX_RETRIES}] Giving up after ${attempt + 1} attempts`,
-        );
         // A fetch the shutdown deadline cut is the deadline's loss, and so
         // is one a post-signal transport's budget cut on its one attempt
-        // (that budget is what is left of the process deadline). A refused
-        // or failed connection, or the fetch timeout, is not.
+        // (that budget is what is left of the process deadline): counted in
+        // the YAVIO-1205 line, not reported as a delivery failure as well
+        // (#148 review round 7). A refused or failed connection, or the
+        // fetch timeout, is not.
         const cut = controller.signal.aborted && (this.deadlineReached || this.immediate);
+        if (!cut) {
+          console.error(
+            `[${ErrorCode.SDK.FLUSH_FAILED_MAX_RETRIES}] Giving up after ${attempt + 1} attempts`,
+          );
+        }
         return this.giveUp(cut ? "deadline" : "failed");
       }
     }

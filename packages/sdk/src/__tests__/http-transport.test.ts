@@ -1044,6 +1044,11 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       expect(cut.deadlineLostEvents()).toBe(1);
       expect(cut.lostEvents()).toBe(1);
       expect(cut.pendingEvents()).toBe(0);
+      // The deadline's loss, not a delivery failure: no 1201 line for it
+      // (#148 review round 7).
+      expect(error.mock.calls.map((c: unknown[]) => String(c[0])).join("\n")).not.toContain(
+        "YAVIO-1201",
+      );
 
       const refused = new HttpTransport({
         ...base,
@@ -1056,7 +1061,8 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(refused.deadlineLostEvents()).toBe(0);
       expect(refused.lostEvents()).toBe(1);
-      expect(error).toHaveBeenCalledTimes(2);
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("YAVIO-1201"));
     });
 
     it("an unparsable Retry-After falls back to the backoff, never to an immediate retry", async () => {
