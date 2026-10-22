@@ -149,6 +149,8 @@ export class HttpTransport implements Transport {
    * it is a counted drop (#148 review round 3).
    */
   private authRejected = false;
+  /** `onClosed` runs once: a 401 closes the transport, and a `shutdown()` after it (or the drain the 401 ended) must not report it closed again (#148 review round 5). */
+  private closed = false;
 
   private readonly endpoint: string;
   private readonly apiKey: string;
@@ -329,10 +331,7 @@ export class HttpTransport implements Transport {
   private async runShutdown(deadlineMs: number): Promise<void> {
     this.stopped = true;
     this.deadlineAt = Date.now() + deadlineMs;
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
+    this.stopTimer();
 
     // Race the drain loop against a total shutdown timeout. The batch already
     // in flight first: resolving mid-send would let the process exit with a
@@ -402,6 +401,20 @@ export class HttpTransport implements Transport {
         );
       }
     }
+    this.reportClosed();
+  }
+
+  private stopTimer(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  /** Tell the registry the transport is settled, once (a 401 and the shutdown after it both end here). */
+  private reportClosed(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.onClosed?.();
   }
 
@@ -490,6 +503,12 @@ export class HttpTransport implements Transport {
           console.error(
             `[${ErrorCode.SDK.AUTH_REJECTED_PERMANENT}] API key rejected — stopping delivery; ${dropped} events dropped`,
           );
+          // Dead for good: the flush timer stops ticking into the same
+          // 401 every 10 s, and the registry forgets the transport now
+          // rather than at the process's end (before #148 review round 5
+          // it stayed in the registry's set for the process lifetime).
+          this.stopTimer();
+          this.reportClosed();
           return;
         }
 

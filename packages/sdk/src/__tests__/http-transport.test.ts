@@ -188,6 +188,35 @@ describe("HttpTransport", () => {
     errorSpy.mockRestore();
   });
 
+  it("a 401 outside a shutdown stops the flush timer and reports the transport closed once — a later shutdown() does not report it again", async () => {
+    const fetch = createMockFetch(401);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const onClosed = vi.fn();
+    const transport = new HttpTransport({
+      endpoint: "http://test/v1/events",
+      apiKey: "yav_bad_key",
+      sdkVersion: "0.0.1",
+      flushIntervalMs: 10_000,
+      fetch,
+      onClosed,
+    });
+    transport.start();
+    expect(vi.getTimerCount()).toBe(1); // the flush interval
+    transport.send([fakeEvent()]);
+    await transport.flush();
+    // Before #148 review round 5 the 401 only set `stopped`: the interval
+    // kept ticking into a dead transport every 10 s and `onClosed` never
+    // ran, so the registry kept the transport for the process lifetime.
+    expect(vi.getTimerCount()).toBe(0);
+    expect(onClosed).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetch).toHaveBeenCalledOnce();
+
+    await transport.shutdown();
+    expect(onClosed).toHaveBeenCalledTimes(1);
+    errorSpy.mockRestore();
+  });
+
   it("respects Retry-After header on 429 (value in seconds per HTTP spec)", async () => {
     let callCount = 0;
     const fetch = vi.fn().mockImplementation(() => {
