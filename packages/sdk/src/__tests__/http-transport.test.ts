@@ -1,6 +1,11 @@
 import type { BaseEvent } from "@yavio/shared/events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HttpTransport, MAX_RETRY_AFTER_MS, retryAfterMs } from "../transport/http.js";
+import {
+  ABORT_SETTLE_MS,
+  HttpTransport,
+  MAX_RETRY_AFTER_MS,
+  retryAfterMs,
+} from "../transport/http.js";
 
 function createMockFetch(status = 200, body = {}, headers?: Record<string, string>) {
   return vi.fn().mockResolvedValue({
@@ -365,8 +370,14 @@ describe("HttpTransport", () => {
   });
 
   it("drops remaining events when shutdown timeout is reached", async () => {
+    // Never answers; rejects once the deadline aborts it, as a real fetch does.
     const fetch = vi.fn().mockImplementation(
-      () => new Promise(() => {}), // never resolves
+      (_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () =>
+            reject(new DOMException("The operation was aborted.", "AbortError")),
+          );
+        }),
     );
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
@@ -1053,6 +1064,62 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       await vi.advanceTimersByTimeAsync(1);
       expect(aborted()).toBe(2);
       expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("a response that arrived in the same tick the deadline fired is delivered, not counted as lost: the timer only aborts, the outcome is counted where it is known", async () => {
+      // The response is resolved by a timer registered before the deadline's,
+      // so both fire in one synchronous tick: the 200 has arrived, its
+      // continuation has not run, and the deadline timer sees the batch
+      // still in flight. Before the fix it counted the batch as lost and
+      // reported it in the 1205 line although ingest had accepted it.
+      const fetch = vi.fn().mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            setTimeout(() => resolve(ok), 500);
+          }),
+      );
+      const losses: Array<[number, number]> = [];
+      const transport = new HttpTransport({
+        ...base,
+        immediate: true,
+        flushIntervalMs: 60_000,
+        fetch,
+        onShutdownLoss: (lost, deadlineMs) => losses.push([lost, deadlineMs]),
+      });
+      transport.send([fakeEvent()]);
+      const closing = transport.shutdown(500);
+      vi.advanceTimersByTime(500); // synchronous: no microtask between the two timers
+      await closing;
+      expect(transport.deadlineLostEvents()).toBe(0);
+      expect(transport.lostEvents()).toBe(0);
+      expect(losses).toEqual([]);
+      expect(transport.pendingEvents()).toBe(0);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("YAVIO-1205"));
+    });
+
+    it("a fetch that ignores its abort signal: its batch is taken for lost ABORT_SETTLE_MS after the deadline, so no deadline waits for it", async () => {
+      const fetch = vi.fn().mockImplementation(() => new Promise(() => {}));
+      const losses: Array<[number, number]> = [];
+      const transport = new HttpTransport({
+        ...base,
+        immediate: true,
+        flushIntervalMs: 60_000,
+        fetch,
+        onShutdownLoss: (lost, deadlineMs) => losses.push([lost, deadlineMs]),
+      });
+      transport.send([fakeEvent()]);
+      let done = false;
+      const closing = transport.shutdown(500).then(() => {
+        done = true;
+      });
+      await vi.advanceTimersByTimeAsync(500 + ABORT_SETTLE_MS - 1);
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await closing;
+      expect(transport.deadlineLostEvents()).toBe(1);
+      expect(losses).toEqual([[1, 500]]);
+      expect(transport.pendingEvents()).toBe(0);
     });
 
     it("a 401 during the drain ends it: one request, one 1203 line with the dropped count, the rest a counted failure, a later send() dropped and counted", async () => {

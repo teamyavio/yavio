@@ -69,6 +69,16 @@ export const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 export const MAX_RETRY_AFTER_MS = DEFAULT_FETCH_TIMEOUT_MS;
 
 /**
+ * How long a shutdown waits, after its deadline aborted the fetch in
+ * flight, for that fetch to settle before its batch is taken for lost. A
+ * compliant fetch rejects on abort within a microtask — the loss, or the
+ * delivery of a response that had already arrived, is then known and
+ * counted where it is (#148 review round 4); only a fetch that ignores its
+ * signal runs into this bound.
+ */
+export const ABORT_SETTLE_MS = 100;
+
+/**
  * A `Retry-After` value as a wait in milliseconds: delay-seconds, or an
  * HTTP-date (counted from now, never negative), either capped at
  * `MAX_RETRY_AFTER_MS`. Undefined when the header is missing or
@@ -122,9 +132,9 @@ export class HttpTransport implements Transport {
    */
   private pendingDelay: { timer: ReturnType<typeof setTimeout>; resolve: () => void } | null = null;
   /**
-   * Events a shutdown deadline gave up: queued or in flight at the deadline,
-   * refused after it, or a batch given up because its retry wait would have
-   * ended past it. What `YAVIO-1205` counts (#148) — and only that: a batch
+   * Events a shutdown deadline gave up: queued at the deadline, in flight
+   * and cut by it, refused after it, or a batch given up because its retry
+   * wait would have ended past it. What `YAVIO-1205` counts (#148) — and only that: a batch
    * given up after its last attempt (`YAVIO-1201`) or on an unexpected
    * status is a delivery failure, counted in `failed`, so a failure from
    * hours earlier is not re-reported as a deadline loss at the next signal
@@ -353,8 +363,14 @@ export class HttpTransport implements Transport {
       onTimeout: () => {
         this.deadlineReached = true;
         if (this.drained) return;
-        this.deadlineLost += this.buffer.length + this.inflightSize;
-        this.inflightSize = 0;
+        // The queue is the deadline's loss for certain. The batch in
+        // flight is not counted here: its outcome is a microtask away —
+        // the abort's rejection, or a 200 that had already arrived and
+        // whose continuation had not run yet — and is counted where it is
+        // known (`giveUp("deadline")` on the abort; nothing on a 200/207).
+        // Counting it here reported delivered events as lost (#148 review
+        // round 4).
+        this.deadlineLost += this.buffer.length;
         this.buffer.length = 0;
         this.inflightController?.abort();
         // A wait in progress ends now: the retry loop wakes, sees the
@@ -362,6 +378,17 @@ export class HttpTransport implements Transport {
         this.pendingDelay?.resolve();
       },
     });
+    if (this.deadlineReached && this.inflight) {
+      // The aborted fetch settles at once with a compliant fetch; a fetch
+      // that ignores its signal is given this long, then its batch is
+      // taken for lost — no deadline waits for it.
+      await raceDeadline(this.inflight, ABORT_SETTLE_MS, {
+        onTimeout: () => {
+          this.deadlineLost += this.inflightSize;
+          this.inflightSize = 0;
+        },
+      });
+    }
     // Counted here, not in the timer: a batch given up before the deadline
     // (its backoff would have ended after it) is a loss of this shutdown
     // too. A batch that failed for good during the drain (YAVIO-1201) is
@@ -513,10 +540,12 @@ export class HttpTransport implements Transport {
         console.error(
           `[${ErrorCode.SDK.FLUSH_FAILED_MAX_RETRIES}] Giving up after ${attempt + 1} attempts`,
         );
-        // A post-signal transport's fetch budget is what is left of the
-        // process deadline: a fetch it cut on the transport's one attempt
-        // is the deadline's loss. A refused or failed connection is not.
-        return this.giveUp(this.immediate && controller.signal.aborted ? "deadline" : "failed");
+        // A fetch the shutdown deadline cut is the deadline's loss, and so
+        // is one a post-signal transport's budget cut on its one attempt
+        // (that budget is what is left of the process deadline). A refused
+        // or failed connection, or the fetch timeout, is not.
+        const cut = controller.signal.aborted && (this.deadlineReached || this.immediate);
+        return this.giveUp(cut ? "deadline" : "failed");
       }
     }
   }
