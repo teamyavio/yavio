@@ -20,6 +20,13 @@ export interface HttpTransportOptions {
    * shutdown will drain it (see shared.ts). Still batched by the buffer cap.
    */
   immediate?: boolean;
+  /**
+   * Called once a `shutdown()` whose deadline gave events up has settled,
+   * with the count and the deadline (#148). Without it the transport logs
+   * its own `YAVIO-1205` line; the registry passes one that lets a signal
+   * cycle report every transport's losses in one line.
+   */
+  onShutdownLoss?: (lost: number, deadlineMs: number) => void;
 }
 
 const DEFAULT_FLUSH_INTERVAL_MS = 10_000;
@@ -74,6 +81,8 @@ export class HttpTransport implements Transport {
    * deadline stops the waiting, not only the awaiting (#148).
    */
   private deadlineAt: number | undefined;
+  /** Events given up — at a shutdown deadline (queued, in flight, refused after it) or after a batch's last attempt: what `YAVIO-1205` counts (#148). */
+  private lost = 0;
 
   private readonly endpoint: string;
   private readonly apiKey: string;
@@ -86,9 +95,11 @@ export class HttpTransport implements Transport {
   private readonly shutdownTimeoutMs: number;
   private readonly _fetch: typeof globalThis.fetch;
   private readonly immediate: boolean;
+  private readonly onShutdownLoss: ((lost: number, deadlineMs: number) => void) | undefined;
 
   constructor(options: HttpTransportOptions) {
     this.immediate = options.immediate === true;
+    this.onShutdownLoss = options.onShutdownLoss;
     this.endpoint = options.endpoint;
     this.apiKey = options.apiKey;
     this.sdkVersion = options.sdkVersion;
@@ -116,8 +127,17 @@ export class HttpTransport implements Transport {
     return this.buffer.length + this.inflightSize;
   }
 
+  /** Events given up so far: at a shutdown deadline, refused after one, or after a batch's last attempt. */
+  lostEvents(): number {
+    return this.lost;
+  }
+
   send(events: BaseEvent[]): void {
-    if (this.stopped) return;
+    if (this.stopped) {
+      // Refused after a shutdown deadline: counted, so the loss is reported.
+      if (this.deadlineAt !== undefined) this.lost += events.length;
+      return;
+    }
 
     this.buffer.push(...events);
 
@@ -258,9 +278,8 @@ export class HttpTransport implements Transport {
     const timeout = new Promise<void>((resolve) => {
       timer = setTimeout(() => {
         if (!drained) {
-          console.warn(
-            `[${ErrorCode.SDK.SHUTDOWN_FLUSH_FAILED}] Shutdown timeout — events may have been dropped`,
-          );
+          this.lost += this.buffer.length + this.inflightSize;
+          this.inflightSize = 0;
           this.buffer.length = 0;
           this.inflightController?.abort();
         }
@@ -269,10 +288,22 @@ export class HttpTransport implements Transport {
       if (timer) unref(timer);
     });
 
+    const lostBefore = this.lost;
     try {
       await Promise.race([drain(), timeout]);
     } finally {
       clearTimeout(timer);
+    }
+    // Counted here, not in the timer: a batch given up before the deadline
+    // (its backoff would have ended after it) is a loss of this shutdown too.
+    const lost = this.lost - lostBefore;
+    if (lost > 0) {
+      if (this.onShutdownLoss) this.onShutdownLoss(lost, deadlineMs);
+      else {
+        console.warn(
+          `[${ErrorCode.SDK.SHUTDOWN_FLUSH_FAILED}] shutdown() deadline of ${deadlineMs} ms reached — ${lost} events not delivered. Raise shutdownTimeoutMs if the platform's grace period allows.`,
+        );
+      }
     }
   }
 
@@ -333,7 +364,7 @@ export class HttpTransport implements Transport {
           // Delay-seconds or an HTTP-date; anything else falls back to the backoff.
           const delayMs =
             retryAfterMs(response.headers.get("Retry-After")) ?? BASE_RETRY_DELAY_MS * 2 ** attempt;
-          if (!this.canWait(delayMs)) return;
+          if (!this.canWait(delayMs)) return this.giveUp();
           console.warn(
             `[${ErrorCode.SDK.FLUSH_RATE_LIMITED}] Rate limited, retrying in ${delayMs}ms`,
           );
@@ -345,7 +376,7 @@ export class HttpTransport implements Transport {
         if (response.status >= 500) {
           if (attempt < this.maxRetries) {
             const delayMs = BASE_RETRY_DELAY_MS * 2 ** attempt;
-            if (!this.canWait(delayMs)) return;
+            if (!this.canWait(delayMs)) return this.giveUp();
             console.warn(
               `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Server error ${response.status}, retry ${attempt + 1}/${this.maxRetries}`,
             );
@@ -355,16 +386,16 @@ export class HttpTransport implements Transport {
           console.error(
             `[${ErrorCode.SDK.FLUSH_FAILED_MAX_RETRIES}] Giving up after ${attempt + 1} attempts`,
           );
-          return;
+          return this.giveUp();
         }
 
         // Other unexpected status codes — don't retry
-        return;
+        return this.giveUp();
       } catch (error) {
         // Network error (or the abort at the deadline) — retry with backoff
         if (attempt < this.maxRetries) {
           const delayMs = BASE_RETRY_DELAY_MS * 2 ** attempt;
-          if (!this.canWait(delayMs)) return;
+          if (!this.canWait(delayMs)) return this.giveUp();
           console.warn(
             `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Network error, retry ${attempt + 1}/${this.maxRetries}`,
           );
@@ -374,7 +405,7 @@ export class HttpTransport implements Transport {
         console.error(
           `[${ErrorCode.SDK.FLUSH_FAILED_MAX_RETRIES}] Giving up after ${attempt + 1} attempts`,
         );
-        return;
+        return this.giveUp();
       }
     }
   }
@@ -386,6 +417,16 @@ export class HttpTransport implements Transport {
    */
   private canWait(ms: number): boolean {
     return this.deadlineAt === undefined || Date.now() + ms < this.deadlineAt;
+  }
+
+  /**
+   * The batch in flight is given up — at the deadline, or after its last
+   * attempt: counted once (zero if the deadline timer already did), so an
+   * exit or a signal cycle can report what never reached ingest.
+   */
+  private giveUp(): void {
+    this.lost += this.inflightSize;
+    this.inflightSize = 0;
   }
 
   private delay(ms: number): Promise<void> {

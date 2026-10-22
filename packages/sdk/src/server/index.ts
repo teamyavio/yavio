@@ -14,6 +14,7 @@ import {
   type SharedHold,
   type SharedState,
   acquireShared,
+  armExitHook,
   awaitBounded,
   isLiveHold,
   logOnce,
@@ -230,6 +231,7 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
       return wrapServer(server, config, state, true, "createYavio().wrap()");
     },
     shutdown: async () => {
+      armExitHook(); // from now on an exit with events undelivered is reported (#148)
       const released = hold;
       hold = null;
       // With a hold: deliver and release it. Without one (a second call, or

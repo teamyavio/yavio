@@ -916,3 +916,132 @@ describe("one process deadline from the signal (#148)", () => {
     });
   });
 });
+
+/**
+ * Loss accounting (#148, Decision C): one `YAVIO-1205` line per signal
+ * cycle with the count of events not delivered, printed before the
+ * re-raise; a non-signal `shutdown()` that times out prints its own line
+ * with its own count; an app that exits before its `shutdown()` resolved
+ * gets one line from an `exit` hook that is armed only after a signal or a
+ * started `shutdown()`. Before #148 the line had no count, a drain that
+ * ran out of time logged nothing, and the post-signal transport's loss
+ * was silent.
+ */
+describe("loss accounting (#148)", () => {
+  let ingest: MockIngest;
+  let warn: { mock: { calls: unknown[][] }; mockRestore: () => void };
+  const lines1205 = () =>
+    warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("YAVIO-1205"));
+  const exitHooks = () => process.listeners("exit").filter((l) => l.name === "yavioReportAtExit");
+
+  function build(apiKey: string, options: { shutdownTimeoutMs?: number } = {}) {
+    const client = createYavio({ apiKey, endpoint: ingest.endpoint, serverOnly: true, ...options });
+    const raw = new McpServer({ name: "app", version: "1.0" });
+    client.wrap(raw).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+    return { client, raw };
+  }
+
+  beforeEach(async () => {
+    _resetGlobalState();
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    ingest = await startMockIngest();
+    ingest.hangEvents = true;
+  });
+
+  afterEach(async () => {
+    await ingest.answerHung();
+    _resetGlobalState();
+    warn.mockRestore();
+    await ingest.close();
+  });
+
+  it("one line per signal cycle, with the count of every transport's loss and what the re-raise cuts, printed before the re-raise", async () => {
+    let linesAtReraise: number | undefined;
+    _setSignalReraise(() => {
+      linesAtReraise = lines1205().length;
+    });
+    await withoutOtherListeners("SIGTERM", async () => {
+      // Two keys, each with a connection and a tool_call queued; the request
+      // finishing after the signal sends a fifth event through an immediate
+      // transport, still in flight when the SDK — the only listener — re-raises.
+      const { raw } = build("yav_148_count_a", { shutdownTimeoutMs: 300 });
+      await callTool(raw, "get_price", { q: "a" });
+      const { raw: other } = build("yav_148_count_b");
+      await callTool(other, "get_price", { q: "b" });
+      process.emit("SIGTERM", "SIGTERM");
+      await callTool(raw, "get_price", { q: "late" });
+      await vi.waitFor(() => expect(linesAtReraise).toBeDefined(), { timeout: 2_000 });
+      expect(linesAtReraise).toBe(1);
+      expect(lines1205()).toHaveLength(1);
+      expect(lines1205()[0]).toContain("deadline of 300 ms");
+      expect(lines1205()[0]).toContain("5 events not delivered");
+      expect(lines1205()[0]).toContain("shutdownTimeoutMs");
+      expect(ingest.batches).toHaveLength(3); // every batch reached ingest, none was answered
+    });
+  });
+
+  it("with an app handler: the cycle's line counts the drained transports; an exit before shutdown() resolved gets one more line from the exit hook, which a plain exit never arms", async () => {
+    _setSignalReraise(() => {});
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client, raw } = build("yav_148_exit", { shutdownTimeoutMs: 300 });
+      await callTool(raw, "get_price", { q: "x" });
+      expect(exitHooks()).toHaveLength(0); // nothing armed: a plain exit prints nothing
+      const handled = new Promise<void>((resolve) => {
+        process.on("SIGTERM", async function app() {
+          process.off("SIGTERM", app);
+          await callTool(raw, "get_price", { q: "late" }); // finishes after the signal, hangs in flight
+          await client.shutdown();
+          resolve();
+        });
+      });
+      process.emit("SIGTERM", "SIGTERM");
+      await handled;
+      expect(exitHooks()).toHaveLength(1);
+      // The cycle ends in the same timer tick the handler's await is cut in.
+      await vi.waitFor(() => expect(lines1205()).toHaveLength(1));
+      expect(lines1205()[0]).toContain("2 events not delivered"); // connection + the first call
+      // `process.exit(0)` now: the late call's event is still in flight.
+      exitHooks()[0]?.call(process, 0);
+      expect(lines1205()).toHaveLength(2);
+      expect(lines1205()[1]).toContain("1 events not delivered");
+      exitHooks()[0]?.call(process, 0);
+      expect(lines1205()).toHaveLength(2); // counted once
+    });
+  });
+
+  it("a non-signal shutdown() that times out prints its own line with its own count", async () => {
+    const { client, raw } = build("yav_148_call", { shutdownTimeoutMs: 300 });
+    await callTool(raw, "get_price", { q: "x" });
+    expect(exitHooks()).toHaveLength(0);
+    await client.shutdown();
+    expect(exitHooks()).toHaveLength(1); // armed by the started shutdown()
+    expect(lines1205()).toHaveLength(1);
+    expect(lines1205()[0]).toContain("shutdown() deadline of 300 ms");
+    expect(lines1205()[0]).toContain("2 events not delivered");
+    // Nothing left unreported: the exit hook stays quiet.
+    exitHooks()[0]?.call(process, 0);
+    expect(lines1205()).toHaveLength(1);
+  });
+
+  it("_resetSharedState() resets the deadline, the loss watermark and the exit hook", async () => {
+    _setSignalReraise(() => {});
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { raw } = build("yav_148_reset", { shutdownTimeoutMs: 300 });
+      await callTool(raw, "get_price", { q: "x" });
+      process.emit("SIGTERM", "SIGTERM");
+      await vi.waitFor(() => expect(lines1205()).toHaveLength(1), { timeout: 2_000 });
+      expect(exitHooks()).toHaveLength(1);
+    });
+    await ingest.answerHung();
+    _resetGlobalState();
+    expect(exitHooks()).toHaveLength(0);
+    // A later shutdown() runs under its own 1 s, not under the stale 300 ms budget.
+    const { client, raw } = build("yav_148_reset2", { shutdownTimeoutMs: 1_000 });
+    await callTool(raw, "get_price", { q: "y" });
+    const started = Date.now();
+    await client.shutdown();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    expect(lines1205()).toHaveLength(2);
+    expect(lines1205()[1]).toContain("2 events not delivered"); // its own count, not 4
+  });
+});

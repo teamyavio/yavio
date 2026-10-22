@@ -153,6 +153,8 @@ export interface SharedHold {
 const slots = new Map<string, Slot>();
 const registry = new Map<string, Entry>();
 let generations = 0;
+/** Every transport this process created, for the loss accounting (#148). */
+const transports = new Set<HttpTransport>();
 
 /**
  * What the registry needs of a config: the key, the drain deadline and
@@ -317,6 +319,66 @@ function releaseWaiters(): void {
 }
 
 /**
+ * Loss accounting (#148). Every transport counts the events a shutdown
+ * deadline gave up (queued, in flight, refused after it); `reportedLost`
+ * is how many of them a `YAVIO-1205` line already covered. One line per
+ * signal cycle, printed when the cycle ends — before the POSIX re-raise,
+ * which skips `exit` listeners — with the events still in flight when the
+ * re-raise is about to end the process; one line per non-signal
+ * `shutdown()` that timed out; and one at `exit` for what was counted after
+ * that, which covers an app calling `process.exit()` before its
+ * `shutdown()` resolved. The exit hook is armed only after a signal or a
+ * started `shutdown()`: a plain exit (tests, CLIs) stays quiet.
+ */
+let reportedLost = 0;
+let exitHookArmed = false;
+let exitReported = false;
+
+const lostTotal = (): number => [...transports].reduce((n, t) => n + t.lostEvents(), 0);
+const pendingTotal = (): number => [...transports].reduce((n, t) => n + t.pendingEvents(), 0);
+
+const RAISE_HINT =
+  "Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.";
+
+function yavioReportAtExit(): void {
+  if (exitReported) return;
+  exitReported = true;
+  const n = lostTotal() - reportedLost + pendingTotal();
+  if (n <= 0) return;
+  reportedLost = lostTotal();
+  console.warn(
+    `[YAVIO-1205] Process exit with ${n} events not delivered — await analytics.shutdown() before exiting, or raise shutdownTimeoutMs.`,
+  );
+}
+
+/** Arm the exit-time report once: on the first signal, or the first `shutdown()` call. */
+export function armExitHook(): void {
+  if (exitHookArmed) return;
+  exitHookArmed = true;
+  process.on("exit", yavioReportAtExit);
+}
+
+/** The cycle's one line: everything the deadline gave up, plus what the re-raise is about to cut. */
+function reportCycleLoss(cycle: SignalCycle): void {
+  const total = lostTotal();
+  const n = total - reportedLost + (cycle.sole ? pendingTotal() : 0);
+  reportedLost = total;
+  if (n <= 0) return;
+  console.warn(
+    `[YAVIO-1205] Shutdown deadline of ${cycle.budgetMs} ms reached — ${n} events not delivered (queued, in flight or refused after the deadline). ${RAISE_HINT}`,
+  );
+}
+
+/** A non-signal `shutdown()` whose deadline gave events up: its own line, its own count. */
+function reportCallLoss(lost: number, deadlineMs: number): void {
+  if (signalInFlight) return; // the cycle's line covers it
+  reportedLost += lost;
+  console.warn(
+    `[YAVIO-1205] shutdown() deadline of ${deadlineMs} ms reached — ${lost} events not delivered. ${RAISE_HINT}`,
+  );
+}
+
+/**
  * Re-raise a signal once the SDK's listener is gone, so Node's default action
  * runs: exit with 128 + the signal number, terminal mode reset (#138). Any
  * listener on a signal — ours included — replaces that default, which is why
@@ -363,6 +425,7 @@ function onSignal(signal: HandledSignal): void {
   clearTimeout(cycleTimer);
   cycleTimer = setTimeout(releaseWaiters, budgetMs);
   unref(cycleTimer);
+  armExitHook();
   beginProcessShutdown()
     .catch(() => {})
     .then(finishSignal);
@@ -380,7 +443,10 @@ function onSignal(signal: HandledSignal): void {
 function finishSignal(): void {
   const cycle = signalInFlight;
   signalInFlight = null;
-  if (cycle) lastBudgetMs = cycle.budgetMs;
+  if (cycle) {
+    lastBudgetMs = cycle.budgetMs;
+    reportCycleLoss(cycle); // before the re-raise: a POSIX re-raise skips `exit` listeners
+  }
   removeSignalHandlers();
   if (cycle?.sole) reraise(cycle.signal);
 }
@@ -419,10 +485,12 @@ function newTransport(config: Key, sdkVersion: string): HttpTransport {
     sdkVersion,
     shutdownTimeoutMs: config.shutdownTimeoutMs,
     immediate: draining,
+    onShutdownLoss: reportCallLoss,
     ...(budgetMs !== undefined
       ? { maxRetries: 0, fetchTimeoutMs: Math.min(DEFAULT_FETCH_TIMEOUT_MS, budgetMs) }
       : {}),
   });
+  transports.add(transport);
   if (draining) noteDraining();
   else transport.start();
   return transport;
@@ -667,8 +735,9 @@ export function logOnce(key: string, log: () => void): void {
 }
 
 /**
- * @internal Reset the registry, the warn-once state and the signal handlers —
- * exposed for testing only. Transports are stopped without draining.
+ * @internal Reset the registry, the warn-once state, the signal handlers,
+ * the process deadline, the loss accounting and the exit hook — exposed
+ * for testing only. Transports are stopped without draining.
  */
 export function _resetSharedState(): void {
   for (const entry of registry.values()) {
@@ -685,6 +754,11 @@ export function _resetSharedState(): void {
   lastBudgetMs = undefined;
   inProgressDeadlines.length = 0;
   releaseWaiters();
+  transports.clear();
+  reportedLost = 0;
+  if (exitHookArmed) process.off("exit", yavioReportAtExit);
+  exitHookArmed = false;
+  exitReported = false;
   _setSignalReraise(null);
   loggedOnce.clear();
   removeSignalHandlers();

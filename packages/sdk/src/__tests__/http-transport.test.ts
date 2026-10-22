@@ -374,9 +374,12 @@ describe("HttpTransport", () => {
     await vi.advanceTimersByTimeAsync(1000);
     await shutdownPromise;
 
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Shutdown timeout — events may have been dropped"),
-    );
+    // One YAVIO-1205 line with the count and the deadline (#148).
+    const lines = warnSpy.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("1205"));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("deadline of 1000 ms");
+    expect(lines[0]).toContain("5 events not delivered");
+    expect(transport.lostEvents()).toBe(5);
     warnSpy.mockRestore();
   });
 });
