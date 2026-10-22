@@ -1,4 +1,5 @@
 import { queryAnalytics } from "@/lib/clickhouse/analytics-client";
+import { parseUtc } from "@/lib/clickhouse/datetime";
 import type { LiveEvent } from "./types";
 
 /**
@@ -100,7 +101,7 @@ interface LiveRow extends LiveEvent {
 
 /** `YYYY-MM-DD HH:MM:SS.mmm` (UTC) as epoch milliseconds. */
 function ingestedAtMs(text: string): number {
-  return Date.parse(`${text.replace(" ", "T")}Z`);
+  return parseUtc(text).getTime();
 }
 
 /**
