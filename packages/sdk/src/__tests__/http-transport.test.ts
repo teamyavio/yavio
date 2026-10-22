@@ -1232,6 +1232,57 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       }
     });
 
+    it("a 207 whose body stalls past the deadline is delivered once — the body read is cut with the fetch, not counted as a loss at ABORT_SETTLE_MS and as delivered again when the body comes", async () => {
+      // The status arrived; the body does not until 10 s later (a stalled
+      // stream). Before the fix `response.json()` ran after the controller
+      // was let go and the fetch timer cleared, so neither the timeout nor
+      // the deadline could cut it: the deadline took the accepted batch for
+      // lost 100 ms after it fired, and the body's arrival then counted it
+      // delivered as well.
+      const fetch = vi.fn().mockResolvedValue({
+        status: 207,
+        headers: { get: () => null },
+        json: () => new Promise((resolve) => setTimeout(() => resolve({ rejected: 0 }), 10_000)),
+      });
+      const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+      const losses: Array<[number, number]> = [];
+      try {
+        const transport = new HttpTransport({
+          ...base,
+          immediate: true,
+          flushIntervalMs: 60_000,
+          fetch,
+          onShutdownLoss: (lost, deadlineMs) => losses.push([lost, deadlineMs]),
+        });
+        transport.send([fakeEvent()]);
+        let done = false;
+        const closing = transport.shutdown(500).then(() => {
+          done = true;
+        });
+        await vi.advanceTimersByTimeAsync(500);
+        const settledAtDeadline = done;
+        await vi.advanceTimersByTimeAsync(ABORT_SETTLE_MS);
+        await closing;
+        // Nothing lost: the abort cut the body read and the batch is
+        // delivered — the status said accepted — and the shutdown settled
+        // at the deadline, not ABORT_SETTLE_MS later.
+        expect(transport.deadlineLostEvents()).toBe(0);
+        expect(settledAtDeadline).toBe(true);
+        expect(transport.lostEvents()).toBe(0);
+        expect(transport.deliveredEvents()).toBe(1);
+        expect(transport.pendingEvents()).toBe(0);
+        expect(losses).toEqual([]);
+        expect(debug).toHaveBeenCalledWith(expect.stringContaining("207 body unreadable"));
+        // The body coming later changes nothing: delivered once.
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(transport.deliveredEvents()).toBe(1);
+        expect(transport.deadlineLostEvents()).toBe(0);
+        expect(fetch).toHaveBeenCalledTimes(1);
+      } finally {
+        debug.mockRestore();
+      }
+    });
+
     it("a 401 during the drain ends it: one request, one 1203 line with the dropped count, the rest a counted failure, a later send() dropped and counted", async () => {
       const fetch = createMockFetch(401);
       const onClosed = vi.fn();

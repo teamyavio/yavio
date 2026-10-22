@@ -97,6 +97,42 @@ export function retryAfterMs(header: string | null): number | undefined {
   return Number.isNaN(at) ? undefined : Math.min(MAX_RETRY_AFTER_MS, Math.max(0, at - Date.now()));
 }
 
+/** What a 207 body says: how many of the batch ingest rejected. */
+interface PartialBody {
+  rejected?: number;
+  errors?: unknown[];
+}
+
+/**
+ * The 207 body, or undefined when it cannot be read — unparsable, or cut by
+ * `signal` (the fetch timeout or the shutdown deadline aborting the
+ * controller that fetched it): the status said accepted, so neither is a
+ * loss, and a `console.debug` note is all it gets. Raced against the signal
+ * itself, since a body stream that ignores its abort would otherwise hold
+ * the batch in flight past the deadline (#148 review rounds 4 and 6).
+ */
+async function readPartial(response: Response, signal: AbortSignal): Promise<PartialBody | undefined> {
+  try {
+    return await new Promise<PartialBody>((resolve, reject) => {
+      const onAbort = () => reject(new DOMException("The operation was aborted.", "AbortError"));
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+      Promise.resolve()
+        .then(() => response.json() as Promise<PartialBody>)
+        .then(resolve, reject)
+        .finally(() => signal.removeEventListener("abort", onAbort));
+    });
+  } catch (error) {
+    console.debug(
+      `[yavio] 207 body unreadable, batch accepted: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return undefined;
+  }
+}
+
 export class HttpTransport implements Transport {
   private buffer: BaseEvent[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -473,6 +509,7 @@ export class HttpTransport implements Transport {
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         unref(timer);
         let response: Response;
+        let partial: PartialBody | undefined;
         try {
           response = await this._fetch(this.endpoint, {
             method: "POST",
@@ -483,6 +520,12 @@ export class HttpTransport implements Transport {
             body,
             signal: controller.signal,
           });
+          // The 207 body is read here, while the fetch timeout and the
+          // shutdown deadline still cover it: read after the controller was
+          // let go, a stalled body outran both, the deadline took the
+          // accepted batch for lost at ABORT_SETTLE_MS and the body's
+          // arrival counted it delivered too (#148 review round 6).
+          if (response.status === 207) partial = await readPartial(response, controller.signal);
         } finally {
           clearTimeout(timer);
           this.inflightController = null;
@@ -495,20 +538,13 @@ export class HttpTransport implements Transport {
 
         if (response.status === 207) {
           // Accepted: the status says so, the body only says how many
-          // were rejected. A body that cannot be read is not a network
-          // error — before #148 review round 4 it re-sent the accepted
-          // batch, and under a deadline counted it as lost.
-          let data: { rejected?: number; errors?: unknown[] } | undefined;
-          try {
-            data = (await response.json()) as typeof data;
-          } catch (error) {
-            console.debug(
-              `[yavio] 207 body unreadable, batch accepted: ${error instanceof Error ? error.message : String(error)}`,
-            );
-          }
-          if (data?.rejected) {
+          // were rejected (read above; unreadable, or cut by the abort, it
+          // is still not a loss — before #148 review round 4 a failed read
+          // re-sent the accepted batch, and under a deadline counted it as
+          // lost).
+          if (partial?.rejected) {
             console.warn(
-              `[${ErrorCode.SDK.PARTIAL_BATCH_REJECTION}] ${data.rejected} events rejected`,
+              `[${ErrorCode.SDK.PARTIAL_BATCH_REJECTION}] ${partial.rejected} events rejected`,
             );
           }
           this.delivered += batch.length;
