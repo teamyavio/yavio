@@ -64,10 +64,12 @@ export async function queryInvocationFeed(
 
   const where = `WHERE ${conditions.join("\n        AND ")}`;
 
-  const invocations = await queryAnalytics<InvocationFeedItem>({
-    workspaceId: ctx.workspaceId,
-    projectId: ctx.projectId,
-    query: `
+  // The page and its total are independent; one round trip, not two.
+  const [invocations, countRows] = await Promise.all([
+    queryAnalytics<InvocationFeedItem>({
+      workspaceId: ctx.workspaceId,
+      projectId: ctx.projectId,
+      query: `
       SELECT
         event_id AS eventId,
         timestamp,
@@ -94,19 +96,19 @@ export async function queryInvocationFeed(
       LIMIT 1 BY event_id
       LIMIT {limit:UInt32} OFFSET {offset:UInt32}
     `,
-    params: { ...params, limit: pageSize, offset },
-  });
-
-  const countRows = await queryAnalytics<{ total: number | string }>({
-    workspaceId: ctx.workspaceId,
-    projectId: ctx.projectId,
-    query: `
+      params: { ...params, limit: pageSize, offset },
+    }),
+    queryAnalytics<{ total: number | string }>({
+      workspaceId: ctx.workspaceId,
+      projectId: ctx.projectId,
+      query: `
       SELECT count(DISTINCT event_id) AS total
       FROM events
       ${where}
     `,
-    params,
-  });
+      params,
+    }),
+  ]);
 
   return { invocations, total: Number(countRows[0]?.total ?? 0) };
 }
