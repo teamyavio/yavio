@@ -243,9 +243,28 @@ interface SignalCycle {
    * Events the cycle's line counted as "in flight when the re-raise is
    * about to end the process". Lost for good only if the process goes on
    * (a test's stubbed re-raise): a later count of the cycle's stops leaves
-   * them out, so no event is in two lines.
+   * out what a deadline gave up OF THEM (`marks`), so no event is in two
+   * lines — and nothing else, so an event sent after the hand-back and
+   * lost at the deadline is still printed (#148 review round 5).
    */
   pendingReported: number;
+  /** Per transport, what the hand-back line pre-counted and the counters it stood at. */
+  marks: PendingMark[];
+}
+
+/**
+ * A transport's counters when the hand-back line counted its pending
+ * events. `lostOfMarked` reads them back when the cycle's drain settles:
+ * a transport settles its queue in order, and a deadline ends delivery, so
+ * whatever was delivered or failed since came from the pending events
+ * first, and what remains of them is what a deadline gave up of them.
+ */
+interface PendingMark {
+  transport: HttpTransport;
+  pending: number;
+  delivered: number;
+  failed: number;
+  deadlineLost: number;
 }
 
 /**
@@ -414,6 +433,46 @@ const lostTotal = (): number =>
   [...transports].reduce((n, t) => n + t.deadlineLostEvents(), lostFromClosed);
 const pendingTotal = (): number => [...transports].reduce((n, t) => n + t.pendingEvents(), 0);
 
+/** Every transport's pending events and the counters they stand at, for `lostOfMarked`. */
+function markPending(): PendingMark[] {
+  const marks: PendingMark[] = [];
+  for (const transport of transports) {
+    const pending = transport.pendingEvents();
+    if (pending === 0) continue;
+    marks.push({
+      transport,
+      pending,
+      delivered: transport.deliveredEvents(),
+      failed: transport.lostEvents() - transport.deadlineLostEvents(),
+      deadlineLost: transport.deadlineLostEvents(),
+    });
+  }
+  return marks;
+}
+
+/**
+ * Of the events the hand-back line pre-counted, how many a deadline gave
+ * up since. Per transport: the queue is settled in order and nothing is
+ * delivered after a deadline, so the events delivered or failed since the
+ * mark are the pending ones first; what is left of the pending count is
+ * lost, capped at the deadline losses since (events sent after the mark
+ * and refused after the deadline are counted there too, and are not the
+ * mark's).
+ */
+function lostOfMarked(marks: PendingMark[]): number {
+  let n = 0;
+  for (const mark of marks) {
+    const t = mark.transport;
+    const settledOtherwise =
+      t.deliveredEvents() -
+      mark.delivered +
+      (t.lostEvents() - t.deadlineLostEvents() - mark.failed);
+    const lostSince = t.deadlineLostEvents() - mark.deadlineLost;
+    n += Math.min(lostSince, Math.max(0, mark.pending - settledOtherwise));
+  }
+  return n;
+}
+
 const RAISE_HINT =
   "Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.";
 
@@ -441,18 +500,25 @@ export function armExitHook(): void {
 /**
  * The cycle's one line: everything the deadline gave up, plus — at the
  * hand-back — what the re-raise is about to cut. Called again when a drain
- * settles after its cycle was handed back early, for what the cycle's stops
- * gave up since (`pendingReported` left out).
+ * settles after its cycle was handed back early, for what was given up
+ * since — less what the hand-back line pre-counted and a deadline then
+ * gave up (`lostOfMarked`), not less the whole pre-count: with the batch
+ * in flight at the hand-back delivered afterwards, subtracting all of it
+ * swallowed the later losses of other sends for good, since `reportedLost`
+ * moved past them and the exit hook never saw them (#148 review round 5).
  */
 function reportCycleLoss(cycle: SignalCycle, at: "hand-back" | "drain-settled"): void {
   const total = lostTotal();
   let n = total - reportedLost;
   reportedLost = total;
   if (at === "hand-back") {
-    if (cycle.sole) cycle.pendingReported = pendingTotal();
+    if (cycle.sole) {
+      cycle.pendingReported = pendingTotal();
+      cycle.marks = markPending();
+    }
     n += cycle.pendingReported;
   } else {
-    n -= cycle.pendingReported;
+    n -= lostOfMarked(cycle.marks);
   }
   if (n <= 0) return;
   const line = `[YAVIO-1205] Shutdown deadline of ${cycle.budgetMs} ms reached — ${n} events not delivered (queued, in flight or refused after the deadline). ${RAISE_HINT}`;
@@ -545,6 +611,7 @@ function onSignal(signal: HandledSignal): void {
     budgetMs,
     deadlineAt: startedAt + budgetMs,
     pendingReported: 0,
+    marks: [],
   };
   signalInFlight = cycle;
   clearTimeout(cycleTimer);

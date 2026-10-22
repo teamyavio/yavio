@@ -1428,6 +1428,79 @@ describe("loss accounting (#148)", () => {
     });
   });
 
+  it("a cycle handed back early: the batch pre-counted at the hand-back is delivered afterwards, and what later sends lose at the deadline is still printed", async () => {
+    // Transport A: five events in flight at the hand-back, answered 300 ms
+    // after the signal. Transport B: two events in flight, its fetch
+    // ignoring the abort (a fetch that does not honour its signal), so its
+    // stop settles 100 ms after the deadline and the cycle's drain with it.
+    // Three keys first used after the hand-back: one connection event each
+    // in flight, cut at the deadline — losses the hand-back line could not
+    // have counted. Before the fix the drain-settled report subtracted the
+    // whole pre-count (7) from the losses since (B's 2 and the 3): nothing
+    // was printed, `reportedLost` moved past the 3, and the exit hook was
+    // quiet too — the 3 were never reported.
+    _setSignalReraise(() => {});
+    const realFetch = globalThis.fetch;
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const headers = init?.headers as Record<string, string> | undefined;
+        if (headers?.Authorization === "Bearer yav_148_precount_b") {
+          return realFetch(input, { ...init, signal: undefined });
+        }
+        return realFetch(input, init);
+      });
+    ingest.hangEvents = false;
+    ingest.respondAfterMs = (batch) => {
+      if (batch.authorization === "Bearer yav_148_precount_a") return 300;
+      // B's batch and the late keys' connection batches hang (answered by
+      // the mock's close); the late keys' tool_call batches, sent once
+      // their connection batch was cut, are answered at once.
+      return batch.events.some((e) => e.event_type === "connection") ? 60_000 : 0;
+    };
+    try {
+      await withoutOtherListeners("SIGTERM", async () => {
+        await withoutOtherListeners("SIGINT", async () => {
+          const { raw: a } = build("yav_148_precount_a", { shutdownTimeoutMs: 600 });
+          for (const q of ["1", "2", "3", "4"]) await callTool(a, "get_price", { q });
+          const { raw: b } = build("yav_148_precount_b");
+          await callTool(b, "get_price", { q: "b" });
+          const t0 = Date.now();
+          process.emit("SIGTERM", "SIGTERM"); // the drain sends A's 5 and B's 2
+          await vi.waitFor(() => expect(ingest.batches).toHaveLength(2));
+          process.emit("SIGINT", "SIGINT"); // a different signal: handed back at once
+          expect(lines1205()).toHaveLength(1);
+          expect(lines1205()[0]).toContain("7 events not delivered");
+
+          // 400 ms after the signal, A delivered: three requests on keys
+          // first used now, each through an immediate transport whose fetch
+          // runs to the cycle's deadline.
+          await new Promise((r) => setTimeout(r, Math.max(0, t0 + 400 - Date.now())));
+          expect(ingest.responded).toBe(1);
+          for (const key of ["yav_148_precount_x", "yav_148_precount_y", "yav_148_precount_z"]) {
+            const { raw: late } = build(key);
+            await callTool(late, "get_price", { q: key });
+          }
+          // The cycle's drain settles at the deadline + 100 ms, when B's
+          // ignored abort is given up on: by then the three connection
+          // batches were cut at the deadline. One more line, with the
+          // three — not B's two, which the hand-back line already counted.
+          await vi.waitFor(() => expect(lines1205()).toHaveLength(2), { timeout: 2_000 });
+          expect(lines1205()[1]).toContain("Shutdown deadline of 600 ms");
+          expect(lines1205()[1]).toContain("3 events not delivered");
+          expect(ingest.batches.filter((batch) => batch.abortedAt !== undefined)).toHaveLength(3);
+          // The late keys' tool_call batches were answered: nothing pending,
+          // nothing left for the exit hook.
+          await vi.waitFor(() => expect(ingest.responded).toBe(4));
+          exitHooks()[0]?.call(process, 0);
+          expect(lines1205()).toHaveLength(2);
+        });
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it("a cycle handed back early, next to an app listener: the stops' later deadline loss is one line with the cycle's wording", async () => {
     await withoutOtherListeners("SIGTERM", async () => {
       await withoutOtherListeners("SIGINT", async () => {

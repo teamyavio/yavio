@@ -143,6 +143,8 @@ export class HttpTransport implements Transport {
   private deadlineLost = 0;
   /** Events given up for a reason other than a deadline: after a batch's last attempt, on an unexpected status, on a 401, or a batch that cannot be serialized. */
   private failed = 0;
+  /** Events ingest acknowledged (a 200 or 207): what the registry's loss accounting reads to tell a batch pending at a hand-back that was delivered from one that was lost (#148 review round 5). */
+  private delivered = 0;
   /**
    * Set by a 401: nothing is ever sent again. The queue was dropped and
    * counted there, a shutdown drain in progress ends, and a `send()` after
@@ -207,6 +209,11 @@ export class HttpTransport implements Transport {
   /** Every event given up so far: what a deadline gave up plus the delivery failures (after a batch's last attempt, or on an unexpected status). */
   lostEvents(): number {
     return this.deadlineLost + this.failed;
+  }
+
+  /** Every event ingest acknowledged so far. */
+  deliveredEvents(): number {
+    return this.delivered;
   }
 
   send(events: BaseEvent[]): void {
@@ -466,7 +473,10 @@ export class HttpTransport implements Transport {
           this.inflightController = null;
         }
 
-        if (response.status === 200) return;
+        if (response.status === 200) {
+          this.delivered += batch.length;
+          return;
+        }
 
         if (response.status === 207) {
           // Accepted: the status says so, the body only says how many
@@ -486,6 +496,7 @@ export class HttpTransport implements Transport {
               `[${ErrorCode.SDK.PARTIAL_BATCH_REJECTION}] ${data.rejected} events rejected`,
             );
           }
+          this.delivered += batch.length;
           return;
         }
 
