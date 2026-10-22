@@ -15,9 +15,26 @@ export type Event = Record<string, unknown>;
 export interface ReceivedBatch {
   /** The `Authorization` header the batch came with. */
   authorization: string | undefined;
+  /** `Date.now()` when the batch was received, and when its response was written. */
+  receivedAt: number;
+  answeredAt?: number;
   events: Event[];
   sdk_version?: string;
   sent_at?: string;
+}
+
+/** How long to wait before answering a batch: a fixed delay, or one decided per batch. */
+export type RespondAfter = number | ((batch: ReceivedBatch) => number);
+
+export interface MockIngestOptions {
+  /**
+   * Answer every event batch this long after receiving it: a slow or remote
+   * ingest, so a shutdown() that resolves before the response is told from
+   * one that waits for it (#142). A function decides per batch, so one
+   * batch can be answered later than the rest. Events are recorded on
+   * receipt. Changeable afterwards through `ingest.respondAfterMs`.
+   */
+  respondAfterMs?: RespondAfter;
 }
 
 export interface MockIngest {
@@ -31,6 +48,18 @@ export interface MockIngest {
   mints: string[];
   /** While true, the widget-token endpoint never answers. */
   hangMints: boolean;
+  /** While true, the events endpoint records batches but never answers them. */
+  hangEvents: boolean;
+  /**
+   * Answer every batch held back by `hangEvents` with 200 now, so the SDK's
+   * fetch settles instead of failing when `close()` cuts the socket — a
+   * failed fetch would retry (`YAVIO-1200`) into the next test's output.
+   */
+  answerHung(): Promise<void>;
+  /** Event batches answered so far (a batch counts once its response was written). */
+  responded: number;
+  /** The delay before a batch is answered, as given to `startMockIngest`; may be changed per test. */
+  respondAfterMs: RespondAfter | undefined;
   /** Events of one type, in order. */
   ofType(eventType: string): Event[];
   /** Cut every open connection, e.g. to fail a pending mint now. */
@@ -42,23 +71,41 @@ export interface MockIngest {
  * An ingest that accepts every batch and records it, and mints widget tokens
  * bound to the requesting call's trace id (`tok-<trace>`), like the real one.
  */
-export async function startMockIngest(): Promise<MockIngest> {
+export async function startMockIngest(options: MockIngestOptions = {}): Promise<MockIngest> {
   const batches: ReceivedBatch[] = [];
   const events: Event[] = [];
   const mints: string[] = [];
+  /** Batches a delayed responder still holds, by their timer: answered on `close()`. */
+  const pending = new Map<ReturnType<typeof setTimeout>, () => void>();
+  const hung: Array<() => void> = [];
   const ingest: MockIngest = {
     endpoint: "",
     batches,
     events,
     mints,
     hangMints: false,
+    hangEvents: false,
+    responded: 0,
+    respondAfterMs: options.respondAfterMs,
     ofType: (eventType) => events.filter((e) => e.event_type === eventType),
     dropConnections: () => server.closeAllConnections(),
-    close: () =>
-      new Promise<void>((resolve) => {
-        server.closeAllConnections();
-        server.close(() => resolve());
-      }),
+    answerHung: async () => {
+      for (const respond of hung.splice(0)) respond();
+      // Let the responses reach the client before the caller closes the server.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    },
+    close: async () => {
+      // A batch still held by a delayed responder is answered with 200 now,
+      // like `answerHung()`, so the SDK's fetch settles instead of failing
+      // when the sockets are cut (a failed fetch retries, `YAVIO-1200`).
+      const late = [...pending.values()];
+      for (const timer of pending.keys()) clearTimeout(timer);
+      pending.clear();
+      for (const respond of late) respond();
+      if (late.length > 0) await new Promise((resolve) => setTimeout(resolve, 20));
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
   };
   const server = createServer((req, res) => {
     // Only the two routes the SDK may call; anything else is a regression, not a batch.
@@ -93,11 +140,37 @@ export async function startMockIngest(): Promise<MockIngest> {
         );
         return;
       }
-      const batch = parsed as Omit<ReceivedBatch, "authorization">;
-      batches.push({ ...batch, authorization: req.headers.authorization });
+      const batch = parsed as Omit<ReceivedBatch, "authorization" | "receivedAt">;
+      const received: ReceivedBatch = {
+        ...batch,
+        authorization: req.headers.authorization,
+        receivedAt: Date.now(),
+      };
+      batches.push(received);
       events.push(...batch.events);
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ accepted: batch.events.length, rejected: 0 }));
+      const respond = () => {
+        ingest.responded++;
+        received.answeredAt = Date.now();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ accepted: batch.events.length, rejected: 0 }));
+      };
+      if (ingest.hangEvents) {
+        hung.push(respond);
+        return;
+      }
+      const delay =
+        typeof ingest.respondAfterMs === "function"
+          ? ingest.respondAfterMs(received)
+          : ingest.respondAfterMs;
+      if (!delay) {
+        respond();
+        return;
+      }
+      const timer = setTimeout(() => {
+        pending.delete(timer);
+        respond();
+      }, delay);
+      pending.set(timer, respond);
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

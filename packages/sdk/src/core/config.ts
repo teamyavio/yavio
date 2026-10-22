@@ -4,6 +4,7 @@ import { ErrorCode } from "@yavio/shared/error-codes";
 import type {
   CaptureConfig,
   IntentConfig,
+  ShutdownTimeoutSource,
   ToolCaptureOverride,
   WithYavioOptions,
   YavioConfig,
@@ -61,6 +62,18 @@ export const DEFAULT_INTENT_DESCRIPTION =
 
 const CONFIG_FILENAME = ".yaviorc.json";
 
+/** The drain deadline when nothing configures one (#142). */
+export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
+/**
+ * The range `shutdownTimeoutMs` accepts (#142 review): below 100 ms a
+ * seconds-for-milliseconds slip (`YAVIO_SHUTDOWN_TIMEOUT_MS=10`) would drop
+ * nearly everything; above 2^31-1 Node clamps `setTimeout` to 1 ms with a
+ * TimeoutOverflowWarning, so a "no deadline" value such as
+ * `Number.MAX_SAFE_INTEGER` would do the same.
+ */
+export const MIN_SHUTDOWN_TIMEOUT_MS = 100;
+export const MAX_SHUTDOWN_TIMEOUT_MS = 2_147_483_647;
+
 interface ConfigFile {
   apiKey?: string;
   endpoint?: string;
@@ -68,6 +81,7 @@ interface ConfigFile {
   serverOnly?: boolean;
   intent?: boolean;
   tools?: Record<string, ToolCaptureOverride>;
+  shutdownTimeoutMs?: number;
 }
 
 const TOOL_OVERRIDE_KEYS = [
@@ -190,6 +204,44 @@ function resolveBooleanFlag(path: string, value: unknown): boolean {
 }
 
 /**
+ * `shutdownTimeoutMs`: an integer number of milliseconds in
+ * [`MIN_SHUTDOWN_TIMEOUT_MS`, `MAX_SHUTDOWN_TIMEOUT_MS`] — from code (a
+ * number), the env var (a string of decimal digits) or the file (a number,
+ * or the same string), tried in that order. An unset or empty value falls
+ * through to the next source; anything else — a string `Number()` would
+ * take, `0x2710` or `1e4`, included — is one `YAVIO-1006` warning and the
+ * default, because a typo must not turn into a deadline that drops every
+ * event on shutdown. Returns the source with the value: the signal drain
+ * is bounded only by values that were set explicitly, so a rejected value
+ * reports `"default"` like an unset one (#142 review round 3).
+ */
+function resolveShutdownTimeout(
+  sources: ReadonlyArray<readonly [Exclude<ShutdownTimeoutSource, "default">, unknown]>,
+): { ms: number; source: ShutdownTimeoutSource } {
+  for (const [source, value] of sources) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === "string" && value.trim() === "") continue;
+    const ms =
+      typeof value === "number"
+        ? value
+        : typeof value === "string" && /^\d+$/.test(value.trim())
+          ? Number(value)
+          : Number.NaN;
+    if (Number.isInteger(ms) && ms >= MIN_SHUTDOWN_TIMEOUT_MS && ms <= MAX_SHUTDOWN_TIMEOUT_MS) {
+      return { ms, source };
+    }
+    if (!warnedInvalidFlags.has("shutdownTimeoutMs")) {
+      warnedInvalidFlags.add("shutdownTimeoutMs");
+      console.warn(
+        `[${ErrorCode.SDK.INVALID_CAPTURE_OPTION}] shutdownTimeoutMs must be an integer between ${MIN_SHUTDOWN_TIMEOUT_MS} and ${MAX_SHUTDOWN_TIMEOUT_MS} milliseconds, got ${JSON.stringify(value)} — using ${DEFAULT_SHUTDOWN_TIMEOUT_MS}. Shown once per process.`,
+      );
+    }
+    return { ms: DEFAULT_SHUTDOWN_TIMEOUT_MS, source: "default" };
+  }
+  return { ms: DEFAULT_SHUTDOWN_TIMEOUT_MS, source: "default" };
+}
+
+/**
  * Parse an env var as a boolean. Accepts "1"/"true"/"yes"/"on" (and their
  * negatives), case-insensitive. An empty or unrecognised value yields
  * undefined so the next configuration source still applies — an env var set
@@ -226,7 +278,8 @@ function findConfigFile(startDir: string): ConfigFile | null {
 /**
  * Resolve SDK configuration with priority:
  * 1. Code options passed to `withYavio()`
- * 2. Environment variables (`YAVIO_API_KEY`, `YAVIO_ENDPOINT`, `YAVIO_SERVER_ONLY`)
+ * 2. Environment variables (`YAVIO_API_KEY`, `YAVIO_ENDPOINT`, `YAVIO_SERVER_ONLY`,
+ *    `YAVIO_INTENT`, `YAVIO_SHUTDOWN_TIMEOUT_MS`)
  * 3. `.yaviorc.json` config file (walked up from cwd)
  *
  * Returns null if no API key is found (triggers no-op mode).
@@ -276,7 +329,22 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
   // No env-var form: the shape is nested. File first, code options win.
   const tools = resolveTools(fileConfig?.tools, options?.tools);
 
-  return { apiKey, endpoint, capture, serverOnly, intent, tools };
+  const { ms: shutdownTimeoutMs, source: shutdownTimeoutMsSource } = resolveShutdownTimeout([
+    ["option", options?.shutdownTimeoutMs],
+    ["env", process.env.YAVIO_SHUTDOWN_TIMEOUT_MS],
+    ["file", fileConfig?.shutdownTimeoutMs],
+  ]);
+
+  return {
+    apiKey,
+    endpoint,
+    capture,
+    serverOnly,
+    intent,
+    tools,
+    shutdownTimeoutMs,
+    shutdownTimeoutMsSource,
+  };
 }
 
 /** The entries of `source` whose value is not undefined. */

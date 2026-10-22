@@ -203,10 +203,15 @@ export function buildToolCallEvent(ctx: EventContext, data: ToolCallData): ToolC
   };
 }
 
+/** Where the connection's client identity came from (#142). */
+export type ClientInfoSource = "envelope" | "initialize" | "user_agent";
+
 export interface ConnectionData {
   protocolVersion?: string;
   clientName?: string;
   clientVersion?: string;
+  /** Set when `clientName` is: which of the three sources named the client. */
+  clientInfoSource?: ClientInfoSource;
   intentEnabled?: boolean;
 }
 
@@ -219,7 +224,12 @@ export function buildConnectionEvent(ctx: EventContext, data: ConnectionData): C
     client_version: data.clientVersion,
     // Explicit capability beacon: lets the dashboard distinguish "intent
     // capture off" from "SDK too old to support it" (metadata absent).
-    metadata: { intent_enabled: data.intentEnabled ?? false },
+    // The client's source tells a User-Agent-derived name (stateless host)
+    // from the initialize clientInfo the same client sends a long-lived one.
+    metadata: {
+      intent_enabled: data.intentEnabled ?? false,
+      ...(data.clientInfoSource ? { client_info_source: data.clientInfoSource } : {}),
+    },
   };
 }
 

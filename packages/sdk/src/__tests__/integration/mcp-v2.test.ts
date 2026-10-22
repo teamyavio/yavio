@@ -55,6 +55,8 @@ const makeConfig = (overrides: Partial<YavioConfig> = {}): YavioConfig => ({
   serverOnly: true,
   intent: { enabled: false, required: true, description: "test" },
   tools: {},
+  shutdownTimeoutMs: 10_000,
+  shutdownTimeoutMsSource: "default",
   ...overrides,
 });
 
@@ -453,6 +455,42 @@ describe("MCP SDK v2 — 2026-07-28 era over Streamable HTTP, a new server per r
     // What v1 records: headers only. The web Request's URL is never read.
     expect(requestInfo).not.toHaveProperty("url");
     expect(JSON.stringify(calls)).not.toContain("127.0.0.1");
+  });
+
+  it("the 2026-07-28 envelope names the client even when the User-Agent names another (#142)", async () => {
+    const yavio = createYavio({ apiKey: "yav_v2_env", endpoint: ingestUrl, serverOnly: true });
+    const handler = createMcpHandler(() => {
+      const server = new McpServer({ name: "stateless-v2", version: "1.0" });
+      server.registerTool("ping", { description: "d" }, async () => ok("pong"));
+      return yavio.wrap(server);
+    });
+    const nodeHandler = toNodeHandler(handler);
+    const httpServer = createServer((req, res) => {
+      void nodeHandler(req, res);
+    });
+    mcp = httpServer;
+    await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+    const url = new URL(`http://127.0.0.1:${(httpServer.address() as AddressInfo).port}/mcp`);
+
+    const client = new Client(
+      { name: "envelope-client", version: "7.0" },
+      { versionNegotiation: { mode: "auto" } },
+    );
+    await client.connect(
+      new StreamableHTTPClientTransport(url, {
+        requestInit: { headers: { "user-agent": "other-agent/9.9" } },
+      }),
+    );
+    expect(client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
+    await client.callTool({ name: "ping", _meta: { "openai/session": "conv-env-ua" } });
+    await client.close();
+    await yavio.shutdown();
+
+    const [connection] = ingest.events.filter((e) => e.event_type === "connection");
+    expect(connection?.client_name).toBe("envelope-client");
+    expect(connection?.client_version).toBe("7.0");
+    expect(connection?.protocol_version).toBe("2026-07-28");
+    expect(connection?.metadata).toEqual({ intent_enabled: false, client_info_source: "envelope" });
   });
 
   it("records v2's wire rejection of a malformed result as a server error, not a success", async () => {

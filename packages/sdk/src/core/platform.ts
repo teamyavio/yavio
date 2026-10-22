@@ -42,6 +42,18 @@ function matchIdentity(raw: string): Platform | undefined {
 }
 
 /**
+ * Whether a client name is one the SDK recognises as an MCP client: the
+ * same vendor patterns `detectPlatform()` maps to a platform. The User-Agent
+ * fallback for the connection's client identity accepts a product token only
+ * when this says yes or the token is on its own short allowlist (#142,
+ * review round 5), so an HTTP library or server framework that happens to
+ * put its name first never becomes a `client_name`.
+ */
+export function isKnownClientName(name: string): boolean {
+  return matchIdentity(name) !== undefined;
+}
+
+/**
  * Detect the MCP client platform from available signals.
  *
  * Priority: OpenAI connector marker (any signal) > clientName > userAgent >

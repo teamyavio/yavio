@@ -13,7 +13,26 @@ export interface YavioConfig {
   intent: IntentConfig;
   /** Per-tool overrides of the capture flags, keyed by tool name. Empty when none. */
   tools: Record<string, ToolCaptureOverride>;
+  /**
+   * How long a drain may take, in milliseconds: this client's `shutdown()`
+   * gives up at this deadline, and so does the SDK's signal drain of a
+   * transport this configuration created (#142). Resolved once per client,
+   * not per proxy.
+   */
+  shutdownTimeoutMs: number;
+  /**
+   * Where `shutdownTimeoutMs` came from: the code option, the env var
+   * `YAVIO_SHUTDOWN_TIMEOUT_MS`, `.yaviorc.json`, or the default when none
+   * of them set it (a rejected value counts as unset — it logged
+   * `YAVIO-1006` and the default applies). The signal drain is bounded only
+   * by values set explicitly: a participant on the default adds no bound
+   * (#142 review round 3).
+   */
+  shutdownTimeoutMsSource: ShutdownTimeoutSource;
 }
+
+/** The configuration source `shutdownTimeoutMs` was read from. */
+export type ShutdownTimeoutSource = "option" | "env" | "file" | "default";
 
 /**
  * Per-tool overrides of the capture flags. A key that is omitted inherits the
@@ -164,6 +183,25 @@ export interface WithYavioOptions {
    * simply unused. Also readable from `.yaviorc.json` as `"tools"`.
    */
   tools?: Record<string, ToolCaptureOverride>;
+  /**
+   * The deadline for delivering what is queued when the process shuts down:
+   * an integer number of milliseconds in [100, 2147483647] (default 10 000;
+   * env `YAVIO_SHUTDOWN_TIMEOUT_MS`; anything else logs `YAVIO-1006` once
+   * and uses the default). Outside a signal it bounds this client's
+   * `shutdown()`, each call under its own client's value. The drain the SDK
+   * starts on `SIGTERM`/`SIGINT` is bounded by the smallest value set
+   * explicitly (option, `YAVIO_SHUTDOWN_TIMEOUT_MS` or `.yaviorc.json`) by
+   * any `createYavio()` client or `withYavio()` call for that key; a
+   * participant that sets none does not lower it, and with nothing set it
+   * is 10 s. A handler's `shutdown()`, which awaits that drain, sees that
+   * bound: the grace period is per process, so the strictest bound wins.
+   * `YAVIO_SHUTDOWN_TIMEOUT_MS` counts as set explicitly for every
+   * participant in the process, so it is the way to set one value for all
+   * of them. Size it so that the time your handler spends closing the HTTP
+   * server plus this deadline stays under the platform's grace period:
+   * Cloud Run allows 10 s after `SIGTERM` in total, Fly.io 5 s by default.
+   */
+  shutdownTimeoutMs?: number;
 }
 
 /**
@@ -200,11 +238,20 @@ export interface YavioClient {
    */
   wrap<T extends McpServerLike>(server: T): T;
   /**
-   * Drain (every queued batch, bounded by the transport's shutdown timeout),
-   * then release this client's hold on the shared transport. The
+   * Deliver everything queued before the call, then release this client's
+   * hold on the shared transport. Resolves only once ingest has the events —
+   * including what the SDK's own `SIGTERM`/`SIGINT` listener is still
+   * draining when the call is made from the app's signal handler, and what a
+   * request finishing after the signal sent (#142). A second or concurrent
+   * call waits for the first. Bounded by this client's own
+   * `shutdownTimeoutMs` per call — the drain and the transport stop it
+   * causes run under that deadline too, not under the deadline of whoever
+   * created the shared transport; the drain the SDK started on a signal,
+   * which this call awaits first, runs under the smallest
+   * `shutdownTimeoutMs` set explicitly for the key (10 s when none is). The
    * transport stops only when no other client with the same configuration
-   * holds it and no `withYavio()` call pinned it; a later wrap by this client
-   * holds it again, or starts a fresh one.
+   * holds it and no `withYavio()` call pinned it; a later wrap by this
+   * client holds it again, or starts a fresh one.
    */
   shutdown(): Promise<void>;
 }

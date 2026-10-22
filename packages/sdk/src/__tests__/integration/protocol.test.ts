@@ -53,6 +53,8 @@ function makeConfig(overrides: Partial<YavioConfig> = {}): YavioConfig {
     serverOnly: true,
     intent: INTENT_OFF,
     tools: {},
+    shutdownTimeoutMs: 10_000,
+    shutdownTimeoutMsSource: "default",
     ...overrides,
   };
 }
