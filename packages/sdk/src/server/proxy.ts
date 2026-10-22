@@ -2,6 +2,7 @@ import { ErrorCode } from "@yavio/shared/error-codes";
 import type { ToolCallEvent, ToolDiscoveryEvent } from "@yavio/shared/events";
 import { normalizeRegionName } from "@yavio/shared/geo";
 import {
+  type ClientInfoSource,
   buildConnectionEvent,
   buildToolCallEvent,
   buildToolDiscoveryEvent,
@@ -13,7 +14,7 @@ import { detectPlatform } from "../core/platform.js";
 import type { CaptureConfig, McpServerLike, SessionState, YavioConfig } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
 import { type RequestStore, runInContext } from "./context.js";
-import { headerValue, readCallExtra } from "./extra.js";
+import { clientFromUserAgent, headerValue, readCallExtra } from "./extra.js";
 import {
   type IntentContext,
   type IntentController,
@@ -148,25 +149,40 @@ function openCallContext(
 
   // Client identity: on the 2026-07-28 protocol era every request carries it
   // (v2 envelope); otherwise from the MCP initialize handshake, available by
-  // the time the first tool call arrives. Only fetched while still needed:
-  // for the once-per-session connection event and unresolved platforms.
-  // `get`, not `has`: a hit refreshes the mark's recency, so an active
-  // conversation is never aged out of the dedup by newer ones.
+  // the time the first tool call arrives on a long-lived server; otherwise —
+  // a stateless host, whose instance serving tools/call never saw initialize
+  // — the first product token of the request's User-Agent (#142). Only
+  // fetched while still needed: for the once-per-session connection event
+  // and unresolved platforms. `get`, not `has`: a hit refreshes the mark's
+  // recency, so an active conversation is never aged out of the dedup by
+  // newer ones.
   const connectionKey = dedupKey(config.apiKey, session.sessionId);
   const connectionEmitted = emittedConnections.get(connectionKey) === true;
   let clientInfo: { name?: string; version?: string } | undefined;
+  let clientInfoSource: ClientInfoSource | undefined;
   if (session.platform === "unknown" || !connectionEmitted) {
     clientInfo = ex.client;
+    if (clientInfo?.name) clientInfoSource = "envelope";
     if (!clientInfo?.name) {
       try {
-        clientInfo =
-          (
-            server.server as {
-              getClientVersion?: () => { name?: string; version?: string } | undefined;
-            }
-          )?.getClientVersion?.() ?? clientInfo;
+        const fromInitialize = (
+          server.server as {
+            getClientVersion?: () => { name?: string; version?: string } | undefined;
+          }
+        )?.getClientVersion?.();
+        if (fromInitialize?.name) {
+          clientInfo = fromInitialize;
+          clientInfoSource = "initialize";
+        }
       } catch {
         // Keep whatever the envelope said.
+      }
+    }
+    if (!clientInfo?.name) {
+      const fromUserAgent = clientFromUserAgent(headerValue(ex.requestHeaders, "user-agent"));
+      if (fromUserAgent) {
+        clientInfo = fromUserAgent;
+        clientInfoSource = "user_agent";
       }
     }
   }
@@ -198,8 +214,16 @@ function openCallContext(
         sdkVersion,
       },
       {
+        // The wire protocol version the client sends on every Streamable HTTP
+        // request (allowlisted in `_requestInfo` as well). Only a date-shaped
+        // value is stored: a Streamable HTTP transport rejects anything else,
+        // a custom one may not, and the column is not a place for free text.
+        protocolVersion: protocolVersionHeader(
+          headerValue(ex.requestHeaders, "mcp-protocol-version"),
+        ),
         clientName: clientInfo?.name,
         clientVersion: clientInfo?.version,
+        clientInfoSource: clientInfo?.name ? clientInfoSource : undefined,
         intentEnabled: config.intent.enabled,
       },
     );
@@ -207,6 +231,13 @@ function openCallContext(
   }
 
   return { traceId: generateTraceId(), session };
+}
+
+/** The MCP protocol versions are dates (`2025-06-18`); anything else is not recorded (#142 review). */
+const PROTOCOL_VERSION = /^\d{4}-\d{2}-\d{2}$/;
+
+function protocolVersionHeader(value: string | undefined): string | undefined {
+  return value !== undefined && PROTOCOL_VERSION.test(value) ? value : undefined;
 }
 
 /**
@@ -437,7 +468,8 @@ export interface ExistingProxy<T = object> {
  * endpoint and key, which are compared on their own — as stable JSON (keys
  * sorted at every level), so two wraps with the same options agree whatever
  * the order they were written in. A function option (`intent.fallback`) is
- * reduced to its presence.
+ * reduced to its presence. `shutdownTimeoutMs` is not part of it: it shapes
+ * the process-level drain, not what a proxy captures.
  */
 const fingerprints = new WeakMap<YavioConfig, string>();
 

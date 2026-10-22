@@ -43,6 +43,12 @@ Berlin' — English, not ISO 3166-2; only set next to a country_code; NULL befor
 SDK 0.4.1). Both come from ChatGPT's request _meta and need the app's argument
 capture on. Connection: protocol_version, client_name, client_version,
 connection_duration_ms. SDK: sdk_version.
+A 'connection' event is emitted at least once per session per SDK process (a
+stateless fleet writes one per instance that served the conversation), so
+never count connection rows: count sessions as uniqExact(session_id), over
+any event type. client_name comes from the protocol envelope, the initialize
+handshake or the request's User-Agent; JSONExtractString(metadata,
+'client_info_source') says which ('envelope', 'initialize', 'user_agent').
 Widget: viewport_width/height, scroll_depth_pct, click_count, visible_duration_ms,
 field_name, nav_from, nav_to, device_touch, device_pixel_ratio, load_time_ms.
 
@@ -74,6 +80,14 @@ conversions, conversion_value
   names are '(other)'. platform outside the known list is 'other'.
 - individuals = distinct people (or sessions where the app identifies no one)
   in that cell. NOT additive across days or cells.
+- events = rows, except in cells with event_type = 'connection', where it is
+  the distinct sessions that connected that day, from the stats runs after
+  the ingest deploy that shipped #142 (date to be filled in at deploy time:
+  YYYY-MM-DD): NOT additive across days. The first run after that deploy
+  recomputes the previous month too, so only months before that keep
+  counting connection rows (one per session per server process); a
+  connection figure spanning them mixes the two. Use uniqExact(session_id)
+  over events for sessions whenever the raw data is still there.
 - Average latency: sum(latency_sum) / sum(latency_count).
 
 ### stats_users_daily — day, dau, wau, mau (7/30 days ending that day)

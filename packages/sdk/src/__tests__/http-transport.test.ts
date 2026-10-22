@@ -514,3 +514,78 @@ describe("HttpTransport.drain()", () => {
     expect(fetch.mock.calls.length).toBeLessThanOrEqual(6 / 2 + 1);
   });
 });
+
+describe("HttpTransport.shutdown() is idempotent (#142)", () => {
+  /** A fetch that answers after a real delay; `settled()` counts the fetches answered so far. */
+  function slowFetch(delayMs: number) {
+    let settled = 0;
+    const fetch = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => {
+            settled++;
+            resolve({ status: 200, headers: { get: () => null }, json: () => ({}) });
+          }, delayMs),
+        ),
+    );
+    return { fetch, settled: () => settled };
+  }
+
+  it("a second shutdown() resolves with the first, after the same send, without sending twice", async () => {
+    const { fetch, settled } = slowFetch(100);
+    const transport = new HttpTransport({
+      endpoint: "http://test/v1/events",
+      apiKey: "yav_test",
+      sdkVersion: "0.0.1",
+      flushIntervalMs: 60_000,
+      fetch,
+    });
+    transport.start();
+    transport.send([fakeEvent()]);
+    const first = transport.shutdown().then(() => settled());
+    const second = transport.shutdown().then(() => settled());
+    expect(await Promise.all([first, second])).toEqual([1, 1]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("drain() after shutdown() waits for the shutdown's sends", async () => {
+    const { fetch, settled } = slowFetch(100);
+    const transport = new HttpTransport({
+      endpoint: "http://test/v1/events",
+      apiKey: "yav_test",
+      sdkVersion: "0.0.1",
+      flushIntervalMs: 60_000,
+      fetch,
+    });
+    transport.start();
+    transport.send([fakeEvent()]);
+    const closing = transport.shutdown();
+    await transport.drain();
+    expect(settled()).toBe(1);
+    await closing;
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("a drain() that started before shutdown() waits for the shutdown's sends too", async () => {
+    const { fetch, settled } = slowFetch(100);
+    const transport = new HttpTransport({
+      endpoint: "http://test/v1/events",
+      apiKey: "yav_test",
+      sdkVersion: "0.0.1",
+      flushIntervalMs: 60_000,
+      maxBatchSize: 1,
+      fetch,
+    });
+    transport.start();
+    transport.send([fakeEvent(), fakeEvent()]);
+    const draining = transport.drain(); // first batch out, second queued
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const closing = transport.shutdown(); // takes over the second batch
+    await draining;
+    // Both batches answered when drain() resolves — not just the first,
+    // with the second still on its way out under the shutdown.
+    expect(settled()).toBe(2);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await closing;
+  });
+});

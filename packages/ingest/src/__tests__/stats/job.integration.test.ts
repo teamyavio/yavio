@@ -351,6 +351,70 @@ describe("statistics job (#85)", () => {
     expect(Number(after[0].n)).toBe(0);
   });
 
+  it("counts connection rows as distinct sessions: one per session, however many processes reported it (#142)", async () => {
+    // Two instances of a stateless fleet served one conversation: each
+    // emitted its own connection event (random id, own timestamp).
+    await insert([
+      event(project, "2026-10-02 10:00:00.000", {
+        event_type: "connection",
+        event_name: null,
+        session_id: "s-fleet",
+        platform: "chatgpt",
+        client_name: "openai-mcp",
+      }),
+      event(project, "2026-10-02 10:05:00.000", {
+        event_type: "connection",
+        event_name: null,
+        session_id: "s-fleet",
+        platform: "chatgpt",
+        client_name: "openai-mcp",
+      }),
+      event(project, "2026-10-02 10:01:00.000", { session_id: "s-fleet" }),
+      event(project, "2026-10-02 10:06:00.000", { session_id: "s-fleet" }),
+    ]);
+    await job(new MemoryStore([project])).runIfDue(NOW);
+    const cells = await rows(
+      "SELECT slice, event_type, events, individuals FROM stats_daily WHERE project_id = {p:String} AND slice IN ('total', 'client') ORDER BY slice, event_type",
+      { p: project },
+    );
+    expect(
+      cells.map((r) => [r.slice, r.event_type, Number(r.events), Number(r.individuals)]),
+    ).toEqual([
+      ["client", "connection", 1, 1],
+      ["client", "tool_call", 2, 1],
+      ["total", "connection", 1, 1],
+      ["total", "tool_call", 2, 1],
+    ]);
+  });
+
+  it("tool_registry: a tool reported by several processes is one row under FINAL, the latest report (#142)", async () => {
+    await getClient().insert({
+      table: "tool_registry",
+      values: [
+        {
+          project_id: project,
+          tool_name: "search",
+          description: "first process",
+          registered_at: "2026-10-01 00:00:00.000",
+          updated_at: "2026-10-01 00:00:00.000",
+        },
+        {
+          project_id: project,
+          tool_name: "search",
+          description: "second process",
+          registered_at: "2026-10-01 00:00:05.000",
+          updated_at: "2026-10-01 00:00:05.000",
+        },
+      ],
+      format: "JSONEachRow",
+    });
+    const registry = await rows(
+      "SELECT tool_name, description FROM tool_registry FINAL WHERE project_id = {p:String}",
+      { p: project },
+    );
+    expect(registry).toEqual([{ tool_name: "search", description: "second process" }]);
+  });
+
   describe("per-project retention (#93)", () => {
     it("deletes old raw events after aggregating them, in one statement, and keeps the statistics", async () => {
       const short = `p-short-${randomUUID().slice(0, 8)}`;

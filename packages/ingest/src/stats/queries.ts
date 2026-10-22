@@ -92,8 +92,18 @@ function prelude(from: string, to: string): string {
 const MONTH = "toDateTime64({monthStart:Date}, 3, 'UTC')";
 const NEXT_MONTH = "toDateTime64({nextMonthStart:Date}, 3, 'UTC')";
 
+/**
+ * `events`: rows, except that `connection` rows count distinct sessions.
+ * The SDK emits a connection event at least once per session per process
+ * (every instance of a stateless fleet that serves the conversation, every
+ * LRU restart), with a random event_id and its own timestamp, so the rows
+ * never collapse under FINAL or LIMIT 1 BY event_id; what the event means
+ * is "this session connected", and every dashboard number already counts
+ * sessions as uniqExact(session_id) (#142). Every cell groups by event_type
+ * (or holds conversions only), so the two terms never mix inside a cell.
+ */
 const MEASURES = `
-    count() AS events,
+    countIf(event_type != 'connection') + uniqExactIf(session_id, event_type = 'connection') AS events,
     uniqExact(individual) AS individuals,
     sum(ifNull(latency_ms, 0)) AS latency_sum,
     countIf(latency_ms IS NOT NULL) AS latency_count,
@@ -135,7 +145,7 @@ WITH ${prelude(MONTH, NEXT_MONTH)},
          lower(splitByChar('-', ifNull(locale, ''))[1]), '') AS language_v,
       if(match(ifNull(conversion_currency, ''), '^[A-Z]{3}$'), assumeNotNull(conversion_currency), '') AS currency_v,
       coalesce(user_key, nullIf(session_id, '')) AS individual,
-      latency_ms, conversion_value
+      session_id, latency_ms, conversion_value
     FROM keyed
   ),
   registered AS (

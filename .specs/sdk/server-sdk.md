@@ -33,6 +33,16 @@ const instrumented = withYavio(server, {
   tools: {
     "book-contract": { inputValues: false, outputValues: false, intent: false },
   },
+
+  // Optional: the deadline for delivering queued events on shutdown (#142).
+  // An integer in [100, 2147483647] ms, default 10 s; env
+  // YAVIO_SHUTDOWN_TIMEOUT_MS; also readable from .yaviorc.json. Anything
+  // outside the range is one YAVIO-1006 warning and the default. Bounds
+  // this client's shutdown(); the SDK's own SIGTERM/SIGINT drain runs under
+  // the smallest value set explicitly (option, env or file) by any client
+  // or withYavio() call for the key — unset participants do not lower it;
+  // with nothing set, 10 s.
+  shutdownTimeoutMs: 10_000,
 });
 ```
 
@@ -41,7 +51,7 @@ const instrumented = withYavio(server, {
 `withYavio()` resolves configuration in priority order:
 
 1. **Code options:** Values passed directly to `withYavio(server, { apiKey, endpoint })`. Highest priority.
-2. **Environment variables:** `YAVIO_API_KEY` and `YAVIO_ENDPOINT`. Used when code options are not provided.
+2. **Environment variables:** `YAVIO_API_KEY` and `YAVIO_ENDPOINT` (also `YAVIO_SERVER_ONLY`, `YAVIO_INTENT`, `YAVIO_SHUTDOWN_TIMEOUT_MS`). Used when code options are not provided.
 3. **`.yaviorc.json`:** Reads `apiKey` and `endpoint` from the nearest `.yaviorc.json` file (walks up from `process.cwd()`). Lowest priority. Created by `yavio init`.
 
 If no API key is found through any source, `withYavio()` logs a warning and returns a transparent pass-through proxy that does not capture any events. This prevents crashes in environments where analytics is not configured.
@@ -162,7 +172,8 @@ The SDK buffers events in memory and flushes them to the Yavio ingestion API in 
 | Max batch size | 100 events | Triggers early flush if buffer fills before interval |
 | Max buffer size | 10,000 events | Prevents memory exhaustion under extreme load. Oldest dropped with warning. |
 | Retry strategy | Exponential backoff: 1s, 2s, 4s, 8s, 16s (max 5 retries) | Handles transient network/ingestion failures |
-| Shutdown | Drain on `SIGTERM`/`SIGINT` (10 s bound), then hand the signal back | The SDK removes its listeners after draining and re-raises the signal when nothing else listens, so the default exit (130/143) happens as without the SDK; an app with its own handler keeps control (#138) |
+| Shutdown | Drain on `SIGTERM`/`SIGINT` (`shutdownTimeoutMs`, 10 s by default), then hand the signal back | The SDK removes its listeners after draining and re-raises the signal when nothing else listens, so the default exit (130/143) happens as without the SDK; an app with its own handler keeps control (#138) |
+| `client.shutdown()` | Delivers everything queued before the call, then releases the client's hold; resolves once ingest answered or at the client's own `shutdownTimeoutMs` | Awaits the signal drain already running and the transport a request finishing after the signal sent through, so the app handler `await http.close(cb); await shutdown(); process.exit(0)` exits with nothing in flight; a second or concurrent call waits for the first; `HttpTransport.shutdown()` is idempotent (#142). Outside a signal the deadline is per call: `HttpTransport.shutdown(deadlineMs)` / `drain(deadlineMs)` take the calling client's value, whichever client or `withYavio()` call created the shared transport (review round 1). The drain the SDK starts on `SIGTERM`/`SIGINT` is bounded by the smallest value set explicitly (option, `YAVIO_SHUTDOWN_TIMEOUT_MS` or `.yaviorc.json`) by any client or `withYavio()` call for the key; unset participants do not lower it (`resolveConfig()` reports `shutdownTimeoutMsSource`, and the registry ignores `"default"`, review round 3); with nothing set, 10 s. A handler's `shutdown()`, which awaits that drain, sees that bound; the grace period is per process, so the strictest bound wins; `YAVIO_SHUTDOWN_TIMEOUT_MS` counts as explicit for every participant in the process, so it sets one value for all of them (review round 2) |
 | Authentication | `Authorization: Bearer <projectApiKey>` header | Stateless, validated by ingestion API against PostgreSQL. Server SDK always uses the project API key directly (JWTs are only for widget-side auth). |
 
 ### 3.3.2 Request Format
@@ -352,6 +363,8 @@ The generated or adopted `session_id` is stored in the `InstrumentationLayer` st
 | `userId` scope | Bound to the session. `.identify()` sets `user_id` for all subsequent events in the session. Cannot change within a session. |
 
 **Many conversations through one proxy (added 2026-10-14, 0.4.0).** Stateless transports and OpenAI's per-call reconnects serve every conversation through one `withYavio()` proxy. The proxy therefore keeps session state — `session_id`, `userId`, traits, the step sequence — **per derived session id** (from `extra.sessionId`, `_meta["openai/session"]` or the transport's session id), in a bounded map of 1,000 least-recently-used entries. Before, one shared session object was mutated per call: a user identified in conversation A appeared on conversation B's events, and two overlapping calls could swap session ids. Calls without any session key keep using the connection's session.
+
+**Several processes (added 2026-10-21, 0.5.2, #142).** The connection-event dedup is per process: a conversation served by N instances of a stateless fleet, or restarted after an LRU eviction, has N `connection` rows with random ids and their own timestamps, which never collapse under `ReplacingMergeTree`. The event therefore means "this session connected, as seen by one process", at least once per session per process, and sessions are counted as `uniqExact(session_id)` over every event — never as connection rows — in every dashboard query, in the #85 statistics job (`events` for connection cells is the number of distinct sessions) and, by its schema note, in `run_query`. `tool_discovery` is unaffected: ingest writes it to `tool_registry`, a `ReplacingMergeTree(updated_at)` read with `FINAL`, so N reports are one row (`registered_at` is the latest report). Not shared across processes: `identify()`, traits and the step sequence (per-process LRU; the dashboard stitches ChatGPT users by `subject_id`).
 
 Two limits of this. **No key, no separation:** a stateless transport serving a client that sends no session key — no `Mcp-Session-Id`, no `openai/session` (ChatGPT is the only platform that sends one) — still lands every conversation on the connection's one session; identify() and steps are shared there exactly as before. **Eviction resets the conversation:** once a conversation falls out of the 1,000-entry map (1,000 other conversations touched the proxy in between), its next call starts a fresh state under the same `session_id` — `user_id` is gone until identify() runs again, the step sequence restarts at 1, and the one-user-per-session guard is reset. A second `connection` event for the same `session_id` marks the restart: the connection-event dedup (module-level, so a server that builds a new proxy per request still emits one per conversation) is a 10,000-entry least-recently-used map — a hit refreshes the entry, so an active conversation is never aged out by newer ones — that also drops an id when its proxy evicts the session (#120). The map is shared by every proxy in the process: two long-lived instrumented servers in one process that see the same conversation key share one mark. Tool discovery events stamp the session of the most recent tool call, or the connection's session before any call.
 

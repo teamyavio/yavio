@@ -1,5 +1,6 @@
 import { ErrorCode } from "@yavio/shared/error-codes";
 import type { BaseEvent } from "@yavio/shared/events";
+import { DEFAULT_SHUTDOWN_TIMEOUT_MS } from "../core/config.js";
 import type { Transport } from "./types.js";
 
 export interface HttpTransportOptions {
@@ -27,13 +28,18 @@ const DEFAULT_MAX_BUFFER_SIZE = 10_000;
 const DEFAULT_MAX_RETRIES = 5;
 const BASE_RETRY_DELAY_MS = 1_000;
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
-const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
 
 export class HttpTransport implements Transport {
   private buffer: BaseEvent[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   /** The batch send in flight, if any (one at a time). */
   private inflight: Promise<void> | null = null;
+  /**
+   * The shutdown in progress or done, once `shutdown()` ran: a second
+   * `shutdown()` or a `drain()` after it waits for the same sends instead of
+   * resolving at once with a batch still on its way out (#142).
+   */
+  private closing: Promise<void> | null = null;
   private stopped = false;
 
   private readonly endpoint: string;
@@ -114,23 +120,31 @@ export class HttpTransport implements Transport {
    * Deliver everything queued so far: every batch, after any send already in
    * flight, without stopping the transport. Bounded by the buffer cap, so a
    * producer that keeps queueing cannot make it loop forever, and by
-   * `shutdownTimeoutMs` like `shutdown()`: against a hanging ingest it gives
-   * up draining at the deadline, leaves what is queued for the timer flush
-   * and does not stop the transport. What a holder's `shutdown()` does while
+   * `deadlineMs` — the caller's own `shutdownTimeoutMs`, or this transport's
+   * when omitted — like `shutdown()`: against a hanging ingest it gives up
+   * draining at the deadline, leaves what is queued for the timer flush and
+   * does not stop the transport. What a holder's `shutdown()` does while
    * other holders keep the transport (see shared.ts).
    */
-  async drain(): Promise<void> {
+  async drain(deadlineMs: number = this.shutdownTimeoutMs): Promise<void> {
     let expired = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<void>((resolve) => {
       timer = setTimeout(() => {
         expired = true;
         resolve();
-      }, this.shutdownTimeoutMs);
+      }, deadlineMs);
     });
     const loop = async () => {
       const rounds = Math.ceil(this.maxBufferSize / this.maxBatchSize) + 1;
-      for (let i = 0; i < rounds && !this.stopped && !expired; i++) {
+      for (let i = 0; i < rounds && !expired; i++) {
+        // A shutdown took over (a signal, the last holder): its sends are
+        // what this drain waits for.
+        if (this.closing) {
+          await this.closing;
+          return;
+        }
+        if (this.stopped) return;
         if (this.inflight) {
           await this.inflight.catch(() => {});
           continue;
@@ -150,7 +164,23 @@ export class HttpTransport implements Transport {
     }
   }
 
-  async shutdown(): Promise<void> {
+  /**
+   * Stop the timer and deliver everything queued, bounded by `deadlineMs`:
+   * the caller's own `shutdownTimeoutMs` (a `createYavio().shutdown()`
+   * passes the deadline its client was configured with), or this
+   * transport's — the value of whoever created it — when omitted; the
+   * SDK's signal drain passes the smallest value the key's holders and
+   * `withYavio()` pins set explicitly, nothing when none did. Idempotent: every call resolves with the one
+   * shutdown that is running, under the deadline of the call that started
+   * it, so two holders — or the signal handler and the app's handler — never
+   * see "done" with a batch still in flight (#142).
+   */
+  shutdown(deadlineMs: number = this.shutdownTimeoutMs): Promise<void> {
+    if (!this.closing) this.closing = this.runShutdown(deadlineMs);
+    return this.closing;
+  }
+
+  private async runShutdown(deadlineMs: number): Promise<void> {
     this.stopped = true;
     if (this.timer) {
       clearInterval(this.timer);
@@ -159,14 +189,18 @@ export class HttpTransport implements Transport {
 
     // Race the drain loop against a total shutdown timeout. The batch already
     // in flight first: resolving mid-send would let the process exit with a
-    // request half-way out.
+    // request half-way out. Every send goes through `inflight`, so a drain()
+    // that started earlier sees it too.
     let drained = false;
     const drain = async () => {
       if (this.inflight) await this.inflight.catch(() => {});
       while (this.buffer.length > 0) {
         const batch = this.buffer.splice(0, this.maxBatchSize);
+        this.inflight = this.sendBatch(batch).finally(() => {
+          this.inflight = null;
+        });
         try {
-          await this.sendBatch(batch);
+          await this.inflight;
         } catch {
           console.warn(
             `[${ErrorCode.SDK.SHUTDOWN_FLUSH_FAILED}] Failed to flush batch on shutdown`,
@@ -188,7 +222,7 @@ export class HttpTransport implements Transport {
           this.buffer.length = 0;
         }
         resolve();
-      }, this.shutdownTimeoutMs);
+      }, deadlineMs);
       if (timer && typeof timer === "object" && "unref" in timer) timer.unref();
     });
 
