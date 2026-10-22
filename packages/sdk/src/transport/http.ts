@@ -111,7 +111,10 @@ interface PartialBody {
  * itself, since a body stream that ignores its abort would otherwise hold
  * the batch in flight past the deadline (#148 review rounds 4 and 6).
  */
-async function readPartial(response: Response, signal: AbortSignal): Promise<PartialBody | undefined> {
+async function readPartial(
+  response: Response,
+  signal: AbortSignal,
+): Promise<PartialBody | undefined> {
   try {
     return await new Promise<PartialBody>((resolve, reject) => {
       const onAbort = () => reject(new DOMException("The operation was aborted.", "AbortError"));
