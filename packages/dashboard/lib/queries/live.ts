@@ -5,18 +5,23 @@ import type { LiveEvent } from "./types";
 /**
  * The live feed's read side (#148, Decision F).
  *
- * The feed tails `ingested_at` — when ingest received the event — not the
- * event's own `timestamp`. On a fleet, an instance whose 10 s batch lands
- * after a newer event from another instance would otherwise have its
- * events skipped for good. `ingested_at` is set before the batch writer's
- * 1 s flush and before any write retry (1/2/4 s), so a row becomes visible
- * a few seconds after its `ingested_at`: every poll re-reads the
+ * The feed tails `ingested_at` — when ClickHouse stored the event: the
+ * column's DEFAULT `now64(3)`, stamped at insert on ClickHouse's clock —
+ * not the event's own `timestamp`. On a fleet, an instance whose 10 s batch
+ * lands after a newer event from another instance would otherwise have its
+ * events skipped for good. Until #148 review round 5 ingest stamped
+ * `ingested_at` on receipt, before the batch writer's 1 s flush and its
+ * retries (each waiting out the failed insert's own duration, tens of
+ * seconds after a hanging first insert), so a row could become visible
+ * after the overlap had moved past its `ingested_at` and was never shown;
+ * stamped at insert, `ingested_at` is monotonic with visibility and the
+ * overlap only has to cover the insert itself: every poll re-reads the
  * `LIVE_OVERLAP` window before its cursor and leaves out the rows it
  * already read, by `event_id`, in the query itself. The page is read oldest
- * first: ingest stamps one `ingested_at` on a whole request batch (up to
- * 100 events), so a page of 50 newest-first would return the same 50 rows
- * of such a batch on every poll and the other 50 would never rank into a
- * page; oldest first with the read ids excluded, the cursor walks through
+ * first: ClickHouse stamps one `ingested_at` on a whole insert block (the
+ * batch writer's flush, up to 10 000 rows), so a page of 50 newest-first
+ * would return the same 50 rows of such a block on every poll and the rest
+ * would never rank into a page; oldest first with the read ids excluded, the cursor walks through
  * a backlog page by page — within one poll, up to `LIVE_MAX_PAGES` pages
  * (bounded catch-up, #148 review round 2): one page per 1.5 s poll fell
  * behind for good above ~33 events/s, with the cursor's `seen` list growing

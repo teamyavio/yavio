@@ -13,12 +13,18 @@ const MAX_RETRIES = 3;
  * block it has already stored under this token, so a retry after an insert
  * that reached the server but failed on the way back is stored once.
  *
- * Hashed from each row's identity — event_id, the client's timestamp and
- * ingested_at — rather than from the whole serialised batch, which cost a
- * second full JSON.stringify per flush on top of the client's own (#114).
- * It still tells apart what has to be told apart: a retry of the same batch
- * carries the same three values; an SDK resend is enriched again and gets a
- * new ingested_at; a clamped resend carries a new timestamp (#90).
+ * Hashed from each row's identity — event_id and the client's timestamp —
+ * rather than from the whole serialised batch, which cost a second full
+ * JSON.stringify per flush on top of the client's own (#114). A retry of
+ * the same batch carries the same values; a clamped resend carries a new
+ * timestamp (#90). Until #148 review round 5 `ingested_at` was part of the
+ * identity, so that an SDK resend of a batch ingest had already written —
+ * enriched again, with a new `ingested_at` — got a new token and was stored
+ * again, to be collapsed by FINAL; now ClickHouse stamps `ingested_at` at
+ * insert and the rows carry none. A resend that makes up a block of the
+ * same rows gets the same token and is dropped by the window, which is the
+ * same end state one merge earlier; one that lands in a block with other
+ * rows is a different block, stored and collapsed by FINAL as before.
  * Sharing one serialisation between the token and the request body is not
  * an option with @clickhouse/client 1.x: validateInsertValues rejects a
  * non-object-mode (raw bytes) stream for JSONEachRow — raw streams are for
@@ -28,7 +34,7 @@ const MAX_RETRIES = 3;
 function batchToken(batch: ReadonlyArray<EnrichedEvent>): string {
   const hash = createHash("sha256");
   for (const event of batch) {
-    hash.update(`${event.event_id}\t${event.timestamp}\t${event.ingested_at}\n`);
+    hash.update(`${event.event_id}\t${event.timestamp}\n`);
   }
   return hash.digest("hex");
 }

@@ -12,8 +12,10 @@ import {
 // fleet gives a session one `connection` row per instance that served it,
 // and an instance whose 10 s batch lands after a newer event from another
 // instance has an older `timestamp` with a newer `ingested_at` — which a
-// feed tailing by `timestamp` skipped for good. `ingested_at` is set
-// explicitly on insert here, the way ingest sets it on receipt.
+// feed tailing by `timestamp` skipped for good. In production ClickHouse
+// stamps `ingested_at` at insert from the column DEFAULT (#148 review round
+// 5); the rows here set it explicitly where a test stages a timeline, and
+// leave it out where the point is the insert-time stamp.
 
 const url = clickhouseUrl();
 

@@ -24,7 +24,6 @@ function enriched(workspace: string): EnrichedEvent {
     source: "server",
     workspace_id: workspace,
     project_id: "p-dedup",
-    ingested_at: now,
   };
 }
 
@@ -97,7 +96,7 @@ describe("insert deduplication (#90)", () => {
       await app?.close();
     });
 
-    it("is a second row until a merge, and one row with FINAL", async () => {
+    it("is dropped by the deduplication window when it makes up a block of its own, and is one row with FINAL", async () => {
       writer = new BatchWriter({ clickhouse: getClient(), flushSize: 100 });
       app = await createApp({
         db: { execute: async () => [{ "?column?": 1 }] } as unknown as Database,
@@ -124,18 +123,28 @@ describe("insert deduplication (#90)", () => {
           },
         ],
       };
-      for (let i = 0; i < 2; i++) {
-        const r = await app.inject({
-          method: "POST",
-          url: "/v1/events",
-          headers: { authorization: "Bearer yav_abc123def456abc123def456abc123de" },
-          payload: body,
-        });
-        expect(r.statusCode).toBe(200);
-        await writer.flush();
+      const beforeRaw = await count(workspace, false);
+      await getClient().command({ query: "SYSTEM STOP MERGES events" });
+      try {
+        for (let i = 0; i < 2; i++) {
+          const r = await app.inject({
+            method: "POST",
+            url: "/v1/events",
+            headers: { authorization: "Bearer yav_abc123def456abc123def456abc123de" },
+            payload: body,
+          });
+          expect(r.statusCode).toBe(200);
+          await writer.flush();
+        }
+        // The same rows, the same token (event_id and timestamp; ingested_at
+        // is ClickHouse's since #148 review round 5): the second block is
+        // dropped by the window — one row even without FINAL. A resend that
+        // lands in a block with other rows is stored and collapsed by FINAL
+        // (same sort key, event_id included), which the #85 job reads.
+        expect((await count(workspace, false)) - beforeRaw).toBe(1);
+      } finally {
+        await getClient().command({ query: "SYSTEM START MERGES events" });
       }
-      // Different batches, different tokens: both stored, collapsed by FINAL
-      // (same sort key, event_id included). The #85 job reads FINAL.
       expect((await count(workspace, true)) - before).toBe(1);
     });
   });
