@@ -4,8 +4,11 @@ import { clientFromUserAgent } from "../server/extra.js";
 /**
  * The User-Agent fallback for the connection's client identity (#142): the
  * first product token only, as `name/version` with a digit in the version,
- * or a bare `name` when that is the whole User-Agent — and never an HTTP
- * library, runtime or browser.
+ * or a bare `name` when that is the whole User-Agent — and only a name the
+ * SDK knows as an MCP client (a vendor the platform matcher recognises, or
+ * an allowlisted token such as `mcp-inspector`); any other name, an HTTP
+ * library, a runtime or a browser among them, yields nothing (review
+ * round 5).
  */
 describe("clientFromUserAgent", () => {
   it.each([
@@ -15,9 +18,18 @@ describe("clientFromUserAgent", () => {
     ["Cursor/1.0", { name: "Cursor", version: "1.0" }],
     ["Zed/0.120.0", { name: "Zed", version: "0.120.0" }],
     ["claude-ai/1.0", { name: "claude-ai", version: "1.0" }],
-    ["my_client/2.0.0-beta.1+build.7", { name: "my_client", version: "2.0.0-beta.1+build.7" }],
-    ["some-client/1.2 node-fetch/3.0", { name: "some-client", version: "1.2" }],
-    ["client/v1 extra", { name: "client", version: "v1" }],
+    ["claude-code/1.2.3", { name: "claude-code", version: "1.2.3" }],
+    ["cursor/0.42.0", { name: "cursor", version: "0.42.0" }],
+    [
+      "codex-mcp-client/2.0.0-beta.1+build.7",
+      { name: "codex-mcp-client", version: "2.0.0-beta.1+build.7" },
+    ],
+    ["gemini-cli/1.2 node-fetch/3.0", { name: "gemini-cli", version: "1.2" }],
+    ["windsurf/v1 extra", { name: "windsurf", version: "v1" }],
+    // Known MCP clients the vendor matcher does not name: the explicit allowlist (review round 5).
+    ["mcp-inspector/0.3.0", { name: "mcp-inspector", version: "0.3.0" }],
+    ["MCP-Remote/0.1.18", { name: "MCP-Remote", version: "0.1.18" }],
+    ["mcp-remote", { name: "mcp-remote", version: undefined }],
     // A `;` after the version terminates the token too (review round 3).
     ["Claude-User/1.0; +Claude-User@anthropic.com", { name: "Claude-User", version: "1.0" }],
     // A bare token that is the whole User-Agent (review round 2).
@@ -38,7 +50,19 @@ describe("clientFromUserAgent", () => {
     "Claude-User (bot)",
     // A version without a digit: a language, not a version (review round 2).
     "OpenAI/Python 1.40.0",
-    "client/beta",
+    "cursor/beta",
+    // A well-formed token that names no known MCP client: a server framework,
+    // a runtime or a library that is not on any list yields nothing, so an
+    // unknown name never reaches the 13-month client slice (review round 5).
+    "Nitro/2.9.0",
+    "Hono/4.6.0",
+    "h3/1.12.0",
+    "some-unknown-lib/1.0",
+    "some-unknown-lib",
+    "Vercel/1.0",
+    "my_client/2.0.0-beta.1+build.7",
+    "some-client/1.2 node-fetch/3.0",
+    "client/v1 extra",
     // Libraries, runtimes and browsers that put their own name first.
     "node-fetch/3.3.2",
     "undici",
@@ -77,15 +101,13 @@ describe("clientFromUserAgent", () => {
   });
 
   it("clamps the name to 64 and the version to 32 characters by not matching longer tokens", () => {
-    expect(clientFromUserAgent(`${"a".repeat(64)}/1.0`)).toEqual({
-      name: "a".repeat(64),
-      version: "1.0",
-    });
-    expect(clientFromUserAgent(`${"a".repeat(65)}/1.0`)).toBeUndefined();
-    expect(clientFromUserAgent(`client/${"1".repeat(32)}`)).toEqual({
-      name: "client",
+    const name64 = "claude-code".padEnd(64, "a");
+    expect(clientFromUserAgent(`${name64}/1.0`)).toEqual({ name: name64, version: "1.0" });
+    expect(clientFromUserAgent(`${name64}a/1.0`)).toBeUndefined();
+    expect(clientFromUserAgent(`cursor/${"1".repeat(32)}`)).toEqual({
+      name: "cursor",
       version: "1".repeat(32),
     });
-    expect(clientFromUserAgent(`client/${"1".repeat(33)}`)).toBeUndefined();
+    expect(clientFromUserAgent(`cursor/${"1".repeat(33)}`)).toBeUndefined();
   });
 });

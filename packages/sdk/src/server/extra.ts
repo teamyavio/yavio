@@ -18,6 +18,8 @@
  * throws.
  */
 
+import { isKnownClientName } from "../core/platform.js";
+
 /** The reserved `_meta` key the 2026-07-28 envelope carries the client identity under. */
 const ENVELOPE_CLIENT_INFO_KEY = "io.modelcontextprotocol/clientInfo";
 
@@ -102,79 +104,21 @@ export function readCallExtra(extra: unknown): CallExtra {
 }
 
 /**
- * HTTP libraries, runtimes and browsers that put their own name first in a
- * User-Agent. Such a token names the transport, not the MCP client, so it is
- * never recorded as one (#142).
+ * MCP clients whose product token the vendor matcher in `core/platform.ts`
+ * does not name. Together with `isKnownClientName()` this is the whole
+ * allowlist for a User-Agent-derived `client_name` (#142, review round 5):
+ * a name lands in the 13-month `stats_daily` client slice, which is never
+ * recomputed once the raw rows age out, so an HTTP library, a runtime, a
+ * server framework or a client the SDK does not know yet must not get
+ * there by merely putting its name first. Lower-case; compared to the
+ * lower-cased token.
  */
-const GENERIC_AGENTS = new Set([
-  "mozilla",
-  "node",
-  "node-fetch",
-  "undici",
-  "axios",
-  "got",
-  "ky",
-  "ofetch",
-  "superagent",
-  "needle",
-  "python",
-  "python-httpx",
-  "python-requests",
-  "python-urllib",
-  "python-urllib3",
-  "httpx",
-  "aiohttp",
-  "urllib3",
-  "pycurl",
-  "okhttp",
-  "okhttp3",
-  "go-http-client",
-  "go",
-  "curl",
-  "libcurl",
-  "wget",
-  "httpie",
-  "java",
-  "java-http-client",
-  "apache-httpclient",
-  "apache-httpasyncclient",
-  "reactornetty",
-  "vert.x-webclient",
-  "ktor-client",
-  "jersey",
-  "dalvik",
-  "dart",
-  "ruby",
-  "faraday",
-  "httparty",
-  "typhoeus",
-  "excon",
-  "php",
-  "guzzlehttp",
-  "symfony",
-  "bun",
-  "deno",
-  "electron",
-  "chrome",
-  "safari",
-  "firefox",
-  "edge",
-  "opera",
-  "libwww-perl",
-  "dotnet",
-  "restsharp",
-  "rust",
-  "reqwest",
-  "hyper",
-  "ureq",
-  "swift",
-  "alamofire",
-  "cfnetwork",
-  "winhttp",
-  "wininet",
-  "postmanruntime",
-  "insomnia",
-]);
+const KNOWN_MCP_CLIENTS = new Set(["mcp-inspector", "mcp-remote"]);
+
+/** The allowlist: a vendor the platform matcher recognises, or an explicit token. */
+function isAcceptedClientName(name: string): boolean {
+  return isKnownClientName(name) || KNOWN_MCP_CLIENTS.has(name.toLowerCase());
+}
 
 /**
  * The first product token of a User-Agent, `name/version` or a bare
@@ -186,10 +130,10 @@ const GENERIC_AGENTS = new Set([
  * `Faraday` from `Faraday v2.7.4` — is a product whose name has spaces,
  * not a client identifying itself. A version must hold at least one digit
  * (`OpenAI/Python 1.40.0` is the SDK's name and its language, not a
- * version). A token on the generic list yields nothing (#142, review
- * round 2). Whitespace, `;` or the end terminates the token: the RFC 9110
+ * version). Whitespace, `;` or the end terminates the token: the RFC 9110
  * form is whitespace, and `Claude-User/1.0; +Claude-User@anthropic.com`
- * puts a `;` after the version (review round 3).
+ * puts a `;` after the version (review round 3). The token then still has
+ * to name a known MCP client (`isAcceptedClientName()`, review round 5).
  */
 const PRODUCT_TOKEN =
   /^([A-Za-z][A-Za-z0-9._-]{0,63})(?:\/([0-9A-Za-z][0-9A-Za-z.+_-]{0,31}))?(?=[\s;]|$)/;
@@ -201,7 +145,13 @@ const PRODUCT_TOKEN =
  * server records the initialize `clientInfo` for the same client, which can
  * differ (ChatGPT's connector sends `openai-mcp/1.0.0` as its User-Agent and
  * `codex-mcp-client` as the clientInfo name when Codex drives it), so the
- * connection event records which source it used. Never throws.
+ * connection event records which source it used. Only a known MCP client
+ * is accepted — a vendor `isKnownClientName()` recognises (`openai-mcp`,
+ * `Claude-User`, `claude-code`, `cursor`, …) or an allowlisted token
+ * (`mcp-inspector`, `mcp-remote`); any other first token (`node`,
+ * `Nitro/2.9.0`, `Hono/4.6.0`, `python-httpx/0.27`, a client the SDK does
+ * not know yet) yields nothing and the connection stays without a client.
+ * Never throws.
  */
 export function clientFromUserAgent(
   userAgent: string | undefined,
@@ -209,7 +159,7 @@ export function clientFromUserAgent(
   if (typeof userAgent !== "string") return undefined;
   const trimmed = userAgent.trim();
   const match = PRODUCT_TOKEN.exec(trimmed);
-  if (!match || GENERIC_AGENTS.has(match[1].toLowerCase())) return undefined;
+  if (!match || !isAcceptedClientName(match[1])) return undefined;
   const [token, name, version] = match;
   if (version === undefined) return token === trimmed ? { name, version: undefined } : undefined;
   return /[0-9]/.test(version) ? { name, version } : undefined;
