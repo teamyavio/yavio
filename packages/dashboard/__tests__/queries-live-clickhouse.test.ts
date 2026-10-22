@@ -105,6 +105,15 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
     const ofSession = events.filter((e) => e.sessionId === session);
     expect(ofSession.map((e) => e.eventType)).toEqual(["connection", "tool_call"]);
     expect(ofSession[0]?.timestamp.startsWith(at(0).slice(0, 19))).toBe(true); // the earliest
+    // Filtered to connections: the same one row; to tool calls: none of them.
+    const only = await q.pollLive(ctx, { ingestedAt: at(0), seen: [] }, "connection");
+    expect(only.events.filter((e) => e.sessionId === session).map((e) => e.eventId)).toEqual([
+      ofSession[0]?.eventId,
+    ]);
+    const calls = await q.pollLive(ctx, { ingestedAt: at(0), seen: [] }, "tool_call");
+    expect(calls.events.filter((e) => e.sessionId === session).map((e) => e.eventType)).toEqual([
+      "tool_call",
+    ]);
   });
 
   it("a 100-row batch with one ingested_at is shown in full over two polls, nothing twice", async () => {

@@ -191,6 +191,28 @@ describe("live queries (#148)", () => {
       expect(result.events.map((e) => e.eventId)).toEqual(["o1", "c1", "t1"]);
     });
 
+    it("ranks a day of connection rows only when a connection can be in the page, over the sessions of the window", async () => {
+      mockQueryAnalytics.mockResolvedValue([]);
+      await pollLive(ctx, cursor, "tool_call");
+      const typed = mockQueryAnalytics.mock.calls[0][0];
+      // A type that is never a connection: no subquery at all (before the
+      // fix it ran on every poll of every type).
+      expect(typed.query).not.toContain("min(ingested_at)");
+      expect(typed.query).not.toContain("event_type != 'connection'");
+
+      for (const type of [undefined, "connection"]) {
+        mockQueryAnalytics.mockClear();
+        await pollLive(ctx, cursor, type);
+        const call = mockQueryAnalytics.mock.calls[0][0];
+        expect(call.query).toContain("SELECT session_id, min(ingested_at)");
+        // The candidates are the sessions with a connection row in the
+        // polled window — the only ones the page can hold — not every
+        // session of the day.
+        expect(call.query).toContain("AND session_id IN (");
+        expect(call.query.split("{cursor:DateTime64(3, 'UTC')}")).toHaveLength(3);
+      }
+    });
+
     it("applies the event type filter", async () => {
       mockQueryAnalytics.mockResolvedValue([]);
       await pollLive(ctx, cursor, "tool_call");

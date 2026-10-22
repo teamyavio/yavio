@@ -89,6 +89,36 @@ const WINDOW = `timestamp >= now() - INTERVAL 1 DAY
         AND ingested_at >= {cursor:DateTime64(3, 'UTC')} - INTERVAL ${LIVE_OVERLAP_SECONDS} SECOND`;
 
 /**
+ * A `connection` row passes only as its session's earliest in the last
+ * day. The candidates are the sessions with a connection row in the polled
+ * window — the only ones whose rows the poll can return, so the result is
+ * the same as over every session of the day, without ranking a day of
+ * connection rows on every poll. Left out when the type filter excludes
+ * connections altogether.
+ */
+function connectionFilter(eventType: string | undefined): string {
+  if (eventType !== undefined && eventType !== "connection") return "";
+  return `AND (
+          event_type != 'connection'
+          OR (session_id, ingested_at) IN (
+            SELECT session_id, min(ingested_at)
+            FROM events
+            WHERE project_id = {projectId:String}
+              AND event_type = 'connection'
+              AND timestamp >= now() - INTERVAL 1 DAY
+              AND session_id IN (
+                SELECT session_id
+                FROM events
+                WHERE project_id = {projectId:String}
+                  AND event_type = 'connection'
+                  AND ${WINDOW}
+              )
+            GROUP BY session_id
+          )
+        )`;
+}
+
+/**
  * One poll: the next page of rows ingested since the cursor (minus the
  * overlap), oldest first, without the ones the previous poll read, and
  * with one connection per session. Pure: the caller keeps the returned
@@ -125,17 +155,7 @@ export async function pollLive(
       FROM events
       WHERE project_id = {projectId:String}
         AND ${WINDOW}
-        AND (
-          event_type != 'connection'
-          OR (session_id, ingested_at) IN (
-            SELECT session_id, min(ingested_at)
-            FROM events
-            WHERE project_id = {projectId:String}
-              AND event_type = 'connection'
-              AND timestamp >= now() - INTERVAL 1 DAY
-            GROUP BY session_id
-          )
-        )
+        ${connectionFilter(eventType)}
         ${typeFilter}
         ${seenFilter}
       ORDER BY ingested_at ASC, timestamp ASC, event_id ASC
