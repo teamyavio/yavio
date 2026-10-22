@@ -1,4 +1,5 @@
 import {
+  TOOL_FILTER_MAX_LENGTH,
   analyticsFiltersSchema,
   granularityToClickHouse,
   invocationFiltersSchema,
@@ -74,9 +75,21 @@ describe("invocationFiltersSchema (#44)", () => {
     });
   });
 
-  it("rejects an unknown status and an overlong tool name", () => {
+  it("rejects an unknown status", () => {
     expect(invocationFiltersSchema.safeParse({ status: "pending" }).success).toBe(false);
-    expect(invocationFiltersSchema.safeParse({ tool: "x".repeat(201) }).success).toBe(false);
+  });
+
+  // #146 review round 1, finding 2: a pasted or hand-written tool value
+  // must never turn the whole page into an error banner.
+  it("cuts an overlong tool name instead of rejecting it", () => {
+    const result = invocationFiltersSchema.safeParse({ tool: "x".repeat(201) });
+    expect(result.success).toBe(true);
+    expect(result.data?.tool).toBe("x".repeat(TOOL_FILTER_MAX_LENGTH));
+  });
+
+  it("treats a blank tool name as no filter", () => {
+    expect(invocationFiltersSchema.parse({ tool: "   " }).tool).toBeUndefined();
+    expect(invocationFiltersSchema.parse({ tool: "" }).tool).toBeUndefined();
   });
 });
 

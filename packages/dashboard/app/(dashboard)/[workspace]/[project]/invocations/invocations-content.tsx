@@ -25,6 +25,7 @@ import {
 import { useAnalyticsFilters } from "@/hooks/use-analytics-filters";
 import { useAnalyticsQuery } from "@/hooks/use-analytics-query";
 import { formatCountry, formatLatency } from "@/lib/analytics/format";
+import { TOOL_FILTER_MAX_LENGTH } from "@/lib/analytics/validation";
 import type { IntentStatus, InvocationFeedItem, InvocationsResponse } from "@/lib/queries/types";
 import { cn } from "@/lib/utils";
 import { Target } from "lucide-react";
@@ -108,9 +109,13 @@ export function InvocationsContent({
   const [toolInput, setToolInput] = useState("");
   const [tool, setTool] = useState("");
 
-  // Typing a tool name must not fire a query per keystroke.
+  // Typing a tool name must not fire a query per keystroke. A pasted value
+  // is cut to what the API accepts so it cannot answer with a 400.
   useEffect(() => {
-    const timer = setTimeout(() => setTool(toolInput.trim()), TOOL_FILTER_DEBOUNCE_MS);
+    const timer = setTimeout(
+      () => setTool(toolInput.trim().slice(0, TOOL_FILTER_MAX_LENGTH)),
+      TOOL_FILTER_DEBOUNCE_MS,
+    );
     return () => clearTimeout(timer);
   }, [toolInput]);
 
@@ -302,6 +307,7 @@ export function InvocationsContent({
               onChange={(e) => setToolInput(e.target.value)}
               placeholder="Filter by tool name"
               aria-label="Filter by tool name"
+              maxLength={TOOL_FILTER_MAX_LENGTH}
               className="h-8 w-56 text-xs"
             />
             <Select
