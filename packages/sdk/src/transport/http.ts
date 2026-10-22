@@ -27,7 +27,29 @@ const DEFAULT_MAX_BATCH_SIZE = 100;
 const DEFAULT_MAX_BUFFER_SIZE = 10_000;
 const DEFAULT_MAX_RETRIES = 5;
 const BASE_RETRY_DELAY_MS = 1_000;
-const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+export const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+
+const unref = (timer: ReturnType<typeof setTimeout>): void => {
+  if (timer && typeof timer === "object" && "unref" in timer) timer.unref();
+};
+
+/**
+ * A `Retry-After` value as a wait in milliseconds: delay-seconds, or an
+ * HTTP-date (counted from now, never negative). Undefined when the header
+ * is missing or unparsable, so the caller falls back to its backoff — not
+ * to `Number("Wed, …") * 1000`, which is NaN and meant an immediate retry
+ * (#148).
+ */
+export function retryAfterMs(header: string | null): number | undefined {
+  if (header === null) return undefined;
+  const value = header.trim();
+  if (/^\d+$/.test(value)) return Number(value) * 1000;
+  // Every HTTP-date form (IMF-fixdate, RFC 850, asctime) starts with a day
+  // name; without that guard `Date.parse` reads "1.5" as a date.
+  if (!/^[A-Za-z]{3}/.test(value)) return undefined;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? undefined : Math.max(0, at - Date.now());
+}
 
 export class HttpTransport implements Transport {
   private buffer: BaseEvent[] = [];
@@ -41,6 +63,17 @@ export class HttpTransport implements Transport {
    */
   private closing: Promise<void> | null = null;
   private stopped = false;
+  /** The controller of the fetch in flight: aborted by the fetch timeout or by the shutdown deadline (#148). */
+  private inflightController: AbortController | null = null;
+  /** Events in the batch in flight, until ingest answered or the batch was given up. */
+  private inflightSize = 0;
+  /**
+   * Absolute time of the shutdown deadline, once `shutdown()` ran: no
+   * backoff or `Retry-After` wait that would end at or after it is
+   * scheduled, and at the deadline the fetch in flight is aborted — the
+   * deadline stops the waiting, not only the awaiting (#148).
+   */
+  private deadlineAt: number | undefined;
 
   private readonly endpoint: string;
   private readonly apiKey: string;
@@ -75,9 +108,12 @@ export class HttpTransport implements Transport {
       this.flush().catch(() => {});
     }, this.flushIntervalMs);
     // Don't prevent process exit
-    if (this.timer && typeof this.timer === "object" && "unref" in this.timer) {
-      this.timer.unref();
-    }
+    unref(this.timer);
+  }
+
+  /** Events ingest has not acknowledged: queued, plus the batch in flight. */
+  pendingEvents(): number {
+    return this.buffer.length + this.inflightSize;
   }
 
   send(events: BaseEvent[]): void {
@@ -105,15 +141,24 @@ export class HttpTransport implements Transport {
     // Atomic swap: take the batch and leave any concurrently-added events
     const batch = this.buffer.slice(0, this.maxBatchSize);
     this.buffer = this.buffer.slice(this.maxBatchSize);
-    this.inflight = this.sendBatch(batch).finally(() => {
-      this.inflight = null;
+    await this.startBatch(batch, () => {
       // An immediate transport has no timer to pick up what was queued
       // while this batch was out: send it now.
       if (this.immediate && !this.stopped && this.buffer.length > 0) {
         this.flush().catch(() => {});
       }
     });
-    await this.inflight;
+  }
+
+  /** Send one batch as the send in flight; `inflight` and the in-flight size track it until it settles. */
+  private startBatch(batch: BaseEvent[], then?: () => void): Promise<void> {
+    this.inflightSize = batch.length;
+    this.inflight = this.sendBatch(batch).finally(() => {
+      this.inflight = null;
+      this.inflightSize = 0;
+      then?.();
+    });
+    return this.inflight;
   }
 
   /**
@@ -134,6 +179,7 @@ export class HttpTransport implements Transport {
         expired = true;
         resolve();
       }, deadlineMs);
+      if (timer) unref(timer);
     });
     const loop = async () => {
       const rounds = Math.ceil(this.maxBufferSize / this.maxBatchSize) + 1;
@@ -182,6 +228,7 @@ export class HttpTransport implements Transport {
 
   private async runShutdown(deadlineMs: number): Promise<void> {
     this.stopped = true;
+    this.deadlineAt = Date.now() + deadlineMs;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -190,28 +237,23 @@ export class HttpTransport implements Transport {
     // Race the drain loop against a total shutdown timeout. The batch already
     // in flight first: resolving mid-send would let the process exit with a
     // request half-way out. Every send goes through `inflight`, so a drain()
-    // that started earlier sees it too.
+    // that started earlier sees it too. `sendBatch` never rejects: a batch
+    // that fails for good is logged there (YAVIO-1201) and the next one
+    // still goes out.
     let drained = false;
     const drain = async () => {
       if (this.inflight) await this.inflight.catch(() => {});
       while (this.buffer.length > 0) {
-        const batch = this.buffer.splice(0, this.maxBatchSize);
-        this.inflight = this.sendBatch(batch).finally(() => {
-          this.inflight = null;
-        });
-        try {
-          await this.inflight;
-        } catch {
-          console.warn(
-            `[${ErrorCode.SDK.SHUTDOWN_FLUSH_FAILED}] Failed to flush batch on shutdown`,
-          );
-        }
+        await this.startBatch(this.buffer.splice(0, this.maxBatchSize));
       }
       drained = true;
     };
 
     // The timer must not outlive the drain: a host that awaits shutdown()
-    // and exits would otherwise stay up for the whole timeout.
+    // and exits would otherwise stay up for the whole timeout. At the
+    // deadline the fetch in flight is aborted and the queue dropped: the
+    // deadline ends the sending too, so a host without process.exit() can
+    // exit and a hanging ingest cannot keep the process alive (#148).
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<void>((resolve) => {
       timer = setTimeout(() => {
@@ -220,10 +262,11 @@ export class HttpTransport implements Transport {
             `[${ErrorCode.SDK.SHUTDOWN_FLUSH_FAILED}] Shutdown timeout — events may have been dropped`,
           );
           this.buffer.length = 0;
+          this.inflightController?.abort();
         }
         resolve();
       }, deadlineMs);
-      if (timer && typeof timer === "object" && "unref" in timer) timer.unref();
+      if (timer) unref(timer);
     });
 
     try {
@@ -242,8 +285,14 @@ export class HttpTransport implements Transport {
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
+        // One controller per fetch, aborted by whichever comes first: the
+        // fetch timeout, or the shutdown deadline (`runShutdown`). Not
+        // `AbortSignal.any`, which needs Node 20.3 while `engines` is
+        // `>=20.0.0`.
         const controller = new AbortController();
+        this.inflightController = controller;
         const timer = setTimeout(() => controller.abort(), this.fetchTimeoutMs);
+        unref(timer);
         let response: Response;
         try {
           response = await this._fetch(this.endpoint, {
@@ -257,6 +306,7 @@ export class HttpTransport implements Transport {
           });
         } finally {
           clearTimeout(timer);
+          this.inflightController = null;
         }
 
         if (response.status === 200) return;
@@ -280,11 +330,10 @@ export class HttpTransport implements Transport {
         }
 
         if (response.status === 429) {
-          const retryAfter = response.headers.get("Retry-After");
-          // Retry-After header is in seconds per HTTP spec
-          const delayMs = retryAfter
-            ? Number(retryAfter) * 1000
-            : BASE_RETRY_DELAY_MS * 2 ** attempt;
+          // Delay-seconds or an HTTP-date; anything else falls back to the backoff.
+          const delayMs =
+            retryAfterMs(response.headers.get("Retry-After")) ?? BASE_RETRY_DELAY_MS * 2 ** attempt;
+          if (!this.canWait(delayMs)) return;
           console.warn(
             `[${ErrorCode.SDK.FLUSH_RATE_LIMITED}] Rate limited, retrying in ${delayMs}ms`,
           );
@@ -296,6 +345,7 @@ export class HttpTransport implements Transport {
         if (response.status >= 500) {
           if (attempt < this.maxRetries) {
             const delayMs = BASE_RETRY_DELAY_MS * 2 ** attempt;
+            if (!this.canWait(delayMs)) return;
             console.warn(
               `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Server error ${response.status}, retry ${attempt + 1}/${this.maxRetries}`,
             );
@@ -303,7 +353,7 @@ export class HttpTransport implements Transport {
             continue;
           }
           console.error(
-            `[${ErrorCode.SDK.FLUSH_FAILED_MAX_RETRIES}] Giving up after ${this.maxRetries} retries`,
+            `[${ErrorCode.SDK.FLUSH_FAILED_MAX_RETRIES}] Giving up after ${attempt + 1} attempts`,
           );
           return;
         }
@@ -311,9 +361,10 @@ export class HttpTransport implements Transport {
         // Other unexpected status codes — don't retry
         return;
       } catch (error) {
-        // Network error — retry with backoff
+        // Network error (or the abort at the deadline) — retry with backoff
         if (attempt < this.maxRetries) {
           const delayMs = BASE_RETRY_DELAY_MS * 2 ** attempt;
+          if (!this.canWait(delayMs)) return;
           console.warn(
             `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Network error, retry ${attempt + 1}/${this.maxRetries}`,
           );
@@ -321,14 +372,26 @@ export class HttpTransport implements Transport {
           continue;
         }
         console.error(
-          `[${ErrorCode.SDK.FLUSH_FAILED_MAX_RETRIES}] Giving up after ${this.maxRetries} retries`,
+          `[${ErrorCode.SDK.FLUSH_FAILED_MAX_RETRIES}] Giving up after ${attempt + 1} attempts`,
         );
         return;
       }
     }
   }
 
+  /**
+   * Whether a wait of `ms` still ends before the shutdown deadline. A wait
+   * that would end at or after it is not scheduled: the batch is given up
+   * instead of being re-sent after the process was meant to be gone (#148).
+   */
+  private canWait(ms: number): boolean {
+    return this.deadlineAt === undefined || Date.now() + ms < this.deadlineAt;
+  }
+
   private delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      unref(timer);
+    });
   }
 }

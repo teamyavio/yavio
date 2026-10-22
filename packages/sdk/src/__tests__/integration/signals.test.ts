@@ -864,6 +864,38 @@ describe("one process deadline from the signal (#148)", () => {
     });
   });
 
+  it("a send() after the hand-back still goes out, and a shutdown() after it waits at most D from its call", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "300";
+      try {
+        const { client, raw } = build("yav_148_after", { shutdownTimeoutMs: 3_000 });
+        await callTool(raw, "get_price", { q: "before" });
+        process.emit("SIGTERM", "SIGTERM"); // nothing else listens: the SDK drains and hands back
+        await vi.waitFor(() => expect(process.listenerCount("SIGTERM")).toBe(0), {
+          timeout: 2_000,
+        });
+        // The process survived (a platform that did not kill it yet, a
+        // handler elsewhere): a request finishing now sends through a new
+        // immediate transport — one attempt, a fetch bounded by D.
+        await callTool(raw, "get_price", { q: "after" });
+        await vi.waitFor(() => expect(ingest.batches).toHaveLength(2));
+        const started = Date.now();
+        await client.shutdown();
+        const elapsed = Date.now() - started;
+        // At most D (300 ms: the immediate transport's fetch gives up at
+        // min(30 s, D) from its send, the drain at D from the call), not
+        // the client's own 3 s: the exit is no longer blocked.
+        expect(elapsed).toBeGreaterThanOrEqual(150);
+        expect(elapsed).toBeLessThan(1_000);
+        expect(
+          ingest.events.map((e) => (e.input_values as { q?: string } | undefined)?.q),
+        ).toContain("after");
+      } finally {
+        process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = undefined;
+      }
+    });
+  });
+
   it("YAVIO_SHUTDOWN_TIMEOUT_MS counts even when no participant set a value: a plain client is bounded by it", async () => {
     await withoutOtherListeners("SIGTERM", async () => {
       process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "300";

@@ -2,7 +2,7 @@ import os from "node:os";
 import { DEFAULT_SHUTDOWN_TIMEOUT_MS, shutdownTimeoutFromEnv } from "../core/config.js";
 import { LruMap } from "../core/lru.js";
 import type { SessionState, YavioConfig } from "../core/types.js";
-import { HttpTransport } from "../transport/http.js";
+import { DEFAULT_FETCH_TIMEOUT_MS, HttpTransport } from "../transport/http.js";
 import type { Transport } from "../transport/types.js";
 
 /**
@@ -265,6 +265,11 @@ export function processBudgetMs(): number {
   return budget ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
 }
 
+/** D of the cycle running or last run, or what a signal arriving now would fix. */
+function currentBudgetMs(): number {
+  return signalInFlight?.budgetMs ?? lastBudgetMs ?? processBudgetMs();
+}
+
 /** What is left of the running cycle's budget, undefined outside a cycle. */
 function remainingMs(): number | undefined {
   return signalInFlight ? Math.max(0, signalInFlight.deadlineAt - Date.now()) : undefined;
@@ -403,12 +408,20 @@ export function _setSignalReraise(fn: ((signal: "SIGTERM" | "SIGINT") => void) |
 }
 
 function newTransport(config: Key, sdkVersion: string): HttpTransport {
+  // After the signal, a transport sends at once with one attempt and a
+  // fetch that gives up within the process budget: a request finishing
+  // late still delivers its events, and never keeps the process alive for
+  // the 30 s default (#148).
+  const budgetMs = draining ? currentBudgetMs() : undefined;
   const transport = new HttpTransport({
     endpoint: config.endpoint,
     apiKey: config.apiKey,
     sdkVersion,
     shutdownTimeoutMs: config.shutdownTimeoutMs,
     immediate: draining,
+    ...(budgetMs !== undefined
+      ? { maxRetries: 0, fetchTimeoutMs: Math.min(DEFAULT_FETCH_TIMEOUT_MS, budgetMs) }
+      : {}),
   });
   if (draining) noteDraining();
   else transport.start();

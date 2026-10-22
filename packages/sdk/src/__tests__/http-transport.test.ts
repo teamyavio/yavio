@@ -1,6 +1,6 @@
 import type { BaseEvent } from "@yavio/shared/events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HttpTransport } from "../transport/http.js";
+import { HttpTransport, retryAfterMs } from "../transport/http.js";
 
 function createMockFetch(status = 200, body = {}, headers?: Record<string, string>) {
   return vi.fn().mockResolvedValue({
@@ -587,5 +587,241 @@ describe("HttpTransport.shutdown() is idempotent (#142)", () => {
     expect(settled()).toBe(2);
     expect(fetch).toHaveBeenCalledTimes(2);
     await closing;
+  });
+});
+
+/**
+ * The deadline stops the waiting, not only the awaiting (#148, Decision B):
+ * at a transport's shutdown deadline the fetch in flight is aborted, no
+ * backoff or `Retry-After` wait that would end at or after the deadline is
+ * scheduled, `Retry-After` is read as delay-seconds or an HTTP-date, and
+ * every timer is unref'd. Before #148 the retry loop never looked at the
+ * deadline: a host without `process.exit()` stayed alive for 31 s against a
+ * refusing ingest and re-sent its batch at 31 s against a hanging one.
+ */
+describe("HttpTransport and the shutdown deadline (#148)", () => {
+  const ok = { status: 200, headers: { get: () => null }, json: () => ({}) };
+  const base = { endpoint: "http://test/v1/events", apiKey: "yav_test", sdkVersion: "0.0.1" };
+
+  /** A fetch that never answers on its own and rejects when its signal is aborted. */
+  function abortableFetch() {
+    let aborted = 0;
+    const fetch = vi.fn().mockImplementation(
+      (_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            aborted++;
+            reject(new DOMException("The operation was aborted.", "AbortError"));
+          });
+        }),
+    );
+    return { fetch, aborted: () => aborted };
+  }
+
+  describe("with fake timers", () => {
+    let warn: ReturnType<typeof vi.spyOn>;
+    let error: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+      warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      error = vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      warn.mockRestore();
+      error.mockRestore();
+      vi.useRealTimers();
+    });
+
+    it("aborts the fetch in flight at the shutdown deadline and schedules no retry after it", async () => {
+      const { fetch, aborted } = abortableFetch();
+      const transport = new HttpTransport({
+        ...base,
+        shutdownTimeoutMs: 500,
+        fetchTimeoutMs: 60_000,
+        maxRetries: 3,
+        fetch,
+      });
+      transport.send([fakeEvent()]);
+      const shutdown = transport.shutdown();
+      await vi.advanceTimersByTimeAsync(500);
+      await shutdown;
+      expect(aborted()).toBe(1);
+      // The abort is a network error to the retry loop; its 1 s backoff
+      // would end after the deadline, so the batch is given up.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(transport.pendingEvents()).toBe(0);
+    });
+
+    it("schedules no backoff wait that would end at or after the deadline", async () => {
+      const fetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+      const transport = new HttpTransport({
+        ...base,
+        shutdownTimeoutMs: 1_500,
+        maxRetries: 5,
+        fetch,
+      });
+      transport.send([fakeEvent()]);
+      const shutdown = transport.shutdown();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await shutdown;
+      // Attempts at 0 and 1 s; the 2 s wait after the second would end at
+      // 3 s, past the 1.5 s deadline, so it is not scheduled (before #148:
+      // attempts at 0, 1, 3 and 7 s, the process kept alive by each wait).
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("honours Retry-After as an HTTP-date", async () => {
+      let calls = 0;
+      const fetch = vi.fn().mockImplementation(() => {
+        calls++;
+        if (calls === 1) {
+          const at = new Date(Date.now() + 3_000).toUTCString();
+          return Promise.resolve({
+            status: 429,
+            headers: { get: (name: string) => (name === "Retry-After" ? at : null) },
+            json: () => ({}),
+          });
+        }
+        return Promise.resolve(ok);
+      });
+      const transport = new HttpTransport({ ...base, fetch });
+      transport.send([fakeEvent()]);
+      const flushing = transport.flush();
+      await vi.advanceTimersByTimeAsync(2_900);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(200);
+      await flushing;
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("caps a Retry-After wait at the shutdown deadline: one that ends after it is not scheduled", async () => {
+      let calls = 0;
+      const fetch = vi.fn().mockImplementation(() => {
+        calls++;
+        if (calls === 1) {
+          return Promise.resolve({
+            status: 429,
+            headers: { get: (name: string) => (name === "Retry-After" ? "5" : null) },
+            json: () => ({}),
+          });
+        }
+        return Promise.resolve(ok);
+      });
+      const transport = new HttpTransport({ ...base, shutdownTimeoutMs: 1_000, fetch });
+      transport.send([fakeEvent()]);
+      const shutdown = transport.shutdown();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await shutdown;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("an unparsable Retry-After falls back to the backoff, never to an immediate retry", async () => {
+      let calls = 0;
+      const fetch = vi.fn().mockImplementation(() => {
+        calls++;
+        if (calls === 1) {
+          return Promise.resolve({
+            status: 429,
+            headers: { get: (name: string) => (name === "Retry-After" ? "soon" : null) },
+            json: () => ({}),
+          });
+        }
+        return Promise.resolve(ok);
+      });
+      const transport = new HttpTransport({ ...base, fetch });
+      transport.send([fakeEvent()]);
+      const flushing = transport.flush();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(fetch).toHaveBeenCalledTimes(1); // NaN meant "retry now" before #148
+      await vi.advanceTimersByTimeAsync(500);
+      await flushing;
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("retryAfterMs(): delay-seconds, an HTTP-date from now, undefined otherwise", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    try {
+      expect(retryAfterMs("2")).toBe(2_000);
+      expect(retryAfterMs(" 0 ")).toBe(0);
+      expect(retryAfterMs("Thu, 01 Jan 2026 00:00:05 GMT")).toBe(5_000);
+      expect(retryAfterMs("Wed, 31 Dec 2025 23:59:00 GMT")).toBe(0); // in the past: now
+      expect(retryAfterMs("soon")).toBeUndefined();
+      expect(retryAfterMs("1.5")).toBeUndefined();
+      expect(retryAfterMs(null)).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("tracks the size of the batch in flight", async () => {
+    let hang = true;
+    let release: (() => void) | undefined;
+    const fetch = vi.fn().mockImplementation(() =>
+      hang
+        ? new Promise((resolve) => {
+            release = () => resolve(ok);
+          })
+        : Promise.resolve(ok),
+    );
+    const transport = new HttpTransport({
+      ...base,
+      maxBatchSize: 2,
+      flushIntervalMs: 60_000,
+      fetch,
+    });
+    transport.send([fakeEvent(), fakeEvent(), fakeEvent()]);
+    expect(transport.pendingEvents()).toBe(3); // the early flush at 2 is out, 1 queued
+    release?.();
+    await vi.waitFor(() => expect(transport.pendingEvents()).toBe(1));
+    hang = false;
+    await transport.shutdown();
+    expect(transport.pendingEvents()).toBe(0);
+  });
+
+  it("every timer it sets is unref'd: fetch timeout, backoff, drain and shutdown deadlines", async () => {
+    const realSetTimeout = globalThis.setTimeout;
+    const handles: NodeJS.Timeout[] = [];
+    const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+      fn: (...args: unknown[]) => void,
+      ms?: number,
+    ) => {
+      const handle = realSetTimeout(fn, ms);
+      handles.push(handle);
+      return handle;
+    }) as typeof setTimeout);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { fetch } = abortableFetch();
+      const transport = new HttpTransport({
+        ...base,
+        fetchTimeoutMs: 30,
+        maxRetries: 1,
+        shutdownTimeoutMs: 5_000,
+        flushIntervalMs: 60_000,
+        fetch,
+      });
+      transport.send([fakeEvent()]);
+      const draining = transport.drain(100); // its deadline timer
+      await new Promise((resolve) => realSetTimeout(resolve, 60)); // fetch timeout fired, backoff scheduled
+      await draining;
+      const closing = transport.shutdown(); // its deadline timer
+      await new Promise((resolve) => realSetTimeout(resolve, 10));
+      expect(handles.length).toBeGreaterThanOrEqual(4);
+      expect(handles.map((h) => h.hasRef())).toEqual(handles.map(() => false));
+      // The second attempt's fetch timeout ends it: the shutdown resolves at ~1.06 s.
+      await closing;
+    } finally {
+      spy.mockRestore();
+      warn.mockRestore();
+      error.mockRestore();
+    }
   });
 });
