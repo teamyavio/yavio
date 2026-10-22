@@ -125,7 +125,7 @@ describe("live queries (#148)", () => {
   });
 
   describe("pollLive", () => {
-    it("tails ingested_at with the overlap within the day — no timestamp bound before the cursor — and reads the page oldest first", async () => {
+    it("tails ingested_at with the overlap within 73 h — no timestamp bound before the cursor — and reads the page oldest first", async () => {
       mockQueryAnalytics.mockResolvedValue([]);
       await pollLive(ctx, cursor);
       const call = mockQueryAnalytics.mock.calls[0][0];
@@ -137,7 +137,11 @@ describe("live queries (#148)", () => {
       // cursor instead, which hid every event of a host whose clock runs
       // more than an hour slow (review round 6).
       expect(call.query).not.toMatch(/timestamp >= \{cursor/);
-      expect(call.query).toContain("timestamp >= now() - INTERVAL 1 DAY");
+      // Ingest stores timestamps down to now − 72 h: the outer bound is
+      // 73 h, the same in the page query and both connection subqueries —
+      // 1 day hid a host 24–72 h slow (review round 7).
+      expect(call.query.match(/timestamp >= now\(\) - INTERVAL 73 HOUR/g)).toHaveLength(3);
+      expect(call.query).not.toContain("INTERVAL 1 DAY");
       // Oldest first, in the cursor's order: ClickHouse stamps one
       // ingested_at on a whole insert block, and a page of the newest 50
       // would return the same rows of such a block on every poll.
@@ -477,7 +481,7 @@ describe("live queries (#148)", () => {
       expect(jump.query).toContain(
         `ingested_at >= now64(3, 'UTC') - INTERVAL ${LIVE_JUMP_LOOKBACK_SECONDS} SECOND`,
       );
-      expect(jump.query).toContain("timestamp >= now() - INTERVAL 1 DAY");
+      expect(jump.query).toContain("timestamp >= now() - INTERVAL 73 HOUR");
       expect(jump.query).not.toMatch(/timestamp >= now\(\) - INTERVAL \d+ SECOND/);
       expect(jump.params.eventType).toBeUndefined();
 

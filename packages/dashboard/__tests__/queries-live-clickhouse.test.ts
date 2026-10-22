@@ -165,26 +165,37 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
     expect(next.events.map((e) => e.eventName)).toEqual(["late"]);
   });
 
-  it("a row whose timestamp is three hours behind its ingested_at — a host with a slow clock — is shown live", async () => {
+  it("rows whose timestamp is 30 hours behind their ingested_at — a host with a slow clock — are shown live, its connection row included", async () => {
     // Ingest clamps a client timestamp to [now − 72 h, now + 5 min], so the
     // events of a host whose clock runs hours slow are stored with their
     // old timestamps. Review round 4's bound — timestamp within an hour
     // before the cursor, standing in for an index on ingested_at — hid
     // every one of them; with the minmax skip index (migration 0021) the
-    // poll prunes by ingested_at itself and the bound is gone.
+    // poll prunes by ingested_at itself. The outer bound of 1 day that
+    // stayed hid those of a host 24–72 h slow; it is 73 h now, in the
+    // connection subquery too, whose `IN` filter a tighter bound would fail
+    // the connection row on (review round 7).
     const projectId = `p-${randomUUID().slice(0, 8)}`;
     const scope = { workspaceId: ws, projectId };
     const session = `s-${randomUUID().slice(0, 8)}`;
     const cursor = await q.initialLiveCursor(scope);
-    const behind = new Date(Date.now() - 3 * 3_600_000)
+    const behind = new Date(Date.now() - 30 * 3_600_000)
       .toISOString()
       .replace("T", " ")
       .replace("Z", "");
     await insert([
+      {
+        project_id: projectId,
+        session_id: session,
+        event_type: "connection",
+        event_name: null,
+        timestamp: behind,
+      },
       { project_id: projectId, session_id: session, event_name: "slow-clock", timestamp: behind },
     ]);
     const { events } = await q.pollLive(scope, cursor, undefined);
-    expect(events.map((e) => e.eventName)).toEqual(["slow-clock"]);
+    expect(events.map((e) => e.eventType).sort()).toEqual(["connection", "tool_call"]);
+    expect(events.find((e) => e.eventType === "tool_call")?.eventName).toBe("slow-clock");
   });
 
   it("two instances' rows for one session give one connection row", async () => {

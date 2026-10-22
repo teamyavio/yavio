@@ -113,7 +113,7 @@ ALTER TABLE events ADD INDEX idx_platform platform TYPE set(10) GRANULARITY 4;
 ALTER TABLE events ADD INDEX idx_status status TYPE set(5) GRANULARITY 4;
 ALTER TABLE events ADD INDEX idx_user_id user_id TYPE bloom_filter GRANULARITY 4;
 -- The live feed tails ingested_at, which is outside the sort key; a minmax
--- index lets its "last 10 s" window prune the day's granules (#148, migration 0021,
+-- index lets its "last 10 s" window prune the granules of its 73 h timestamp bound (#148, migration 0021,
 -- with MATERIALIZE INDEX for the existing parts).
 ALTER TABLE events ADD INDEX idx_ingested_at ingested_at TYPE minmax GRANULARITY 1;
 ```

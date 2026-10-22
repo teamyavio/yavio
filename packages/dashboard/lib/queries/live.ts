@@ -53,16 +53,18 @@ import type { LiveEvent } from "./types";
  *
  * `ingested_at` is outside the sort key `(workspace_id, project_id,
  * event_type, timestamp, event_id)`; a minmax skip index on it (migration
- * 0021) lets the window bound prune the day's granules. Before it, every
- * poll sorted the project's whole last day (#148 review round 4), and the
- * bound on `timestamp` that stood in for the index — an hour before the
- * cursor — hid every event of a host whose clock runs more than an hour
- * slow: ingest clamps a client timestamp to [now − 72 h, now + 5 min], so
- * such events are stored and were never shown live (review round 6). The
- * 1-day bound on `timestamp` stays as the outer limit (the partition).
+ * 0021) lets the window bound prune the granules the `timestamp` bound
+ * leaves. Before it, every poll sorted the project's whole last day (#148
+ * review round 4), and the bound on `timestamp` that stood in for the
+ * index — an hour before the cursor — hid every event of a host whose
+ * clock runs more than an hour slow: ingest clamps a client timestamp to
+ * [now − 72 h, now + 5 min], so such events are stored and were never
+ * shown live (review round 6). The outer bound on `timestamp`
+ * (`LIVE_TIMESTAMP_BOUND`, 73 h) stays for the sort key, not for the
+ * partitions, which are monthly (review round 7).
  *
  * A `connection` row is shown only as its session's earliest in the
- * preceding 24 h — by `(ingested_at, event_id)`, so two rows of one block
+ * preceding 73 h — by `(ingested_at, event_id)`, so two rows of one block
  * (the same stamp) cannot both pass — and only once per session for as
  * long as the window covers the one shown (`LiveCursor.connections`): a
  * block visible late with an earlier row of the session would otherwise
@@ -182,7 +184,7 @@ function after(a: LivePosition, b: LivePosition): boolean {
  * Where a capped poll jumps to: the newest position the feed would show
  * (the type filter applies) among the rows stored in the last
  * `LIVE_JUMP_LOOKBACK` — by `ingested_at`, the skip index pruning, within
- * the day — or ClickHouse's clock when there are none. The newest row
+ * `LIVE_TIMESTAMP_BOUND` — or ClickHouse's clock when there are none. The newest row
  * rather than the clock: the backlog the jump gives up may end before the
  * clock's window, and the blocks of its last `LIVE_OVERLAP` seconds are
  * what the next poll shows (#148 review rounds 2 and 4).
@@ -198,7 +200,7 @@ async function latestCursor(ctx: QueryContext, eventType?: string): Promise<Live
         argMaxOrNull(event_id, (ingested_at, event_id)) AS eventId
       FROM events
       WHERE project_id = {projectId:String}
-        AND timestamp >= now() - INTERVAL 1 DAY
+        AND ${LIVE_TIMESTAMP_BOUND}
         AND ingested_at >= now64(3, 'UTC') - INTERVAL ${LIVE_JUMP_LOOKBACK_SECONDS} SECOND
         ${typeFilter}
     `,
@@ -232,23 +234,35 @@ export async function initialLiveCursor(ctx: QueryContext): Promise<LiveCursor> 
 }
 
 /**
- * The bounds every poll reads within: the partition bound on `timestamp`,
- * and the overlap window before the cursor on `ingested_at`, which the
- * skip index prunes by.
+ * The outer bound on `timestamp`, for the sort key: ingest stores a client
+ * timestamp down to now − 72 h (`MAX_PAST_MS` in its event normalizer), so
+ * a tighter bound hides every event of a host whose clock runs that slow —
+ * the 1-day bound before review round 7 those of a host 24–72 h slow — and
+ * one hour on top covers the time between that clamp and the poll. Every
+ * query here uses this one bound: the connection subquery with a tighter
+ * one would fail such a host's connection rows on its `IN` filter.
  */
-const WINDOW = `timestamp >= now() - INTERVAL 1 DAY
+const LIVE_TIMESTAMP_BOUND = "timestamp >= now() - INTERVAL 73 HOUR";
+
+/**
+ * The bounds every poll reads within: the outer bound on `timestamp`, and
+ * the overlap window before the cursor on `ingested_at`, which the skip
+ * index prunes by.
+ */
+const WINDOW = `${LIVE_TIMESTAMP_BOUND}
         AND ingested_at >= {cursor:DateTime64(3, 'UTC')} - INTERVAL ${LIVE_OVERLAP_SECONDS} SECOND`;
 
 /**
- * A `connection` row passes only as its session's earliest in the last
- * day, by `(ingested_at, event_id)`: with `min(ingested_at)` alone, two
- * connection rows of one session stored in one insert block — the same
- * stamp — both passed, and a page cap or a jump between them showed two
- * connections for the session (#148 review round 6). The candidates are
- * the sessions with a connection row in the polled window — the only ones
- * whose rows the poll can return, so the result is the same as over every
- * session of the day, without ranking a day of connection rows on every
- * poll. Left out when the type filter excludes connections altogether.
+ * A `connection` row passes only as its session's earliest within
+ * `LIVE_TIMESTAMP_BOUND`, by `(ingested_at, event_id)`: with
+ * `min(ingested_at)` alone, two connection rows of one session stored in
+ * one insert block — the same stamp — both passed, and a page cap or a
+ * jump between them showed two connections for the session (#148 review
+ * round 6). The candidates are the sessions with a connection row in the
+ * polled window — the only ones whose rows the poll can return, so the
+ * result is the same as over every session within the bound, without
+ * ranking all of their connection rows on every poll. Left out when the
+ * type filter excludes connections altogether.
  */
 function connectionFilter(eventType: string | undefined): string {
   if (eventType !== undefined && eventType !== "connection") return "";
@@ -259,7 +273,7 @@ function connectionFilter(eventType: string | undefined): string {
             FROM events
             WHERE project_id = {projectId:String}
               AND event_type = 'connection'
-              AND timestamp >= now() - INTERVAL 1 DAY
+              AND ${LIVE_TIMESTAMP_BOUND}
               AND session_id IN (
                 SELECT session_id
                 FROM events
