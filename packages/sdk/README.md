@@ -153,17 +153,47 @@ What holds across instances **and across processes** (a fleet behind a load bala
 
 `withYavio(server, options)` is safe for a server created per request too: the transport, the session store and the shutdown hooks are shared per API key and endpoint. It resolves the configuration (environment, `.yaviorc.json`) on every call, which `createYavio()` does once. Wrapping the same long-lived server again — with either entry point — returns the existing proxy, so a host that wraps on every request never stacks instrumentation. The first wrap wins: later options are ignored — any difference (another key or endpoint, other `capture` flags or `tools` overrides, `serverOnly`, intent, or a `wrap()` after a `withYavio()`) logs one `YAVIO-1108` warning and the first wrap's configuration keeps applying.
 
-**Graceful shutdown.** Events are batched, so the ones from the last seconds before a scale-down or redeploy are still in memory when `SIGTERM` arrives. With no handler of your own the SDK drains them and hands the signal back (below). With a handler, wait for the requests in flight, then await `shutdown()`, then exit:
+**Graceful shutdown.** Events are batched, so the ones from the last seconds before a scale-down or redeploy are still in memory when the signal arrives. With no handler of your own the SDK drains them within 4 s and hands the signal back (below). With a handler, stop accepting, give the requests in flight a bounded time to finish, then await `shutdown()`, then exit — `http` is the server `app.listen(port)` returned:
 
+<!-- shutdown-recipe -->
 ```typescript
-process.on("SIGTERM", async () => {
-  await new Promise((resolve) => http.close(resolve)); // waits for in-flight requests
-  await analytics.shutdown();                          // resolves once ingest has every event
-  process.exit(0);
-});
+import type { Server } from "node:http";
+// Stop accepting; let requests in flight finish; never wait longer than `ms`.
+function closeWithin(server: Server, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const idle = setInterval(() => server.closeIdleConnections(), 100);
+    const cap = setTimeout(() => server.closeAllConnections(), ms);
+    server.close(() => {
+      clearInterval(idle);
+      clearTimeout(cap);
+      resolve();
+    }); // resolves on error too
+  });
+}
+let stopping: Promise<void> | undefined;
+function stop(): Promise<void> {
+  stopping ??= (async () => {
+    await closeWithin(http, 3_000);
+    await analytics.shutdown(); // resolves by 4 s after the signal
+    process.exit(0);
+  })();
+  return stopping;
+}
+process.on("SIGTERM", stop);
+process.on("SIGINT", stop);
 ```
 
-On Node 20 and later `http.close()` already closes idle keep-alive sockets; what its callback waits for is the socket of the request in flight at close time, which a fetch-based client keeps open for a few seconds after the response. An app that needs a fast close can send `Connection: close` on its responses once shutdown has begun; otherwise expect a few seconds here. `analytics.shutdown()` delivers everything queued before the call — including what the SDK's own signal listener is already draining and what a request that finished after the signal sent — releases this client's hold on the shared transport, and resolves only once ingest answered, or at this client's `shutdownTimeoutMs` (an integer in [100, 2147483647] milliseconds, default 10 s; env `YAVIO_SHUTDOWN_TIMEOUT_MS`; anything else logs `YAVIO-1006` once and uses the default), whichever comes first. Outside a signal, each `shutdown()` is bounded by its own client's value. The drain the SDK starts on `SIGTERM`/`SIGINT` is bounded by the smallest value set explicitly (option, `YAVIO_SHUTDOWN_TIMEOUT_MS` or `.yaviorc.json`) by any `createYavio()` client or `withYavio()` call for that key; participants that set none do not lower it, and with nothing set it is 10 s. A handler's `shutdown()`, which awaits that drain, sees that bound: the grace period is per process, so the strictest bound wins. It is capped by its own client's `shutdownTimeoutMs` as well, so to raise the drain above 10 s set `shutdownTimeoutMs` on the client you call `shutdown()` on too, or use `YAVIO_SHUTDOWN_TIMEOUT_MS`. The drain covers every key in the process, so with several API keys a handler's `shutdown()` also waits for the other keys' drains, capped by its own client's deadline. `YAVIO_SHUTDOWN_TIMEOUT_MS` counts as set explicitly for every participant in the process, so it is the way to set one value for all of them. The deadline starts after `http.close()`, so the close time plus `shutdownTimeoutMs` must stay under the platform's grace period (Cloud Run allows 10 s after `SIGTERM` in total, Fly.io 5 s by default). A second or concurrent `shutdown()` — a framework hook and your handler — waits for the first. The transport stops once no client with the same key holds it (a `withYavio()` call never releases). A `withYavio()` host has no client to call: create one once at startup, next to the `withYavio()` calls and for the same key and endpoint, and use it only for `shutdown()`:
+Both signals, because Fly.io sends `SIGINT` by default. `stopping` makes a second signal — `npm run` forwards the terminal's Ctrl-C to a script that already got it — join the first run instead of calling `http.close()` again (`ERR_SERVER_NOT_RUNNING`) and exiting under the first close. `http.close()` alone waits for every keep-alive socket, which a fetch-based client holds for seconds after its response (65 s behind some load balancers), and a `Connection: close` header set once shutdown began cannot reach a response whose headers are already out — every SSE response, which is most MCP traffic today; `closeWithin` closes the idle sockets every 100 ms and cuts whatever is left at the cap, so a request that outlasts the cap is the one thing it costs.
+
+**The deadline.** On `SIGTERM`/`SIGINT` the SDK fixes one deadline for the whole process at signal + D, where D is the smallest `shutdownTimeoutMs` set explicitly (option, `YAVIO_SHUTDOWN_TIMEOUT_MS` or `.yaviorc.json`) by any `createYavio()` client, `withYavio()` call or `shutdown()` still running when the signal arrives, else 4 s; the SDK's own drain and every `shutdown()` — your handler's included, however long the close before it took — resolve by then, and a `shutdown()` called after it resolves at once. A slow or unreachable ingest therefore costs events, not the exit: what is still undelivered at the deadline is dropped, the fetch in flight is aborted, no retry is scheduled past it, and one `YAVIO-1205` line gives the count (`Shutdown deadline of 4000 ms reached — 12 events not delivered …`); the platform never has to kill the process. Requests that finish after the signal still send their events at once, one attempt each, and a `shutdown()` after the deadline waits for those at most D from its own call. Outside a signal each `shutdown()` is bounded by its own client's value from its call. `shutdownTimeoutMs` takes an integer in [100, 2147483647] milliseconds; anything else logs `YAVIO-1006` once and uses the default. Rule of thumb: `shutdownTimeoutMs` = the close cap + 1 s, and both must fit the platform's grace period:
+
+| Platform | Grace period after the signal | Close cap | `shutdownTimeoutMs` |
+|---|---|---|---|
+| Fly.io (sends `SIGINT` by default) | 5 s | 3 s | 4 s (the default) |
+| Cloud Run | 10 s | 3 s, or 6 s to drain longer | 4 s (the default), or 8 s |
+| Kubernetes, ECS | 30 s | 20 s | 25 s |
+
+With a healthy ingest the delivery takes about 250 ms and none of this is reached. Fastify's server is `fastify.server`, Nest's `app.getHttpServer()`; Next.js installs its own `SIGTERM`/`SIGINT` handler, which exits with 143 after `server.close()` without waiting for the SDK — set `NEXT_MANUAL_SIG_HANDLE=true` to use the recipe. A second or concurrent `shutdown()` — a framework hook and your handler — waits for the first. The transport stops once no client with the same key holds it (a `withYavio()` call never releases). A `withYavio()` host has no client to call: create one once at startup, next to the `withYavio()` calls and for the same key and endpoint, and use it only for `shutdown()`:
 
 ```typescript
 const analytics = createYavio({ apiKey, endpoint }); // once, at startup; shutdown() only

@@ -179,6 +179,19 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
 }
 
 /**
+ * An endpoint nothing listens on: a port that was bound and released, so a
+ * fetch to it is refused at once (ECONNREFUSED), like an ingest that is down
+ * or a hostname that resolves to a closed port (#148).
+ */
+export async function refusedEndpoint(): Promise<string> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return `http://127.0.0.1:${port}/v1/events`;
+}
+
+/**
  * Call one tool through a real MCP client over an in-memory transport: the
  * whole protocol path (initialize, tools/call, our wrappers), as a host would.
  * Connects the server, so use a fresh server or one not connected yet.
