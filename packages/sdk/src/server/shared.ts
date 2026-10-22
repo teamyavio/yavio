@@ -227,9 +227,11 @@ type HandledSignal = (typeof SIGNALS)[number];
 let signalListeners: Map<HandledSignal, () => void> | null = null;
 
 /**
- * One handled signal, from its arrival to the hand-back: whether the SDK
- * was the only listener when it arrived, and the process deadline it fixed
- * — `budgetMs` (D) from `startedAt`, absolute in `deadlineAt`.
+ * One handled signal, from its arrival to the hand-back: the signal the
+ * cycle hands back — the one that started it, or a later one that ended it
+ * early — with whether the SDK was its only listener when it arrived, and
+ * the process deadline the cycle fixed — `budgetMs` (D) from `startedAt`,
+ * absolute in `deadlineAt`.
  */
 interface SignalCycle {
   signal: HandledSignal;
@@ -510,20 +512,27 @@ let reraise: (signal: HandledSignal) => void = defaultReraise;
 /**
  * The first signal fixes the process deadline, drains the registry, then
  * hands the signal back (`finishSignal`); a second one while that is still
- * running hands it back at once, so a second Ctrl-C still ends the process
+ * running hands back at once, so a second Ctrl-C still ends the process
  * the way it does without the SDK — except the same signal within 250 ms,
  * taken for the first one delivered twice (a heuristic, see
- * `SAME_DELIVERY_MS`). Whether to re-raise is decided
- * when the signal ARRIVES: an app listener registered with `process.once`
- * is gone by the time the drain is done, and that app must not be killed in
- * the middle of its own shutdown. Each cycle is its own object, and
- * `finishSignal(cycle)` ends only the cycle still in flight: a drain that
- * ends after its cycle was handed back cannot end a later cycle.
+ * `SAME_DELIVERY_MS`). What is handed back is the signal that ARRIVED,
+ * with its own listeners deciding: re-raised only if the SDK is its only
+ * listener (re-raising the first signal with the first's decision killed
+ * an app that handles only the second one — SIGINT, say — with the default
+ * action of the first, SIGTERM's 143, in the middle of its own shutdown;
+ * #148 review round 4). Whether to re-raise is decided when the signal
+ * arrives: an app listener registered with `process.once` is gone by the
+ * time the drain is done, and that app must not be killed in the middle of
+ * its own shutdown. Each cycle is its own object, and `finishSignal(cycle)`
+ * ends only the cycle still in flight: a drain that ends after its cycle
+ * was handed back cannot end a later cycle.
  */
 function onSignal(signal: HandledSignal): void {
   const running = signalInFlight;
   if (running) {
     if (running.signal === signal && Date.now() - running.startedAt < SAME_DELIVERY_MS) return;
+    running.signal = signal;
+    running.sole = process.listenerCount(signal) === 1;
     finishSignal(running);
     return;
   }

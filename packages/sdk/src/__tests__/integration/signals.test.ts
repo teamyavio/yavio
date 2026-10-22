@@ -224,6 +224,88 @@ describe("SIGTERM/SIGINT hand-back (#138)", () => {
     }
   });
 
+  it("a different signal during the drain is handed back for the signal that arrived: SIGINT next to the app's own SIGINT listener — no re-raise, the app keeps control (#148)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await withoutOtherListeners("SIGTERM", async () => {
+        await withoutOtherListeners("SIGINT", async () => {
+          // An app that handles only SIGINT (a CLI, say) and relies on the
+          // default for SIGTERM.
+          const app = vi.fn();
+          process.on("SIGINT", app);
+          try {
+            ingest.hangEvents = true;
+            const raw = new McpServer({ name: "app", version: "1.0" });
+            withYavio(raw, {
+              apiKey: "yav_sig_other_signal",
+              endpoint: ingest.endpoint,
+              serverOnly: true,
+              shutdownTimeoutMs: 600,
+            }).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+            await callTool(raw, "get_price", { q: "x" });
+            expect(process.listenerCount("SIGTERM")).toBe(1); // the SDK alone
+            process.emit("SIGTERM", "SIGTERM"); // sole: the drain hangs to the 600 ms deadline
+            await new Promise((r) => setTimeout(r, 100));
+            process.emit("SIGINT", "SIGINT"); // the app's own signal, mid-drain
+            // Handed back for SIGINT: the app's listener ran and decides
+            // what happens next. Before the fix the cycle re-raised SIGTERM
+            // with its own "sole" decision — the app, handling only SIGINT,
+            // was killed by SIGTERM's default action (143) mid-shutdown.
+            expect(reraised).toEqual([]);
+            expect(app).toHaveBeenCalledTimes(1);
+            expect(process.listenerCount("SIGTERM")).toBe(0);
+            expect(process.rawListeners("SIGINT")).toEqual([app]);
+            // The drain still ends at its deadline, without a hand-back of its own.
+            await new Promise((r) => setTimeout(r, 700));
+            expect(reraised).toEqual([]);
+          } finally {
+            process.off("SIGINT", app);
+          }
+        });
+      });
+    } finally {
+      await ingest.answerHung();
+      warn.mockRestore();
+    }
+  });
+
+  it("the other way round: SIGTERM next to an app listener, then SIGINT with nothing else listening — SIGINT is re-raised, not SIGTERM (#148)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await withoutOtherListeners("SIGTERM", async () => {
+        await withoutOtherListeners("SIGINT", async () => {
+          const app = vi.fn();
+          process.on("SIGTERM", app);
+          try {
+            ingest.hangEvents = true;
+            const raw = new McpServer({ name: "app", version: "1.0" });
+            withYavio(raw, {
+              apiKey: "yav_sig_other_signal_2",
+              endpoint: ingest.endpoint,
+              serverOnly: true,
+              shutdownTimeoutMs: 600,
+            }).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+            await callTool(raw, "get_price", { q: "x" });
+            process.emit("SIGTERM", "SIGTERM"); // next to the app's listener: no re-raise for this one
+            expect(app).toHaveBeenCalledTimes(1);
+            await new Promise((r) => setTimeout(r, 100));
+            process.emit("SIGINT", "SIGINT"); // nothing else listens: Node's default for SIGINT must run
+            // Before the fix nothing was re-raised (the first signal's
+            // decision), and the process stayed up with no handler for SIGINT.
+            expect(reraised.map((r) => r.signal)).toEqual(["SIGINT"]);
+            expect(process.listenerCount("SIGINT")).toBe(0);
+            expect(process.rawListeners("SIGTERM")).toEqual([app]);
+          } finally {
+            process.off("SIGTERM", app);
+          }
+        });
+      });
+    } finally {
+      await ingest.answerHung();
+      warn.mockRestore();
+    }
+  });
+
   it("a signal during a releasing last holder with an explicit 20 s uses 20 s and waits for the stop in progress (#148)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
