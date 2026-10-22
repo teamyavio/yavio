@@ -14,6 +14,7 @@ import {
   type SharedHold,
   type SharedState,
   acquireShared,
+  awaitBounded,
   isLiveHold,
   logOnce,
   pinShared,
@@ -236,17 +237,10 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
       // the signal drain and the key's post-signal transport still carry.
       const work = released ? releaseShared(config, released) : settleShared(config);
       closing = Promise.all([closing, work.catch(() => {})]).then(() => {});
-      // One deadline per call, whatever the chain behind it waits for.
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const deadline = new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, config.shutdownTimeoutMs);
-        if (timer && typeof timer === "object" && "unref" in timer) timer.unref();
-      });
-      try {
-        await Promise.race([closing, deadline]);
-      } finally {
-        clearTimeout(timer);
-      }
+      // One deadline per call, whatever the chain behind it waits for: this
+      // client's own value from the call, cut to the process deadline once a
+      // signal fixed one — before or during the call (#148).
+      await awaitBounded(closing, config.shutdownTimeoutMs);
     },
   };
 }

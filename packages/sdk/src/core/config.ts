@@ -62,8 +62,15 @@ export const DEFAULT_INTENT_DESCRIPTION =
 
 const CONFIG_FILENAME = ".yaviorc.json";
 
-/** The drain deadline when nothing configures one (#142). */
-export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
+/**
+ * The drain deadline when nothing configures one (#142): 4 s since #148,
+ * so that a host which follows the README (a close bounded at 3 s, then
+ * `shutdown()`) exits within the grace period of every common platform —
+ * Fly.io kills 5 s after the signal, Cloud Run 10 s, Kubernetes and ECS
+ * 30 s. On a signal this is the whole process budget, counted from the
+ * signal; outside a signal it bounds each `shutdown()` from its call.
+ */
+export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 4_000;
 /**
  * The range `shutdownTimeoutMs` accepts (#142 review): below 100 ms a
  * seconds-for-milliseconds slip (`YAVIO_SHUTDOWN_TIMEOUT_MS=10`) would drop
@@ -239,6 +246,17 @@ function resolveShutdownTimeout(
     return { ms: DEFAULT_SHUTDOWN_TIMEOUT_MS, source: "default" };
   }
   return { ms: DEFAULT_SHUTDOWN_TIMEOUT_MS, source: "default" };
+}
+
+/**
+ * `YAVIO_SHUTDOWN_TIMEOUT_MS` as an explicit value, or undefined when it is
+ * unset, empty or rejected (the rejection warned `YAVIO-1006` once). Read
+ * again when a signal arrives: the env var counts towards the process
+ * deadline even when no client or `withYavio()` call is live (#148).
+ */
+export function shutdownTimeoutFromEnv(): number | undefined {
+  const { ms, source } = resolveShutdownTimeout([["env", process.env.YAVIO_SHUTDOWN_TIMEOUT_MS]]);
+  return source === "default" ? undefined : ms;
 }
 
 /**

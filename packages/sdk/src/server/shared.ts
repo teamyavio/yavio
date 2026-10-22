@@ -1,5 +1,5 @@
 import os from "node:os";
-import { DEFAULT_SHUTDOWN_TIMEOUT_MS } from "../core/config.js";
+import { DEFAULT_SHUTDOWN_TIMEOUT_MS, shutdownTimeoutFromEnv } from "../core/config.js";
 import { LruMap } from "../core/lru.js";
 import type { SessionState, YavioConfig } from "../core/types.js";
 import { HttpTransport } from "../transport/http.js";
@@ -56,25 +56,26 @@ import type { Transport } from "../transport/types.js";
  * SDK installed its own runs before ours and is gone when we count, so the
  * SDK takes itself for the only listener and re-raises after the drain.
  *
- * Deadlines. Outside a signal every `client.shutdown()` is bounded by its
- * own client's `shutdownTimeoutMs`. The drain a signal starts is bounded by
- * the smallest value *set explicitly* (option, env or rc file) by any
- * `createYavio()` hold or `withYavio()` pin on the key — because the
- * deadline exists to stay under the platform's grace period, which is per
- * process, so the strictest bound wins; a participant on the default adds
- * no bound, so raising the deadline on one client is not undone by the
- * others (review round 3: every resolved config carries a value, and
- * registering the default capped a 12 s client at 10 s). With nothing set
- * explicitly the drain runs under the documented 10 s default — not the
- * transport's own value, which is its creator's and would outlive that
- * creator's release (review round 4: a 300 ms creator released outside a
- * signal left a default holder's drain bounded at 300 ms). A handler's
- * `shutdown()` awaits that drain and so sees that bound (#142 review
- * round 2) — and, since the drain covers every key in the process, the
- * other keys' drains too, capped by its own deadline, so raising the drain
- * above 10 s takes a value on the shutdown client as well (review round 4).
- * `YAVIO_SHUTDOWN_TIMEOUT_MS` counts as explicit for
- * every participant in the process, so it sets one value for all of them.
+ * Deadlines (#148). Outside a signal every `client.shutdown()` is bounded
+ * by its own client's `shutdownTimeoutMs`, from its call. A signal fixes
+ * ONE process deadline at signal + D, where D is the smallest
+ * `shutdownTimeoutMs` set explicitly (option, env or rc file) by any live
+ * `createYavio()` hold, `withYavio()` pin or `shutdown()` call still in
+ * progress at the signal, across every key — the grace period is per
+ * process, so the strictest explicit bound wins, and a participant on the
+ * default adds no bound (review round 3 of #142: registering the default
+ * capped a raised value). `YAVIO_SHUTDOWN_TIMEOUT_MS` counts even when no
+ * participant is live; with nothing set, D is the 4 s default. The signal
+ * drain, every drain or stop a release causes, and every `shutdown()`
+ * running at or after the signal — one that started before it included —
+ * resolve by that deadline; a `shutdown()` called with no time left
+ * resolves at once. Values registered after the signal do not move it; a
+ * new cycle after a hand-back gets a new deadline. After the hand-back a
+ * `shutdown()` waits at most D from its own call, so a process that
+ * survives a signal still delivers what requests finishing later send,
+ * without blocking the exit. Before #148 there were three clocks (the
+ * signal, each `shutdown()` call, the post-signal transport's own drain),
+ * which added up to 15–18 s with a 10 s default.
  */
 
 export interface SharedSessions {
@@ -134,8 +135,8 @@ interface Entry {
    * The `shutdownTimeoutMs` of every live hold whose config set it
    * explicitly (option, env or rc file), one per such hold — a client on
    * the default adds nothing — and the smallest among the explicitly set
-   * `withYavio()` pins: the signal drain runs under the smallest of them
-   * all, the 10 s default when none set one (review rounds 3 and 4).
+   * `withYavio()` pins: inputs of the process deadline a signal fixes, the
+   * smallest of them all across every key, the default when none set one.
    */
   holdDeadlines: number[];
   pinDeadline: number | undefined;
@@ -212,11 +213,103 @@ type HandledSignal = (typeof SIGNALS)[number];
 
 /** The SDK's listener per signal, bound to its name — `process.emit("SIGINT")` without an argument is common in harnesses. */
 let signalListeners: Map<HandledSignal, () => void> | null = null;
+
 /**
- * The signal being handled, with whether the SDK was the only listener when
- * it arrived. A second signal while this is set means "stop waiting".
+ * One handled signal, from its arrival to the hand-back: whether the SDK
+ * was the only listener when it arrived, and the process deadline it fixed
+ * — `budgetMs` (D) from `startedAt`, absolute in `deadlineAt`.
  */
-let signalInFlight: { signal: HandledSignal; sole: boolean } | null = null;
+interface SignalCycle {
+  id: number;
+  signal: HandledSignal;
+  sole: boolean;
+  startedAt: number;
+  budgetMs: number;
+  deadlineAt: number;
+}
+
+/** The signal being handled. A second signal while this is set means "stop waiting". */
+let signalInFlight: SignalCycle | null = null;
+let cycles = 0;
+/**
+ * The latest cycle's deadline timer: cuts every `shutdown()` await still
+ * pending at signal + D, even after an early hand-back. Unref'd, so it
+ * never keeps the process alive; replaced by the next cycle's, cleared on
+ * reset.
+ */
+let cycleTimer: ReturnType<typeof setTimeout> | undefined;
+/** D of the last cycle that ended: after the hand-back a `shutdown()` waits at most this long from its call. */
+let lastBudgetMs: number | undefined;
+/**
+ * The explicit `shutdownTimeoutMs` of every `shutdown()` call in progress
+ * (a release or a settle), kept until the call resolves: a hold that is
+ * releasing when the signal arrives still counts towards D.
+ */
+const inProgressDeadlines: number[] = [];
+/** Resolvers of the `shutdown()` awaits to cut at the next cycle's deadline. */
+const deadlineWaiters = new Set<() => void>();
+
+const unref = (timer: ReturnType<typeof setTimeout>): void => {
+  if (timer && typeof timer === "object" && "unref" in timer) timer.unref();
+};
+
+/**
+ * D for a signal arriving now: the smallest `shutdownTimeoutMs` set
+ * explicitly by a live hold or pin (every key), by a `shutdown()` in
+ * progress, or by `YAVIO_SHUTDOWN_TIMEOUT_MS`; the default when none is.
+ */
+export function processBudgetMs(): number {
+  let budget = shutdownTimeoutFromEnv();
+  for (const entry of registry.values()) budget = minDeadline(budget, signalDeadline(entry));
+  for (const ms of inProgressDeadlines) budget = minDeadline(budget, ms);
+  return budget ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+}
+
+/** What is left of the running cycle's budget, undefined outside a cycle. */
+function remainingMs(): number | undefined {
+  return signalInFlight ? Math.max(0, signalInFlight.deadlineAt - Date.now()) : undefined;
+}
+
+/**
+ * The deadline a drain or stop started now runs under: the caller's own
+ * value, cut to what the signal cycle leaves, or to D after a hand-back.
+ */
+export function boundedBy(ownMs: number): number {
+  const remaining = remainingMs();
+  if (remaining !== undefined) return Math.min(ownMs, remaining);
+  if (lastBudgetMs !== undefined) return Math.min(ownMs, lastBudgetMs);
+  return ownMs;
+}
+
+/**
+ * Await `work` for at most `ownMs`, cut earlier by the deadline of a signal
+ * cycle running now — or of one that starts meanwhile. With no time left
+ * it returns at once; the work goes on in the background.
+ */
+export async function awaitBounded(work: Promise<void>, ownMs: number): Promise<void> {
+  const ms = boundedBy(ownMs);
+  if (ms <= 0) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let release: (() => void) | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    release = resolve;
+    deadlineWaiters.add(resolve);
+    timer = setTimeout(resolve, ms);
+    if (timer) unref(timer);
+  });
+  try {
+    await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+    if (release) deadlineWaiters.delete(release);
+  }
+}
+
+function releaseWaiters(): void {
+  const waiters = [...deadlineWaiters];
+  deadlineWaiters.clear();
+  for (const resolve of waiters) resolve();
+}
 
 /**
  * Re-raise a signal once the SDK's listener is gone, so Node's default action
@@ -239,19 +332,32 @@ const defaultReraise = (signal: HandledSignal): void => {
 let reraise: (signal: HandledSignal) => void = defaultReraise;
 
 /**
- * The first signal drains the registry, then hands the signal back
- * (`finishSignal`); a second one while that is still running hands it back
- * at once, so a second Ctrl-C still ends the process the way it does without
- * the SDK. Whether to re-raise is decided when the signal ARRIVES: an app
- * listener registered with `process.once` is gone by the time the drain is
- * done, and that app must not be killed in the middle of its own shutdown.
+ * The first signal fixes the process deadline, drains the registry, then
+ * hands the signal back (`finishSignal`); a second one while that is still
+ * running hands it back at once, so a second Ctrl-C still ends the process
+ * the way it does without the SDK. Whether to re-raise is decided when the
+ * signal ARRIVES: an app listener registered with `process.once` is gone by
+ * the time the drain is done, and that app must not be killed in the
+ * middle of its own shutdown.
  */
 function onSignal(signal: HandledSignal): void {
   if (signalInFlight) {
     finishSignal();
     return;
   }
-  signalInFlight = { signal, sole: process.listenerCount(signal) === 1 };
+  const budgetMs = processBudgetMs();
+  const startedAt = Date.now();
+  signalInFlight = {
+    id: ++cycles,
+    signal,
+    sole: process.listenerCount(signal) === 1,
+    startedAt,
+    budgetMs,
+    deadlineAt: startedAt + budgetMs,
+  };
+  clearTimeout(cycleTimer);
+  cycleTimer = setTimeout(releaseWaiters, budgetMs);
+  unref(cycleTimer);
   beginProcessShutdown()
     .catch(() => {})
     .then(finishSignal);
@@ -267,10 +373,11 @@ function onSignal(signal: HandledSignal): void {
  * ora) does not get its turn either — that app must handle the signal itself.
  */
 function finishSignal(): void {
-  const inFlight = signalInFlight;
+  const cycle = signalInFlight;
   signalInFlight = null;
+  if (cycle) lastBudgetMs = cycle.budgetMs;
   removeSignalHandlers();
-  if (inFlight?.sole) reraise(inFlight.signal);
+  if (cycle?.sole) reraise(cycle.signal);
 }
 
 /**
@@ -389,12 +496,9 @@ const minDeadline = (a: number | undefined, b: number | undefined): number | und
   a === undefined ? b : b === undefined ? a : Math.min(a, b);
 
 /**
- * The deadline of a key's signal drain: the smallest `shutdownTimeoutMs`
- * set explicitly by its holders and pins, or undefined when none set one
- * (`shutdownAllShared` then uses the 10 s default, never the transport's
- * own value, which is its creator's). The deadline exists to stay under the
- * platform's grace period, which is per process, so the strictest explicit
- * bound wins.
+ * The smallest `shutdownTimeoutMs` set explicitly by a key's holders and
+ * pins, or undefined when none set one: one input of the process deadline
+ * (`processBudgetMs`), which takes the smallest across every key.
  */
 function signalDeadline(entry: Entry): number | undefined {
   return entry.holdDeadlines.reduce<number | undefined>(minDeadline, entry.pinDeadline);
@@ -432,31 +536,37 @@ export function isLiveHold(config: Key, hold: SharedHold): boolean {
  * pinned it; otherwise the other holders keep delivering through it, with
  * everything this client queued delivered first. Every drain or stop this
  * causes runs under the releasing config's own `shutdownTimeoutMs`, not the
- * transport creator's — except the signal drain it awaits first, which runs
- * under the smallest deadline set explicitly for the key.
+ * transport creator's, cut to the process deadline once a signal fixed one
+ * (`boundedBy`). The config's explicit value counts towards D while the
+ * call is in progress.
  */
 export async function releaseShared(config: Key, hold: SharedHold): Promise<void> {
   const key = keyOf(config);
-  const deadlineMs = config.shutdownTimeoutMs;
-  if (signalDrain) await signalDrain;
-  const entry = registry.get(key);
-  if (!entry || entry.generation !== hold.generation) {
-    await drainTransport(slots.get(key)?.live ?? null, deadlineMs);
-    return;
+  const ownMs = config.shutdownTimeoutMs;
+  const done = noteInProgress(config);
+  try {
+    if (signalDrain) await signalDrain;
+    const entry = registry.get(key);
+    if (!entry || entry.generation !== hold.generation) {
+      await drainTransport(slots.get(key)?.live ?? null, boundedBy(ownMs));
+      return;
+    }
+    entry.holders = Math.max(0, entry.holders - 1);
+    if (hold.deadlineMs !== undefined) {
+      const at = entry.holdDeadlines.indexOf(hold.deadlineMs);
+      if (at >= 0) entry.holdDeadlines.splice(at, 1);
+    }
+    if (entry.holders > 0 || entry.pinned) {
+      await drainTransport(entry.slot.live, boundedBy(ownMs));
+      return;
+    }
+    registry.delete(key);
+    const live = entry.slot.live;
+    entry.slot.live = null;
+    if (live) await live.shutdown(boundedBy(ownMs));
+  } finally {
+    done();
   }
-  entry.holders = Math.max(0, entry.holders - 1);
-  if (hold.deadlineMs !== undefined) {
-    const at = entry.holdDeadlines.indexOf(hold.deadlineMs);
-    if (at >= 0) entry.holdDeadlines.splice(at, 1);
-  }
-  if (entry.holders > 0 || entry.pinned) {
-    await drainTransport(entry.slot.live, deadlineMs);
-    return;
-  }
-  registry.delete(key);
-  const live = entry.slot.live;
-  entry.slot.live = null;
-  if (live) await live.shutdown(deadlineMs);
 }
 
 /**
@@ -465,18 +575,36 @@ export async function releaseShared(config: Key, hold: SharedHold): Promise<void
  * the key's live transport still carries (#142). Never stops anything.
  */
 export async function settleShared(config: Key): Promise<void> {
-  if (signalDrain) await signalDrain;
-  await drainTransport(slots.get(keyOf(config))?.live ?? null, config.shutdownTimeoutMs);
+  const done = noteInProgress(config);
+  try {
+    if (signalDrain) await signalDrain;
+    await drainTransport(
+      slots.get(keyOf(config))?.live ?? null,
+      boundedBy(config.shutdownTimeoutMs),
+    );
+  } finally {
+    done();
+  }
+}
+
+/** Count a `shutdown()` call's explicit deadline towards D until the returned function runs. */
+function noteInProgress(config: Key): () => void {
+  const ms = explicitDeadline(config);
+  if (ms === undefined) return () => {};
+  inProgressDeadlines.push(ms);
+  return () => {
+    const at = inProgressDeadlines.indexOf(ms);
+    if (at >= 0) inProgressDeadlines.splice(at, 1);
+  };
 }
 
 /**
  * What the SIGTERM/SIGINT handler does: mark the process as draining, so
  * everything created or sent from now on goes out at once, then drain every
- * transport in the registry — each under the smallest `shutdownTimeoutMs`
- * its holders and `withYavio()` pins set explicitly (`signalDeadline`), the
- * 10 s default when none did. The drain is kept in `signalDrain`
- * for every release that follows; the returned promise is this signal's
- * drain alone.
+ * transport in the registry under the process deadline (what the running
+ * cycle leaves; D from now when called without a signal, as tests do). The
+ * drain is kept in `signalDrain` for every release that follows; the
+ * returned promise is this signal's drain alone.
  */
 export function beginProcessShutdown(): Promise<void> {
   draining = true;
@@ -488,18 +616,21 @@ export function beginProcessShutdown(): Promise<void> {
 
 /**
  * Drain every transport in the registry (`beginProcessShutdown`, tests),
- * each under the smallest deadline its holders and pins set explicitly, the
- * 10 s default when none did — not the transport's own value, which is its
- * creator's and stays after that creator released (review round 4).
+ * every one under the same process deadline: what the running signal cycle
+ * leaves, or D computed now when no signal is being handled. Not the
+ * transport's own value, which is its creator's and stays after that
+ * creator released (#142 review round 4), and not a per-key value: the
+ * grace period is per process (#148).
  */
 export async function shutdownAllShared(): Promise<void> {
+  const deadlineMs = remainingMs() ?? processBudgetMs();
   const entries = [...registry.values()];
   registry.clear();
   await Promise.all(
     entries.map((entry) => {
       const live = entry.slot.live;
       entry.slot.live = null;
-      return live?.shutdown(signalDeadline(entry) ?? DEFAULT_SHUTDOWN_TIMEOUT_MS).catch(() => {});
+      return live?.shutdown(deadlineMs).catch(() => {});
     }),
   );
 }
@@ -535,7 +666,12 @@ export function _resetSharedState(): void {
   slots.clear();
   draining = false;
   signalDrain = null;
+  clearTimeout(cycleTimer);
+  cycleTimer = undefined;
   signalInFlight = null;
+  lastBudgetMs = undefined;
+  inProgressDeadlines.length = 0;
+  releaseWaiters();
   _setSignalReraise(null);
   loggedOnce.clear();
   removeSignalHandlers();

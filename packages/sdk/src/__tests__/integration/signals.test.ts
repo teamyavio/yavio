@@ -506,7 +506,7 @@ describe("shutdown() during the signal drain (#142)", () => {
   });
 
   it(
-    "a participant on the default does not lower the bound: the recipe with 11 s on the startup client and a plain withYavio() delivers at 10.5 s",
+    "a participant on the default does not lower the bound: the recipe with 5 s on the startup client and a plain withYavio() delivers at 4.5 s",
     { timeout: 20_000 },
     async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -515,14 +515,15 @@ describe("shutdown() during the signal drain (#142)", () => {
           // The README recipe with the deadline raised above the default on
           // the shutdown client only. Every resolved config carries a
           // value, and registering the withYavio() call's default capped
-          // the drain at 10 s (review round 3: 9985 ms, YAVIO-1205, the
-          // batch lost). Only values set explicitly bound the drain, so the
-          // batch ingest answers after 10.5 s is delivered. No way to scale
-          // this down: the cap an unset participant would add is the 10 s
-          // default itself.
-          ingest.respondAfterMs = 10_500;
+          // the drain at the default (review round 3 of #142: 9985 ms,
+          // YAVIO-1205, the batch lost, when the default was 10 s). Only
+          // values set explicitly bound the drain, so the batch ingest
+          // answers after 4.5 s — past the 4 s default — is delivered. No
+          // way to scale this down: the cap an unset participant would add
+          // is the default itself.
+          ingest.respondAfterMs = 4_500;
           const options = { apiKey: "yav_142_raised", endpoint: ingest.endpoint, serverOnly: true };
-          const analytics = createYavio({ ...options, shutdownTimeoutMs: 11_000 });
+          const analytics = createYavio({ ...options, shutdownTimeoutMs: 5_000 });
           const raw = new McpServer({ name: "app", version: "1.0" });
           withYavio(raw, options).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
           await callTool(raw, "get_price", { q: "x" });
@@ -541,8 +542,8 @@ describe("shutdown() during the signal drain (#142)", () => {
           process.emit("SIGTERM", "SIGTERM");
           await handled;
           expect(answeredOnResolve).toBe(true);
-          expect(elapsed).toBeGreaterThanOrEqual(10_400);
-          expect(elapsed).toBeLessThan(12_000);
+          expect(elapsed).toBeGreaterThanOrEqual(4_400);
+          expect(elapsed).toBeLessThan(6_000);
           expect(toolCalls()).toHaveLength(1);
           expect(warn.mock.calls.map((c) => String(c[0]))).not.toContainEqual(
             expect.stringContaining("YAVIO-1205"),
@@ -556,24 +557,25 @@ describe("shutdown() during the signal drain (#142)", () => {
   );
 
   it(
-    "two clients, one key, 11 s and the default: the signal drain is bounded by the 11 s, not capped at 10 s by the client that set none",
+    "two clients, one key, 5 s and the default: the signal drain is bounded by the 5 s, not capped at 4 s by the client that set none",
     { timeout: 20_000 },
     async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       try {
         await withoutOtherListeners("SIGTERM", async () => {
-          // The two-holder case of the round-3 probe (9984 ms, the event lost).
-          // The default client creates the transport and the 11 s one joins
-          // second, so a drain that fell back to the creator's value (10 s)
-          // or took the minimum with it would be caught (review round 4).
-          ingest.respondAfterMs = 10_500;
+          // The two-holder case of the round-3 probe (9984 ms, the event lost,
+          // under the 10 s default). The default client creates the transport
+          // and the 5 s one joins second, so a drain that fell back to the
+          // creator's value or took the minimum with it would be caught
+          // (review round 4).
+          ingest.respondAfterMs = 4_500;
           const options = {
             apiKey: "yav_142_raised2",
             endpoint: ingest.endpoint,
             serverOnly: true,
           };
           const b = createYavio(options);
-          const a = createYavio({ ...options, shutdownTimeoutMs: 11_000 });
+          const a = createYavio({ ...options, shutdownTimeoutMs: 5_000 });
           const raw = new McpServer({ name: "app", version: "1.0" });
           a.wrap(raw).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
           await callTool(raw, "get_price", { q: "x" });
@@ -592,8 +594,8 @@ describe("shutdown() during the signal drain (#142)", () => {
           process.emit("SIGTERM", "SIGTERM");
           await handled;
           expect(answeredOnResolve).toBe(true);
-          expect(elapsed).toBeGreaterThanOrEqual(10_400);
-          expect(elapsed).toBeLessThan(12_000);
+          expect(elapsed).toBeGreaterThanOrEqual(4_400);
+          expect(elapsed).toBeLessThan(6_000);
           expect(toolCalls()).toHaveLength(1);
           expect(warn.mock.calls.map((c) => String(c[0]))).not.toContainEqual(
             expect.stringContaining("YAVIO-1205"),
@@ -607,50 +609,52 @@ describe("shutdown() during the signal drain (#142)", () => {
     },
   );
 
-  it("a released creator's deadline does not bound the drain: with nothing set explicitly it is 10 s", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      await withoutOtherListeners("SIGTERM", async () => {
-        // Review round 4 probe: A creates the key's transport with 300 ms
-        // and releases outside a signal; B, on the default, holds it. The
-        // drain fell back to the transport's own value — A's 300 ms — and
-        // B's handler shutdown() resolved at 299 ms with YAVIO-1205, the
-        // batch lost. Nothing set explicitly means the 10 s default.
-        const options = { apiKey: "yav_142_gone", endpoint: ingest.endpoint, serverOnly: true };
-        const a = createYavio({ ...options, shutdownTimeoutMs: 300 });
-        const b = createYavio(options);
-        await a.shutdown(); // nothing queued: releases A's hold at once
-        ingest.respondAfterMs = 1_000;
-        const raw = new McpServer({ name: "app", version: "1.0" });
-        b.wrap(raw).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
-        await callTool(raw, "get_price", { q: "x" });
-        let elapsed: number | undefined;
-        let answeredOnResolve: boolean | undefined;
-        const handled = new Promise<void>((resolve) => {
-          process.on("SIGTERM", async function app() {
-            process.off("SIGTERM", app);
-            const started = Date.now();
-            await b.shutdown();
-            elapsed = Date.now() - started;
-            answeredOnResolve = allAnswered();
-            resolve();
+  it(
+    "a released creator's deadline does not bound the drain: with nothing set explicitly it is 4 s",
+    { timeout: 20_000 },
+    async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await withoutOtherListeners("SIGTERM", async () => {
+          // Review round 4 probe of #142: A creates the key's transport with
+          // 300 ms and releases outside a signal; B, on the default, holds
+          // it. The drain fell back to the transport's own value — A's
+          // 300 ms — and B's handler shutdown() resolved at 299 ms with
+          // YAVIO-1205, the batch lost. Nothing set explicitly means the
+          // default: 4 s since #148 (10 s before), measured against an
+          // ingest that never answers.
+          ingest.hangEvents = true;
+          const options = { apiKey: "yav_142_gone", endpoint: ingest.endpoint, serverOnly: true };
+          const a = createYavio({ ...options, shutdownTimeoutMs: 300 });
+          const b = createYavio(options);
+          await a.shutdown(); // nothing queued: releases A's hold at once
+          const raw = new McpServer({ name: "app", version: "1.0" });
+          b.wrap(raw).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+          await callTool(raw, "get_price", { q: "x" });
+          let elapsed: number | undefined;
+          const handled = new Promise<void>((resolve) => {
+            process.on("SIGTERM", async function app() {
+              process.off("SIGTERM", app);
+              const started = Date.now();
+              await b.shutdown();
+              elapsed = Date.now() - started;
+              resolve();
+            });
           });
+          process.emit("SIGTERM", "SIGTERM");
+          await handled;
+          expect(elapsed).toBeGreaterThanOrEqual(3_900);
+          expect(elapsed).toBeLessThan(4_600);
+          expect(ingest.batches).toHaveLength(1); // sent, never answered
+          expect(ingest.responded).toBe(0);
+          expect(_sharedStateCount()).toBe(0);
         });
-        process.emit("SIGTERM", "SIGTERM");
-        await handled;
-        expect(answeredOnResolve).toBe(true);
-        expect(elapsed).toBeGreaterThanOrEqual(900);
-        expect(elapsed).toBeLessThan(5_000);
-        expect(toolCalls()).toHaveLength(1);
-        expect(warn.mock.calls.map((c) => String(c[0]))).not.toContainEqual(
-          expect.stringContaining("YAVIO-1205"),
-        );
-        expect(_sharedStateCount()).toBe(0);
-      });
-    } finally {
-      warn.mockRestore();
-    }
-  });
+      } finally {
+        await ingest.answerHung();
+        warn.mockRestore();
+      }
+    },
+  );
 
   it("withYavio() hosts: the recipe's shutdown client, created at startup, awaits the signal drain", async () => {
     await withoutOtherListeners("SIGTERM", async () => {
@@ -714,6 +718,169 @@ describe("shutdown() during the signal drain (#142)", () => {
       expect(listenersOnResolve).toBe(0);
       expect(process.listenerCount("SIGTERM")).toBe(0);
       expect(_sharedStateCount()).toBe(0);
+    });
+  });
+});
+
+/**
+ * One process deadline from the signal (#148, Decision A): signal + D,
+ * where D is the smallest `shutdownTimeoutMs` set explicitly by any live
+ * hold, pin or `shutdown()` in progress across every key, else 4 s. The
+ * signal drain, every release drain and every `shutdown()` running at or
+ * after the signal resolve by then. Before #148 each key drained under its
+ * own smallest value, a `shutdown()` call ran its own deadline from its
+ * call, and the post-signal transport added a third one.
+ */
+describe("one process deadline from the signal (#148)", () => {
+  let ingest: MockIngest;
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  function build(apiKey: string, options: { shutdownTimeoutMs?: number } = {}) {
+    const client = createYavio({ apiKey, endpoint: ingest.endpoint, serverOnly: true, ...options });
+    const raw = new McpServer({ name: "app", version: "1.0" });
+    client.wrap(raw).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+    return { client, raw };
+  }
+
+  /** Install an app SIGTERM listener that runs `handler` once and resolves with its timings. */
+  function onSigterm(handler: () => Promise<void>): Promise<{ fromSignal: number }> {
+    return new Promise((resolve) => {
+      process.on("SIGTERM", async function app() {
+        process.off("SIGTERM", app);
+        const signalAt = Date.now();
+        await handler();
+        resolve({ fromSignal: Date.now() - signalAt });
+      });
+    });
+  }
+
+  beforeEach(async () => {
+    _resetGlobalState();
+    _setSignalReraise(() => {});
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    ingest = await startMockIngest();
+    ingest.hangEvents = true;
+  });
+
+  afterEach(async () => {
+    await ingest.answerHung();
+    _resetGlobalState();
+    warn.mockRestore();
+    await ingest.close();
+  });
+
+  it("one deadline across keys: a client with 3 s on key A and a pin with 300 ms on key B — A's handler shutdown() resolves at about 300 ms", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client: a, raw } = build("yav_148_a", { shutdownTimeoutMs: 3_000 });
+      await callTool(raw, "get_price", { q: "x" });
+      const other = new McpServer({ name: "other", version: "1.0" });
+      withYavio(other, {
+        apiKey: "yav_148_b",
+        endpoint: ingest.endpoint,
+        serverOnly: true,
+        shutdownTimeoutMs: 300,
+      }).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+      await callTool(other, "get_price", { q: "y" });
+      const handled = onSigterm(() => a.shutdown());
+      process.emit("SIGTERM", "SIGTERM");
+      const { fromSignal } = await handled;
+      // The grace period is per process: the strictest explicit value wins
+      // for every key, and A's own 3 s does not extend the wait.
+      expect(fromSignal).toBeGreaterThanOrEqual(250);
+      expect(fromSignal).toBeLessThan(1_000);
+      expect(ingest.batches).toHaveLength(2); // both keys sent, never answered
+      expect(ingest.responded).toBe(0);
+    });
+  });
+
+  it("the deadline counts from the signal: a handler that waits 1 s with an explicit 1.5 s resolves at about 1.5 s after the signal", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client, raw } = build("yav_148_from_signal", { shutdownTimeoutMs: 1_500 });
+      await callTool(raw, "get_price", { q: "before" });
+      const handled = onSigterm(async () => {
+        // `await closeWithin(http, …)`: a request finishing after the signal
+        // sends its event through the key's immediate transport meanwhile.
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        await callTool(raw, "get_price", { q: "after" });
+        await client.shutdown();
+      });
+      process.emit("SIGTERM", "SIGTERM");
+      const { fromSignal } = await handled;
+      // Not 1 s + 1.5 s: the call's own clock does not start at the call.
+      expect(fromSignal).toBeGreaterThanOrEqual(1_400);
+      expect(fromSignal).toBeLessThan(2_200);
+      expect(ingest.batches).toHaveLength(2);
+      expect(ingest.responded).toBe(0);
+    });
+  });
+
+  it("a shutdown() that started before the signal is cut at the deadline", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      // A (3 s) releases while B (300 ms) still holds the key, so A's
+      // release drains the transport under A's 3 s. The signal 100 ms later
+      // fixes D = 300 ms, and A's pending await ends at signal + D.
+      const { client: a, raw } = build("yav_148_cut", { shutdownTimeoutMs: 3_000 });
+      const b = createYavio({
+        apiKey: "yav_148_cut",
+        endpoint: ingest.endpoint,
+        serverOnly: true,
+        shutdownTimeoutMs: 300,
+      });
+      await callTool(raw, "get_price", { q: "x" });
+      const started = Date.now();
+      const closing = a.shutdown().then(() => Date.now() - started);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      process.emit("SIGTERM", "SIGTERM");
+      const elapsed = await closing;
+      expect(elapsed).toBeGreaterThanOrEqual(350);
+      expect(elapsed).toBeLessThan(1_000);
+      await b.shutdown();
+    });
+  });
+
+  it("a shutdown() called with no time left resolves at once", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client: a, raw } = build("yav_148_late", { shutdownTimeoutMs: 3_000 });
+      await callTool(raw, "get_price", { q: "x" });
+      const other = new McpServer({ name: "other", version: "1.0" });
+      withYavio(other, {
+        apiKey: "yav_148_late_b",
+        endpoint: ingest.endpoint,
+        serverOnly: true,
+        shutdownTimeoutMs: 300,
+      }).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+      await callTool(other, "get_price", { q: "y" });
+      let elapsed: number | undefined;
+      const handled = onSigterm(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 600)); // past signal + D
+        const started = Date.now();
+        await a.shutdown();
+        elapsed = Date.now() - started;
+      });
+      process.emit("SIGTERM", "SIGTERM");
+      await handled;
+      // Not A's 3 s, and not the rest of A's key's drain either.
+      expect(elapsed).toBeLessThan(150);
+    });
+  });
+
+  it("YAVIO_SHUTDOWN_TIMEOUT_MS counts even when no participant set a value: a plain client is bounded by it", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "300";
+      try {
+        // Resolved with the option, so the client's own value is 3 s and
+        // its source is "option": the env var is not among the registered
+        // deadlines, yet it bounds the process.
+        const { client, raw } = build("yav_148_env", { shutdownTimeoutMs: 3_000 });
+        await callTool(raw, "get_price", { q: "x" });
+        const handled = onSigterm(() => client.shutdown());
+        process.emit("SIGTERM", "SIGTERM");
+        const { fromSignal } = await handled;
+        expect(fromSignal).toBeGreaterThanOrEqual(250);
+        expect(fromSignal).toBeLessThan(1_000);
+      } finally {
+        process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = undefined;
+      }
     });
   });
 });
