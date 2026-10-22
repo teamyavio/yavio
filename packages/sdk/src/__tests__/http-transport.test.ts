@@ -276,6 +276,16 @@ describe("HttpTransport", () => {
 
     // Both batches attempted despite first one failing
     expect(fetch).toHaveBeenCalledTimes(2);
+    // The failed batch is a delivery failure (its YAVIO-1201 line), not a
+    // loss of the shutdown deadline, which was never reached: before #148
+    // review round 2 the shutdown reported it as "deadline of 4000 ms
+    // reached — 2 events not delivered".
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("YAVIO-1201"));
+    expect(warnSpy.mock.calls.map((c) => String(c[0]))).not.toContainEqual(
+      expect.stringContaining("1205"),
+    );
+    expect(transport.lostEvents()).toBe(2);
+    expect(transport.deadlineLostEvents()).toBe(0);
     warnSpy.mockRestore();
     errorSpy.mockRestore();
   });
@@ -836,6 +846,79 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       await vi.advanceTimersByTimeAsync(200);
       await flushing;
       expect(fetch).toHaveBeenCalledTimes(2); // and not held for 35 days
+    });
+
+    it("a batch given up for good earlier — 503s, a 400 — is a delivery failure, not a deadline loss: a later healthy shutdown() reports nothing", async () => {
+      let status = 503;
+      const fetch = vi
+        .fn()
+        .mockImplementation(() =>
+          Promise.resolve({ status, headers: { get: () => null }, json: () => ({}) }),
+        );
+      const losses: Array<[number, number]> = [];
+      const transport = new HttpTransport({
+        ...base,
+        maxRetries: 1,
+        flushIntervalMs: 60_000,
+        fetch,
+        onShutdownLoss: (lost, deadlineMs) => losses.push([lost, deadlineMs]),
+      });
+      // 100 events: the early flush; 503 at 0 and 1 s, then given up after
+      // the last attempt (YAVIO-1201) — at noon, hours before any shutdown.
+      transport.send(Array.from({ length: 100 }, () => fakeEvent()));
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("YAVIO-1201"));
+      expect(transport.lostEvents()).toBe(100);
+      expect(transport.deadlineLostEvents()).toBe(0);
+      // An unexpected 4xx is given up at once, the same way.
+      status = 400;
+      transport.send([fakeEvent()]);
+      await transport.flush();
+      expect(transport.lostEvents()).toBe(101);
+      expect(transport.deadlineLostEvents()).toBe(0);
+      // A healthy drain later: the deadline gave nothing up, so no
+      // YAVIO-1205 — the registry's cycle and exit lines read the same counter.
+      status = 200;
+      transport.send([fakeEvent()]);
+      await transport.shutdown(1_000);
+      expect(fetch).toHaveBeenCalledTimes(4);
+      expect(losses).toEqual([]);
+      expect(transport.deadlineLostEvents()).toBe(0);
+      expect(transport.lostEvents()).toBe(101);
+      expect(transport.pendingEvents()).toBe(0);
+    });
+
+    it("a post-signal transport: a fetch its budget cuts on its one attempt is a deadline loss, a refused connection a delivery failure", async () => {
+      // `newTransport` after a signal: immediate, one attempt, a fetch
+      // timeout of min(30 s, D). The exit hook reports the first; the
+      // second has its YAVIO-1201 line.
+      const { fetch: hanging } = abortableFetch();
+      const cut = new HttpTransport({
+        ...base,
+        immediate: true,
+        maxRetries: 0,
+        fetchTimeoutMs: 300,
+        fetch: hanging,
+      });
+      cut.send([fakeEvent()]);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(cut.deadlineLostEvents()).toBe(1);
+      expect(cut.lostEvents()).toBe(1);
+      expect(cut.pendingEvents()).toBe(0);
+
+      const refused = new HttpTransport({
+        ...base,
+        immediate: true,
+        maxRetries: 0,
+        fetchTimeoutMs: 300,
+        fetch: vi.fn().mockRejectedValue(new Error("ECONNREFUSED")),
+      });
+      refused.send([fakeEvent()]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(refused.deadlineLostEvents()).toBe(0);
+      expect(refused.lostEvents()).toBe(1);
+      expect(error).toHaveBeenCalledTimes(2);
     });
 
     it("an unparsable Retry-After falls back to the backoff, never to an immediate retry", async () => {

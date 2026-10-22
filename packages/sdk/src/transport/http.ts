@@ -19,6 +19,9 @@ export interface HttpTransportOptions {
    * Send on every `send()` instead of on the timer: for a transport created
    * after the process began shutting down, when no timer will fire and no
    * shutdown will drain it (see shared.ts). Still batched by the buffer cap.
+   * Such a transport lives within the process budget — its fetch timeout is
+   * cut to it — so a fetch of its that is aborted on its last attempt is
+   * the deadline's loss, not a delivery failure (#148 review round 2).
    */
   immediate?: boolean;
   /**
@@ -105,8 +108,18 @@ export class HttpTransport implements Transport {
    * (#148 review round 1).
    */
   private pendingDelay: { timer: ReturnType<typeof setTimeout>; resolve: () => void } | null = null;
-  /** Events given up — at a shutdown deadline (queued, in flight, refused after it) or after a batch's last attempt: what `YAVIO-1205` counts (#148). */
-  private lost = 0;
+  /**
+   * Events a shutdown deadline gave up: queued or in flight at the deadline,
+   * refused after it, or a batch given up because its retry wait would have
+   * ended past it. What `YAVIO-1205` counts (#148) — and only that: a batch
+   * given up after its last attempt (`YAVIO-1201`) or on an unexpected
+   * status is a delivery failure, counted in `failed`, so a failure from
+   * hours earlier is not re-reported as a deadline loss at the next signal
+   * or exit (#148 review round 2).
+   */
+  private deadlineLost = 0;
+  /** Events given up for a reason other than a deadline: after a batch's last attempt, or on an unexpected status. */
+  private failed = 0;
 
   private readonly endpoint: string;
   private readonly apiKey: string;
@@ -153,15 +166,20 @@ export class HttpTransport implements Transport {
     return this.buffer.length + this.inflightSize;
   }
 
-  /** Events given up so far: at a shutdown deadline, refused after one, or after a batch's last attempt. */
+  /** Events a shutdown deadline gave up: queued, in flight or refused at or after it, or given up because a retry would have ended past it. What `YAVIO-1205` reports. */
+  deadlineLostEvents(): number {
+    return this.deadlineLost;
+  }
+
+  /** Every event given up so far: what a deadline gave up plus the delivery failures (after a batch's last attempt, or on an unexpected status). */
   lostEvents(): number {
-    return this.lost;
+    return this.deadlineLost + this.failed;
   }
 
   send(events: BaseEvent[]): void {
     if (this.stopped) {
       // Refused after a shutdown deadline: counted, so the loss is reported.
-      if (this.deadlineAt !== undefined) this.lost += events.length;
+      if (this.deadlineAt !== undefined) this.deadlineLost += events.length;
       return;
     }
 
@@ -307,7 +325,7 @@ export class HttpTransport implements Transport {
       timer = setTimeout(() => {
         this.deadlineReached = true;
         if (!drained) {
-          this.lost += this.buffer.length + this.inflightSize;
+          this.deadlineLost += this.buffer.length + this.inflightSize;
           this.inflightSize = 0;
           this.buffer.length = 0;
           this.inflightController?.abort();
@@ -320,15 +338,17 @@ export class HttpTransport implements Transport {
       if (timer) unref(timer);
     });
 
-    const lostBefore = this.lost;
+    const lostBefore = this.deadlineLost;
     try {
       await Promise.race([drain(), timeout]);
     } finally {
       clearTimeout(timer);
     }
     // Counted here, not in the timer: a batch given up before the deadline
-    // (its backoff would have ended after it) is a loss of this shutdown too.
-    const lost = this.lost - lostBefore;
+    // (its backoff would have ended after it) is a loss of this shutdown
+    // too. A batch that failed for good during the drain (YAVIO-1201) is
+    // not: it has its own line, and the deadline did not cause it.
+    const lost = this.deadlineLost - lostBefore;
     if (lost > 0) {
       if (this.onShutdownLoss) this.onShutdownLoss(lost, deadlineMs);
       else {
@@ -348,12 +368,12 @@ export class HttpTransport implements Transport {
     });
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      // One controller per fetch, aborted by whichever comes first: the
+      // fetch timeout, or the shutdown deadline (`runShutdown`). Not
+      // `AbortSignal.any`, which needs Node 20.3 while `engines` is
+      // `>=20.0.0`.
+      const controller = new AbortController();
       try {
-        // One controller per fetch, aborted by whichever comes first: the
-        // fetch timeout, or the shutdown deadline (`runShutdown`). Not
-        // `AbortSignal.any`, which needs Node 20.3 while `engines` is
-        // `>=20.0.0`.
-        const controller = new AbortController();
         this.inflightController = controller;
         const timer = setTimeout(() => controller.abort(), this.fetchTimeoutMs);
         unref(timer);
@@ -399,12 +419,12 @@ export class HttpTransport implements Transport {
             const delayMs =
               retryAfterMs(response.headers.get("Retry-After")) ??
               BASE_RETRY_DELAY_MS * 2 ** attempt;
-            if (!this.canWait(delayMs)) return this.giveUp();
+            if (!this.canWait(delayMs)) return this.giveUp("deadline");
             console.warn(
               `[${ErrorCode.SDK.FLUSH_RATE_LIMITED}] Rate limited, retrying in ${delayMs}ms`,
             );
             await this.delay(delayMs);
-            if (this.deadlineReached) return this.giveUp();
+            if (this.deadlineReached) return this.giveUp("deadline");
             continue;
           }
           // The last allowed attempt: the batch is given up like a 5xx on
@@ -413,45 +433,48 @@ export class HttpTransport implements Transport {
           console.error(
             `[${ErrorCode.SDK.FLUSH_FAILED_MAX_RETRIES}] Giving up after ${attempt + 1} attempts`,
           );
-          return this.giveUp();
+          return this.giveUp("failed");
         }
 
         // 5xx — retry with backoff
         if (response.status >= 500) {
           if (attempt < this.maxRetries) {
             const delayMs = BASE_RETRY_DELAY_MS * 2 ** attempt;
-            if (!this.canWait(delayMs)) return this.giveUp();
+            if (!this.canWait(delayMs)) return this.giveUp("deadline");
             console.warn(
               `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Server error ${response.status}, retry ${attempt + 1}/${this.maxRetries}`,
             );
             await this.delay(delayMs);
-            if (this.deadlineReached) return this.giveUp();
+            if (this.deadlineReached) return this.giveUp("deadline");
             continue;
           }
           console.error(
             `[${ErrorCode.SDK.FLUSH_FAILED_MAX_RETRIES}] Giving up after ${attempt + 1} attempts`,
           );
-          return this.giveUp();
+          return this.giveUp("failed");
         }
 
         // Other unexpected status codes — don't retry
-        return this.giveUp();
+        return this.giveUp("failed");
       } catch (error) {
         // Network error (or the abort at the deadline) — retry with backoff
         if (attempt < this.maxRetries) {
           const delayMs = BASE_RETRY_DELAY_MS * 2 ** attempt;
-          if (!this.canWait(delayMs)) return this.giveUp();
+          if (!this.canWait(delayMs)) return this.giveUp("deadline");
           console.warn(
             `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Network error, retry ${attempt + 1}/${this.maxRetries}`,
           );
           await this.delay(delayMs);
-          if (this.deadlineReached) return this.giveUp();
+          if (this.deadlineReached) return this.giveUp("deadline");
           continue;
         }
         console.error(
           `[${ErrorCode.SDK.FLUSH_FAILED_MAX_RETRIES}] Giving up after ${attempt + 1} attempts`,
         );
-        return this.giveUp();
+        // A post-signal transport's fetch timeout is the process budget: a
+        // fetch it cut on the transport's one attempt is the deadline's
+        // loss. A refused or failed connection is not.
+        return this.giveUp(this.immediate && controller.signal.aborted ? "deadline" : "failed");
       }
     }
   }
@@ -467,12 +490,16 @@ export class HttpTransport implements Transport {
   }
 
   /**
-   * The batch in flight is given up — at the deadline, or after its last
-   * attempt: counted once (zero if the deadline timer already did), so an
-   * exit or a signal cycle can report what never reached ingest.
+   * The batch in flight is given up, counted once (zero if the deadline
+   * timer already did) under its cause: the shutdown deadline — a retry
+   * wait that would end past it, or the deadline itself ending a wait — so
+   * an exit or a signal cycle can report what the deadline cost; or a
+   * delivery failure — the last attempt (`YAVIO-1201`), an unexpected
+   * status — which has its own line and is not a deadline's loss.
    */
-  private giveUp(): void {
-    this.lost += this.inflightSize;
+  private giveUp(cause: "deadline" | "failed"): void {
+    if (cause === "deadline") this.deadlineLost += this.inflightSize;
+    else this.failed += this.inflightSize;
     this.inflightSize = 0;
   }
 

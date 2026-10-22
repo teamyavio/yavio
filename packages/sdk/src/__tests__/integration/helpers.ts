@@ -51,6 +51,13 @@ export interface MockIngest {
   /** While true, the events endpoint records batches but never answers them. */
   hangEvents: boolean;
   /**
+   * While set, the events endpoint answers every batch with this status
+   * instead of 200 — a 400 the SDK gives up on at once, a 503 it retries —
+   * recorded and counted as responded like any other answer (#148 review
+   * round 2).
+   */
+  failWith: number | undefined;
+  /**
    * Answer every batch held back by `hangEvents` with 200 now, so the SDK's
    * fetch settles instead of failing when `close()` cuts the socket — a
    * failed fetch would retry (`YAVIO-1200`) into the next test's output.
@@ -85,6 +92,7 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
     mints,
     hangMints: false,
     hangEvents: false,
+    failWith: undefined,
     responded: 0,
     respondAfterMs: options.respondAfterMs,
     ofType: (eventType) => events.filter((e) => e.event_type === eventType),
@@ -154,6 +162,13 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ accepted: batch.events.length, rejected: 0 }));
       };
+      if (ingest.failWith !== undefined) {
+        ingest.responded++;
+        received.answeredAt = Date.now();
+        res.writeHead(ingest.failWith);
+        res.end();
+        return;
+      }
       if (ingest.hangEvents) {
         hung.push(respond);
         return;

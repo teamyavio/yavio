@@ -1125,6 +1125,42 @@ describe("loss accounting (#148)", () => {
     });
   });
 
+  it("a batch given up for good before the signal (a 400 at noon) is no deadline loss: a healthy drain prints no line, and the exit hook nothing", async () => {
+    _setSignalReraise(() => {});
+    await withoutOtherListeners("SIGTERM", async () => {
+      ingest.hangEvents = false;
+      ingest.failWith = 400;
+      // Two holders of one key: A's shutdown() drains the transport without
+      // stopping it (B keeps it), so the batch goes out hours before the signal.
+      const b = createYavio({
+        apiKey: "yav_148_failed_before",
+        endpoint: ingest.endpoint,
+        serverOnly: true,
+      });
+      const { client: a, raw } = build("yav_148_failed_before");
+      await callTool(raw, "get_price", { q: "noon" });
+      await a.shutdown(); // answered 400: given up for good, not by a deadline
+      expect(ingest.batches).toHaveLength(1);
+      expect(ingest.responded).toBe(1);
+      expect(lines1205()).toHaveLength(0);
+
+      // Much later: ingest healthy, a new request, the signal, a drain that delivers.
+      ingest.failWith = undefined;
+      await callTool(raw, "get_price", { q: "later" });
+      process.emit("SIGTERM", "SIGTERM");
+      await vi.waitFor(() => expect(process.listenerCount("SIGTERM")).toBe(0), {
+        timeout: 2_000,
+      });
+      expect(ingest.responded).toBe(2);
+      // Before the fix the cycle's line re-reported the 400's two events:
+      // "Shutdown deadline of 4000 ms reached — 2 events not delivered".
+      expect(lines1205()).toHaveLength(0);
+      exitHooks()[0]?.call(process, 0);
+      expect(lines1205()).toHaveLength(0);
+      await b.shutdown();
+    });
+  });
+
   it("a non-signal shutdown() that times out prints its own line with its own count", async () => {
     const { client, raw } = build("yav_148_call", { shutdownTimeoutMs: 300 });
     await callTool(raw, "get_price", { q: "x" });

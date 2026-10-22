@@ -157,12 +157,12 @@ let generations = 0;
 /**
  * Every transport this process created and not yet shut down, for the loss
  * accounting (#148). A transport leaves the set when its `shutdown()` has
- * settled, its losses folded into `lostFromClosed`: a host that creates and
- * shuts down a client per request would otherwise keep one transport per
- * request for the process lifetime (#148 review round 1).
+ * settled, its deadline losses folded into `lostFromClosed`: a host that
+ * creates and shuts down a client per request would otherwise keep one
+ * transport per request for the process lifetime (#148 review round 1).
  */
 const transports = new Set<HttpTransport>();
-/** Events given up by transports that have since left `transports`. */
+/** Events a deadline gave up on transports that have since left `transports`. */
 let lostFromClosed = 0;
 
 /**
@@ -344,8 +344,12 @@ function releaseWaiters(): void {
 
 /**
  * Loss accounting (#148). Every transport counts the events a shutdown
- * deadline gave up (queued, in flight, refused after it); `reportedLost`
- * is how many of them a `YAVIO-1205` line already covered. One line per
+ * deadline gave up (queued, in flight, refused after it, or a retry wait
+ * cut by it) in `deadlineLostEvents()`; `reportedLost` is how many of them
+ * a `YAVIO-1205` line already covered. A batch that failed for good on its
+ * own (`YAVIO-1201`, an unexpected status) is not in it: that line is its
+ * report, and a failure from hours earlier must not come back as a deadline
+ * loss at the next signal or exit (#148 review round 2). One line per
  * signal cycle, printed when the cycle ends — before the POSIX re-raise,
  * which skips `exit` listeners — with the events still in flight when the
  * re-raise is about to end the process; one line per non-signal
@@ -367,7 +371,7 @@ let exitReported = false;
 const signalStops = new WeakSet<Transport>();
 
 const lostTotal = (): number =>
-  [...transports].reduce((n, t) => n + t.lostEvents(), lostFromClosed);
+  [...transports].reduce((n, t) => n + t.deadlineLostEvents(), lostFromClosed);
 const pendingTotal = (): number => [...transports].reduce((n, t) => n + t.pendingEvents(), 0);
 
 const RAISE_HINT =
@@ -550,7 +554,7 @@ function newTransport(config: Key, sdkVersion: string): HttpTransport {
       // registry unhooks a transport from its slot before stopping it), so
       // its count is final. Folded, then forgotten.
       if (!transports.delete(transport)) return;
-      lostFromClosed += transport.lostEvents();
+      lostFromClosed += transport.deadlineLostEvents();
     },
     ...(budgetMs !== undefined
       ? { maxRetries: 0, fetchTimeoutMs: Math.min(DEFAULT_FETCH_TIMEOUT_MS, budgetMs) }

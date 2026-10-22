@@ -396,7 +396,13 @@ describe.each(STACKS)("a stateless host as a child process on MCP SDK %s (#142, 
       expect(exit, child.output()).toMatchObject({ code: 0, signal: null });
       expect(exit.afterSignalMs).toBeLessThan(5_000);
       expect(ingest.events).toHaveLength(0);
-      expect(sum(child.lossLines())).toBe(EVENTS_BEFORE_SIGNAL + 1);
+      // The drained transport's events are the deadline's loss (its third
+      // backoff would have ended past the deadline): one YAVIO-1205 line.
+      // The in-flight request's event went through the post-signal
+      // transport's single attempt and was refused: a delivery failure with
+      // its own YAVIO-1201 line, not a deadline loss (#148 review round 2).
+      expect(sum(child.lossLines())).toBe(EVENTS_BEFORE_SIGNAL);
+      expect(child.output()).toContain("YAVIO-1201");
     },
   );
 });
