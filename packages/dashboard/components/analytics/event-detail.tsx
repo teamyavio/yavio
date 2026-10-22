@@ -2,11 +2,11 @@
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import type { CustomEventEntry } from "@/lib/queries/types";
 import { cn } from "@/lib/utils";
 import { Check, Copy } from "lucide-react";
-import { Fragment, type ReactNode, useState } from "react";
-import { toast } from "sonner";
+import { Fragment, type ReactNode } from "react";
 
 /**
  * One expanded-event layout for the live feed, the invocation list and the
@@ -137,20 +137,16 @@ export function CopyRawButton({
   value,
   label = "Copy raw event",
 }: { value: unknown; label?: string }) {
-  const [copied, setCopied] = useState(false);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(value, null, 2));
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      toast.error("Could not copy to the clipboard");
-    }
-  }
+  const { copied, copy } = useCopyToClipboard();
 
   return (
-    <Button type="button" variant="outline" size="xs" onClick={copy} className="gap-1">
+    <Button
+      type="button"
+      variant="outline"
+      size="xs"
+      onClick={() => copy(JSON.stringify(value, null, 2))}
+      className="gap-1"
+    >
       {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
       {copied ? "Copied" : label}
     </Button>

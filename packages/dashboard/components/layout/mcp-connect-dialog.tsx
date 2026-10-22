@@ -9,10 +9,9 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { cn } from "@/lib/utils";
 import { Check, Copy, Plug } from "lucide-react";
-import { useState } from "react";
-import { toast } from "sonner";
 
 interface McpConnectDialogProps {
   /** This deployment's MCP server URL (mcpResourceUri()), never hardcoded. */
@@ -27,17 +26,7 @@ interface McpConnectDialogProps {
  * passed in from the server-rendered layout.
  */
 export function McpConnectDialog({ url, collapsed }: McpConnectDialogProps) {
-  const [copied, setCopied] = useState(false);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(url);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      toast.error("Could not copy to the clipboard");
-    }
-  }
+  const { copied, copy } = useCopyToClipboard();
 
   return (
     <Dialog>
@@ -76,7 +65,7 @@ export function McpConnectDialog({ url, collapsed }: McpConnectDialogProps) {
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={copy}
+                onClick={() => copy(url)}
                 className="gap-1.5 text-xs"
               >
                 {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
