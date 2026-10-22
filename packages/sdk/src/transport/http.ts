@@ -1,7 +1,7 @@
 import { ErrorCode } from "@yavio/shared/error-codes";
 import type { BaseEvent } from "@yavio/shared/events";
 import { DEFAULT_SHUTDOWN_TIMEOUT_MS } from "../core/config.js";
-import { unref } from "../core/timers.js";
+import { raceDeadline, unref } from "../core/timers.js";
 import type { Transport } from "./types.js";
 
 export interface HttpTransportOptions {
@@ -249,14 +249,6 @@ export class HttpTransport implements Transport {
    */
   async drain(deadlineMs: number = this.shutdownTimeoutMs): Promise<void> {
     let expired = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<void>((resolve) => {
-      timer = setTimeout(() => {
-        expired = true;
-        resolve();
-      }, deadlineMs);
-      if (timer) unref(timer);
-    });
     const loop = async () => {
       const rounds = Math.ceil(this.maxBufferSize / this.maxBatchSize) + 1;
       for (let i = 0; i < rounds && !expired; i++) {
@@ -279,11 +271,11 @@ export class HttpTransport implements Transport {
         }
       }
     };
-    try {
-      await Promise.race([loop(), deadline]);
-    } finally {
-      clearTimeout(timer);
-    }
+    await raceDeadline(loop(), deadlineMs, {
+      onTimeout: () => {
+        expired = true;
+      },
+    });
   }
 
   /**
@@ -332,30 +324,20 @@ export class HttpTransport implements Transport {
     // deadline the fetch in flight is aborted and the queue dropped: the
     // deadline ends the sending too, so a host without process.exit() can
     // exit and a hanging ingest cannot keep the process alive (#148).
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<void>((resolve) => {
-      timer = setTimeout(() => {
-        this.deadlineReached = true;
-        if (!this.drained) {
-          this.deadlineLost += this.buffer.length + this.inflightSize;
-          this.inflightSize = 0;
-          this.buffer.length = 0;
-          this.inflightController?.abort();
-          // A wait in progress ends now: the retry loop wakes, sees the
-          // deadline and gives up instead of sending after it.
-          this.pendingDelay?.resolve();
-        }
-        resolve();
-      }, deadlineMs);
-      if (timer) unref(timer);
-    });
-
     const lostBefore = this.deadlineLost;
-    try {
-      await Promise.race([drain(), timeout]);
-    } finally {
-      clearTimeout(timer);
-    }
+    await raceDeadline(drain(), deadlineMs, {
+      onTimeout: () => {
+        this.deadlineReached = true;
+        if (this.drained) return;
+        this.deadlineLost += this.buffer.length + this.inflightSize;
+        this.inflightSize = 0;
+        this.buffer.length = 0;
+        this.inflightController?.abort();
+        // A wait in progress ends now: the retry loop wakes, sees the
+        // deadline and gives up instead of sending after it.
+        this.pendingDelay?.resolve();
+      },
+    });
     // Counted here, not in the timer: a batch given up before the deadline
     // (its backoff would have ended after it) is a loss of this shutdown
     // too. A batch that failed for good during the drain (YAVIO-1201) is

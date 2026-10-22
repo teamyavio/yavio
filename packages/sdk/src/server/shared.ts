@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import { DEFAULT_SHUTDOWN_TIMEOUT_MS, shutdownTimeoutFromEnv } from "../core/config.js";
 import { LruMap } from "../core/lru.js";
-import { unref } from "../core/timers.js";
+import { raceDeadline, unref } from "../core/timers.js";
 import type { SessionState, YavioConfig } from "../core/types.js";
 import { DEFAULT_FETCH_TIMEOUT_MS, HttpTransport } from "../transport/http.js";
 import type { Transport } from "../transport/types.js";
@@ -321,20 +321,7 @@ export function boundedBy(ownMs: number): number {
 export async function awaitBounded(work: Promise<void>, ownMs: number): Promise<void> {
   const ms = boundedBy(ownMs);
   if (ms <= 0) return;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let release: (() => void) | undefined;
-  const deadline = new Promise<void>((resolve) => {
-    release = resolve;
-    deadlineWaiters.add(resolve);
-    timer = setTimeout(resolve, ms);
-    if (timer) unref(timer);
-  });
-  try {
-    await Promise.race([work, deadline]);
-  } finally {
-    clearTimeout(timer);
-    if (release) deadlineWaiters.delete(release);
-  }
+  await raceDeadline(work, ms, { waiters: deadlineWaiters });
 }
 
 function releaseWaiters(): void {
@@ -827,16 +814,11 @@ export async function shutdownAllShared(): Promise<void> {
     await Promise.all(stops);
     return;
   }
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<void>((resolve) => {
-    timer = setTimeout(resolve, deadlineMs);
-    if (timer) unref(timer);
+  // Released early by the cycle's deadline timer and by the test reset,
+  // like every bounded shutdown() wait (#148 review round 2).
+  await raceDeadline(Promise.all([...stops, ...inProgress]), deadlineMs, {
+    waiters: deadlineWaiters,
   });
-  try {
-    await Promise.race([Promise.all([...stops, ...inProgress]), deadline]);
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 /** @internal Number of live shared states — exposed for testing only. */
