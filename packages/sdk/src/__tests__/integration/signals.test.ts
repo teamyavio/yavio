@@ -1169,6 +1169,11 @@ describe("loss accounting (#148)", () => {
       exitHooks()[0]?.call(process, 0);
       expect(lines1205()).toHaveLength(2);
       expect(lines1205()[1]).toContain("1 events not delivered");
+      // Written synchronously to fd 2, like the hand-back line: process.exit()
+      // ends the process right after its listeners, and an asynchronous
+      // stderr pipe would lose a console.warn (#148 review round 3).
+      expect(stderr).toHaveBeenCalledWith(2, expect.stringContaining("Process exit with 1 events"));
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("Process exit with"));
       exitHooks()[0]?.call(process, 0);
       expect(lines1205()).toHaveLength(2); // counted once
     });

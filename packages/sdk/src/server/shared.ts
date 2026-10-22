@@ -379,7 +379,10 @@ function yavioReportAtExit(): void {
   const n = lostTotal() - reportedLost + pendingTotal() - pendingInHandBackLine;
   if (n <= 0) return;
   reportedLost = lostTotal();
-  console.warn(
+  // Synchronous: `process.exit()` ends the process right after its `exit`
+  // listeners, and an asynchronous stderr pipe would lose a console.warn
+  // (#148 review round 3, as the hand-back line in round 2).
+  writeStderrLine(
     `[YAVIO-1205] Process exit with ${n} events not delivered — await analytics.shutdown() before exiting, or raise shutdownTimeoutMs.`,
   );
 }
@@ -414,10 +417,11 @@ function reportCycleLoss(cycle: SignalCycle, at: "hand-back" | "drain-settled"):
 }
 
 /**
- * One line to stderr, synchronously: the re-raise that follows ends the
- * process, and where stderr is an asynchronous pipe (macOS and BSD under
- * `npm run` or a log collector) a `console.warn` just before it can be
- * lost with the process (#148 review round 2). `console.warn` elsewhere.
+ * One line to stderr, synchronously: what follows ends the process — the
+ * re-raise after the hand-back line, `process.exit()` after the exit hook's
+ * — and where stderr is an asynchronous pipe (macOS and BSD under `npm run`
+ * or a log collector) a `console.warn` just before it can be lost with the
+ * process (#148 review rounds 2 and 3). `console.warn` elsewhere.
  */
 function writeStderrLine(line: string): void {
   try {
