@@ -147,21 +147,133 @@ describe("SIGTERM/SIGINT hand-back (#138)", () => {
     });
   });
 
-  it("a second signal while draining hands back at once, and only once", async () => {
-    await withoutOtherListeners("SIGINT", async () => {
-      await wrappedAndCalled("yav_sig_twice");
+  it("a second identical signal within 250 ms is the same delivery; one after that hands back at once, and only once (#148)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await withoutOtherListeners("SIGINT", async () => {
+        ingest.hangEvents = true;
+        const raw = new McpServer({ name: "app", version: "1.0" });
+        withYavio(raw, {
+          apiKey: "yav_sig_twice",
+          endpoint: ingest.endpoint,
+          serverOnly: true,
+          shutdownTimeoutMs: 600,
+        }).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+        await callTool(raw, "get_price", { q: "x" });
 
-      process.emit("SIGINT", "SIGINT"); // starts the drain
-      process.emit("SIGINT", "SIGINT"); // impatient second Ctrl-C
-      // Handed back synchronously, before anything was delivered.
-      expect(reraised).toEqual([{ signal: "SIGINT", delivered: 0 }]);
-      expect(process.listenerCount("SIGINT")).toBe(0);
+        process.emit("SIGINT", "SIGINT"); // starts the drain
+        process.emit("SIGINT", "SIGINT"); // `npm run` forwarding the terminal's Ctrl-C a few ms later
+        // The same delivery: not handed back, the drain goes on (before
+        // #148 this hand-back cut the drain at 40 ms, the batch unanswered).
+        expect(reraised).toEqual([]);
+        expect(process.listenerCount("SIGINT")).toBe(1);
 
-      // The drain that was already running still completes, without a second hand-back.
-      await vi.waitFor(() => expect(deliveredCalls()).toBe(1), { timeout: 5_000 });
-      await new Promise((r) => setTimeout(r, 50));
-      expect(reraised).toHaveLength(1);
-    });
+        await new Promise((r) => setTimeout(r, 300));
+        process.emit("SIGINT", "SIGINT"); // an impatient second Ctrl-C, after the window
+        // Handed back synchronously: the batch had reached ingest (the mock
+        // records on receipt) but nothing was answered.
+        expect(reraised).toEqual([{ signal: "SIGINT", delivered: 1 }]);
+        expect(ingest.responded).toBe(0);
+        expect(process.listenerCount("SIGINT")).toBe(0);
+
+        // The drain that was already running still ends at its deadline, without a second hand-back.
+        await new Promise((r) => setTimeout(r, 500));
+        expect(reraised).toHaveLength(1);
+        expect(ingest.batches).toHaveLength(1);
+      });
+    } finally {
+      await ingest.answerHung();
+      warn.mockRestore();
+    }
+  });
+
+  it("a signal during a releasing last holder with an explicit 20 s uses 20 s and waits for the stop in progress (#148)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await withoutOtherListeners("SIGTERM", async () => {
+        // The last holder's shutdown() stopped the transport outside a
+        // signal and is waiting for ingest when the signal arrives. Before
+        // #148 the drain found an empty registry, took the SDK for the only
+        // listener and re-raised at once, mid-send; and the releasing hold's
+        // value no longer counted, so D would have been the 4 s default,
+        // short of the answer at 4.5 s.
+        ingest.respondAfterMs = 4_500;
+        let answeredAtReraise: number | undefined;
+        _setSignalReraise((signal) => {
+          answeredAtReraise = ingest.responded;
+          reraised.push({ signal, delivered: deliveredCalls() });
+        });
+        const client = createYavio({
+          apiKey: "yav_sig_release",
+          endpoint: ingest.endpoint,
+          serverOnly: true,
+          shutdownTimeoutMs: 20_000,
+        });
+        const raw = new McpServer({ name: "app", version: "1.0" });
+        client.wrap(raw).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+        await callTool(raw, "get_price", { q: "x" });
+        const closing = client.shutdown();
+        await new Promise((r) => setTimeout(r, 50));
+        const signalAt = Date.now();
+        process.emit("SIGTERM", "SIGTERM");
+        await vi.waitFor(() => expect(reraised).toHaveLength(1), { timeout: 10_000 });
+        // Re-raised only after the batch was answered, at about 4.5 s (the
+        // mock records events on receipt, so `delivered` alone would not tell).
+        expect(answeredAtReraise).toBe(1);
+        expect(reraised[0]).toEqual({ signal: "SIGTERM", delivered: 1 });
+        expect(Date.now() - signalAt).toBeGreaterThanOrEqual(4_300);
+        await closing;
+        expect(ingest.responded).toBe(1);
+        expect(warn.mock.calls.map((c) => String(c[0]))).not.toContainEqual(
+          expect.stringContaining("YAVIO-1205"),
+        );
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  }, 15_000);
+
+  it("each cycle has an identity: a drain that ends after its cycle was handed back cannot end a later cycle (#148)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await withoutOtherListeners("SIGINT", async () => {
+        ingest.hangEvents = true;
+        const options = {
+          apiKey: "yav_sig_cycles",
+          endpoint: ingest.endpoint,
+          serverOnly: true,
+          shutdownTimeoutMs: 1_000,
+        };
+        const raw = new McpServer({ name: "app", version: "1.0" });
+        withYavio(raw, options).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+        await callTool(raw, "get_price", { q: "first" });
+        const t0 = Date.now();
+        process.emit("SIGINT", "SIGINT"); // cycle 1: its drain hangs until t0 + 1 s
+        await new Promise((r) => setTimeout(r, 300));
+        process.emit("SIGINT", "SIGINT"); // impatient: cycle 1 handed back now, its drain still running
+        expect(reraised).toHaveLength(1);
+
+        // The process survived (the re-raise is stubbed here, as with an app
+        // listener elsewhere): a new wrap re-installs the listeners and the
+        // next signal starts cycle 2, with its own deadline at t0 + 1.3 s.
+        const next = new McpServer({ name: "next", version: "1.0" });
+        withYavio(next, options).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+        await callTool(next, "get_price", { q: "second" });
+        expect(process.listenerCount("SIGINT")).toBe(1);
+        process.emit("SIGINT", "SIGINT");
+
+        // At t0 + 1.1 s cycle 1's drain has ended; cycle 2 must still be running.
+        await new Promise((r) => setTimeout(r, 1_100 - (Date.now() - t0)));
+        expect(process.listenerCount("SIGINT")).toBe(1);
+        expect(reraised).toHaveLength(1);
+        await vi.waitFor(() => expect(reraised).toHaveLength(2), { timeout: 2_000 });
+        expect(Date.now() - t0).toBeGreaterThanOrEqual(1_250);
+        expect(process.listenerCount("SIGINT")).toBe(0);
+      });
+    } finally {
+      await ingest.answerHung();
+      warn.mockRestore();
+    }
   });
 
   it("after a hand-back the SDK starts over: a later wrap installs the listeners again and the next signal drains", async () => {

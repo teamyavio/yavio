@@ -230,9 +230,21 @@ interface SignalCycle {
   deadlineAt: number;
 }
 
-/** The signal being handled. A second signal while this is set means "stop waiting". */
+/**
+ * The signal being handled. A second signal while this is set means "stop
+ * waiting" — unless it is the same signal within `SAME_DELIVERY_MS` of the
+ * first, which is one delivery arriving twice: `npm run` forwards the
+ * terminal's Ctrl-C to a script that already received it (#148).
+ */
 let signalInFlight: SignalCycle | null = null;
 let cycles = 0;
+const SAME_DELIVERY_MS = 250;
+/**
+ * Transport stops started outside a signal and still running (the last
+ * holder's release): a signal arriving meanwhile awaits them too, instead
+ * of finding an empty registry and re-raising mid-send (#148).
+ */
+const stopsInProgress = new Set<Promise<void>>();
 /**
  * The latest cycle's deadline timer: cuts every `shutdown()` await still
  * pending at signal + D, even after an early hand-back. Unref'd, so it
@@ -402,19 +414,23 @@ let reraise: (signal: HandledSignal) => void = defaultReraise;
  * The first signal fixes the process deadline, drains the registry, then
  * hands the signal back (`finishSignal`); a second one while that is still
  * running hands it back at once, so a second Ctrl-C still ends the process
- * the way it does without the SDK. Whether to re-raise is decided when the
- * signal ARRIVES: an app listener registered with `process.once` is gone by
- * the time the drain is done, and that app must not be killed in the
- * middle of its own shutdown.
+ * the way it does without the SDK — except the same signal within 250 ms,
+ * which is the first one delivered twice. Whether to re-raise is decided
+ * when the signal ARRIVES: an app listener registered with `process.once`
+ * is gone by the time the drain is done, and that app must not be killed in
+ * the middle of its own shutdown. Each cycle has an identity: a drain that
+ * ends after its cycle was handed back cannot end a later cycle.
  */
 function onSignal(signal: HandledSignal): void {
-  if (signalInFlight) {
-    finishSignal();
+  const running = signalInFlight;
+  if (running) {
+    if (running.signal === signal && Date.now() - running.startedAt < SAME_DELIVERY_MS) return;
+    finishSignal(running);
     return;
   }
   const budgetMs = processBudgetMs();
   const startedAt = Date.now();
-  signalInFlight = {
+  const cycle: SignalCycle = {
     id: ++cycles,
     signal,
     sole: process.listenerCount(signal) === 1,
@@ -422,13 +438,14 @@ function onSignal(signal: HandledSignal): void {
     budgetMs,
     deadlineAt: startedAt + budgetMs,
   };
+  signalInFlight = cycle;
   clearTimeout(cycleTimer);
   cycleTimer = setTimeout(releaseWaiters, budgetMs);
   unref(cycleTimer);
   armExitHook();
   beginProcessShutdown()
     .catch(() => {})
-    .then(finishSignal);
+    .then(() => finishSignal(cycle));
 }
 
 /**
@@ -440,15 +457,13 @@ function onSignal(signal: HandledSignal): void {
  * only re-raises when it is the last listener (signal-exit, used by execa and
  * ora) does not get its turn either — that app must handle the signal itself.
  */
-function finishSignal(): void {
-  const cycle = signalInFlight;
+function finishSignal(cycle: SignalCycle): void {
+  if (signalInFlight !== cycle) return; // handed back already, or a later cycle is running
   signalInFlight = null;
-  if (cycle) {
-    lastBudgetMs = cycle.budgetMs;
-    reportCycleLoss(cycle); // before the re-raise: a POSIX re-raise skips `exit` listeners
-  }
+  lastBudgetMs = cycle.budgetMs;
+  reportCycleLoss(cycle); // before the re-raise: a POSIX re-raise skips `exit` listeners
   removeSignalHandlers();
-  if (cycle?.sole) reraise(cycle.signal);
+  if (cycle.sole) reraise(cycle.signal);
 }
 
 /**
@@ -644,10 +659,17 @@ export async function releaseShared(config: Key, hold: SharedHold): Promise<void
     registry.delete(key);
     const live = entry.slot.live;
     entry.slot.live = null;
-    if (live) await live.shutdown(boundedBy(ownMs));
+    if (live) await trackStop(live.shutdown(boundedBy(ownMs)));
   } finally {
     done();
   }
+}
+
+/** Keep a transport stop in `stopsInProgress` until it settles. */
+function trackStop(stop: Promise<void>): Promise<void> {
+  const tracked = stop.catch(() => {}).finally(() => stopsInProgress.delete(tracked));
+  stopsInProgress.add(tracked);
+  return stop;
 }
 
 /**
@@ -701,19 +723,34 @@ export function beginProcessShutdown(): Promise<void> {
  * leaves, or D computed now when no signal is being handled. Not the
  * transport's own value, which is its creator's and stays after that
  * creator released (#142 review round 4), and not a per-key value: the
- * grace period is per process (#148).
+ * grace period is per process (#148). Stops already in progress — the last
+ * holder's release when the signal arrived — are awaited too, within the
+ * same deadline.
  */
 export async function shutdownAllShared(): Promise<void> {
   const deadlineMs = remainingMs() ?? processBudgetMs();
   const entries = [...registry.values()];
   registry.clear();
-  await Promise.all(
-    entries.map((entry) => {
-      const live = entry.slot.live;
-      entry.slot.live = null;
-      return live?.shutdown(deadlineMs).catch(() => {});
-    }),
-  );
+  const stops = entries.map((entry) => {
+    const live = entry.slot.live;
+    entry.slot.live = null;
+    return live?.shutdown(deadlineMs).catch(() => {});
+  });
+  const inProgress = [...stopsInProgress];
+  if (inProgress.length === 0) {
+    await Promise.all(stops);
+    return;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, deadlineMs);
+    if (timer) unref(timer);
+  });
+  try {
+    await Promise.race([Promise.all([...stops, ...inProgress]), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** @internal Number of live shared states — exposed for testing only. */
@@ -755,6 +792,7 @@ export function _resetSharedState(): void {
   inProgressDeadlines.length = 0;
   releaseWaiters();
   transports.clear();
+  stopsInProgress.clear();
   reportedLost = 0;
   if (exitHookArmed) process.off("exit", yavioReportAtExit);
   exitHookArmed = false;
