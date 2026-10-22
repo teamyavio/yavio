@@ -141,10 +141,19 @@ function connectionFilter(eventType: string | undefined): string {
         )`;
 }
 
+/** A row read, as `pollLive` keeps it: its `ingested_at` parsed once, so the window check does not re-parse it per page and per poll. */
+interface ReadRow extends SeenRow {
+  ms: number;
+}
+
 /** The ids read whose `ingested_at` the window before `ingestedAt` covers again. */
-function withinWindow(read: Map<string, SeenRow>, ingestedAt: string): SeenRow[] {
+function withinWindow(read: Map<string, ReadRow>, ingestedAt: string): SeenRow[] {
   const windowStart = ingestedAtMs(ingestedAt) - LIVE_OVERLAP_MS;
-  return [...read.values()].filter((row) => ingestedAtMs(row.ingestedAt) >= windowStart);
+  const rows: SeenRow[] = [];
+  for (const { eventId, ingestedAt: at, ms } of read.values()) {
+    if (ms >= windowStart) rows.push({ eventId, ingestedAt: at });
+  }
+  return rows;
 }
 
 /**
@@ -158,14 +167,16 @@ export async function pollLive(
   cursor: LiveCursor,
   eventType?: string,
 ): Promise<LivePoll> {
-  const seen = new Set(cursor.seen.map((row) => row.eventId));
   const connectionSessions = new Set<string>();
   const events: LiveEvent[] = [];
   // Every row read so far — earlier polls' or this one's, shown or not —
   // with its ingested_at, so the next page and the next poll leave it out
-  // while the window still covers it. Rows older than the window cannot
-  // come back: the cursor never moves backwards.
-  const read = new Map(cursor.seen.map((row) => [row.eventId, row]));
+  // while the window still covers it, and so a row read before is not
+  // shown again. Rows older than the window cannot come back: the cursor
+  // never moves backwards.
+  const read = new Map<string, ReadRow>(
+    cursor.seen.map((row) => [row.eventId, { ...row, ms: ingestedAtMs(row.ingestedAt) }]),
+  );
   let newest = cursor.ingestedAt;
   let full = false;
 
@@ -176,14 +187,17 @@ export async function pollLive(
       eventType,
     );
     for (const row of rows) {
-      read.set(row.eventId, { eventId: row.eventId, ingestedAt: row.ingestedAt });
       if (row.ingestedAt > newest) newest = row.ingestedAt;
       // The query leaves out the rows read before; this also catches a
       // stale page and the same event_id twice in one page (a
       // ReplacingMergeTree holds at-least-once duplicates until it merges,
       // #148 review round 2).
-      if (seen.has(row.eventId)) continue;
-      seen.add(row.eventId);
+      if (read.has(row.eventId)) continue;
+      read.set(row.eventId, {
+        eventId: row.eventId,
+        ingestedAt: row.ingestedAt,
+        ms: ingestedAtMs(row.ingestedAt),
+      });
       if (row.eventType === "connection") {
         if (connectionSessions.has(row.sessionId)) continue;
         connectionSessions.add(row.sessionId);
