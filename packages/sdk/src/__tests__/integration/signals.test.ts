@@ -1431,14 +1431,19 @@ describe("loss accounting (#148)", () => {
   it("a cycle handed back early, next to an app listener: the stops' later deadline loss is one line with the cycle's wording", async () => {
     await withoutOtherListeners("SIGTERM", async () => {
       await withoutOtherListeners("SIGINT", async () => {
+        // The README recipe listens on both signals; a second signal is
+        // handed back for the signal that arrived (review round 4), so the
+        // SIGINT below is handed back next to the app's listener too.
         const app = vi.fn();
         process.on("SIGTERM", app);
+        process.on("SIGINT", app);
         try {
           const { raw } = build("yav_148_late_app", { shutdownTimeoutMs: 600 });
           await callTool(raw, "get_price", { q: "x" });
           process.emit("SIGTERM", "SIGTERM");
           await new Promise((r) => setTimeout(r, 300));
           process.emit("SIGINT", "SIGINT"); // handed back; nothing lost yet, so no line
+          expect(app).toHaveBeenCalledTimes(2);
           expect(lines1205()).toHaveLength(0);
           await new Promise((r) => setTimeout(r, 500));
           // The two events the stop gave up at the cycle's deadline, once,
@@ -1451,6 +1456,7 @@ describe("loss accounting (#148)", () => {
           expect(lines1205()).toHaveLength(1); // nothing left unreported
         } finally {
           process.off("SIGTERM", app);
+          process.off("SIGINT", app);
         }
       });
     });
