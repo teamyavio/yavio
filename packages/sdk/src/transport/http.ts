@@ -28,6 +28,13 @@ export interface HttpTransportOptions {
    * cycle report every transport's losses in one line.
    */
   onShutdownLoss?: (lost: number, deadlineMs: number) => void;
+  /**
+   * Called once `shutdown()` has settled — drained, or at its deadline —
+   * after `onShutdownLoss`. The registry drops its reference to the
+   * transport here, so a host that creates and shuts down a client per
+   * request does not keep one transport per request (#148 review round 1).
+   */
+  onClosed?: () => void;
 }
 
 const DEFAULT_FLUSH_INTERVAL_MS = 10_000;
@@ -113,10 +120,12 @@ export class HttpTransport implements Transport {
   private readonly _fetch: typeof globalThis.fetch;
   private readonly immediate: boolean;
   private readonly onShutdownLoss: ((lost: number, deadlineMs: number) => void) | undefined;
+  private readonly onClosed: (() => void) | undefined;
 
   constructor(options: HttpTransportOptions) {
     this.immediate = options.immediate === true;
     this.onShutdownLoss = options.onShutdownLoss;
+    this.onClosed = options.onClosed;
     this.endpoint = options.endpoint;
     this.apiKey = options.apiKey;
     this.sdkVersion = options.sdkVersion;
@@ -328,6 +337,7 @@ export class HttpTransport implements Transport {
         );
       }
     }
+    this.onClosed?.();
   }
 
   private async sendBatch(batch: BaseEvent[]): Promise<void> {

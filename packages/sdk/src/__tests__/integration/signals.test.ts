@@ -9,7 +9,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createYavio, withYavio } from "../../server/index.js";
 import { _resetGlobalState } from "../../server/proxy.js";
-import { _setSignalReraise, _sharedStateCount } from "../../server/shared.js";
+import {
+  _setSignalReraise,
+  _sharedStateCount,
+  _trackedTransportCount,
+} from "../../server/shared.js";
 import { type MockIngest, callTool, startMockIngest } from "./helpers.js";
 
 const RESPONSE_DELAY_MS = 150;
@@ -1133,6 +1137,37 @@ describe("loss accounting (#148)", () => {
     // Nothing left unreported: the exit hook stays quiet.
     exitHooks()[0]?.call(process, 0);
     expect(lines1205()).toHaveLength(1);
+  });
+
+  it("a client created and shut down per request leaves no transport behind, and its losses stay counted", async () => {
+    // A stateless host that follows the README per request: before the fix
+    // every transport stayed in the registry's set for the process lifetime.
+    ingest.hangEvents = false;
+    const baseline = _trackedTransportCount();
+    for (let i = 0; i < 20; i++) {
+      const { client, raw } = build("yav_148_per_request");
+      await callTool(raw, "get_price", { q: String(i) });
+      await client.shutdown();
+    }
+    expect(_trackedTransportCount()).toBe(baseline);
+    expect(lines1205()).toHaveLength(0);
+
+    // Losses of a transport that left the set are still in the total: three
+    // timed-out shutdowns, three lines of their own, nothing left over for
+    // the exit hook to report twice or to forget.
+    ingest.hangEvents = true;
+    for (let i = 0; i < 3; i++) {
+      const { client, raw } = build("yav_148_per_request_lost", { shutdownTimeoutMs: 100 });
+      await callTool(raw, "get_price", { q: String(i) });
+      await client.shutdown();
+      await ingest.answerHung();
+    }
+    expect(_trackedTransportCount()).toBe(baseline);
+    expect(lines1205()).toHaveLength(3);
+    expect(lines1205()[0]).toContain("2 events not delivered"); // connection + call
+    expect(lines1205()[2]).toContain("1 events not delivered"); // the connection is once per key
+    exitHooks()[0]?.call(process, 0);
+    expect(lines1205()).toHaveLength(3);
   });
 
   it("_resetSharedState() resets the deadline, the loss watermark and the exit hook", async () => {

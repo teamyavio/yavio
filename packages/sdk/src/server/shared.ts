@@ -154,8 +154,16 @@ export interface SharedHold {
 const slots = new Map<string, Slot>();
 const registry = new Map<string, Entry>();
 let generations = 0;
-/** Every transport this process created, for the loss accounting (#148). */
+/**
+ * Every transport this process created and not yet shut down, for the loss
+ * accounting (#148). A transport leaves the set when its `shutdown()` has
+ * settled, its losses folded into `lostFromClosed`: a host that creates and
+ * shuts down a client per request would otherwise keep one transport per
+ * request for the process lifetime (#148 review round 1).
+ */
 const transports = new Set<HttpTransport>();
+/** Events given up by transports that have since left `transports`. */
+let lostFromClosed = 0;
 
 /**
  * What the registry needs of a config: the key, the drain deadline and
@@ -343,7 +351,8 @@ let reportedLost = 0;
 let exitHookArmed = false;
 let exitReported = false;
 
-const lostTotal = (): number => [...transports].reduce((n, t) => n + t.lostEvents(), 0);
+const lostTotal = (): number =>
+  [...transports].reduce((n, t) => n + t.lostEvents(), lostFromClosed);
 const pendingTotal = (): number => [...transports].reduce((n, t) => n + t.pendingEvents(), 0);
 
 const RAISE_HINT =
@@ -498,6 +507,13 @@ function newTransport(config: Key, sdkVersion: string): HttpTransport {
     shutdownTimeoutMs: config.shutdownTimeoutMs,
     immediate: draining,
     onShutdownLoss: reportCallLoss,
+    onClosed: () => {
+      // Settled: nothing is pending, and nothing reaches it any more (the
+      // registry unhooks a transport from its slot before stopping it), so
+      // its count is final. Folded, then forgotten.
+      if (!transports.delete(transport)) return;
+      lostFromClosed += transport.lostEvents();
+    },
     ...(budgetMs !== undefined
       ? { maxRetries: 0, fetchTimeoutMs: Math.min(DEFAULT_FETCH_TIMEOUT_MS, budgetMs) }
       : {}),
@@ -755,6 +771,11 @@ export function _sharedStateCount(): number {
   return registry.size;
 }
 
+/** @internal Number of transports not yet shut down — exposed for testing only. */
+export function _trackedTransportCount(): number {
+  return transports.size;
+}
+
 /**
  * Messages that are worth exactly one line per process: the mode a wrap
  * runs in does not change between requests, and a stateless host wraps on
@@ -789,6 +810,7 @@ export function _resetSharedState(): void {
   inProgressDeadlines.length = 0;
   releaseWaiters();
   transports.clear();
+  lostFromClosed = 0;
   stopsInProgress.clear();
   reportedLost = 0;
   if (exitHookArmed) process.off("exit", yavioReportAtExit);
