@@ -13,6 +13,7 @@ import {
   LIVE_SEEN_CAP,
   LIVE_SKEW_ALLOWANCE_SECONDS,
   LIVE_STAMPS_CAP,
+  type LiveCursor,
   initialLiveCursor,
   pollLive,
 } from "@/lib/queries/live";
@@ -535,7 +536,7 @@ describe("live queries (#148)", () => {
       // query of every poll while the window covered the block.
       mockQueryAnalytics.mockImplementation(table(batch(1_200, "2025-01-01 12:00:30.000")));
       const shown: string[] = [];
-      let at = { ...cursor, ingestedAt: "2025-01-01 12:00:25.000" };
+      let at: LiveCursor = { ...cursor, ingestedAt: "2025-01-01 12:00:25.000" };
       const polls: number[] = [];
       for (let i = 0; i < 4; i++) {
         const result = await pollLive(ctx, at);
