@@ -247,8 +247,11 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
     // last page read (49.9 s), and not to ClickHouse's clock (review round
     // 3), which ingest's clock may run behind by more than the overlap.
     expect(first.cursor.ingestedAt).toBe(far(69_900));
-    // `seen` keeps only the rows read inside the new window: none.
-    expect(first.cursor.seen).toHaveLength(0);
+    // The cursor remembers the rows read inside the resend horizon — the
+    // 60 s before 69.9 s: rows 99–499 — and the next query's parameter
+    // carries only the window's (the 10 s before): none of them.
+    expect(first.cursor.seen).toHaveLength(401);
+    expect(first.cursor.seen.every((r) => r.ingestedAt >= far(9_900))).toBe(true);
 
     // The next poll reads the window the jump opened — the 10 s before the
     // newest row — rows 599–699; rows 500–598 are never shown.
@@ -272,6 +275,63 @@ describe.skipIf(!url)("live feed on a real ClickHouse (#148)", () => {
     const third = await q.pollLive(scope, second.cursor, undefined);
     expect(third.events.map((e) => e.eventName)).toEqual(["call-fresh"]);
     expect(third.cursor.ingestedAt).toBe(now);
+  });
+
+  it("an SDK resend stored 15 s later — a second row for the same event_id with a newer ingested_at — is not shown again", async () => {
+    // The SDK re-sends a batch whose fetch timed out or saw a 5xx after
+    // ingest had written it, after a backoff of up to 16 s or a Retry-After
+    // of up to 30 s; the resend is a second row until a merge collapses it.
+    // Merges off, so the second row is there to be found.
+    const projectId = `p-${randomUUID().slice(0, 8)}`;
+    const scope = { workspaceId: ws, projectId };
+    const session = `s-${randomUUID().slice(0, 8)}`;
+    const resent = randomUUID();
+    await admin.command({ query: "SYSTEM STOP MERGES events" });
+    try {
+      await insert([
+        {
+          event_id: resent,
+          project_id: projectId,
+          session_id: session,
+          event_name: "once",
+          timestamp: at(0),
+          ingested_at: at(100),
+        },
+      ]);
+      const first = await q.pollLive(scope, { ingestedAt: at(0), seen: [] }, undefined);
+      expect(first.events.map((e) => e.eventName)).toEqual(["once"]);
+      // Another row moves the cursor past the window that covers the first.
+      await insert([
+        {
+          project_id: projectId,
+          session_id: session,
+          event_name: "next",
+          timestamp: at(11_000),
+          ingested_at: at(12_000),
+        },
+      ]);
+      const second = await q.pollLive(scope, first.cursor, undefined);
+      expect(second.events.map((e) => e.eventName)).toEqual(["next"]);
+      expect(second.cursor.ingestedAt).toBe(at(12_000));
+      // The resend: the same event_id and timestamp, stored 15 s after the
+      // first row. Before the fix the first row's id had left the cursor
+      // with the window and the row was shown a second time.
+      await insert([
+        {
+          event_id: resent,
+          project_id: projectId,
+          session_id: session,
+          event_name: "once",
+          timestamp: at(0),
+          ingested_at: at(15_100),
+        },
+      ]);
+      const third = await q.pollLive(scope, second.cursor, undefined);
+      expect(third.events).toEqual([]);
+      expect(third.cursor.ingestedAt).toBe(at(15_100));
+    } finally {
+      await admin.command({ query: "SYSTEM START MERGES events" });
+    }
   });
 
   it("interleaved batches skip nothing across two polls: an older-timestamp event ingested later is shown once", async () => {

@@ -30,7 +30,10 @@ import type { LiveEvent } from "./types";
  * the last `LIVE_SKEW_ALLOWANCE` (see `latestCursor`), so the live view
  * shows what was ingested in the last `LIVE_OVERLAP` window before that
  * and after, and the rows between the last page read and that window are
- * never shown.
+ * never shown. The ids read are remembered for `LIVE_RESEND_HORIZON`
+ * after the window has moved past them: an SDK resend of a batch ingest
+ * had already stored is a new row with a newer `ingested_at`, back inside
+ * the window (#148 review round 5).
  *
  * `ingested_at` is outside the sort key `(workspace_id, project_id,
  * event_type, timestamp, event_id)` and has no skip index, so a bound on
@@ -51,6 +54,20 @@ import type { LiveEvent } from "./types";
 /** How far before the cursor a poll re-reads, in whole seconds (SQL `INTERVAL n SECOND`). */
 export const LIVE_OVERLAP_SECONDS = 10;
 const LIVE_OVERLAP_MS = LIVE_OVERLAP_SECONDS * 1_000;
+/**
+ * How long a row read stays remembered after the window has moved past
+ * it, in whole seconds. An SDK resend of a batch ingest had already stored
+ * — the fetch timed out or saw a 5xx after the write — lands after a
+ * backoff of up to 16 s or a `Retry-After` of up to 30 s as a NEW row with
+ * a new `ingested_at` (the ReplacingMergeTree collapses it on a later
+ * merge), inside the window again; remembered only for the window, its id
+ * was emitted twice. 60 s covers the SDK's 1+2+4+8+16 s backoffs and the
+ * 30 s `Retry-After` cap (#148 review round 5). Only the ids still inside
+ * the window go to the query's `NOT IN`, so the parameter stays bounded by
+ * the window; the rest is checked in memory.
+ */
+export const LIVE_RESEND_HORIZON_SECONDS = 60;
+const LIVE_RESEND_HORIZON_MS = LIVE_RESEND_HORIZON_SECONDS * 1_000;
 /**
  * How far an event's `timestamp` may lie behind its `ingested_at`, in
  * whole seconds: the SDK's 10 s flush, its retries (1/2/4/8/16 s backoff,
@@ -79,15 +96,16 @@ export interface QueryContext {
 /**
  * Where the feed has read up to: the newest `ingested_at` read so far
  * (ClickHouse `DateTime64(3, 'UTC')` text, `YYYY-MM-DD HH:MM:SS.mmm`), and
- * the ids of the rows read whose `ingested_at` is still inside the overlap
- * window — the rows the next poll's window covers again, and leaves out.
+ * the ids of the rows read whose `ingested_at` is still inside the resend
+ * horizon — the rows a resend could bring back, and that the next poll
+ * leaves out: in the query while the window covers them, in memory after.
  */
 export interface LiveCursor {
   ingestedAt: string;
   seen: SeenRow[];
 }
 
-/** A row read, with its `ingested_at`: dropped from the cursor once the window has moved past it. */
+/** A row read, with its `ingested_at`: dropped from the cursor once the resend horizon has moved past it. */
 export interface SeenRow {
   eventId: string;
   ingestedAt: string;
@@ -202,12 +220,12 @@ interface ReadRow extends SeenRow {
   ms: number;
 }
 
-/** The ids read whose `ingested_at` the window before `ingestedAt` covers again. */
-function withinWindow(read: Map<string, ReadRow>, ingestedAt: string): SeenRow[] {
-  const windowStart = ingestedAtMs(ingestedAt) - LIVE_OVERLAP_MS;
+/** The rows read whose `ingested_at` lies within `spanMs` before `ingestedAt`: the window's for the query, the horizon's for the cursor. */
+function readSince(read: Map<string, ReadRow>, ingestedAt: string, spanMs: number): SeenRow[] {
+  const start = ingestedAtMs(ingestedAt) - spanMs;
   const rows: SeenRow[] = [];
   for (const { eventId, ingestedAt: at, ms } of read.values()) {
-    if (ms >= windowStart) rows.push({ eventId, ingestedAt: at });
+    if (ms >= start) rows.push({ eventId, ingestedAt: at });
   }
   return rows;
 }
@@ -228,8 +246,11 @@ export async function pollLive(
   // Every row read so far — earlier polls' or this one's, shown or not —
   // with its ingested_at, so the next page and the next poll leave it out
   // while the window still covers it, and so a row read before is not
-  // shown again. Rows older than the window cannot come back: the cursor
-  // never moves backwards.
+  // shown again: a resend's new row carries the same event_id with a newer
+  // ingested_at, inside the window and outside the query's `NOT IN`, and
+  // is caught here for as long as the resend horizon keeps the id. Rows
+  // older than the horizon cannot come back: the cursor never moves
+  // backwards.
   const read = new Map<string, ReadRow>(
     cursor.seen.map((row) => [row.eventId, { ...row, ms: ingestedAtMs(row.ingestedAt) }]),
   );
@@ -239,7 +260,7 @@ export async function pollLive(
   for (let page = 0; page < LIVE_MAX_PAGES; page++) {
     const rows = await readPage(
       ctx,
-      { ingestedAt: newest, seen: withinWindow(read, newest) },
+      { ingestedAt: newest, seen: readSince(read, newest, LIVE_OVERLAP_MS) },
       eventType,
     );
     for (const row of rows) {
@@ -248,7 +269,20 @@ export async function pollLive(
       // stale page and the same event_id twice in one page (a
       // ReplacingMergeTree holds at-least-once duplicates until it merges,
       // #148 review round 2).
-      if (read.has(row.eventId)) continue;
+      const before = read.get(row.eventId);
+      if (before) {
+        // Read before (a resend's row, or a stale page): not shown again.
+        // Remembered from its newest ingested_at, so the query leaves the
+        // resend's row out for as long as the window covers it.
+        if (row.ingestedAt > before.ingestedAt) {
+          read.set(row.eventId, {
+            ...before,
+            ingestedAt: row.ingestedAt,
+            ms: ingestedAtMs(row.ingestedAt),
+          });
+        }
+        continue;
+      }
       read.set(row.eventId, {
         eventId: row.eventId,
         ingestedAt: row.ingestedAt,
@@ -279,10 +313,13 @@ export async function pollLive(
     if (jump > newest) newest = jump;
   }
 
-  return { events, cursor: { ingestedAt: newest, seen: withinWindow(read, newest) } };
+  return {
+    events,
+    cursor: { ingestedAt: newest, seen: readSince(read, newest, LIVE_RESEND_HORIZON_MS) },
+  };
 }
 
-/** One page of rows ingested since `cursor` (minus the overlap), oldest first, without the ids in `cursor.seen`. */
+/** One page of rows ingested since `cursor` (minus the overlap), oldest first, without the ids in `cursor.seen` (the ones inside the window: the caller narrows the cursor's list). */
 async function readPage(
   ctx: QueryContext,
   cursor: LiveCursor,

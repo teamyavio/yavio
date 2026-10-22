@@ -9,6 +9,7 @@ vi.mock("@/lib/clickhouse/analytics-client", () => ({
 import {
   LIVE_MAX_PAGES,
   LIVE_PAGE,
+  LIVE_RESEND_HORIZON_SECONDS,
   LIVE_SKEW_ALLOWANCE_SECONDS,
   initialLiveCursor,
   pollLive,
@@ -127,17 +128,27 @@ describe("live queries (#148)", () => {
       ]);
     });
 
-    it("keeps the cursor where it was when nothing was read, and the seen rows still inside the window", async () => {
+    it("keeps the cursor where it was when nothing was read; the query leaves out the rows inside the window, the cursor keeps the ones inside the resend horizon", async () => {
       mockQueryAnalytics.mockResolvedValue([]);
-      const seen = [{ eventId: "old", ingestedAt: "2025-01-01 11:59:55.000" }];
+      expect(LIVE_RESEND_HORIZON_SECONDS).toBe(60);
+      const seen = [
+        { eventId: "in-window", ingestedAt: "2025-01-01 11:59:55.000" },
+        { eventId: "in-horizon", ingestedAt: "2025-01-01 11:59:30.000" },
+        { eventId: "forgotten", ingestedAt: "2025-01-01 11:58:00.000" },
+      ];
       const result = await pollLive(ctx, { ...cursor, seen });
-      expect(result).toEqual({ events: [], cursor: { ingestedAt: cursor.ingestedAt, seen } });
+      expect(result.events).toEqual([]);
+      expect(result.cursor.ingestedAt).toBe(cursor.ingestedAt);
+      // Remembered for 60 s, not only for the 10 s window; the parameter
+      // carries only what the window covers, so it stays bounded by the
+      // window, not by the horizon (#148 review round 5).
+      expect(result.cursor.seen.map((r) => r.eventId)).toEqual(["in-window", "in-horizon"]);
       const call = mockQueryAnalytics.mock.calls[0][0];
       expect(call.query).toContain("AND event_id NOT IN {seen:Array(String)}");
-      expect(call.params.seen).toEqual(["old"]);
+      expect(call.params.seen).toEqual(["in-window"]);
     });
 
-    it("leaves out the rows the previous poll read (the overlap window) in the query, and keeps only the ones still inside the window", async () => {
+    it("leaves out the rows the previous poll read (the overlap window) in the query, and remembers the ones inside the resend horizon", async () => {
       // `shown` is not in the page: the query excluded it.
       mockQueryAnalytics.mockResolvedValue([
         row({ eventId: "late", ingestedAt: "2025-01-01 12:00:03.000" }),
@@ -152,9 +163,51 @@ describe("live queries (#148)", () => {
       // ingested_at than the cursor: the overlap shows it, nothing is skipped.
       expect(result.events.map((e) => e.eventId)).toEqual(["late", "new"]);
       expect(result.cursor.ingestedAt).toBe("2025-01-01 12:00:15.000");
-      // The next window starts at 12:00:05: `late` (12:00:03) cannot come
-      // back; `shown` (12:00:08) can, and stays excluded.
-      expect(result.cursor.seen.map((r) => r.eventId).sort()).toEqual(["new", "shown"]);
+      // All three stay remembered (the horizon reaches back to 11:59:15);
+      // the next window starts at 12:00:05, so the next query leaves out
+      // `shown` (12:00:08) and `new`, not `late` (12:00:03).
+      expect(result.cursor.seen.map((r) => r.eventId).sort()).toEqual(["late", "new", "shown"]);
+      mockQueryAnalytics.mockClear();
+      mockQueryAnalytics.mockResolvedValue([]);
+      await pollLive(ctx, result.cursor);
+      expect(mockQueryAnalytics.mock.calls[0][0].params.seen.sort()).toEqual(["new", "shown"]);
+    });
+
+    it("an SDK resend — the same event_id stored again 15 s later with a newer ingested_at, outside the query's NOT IN — is not shown again", async () => {
+      // Poll 1: `r` at 12:00:00. Poll 2: `x` at 12:00:12 moves the cursor
+      // past the window that covers `r`. Poll 3: the resend's row for `r`
+      // at 12:00:15 (ingest wrote the batch, the SDK's fetch timed out, the
+      // resend landed after the backoff) with `y`.
+      mockQueryAnalytics.mockResolvedValueOnce([
+        row({ eventId: "r", ingestedAt: "2025-01-01 12:00:00.000" }),
+      ]);
+      const first = await pollLive(ctx, cursor);
+      expect(first.events.map((e) => e.eventId)).toEqual(["r"]);
+      mockQueryAnalytics.mockResolvedValueOnce([
+        row({ eventId: "x", ingestedAt: "2025-01-01 12:00:12.000" }),
+      ]);
+      const second = await pollLive(ctx, first.cursor);
+      expect(second.events.map((e) => e.eventId)).toEqual(["x"]);
+      expect(second.cursor.ingestedAt).toBe("2025-01-01 12:00:12.000");
+      mockQueryAnalytics.mockResolvedValueOnce([
+        row({ eventId: "r", ingestedAt: "2025-01-01 12:00:15.000" }),
+        row({ eventId: "y", ingestedAt: "2025-01-01 12:00:16.000" }),
+      ]);
+      const third = await pollLive(ctx, second.cursor);
+      // The window before 12:00:12 starts at 12:00:02: `r` is out of the
+      // parameter, and the resend's row comes back from the query. Before
+      // the fix `r` was forgotten with the window and emitted twice.
+      expect(mockQueryAnalytics.mock.calls[2][0].params.seen).toEqual(["x"]);
+      expect(third.events.map((e) => e.eventId)).toEqual(["y"]);
+      expect(third.cursor.ingestedAt).toBe("2025-01-01 12:00:16.000");
+      // Remembered from the resend's ingested_at: the next query leaves the
+      // resend's row out for as long as its window covers it.
+      expect(third.cursor.seen.find((r) => r.eventId === "r")?.ingestedAt).toBe(
+        "2025-01-01 12:00:15.000",
+      );
+      mockQueryAnalytics.mockResolvedValueOnce([]);
+      await pollLive(ctx, third.cursor);
+      expect(mockQueryAnalytics.mock.calls[3][0].params.seen.sort()).toEqual(["r", "x", "y"]);
     });
 
     it("a stale page that repeats a seen row does not show it twice", async () => {
@@ -207,7 +260,7 @@ describe("live queries (#148)", () => {
       expect(calls.some((c) => c.query.includes("maxOrNull"))).toBe(false);
     });
 
-    it("gives a backlog beyond the cap up: after LIVE_MAX_PAGES full pages the cursor jumps to the newest ingested_at of the last hour and seen keeps only the window", async () => {
+    it("gives a backlog beyond the cap up: after LIVE_MAX_PAGES full pages the cursor jumps to the newest ingested_at of the last hour; the next query leaves out only the window's rows", async () => {
       // Every page full and fresh: page k ingested at 12:00:(10+k).
       let page = 0;
       mockQueryAnalytics.mockImplementation(async (call: { query: string }) => {
@@ -224,9 +277,10 @@ describe("live queries (#148)", () => {
       expect(result.events).toHaveLength(LIVE_PAGE * LIVE_MAX_PAGES);
       // The cursor is at the newest row, not at the last page read (12:00:19).
       expect(result.cursor.ingestedAt).toBe("2025-01-01 12:00:25.000");
-      // `seen` is bounded to the new window: pages ingested at 12:00:15 and later.
-      expect(result.cursor.seen).toHaveLength(LIVE_PAGE * 5);
-      expect(result.cursor.seen.every((r) => r.ingestedAt >= "2025-01-01 12:00:15.000")).toBe(true);
+      // Every row read is inside the resend horizon (12:00:10 to 12:00:19,
+      // the cursor at 12:00:25); the next query's parameter carries only
+      // the window's: pages ingested at 12:00:15 and later.
+      expect(result.cursor.seen).toHaveLength(LIVE_PAGE * LIVE_MAX_PAGES);
       // The jump reads the newest ingested_at of the last hour by
       // timestamp (the sort key prunes), the clock only with no rows: the
       // backlog it gives up may end before the clock's window, and the
@@ -241,6 +295,17 @@ describe("live queries (#148)", () => {
       );
       expect(jump.query).not.toContain("INTERVAL 1 DAY");
       expect(jump.params.eventType).toBeUndefined();
+
+      mockQueryAnalytics.mockClear();
+      mockQueryAnalytics.mockResolvedValue([]);
+      await pollLive(ctx, result.cursor);
+      const inWindow = new Set(
+        result.cursor.seen
+          .filter((r) => r.ingestedAt >= "2025-01-01 12:00:15.000")
+          .map((r) => r.eventId),
+      );
+      expect(inWindow.size).toBe(LIVE_PAGE * 5);
+      expect(new Set(mockQueryAnalytics.mock.calls[0][0].params.seen)).toEqual(inWindow);
     });
 
     it("the jump never moves the cursor backwards, and the pages and the jump keep the type filter", async () => {
