@@ -232,7 +232,6 @@ let signalListeners: Map<HandledSignal, () => void> | null = null;
  * — `budgetMs` (D) from `startedAt`, absolute in `deadlineAt`.
  */
 interface SignalCycle {
-  id: number;
   signal: HandledSignal;
   sole: boolean;
   startedAt: number;
@@ -254,7 +253,6 @@ interface SignalCycle {
  * terminal's Ctrl-C to a script that already received it (#148).
  */
 let signalInFlight: SignalCycle | null = null;
-let cycles = 0;
 const SAME_DELIVERY_MS = 250;
 /**
  * Transport stops started outside a signal and still running (the last
@@ -492,7 +490,8 @@ let reraise: (signal: HandledSignal) => void = defaultReraise;
  * which is the first one delivered twice. Whether to re-raise is decided
  * when the signal ARRIVES: an app listener registered with `process.once`
  * is gone by the time the drain is done, and that app must not be killed in
- * the middle of its own shutdown. Each cycle has an identity: a drain that
+ * the middle of its own shutdown. Each cycle is its own object, and
+ * `finishSignal(cycle)` ends only the cycle still in flight: a drain that
  * ends after its cycle was handed back cannot end a later cycle.
  */
 function onSignal(signal: HandledSignal): void {
@@ -505,7 +504,6 @@ function onSignal(signal: HandledSignal): void {
   const budgetMs = processBudgetMs();
   const startedAt = Date.now();
   const cycle: SignalCycle = {
-    id: ++cycles,
     signal,
     sole: process.listenerCount(signal) === 1,
     startedAt,
