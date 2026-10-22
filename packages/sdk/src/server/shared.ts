@@ -368,6 +368,14 @@ function releaseWaiters(): void {
 let reportedLost = 0;
 let exitHookArmed = false;
 let exitReported = false;
+/**
+ * While the re-raise runs: the in-flight events the hand-back line just
+ * counted. On win32, or when `process.kill` throws, the re-raise ends the
+ * process through `process.exit()`, whose `exit` listeners run inside it —
+ * the exit hook must not count those events a second time (#148 review
+ * round 2). Zero otherwise, so the POSIX output is unchanged.
+ */
+let pendingInHandBackLine = 0;
 const signalStops = new WeakSet<Transport>();
 
 const lostTotal = (): number =>
@@ -380,7 +388,7 @@ const RAISE_HINT =
 function yavioReportAtExit(): void {
   if (exitReported) return;
   exitReported = true;
-  const n = lostTotal() - reportedLost + pendingTotal();
+  const n = lostTotal() - reportedLost + pendingTotal() - pendingInHandBackLine;
   if (n <= 0) return;
   reportedLost = lostTotal();
   console.warn(
@@ -511,7 +519,13 @@ function finishSignal(cycle: SignalCycle): void {
   lastBudgetMs = cycle.budgetMs;
   reportCycleLoss(cycle, "hand-back"); // before the re-raise: a POSIX re-raise skips `exit` listeners
   removeSignalHandlers();
-  if (cycle.sole) reraise(cycle.signal);
+  if (!cycle.sole) return;
+  pendingInHandBackLine = cycle.pendingReported;
+  try {
+    reraise(cycle.signal);
+  } finally {
+    pendingInHandBackLine = 0; // the process went on: a stubbed re-raise, or a survived one
+  }
 }
 
 /**
@@ -857,6 +871,7 @@ export function _resetSharedState(): void {
   lostFromClosed = 0;
   stopsInProgress.clear();
   reportedLost = 0;
+  pendingInHandBackLine = 0;
   if (exitHookArmed) process.off("exit", yavioReportAtExit);
   exitHookArmed = false;
   exitReported = false;

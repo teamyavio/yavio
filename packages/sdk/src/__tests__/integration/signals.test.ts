@@ -1125,6 +1125,30 @@ describe("loss accounting (#148)", () => {
     });
   });
 
+  it("a re-raise that ends the process through process.exit() — win32, or process.kill throwing — adds no second line for the in-flight events the cycle's line counted", async () => {
+    // What defaultReraise does there: process.exit(), whose exit listeners
+    // run inside it, right after the cycle's line.
+    _setSignalReraise(() => {
+      exitHooks()[0]?.call(process, 0);
+    });
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { raw } = build("yav_148_exit_in_reraise", { shutdownTimeoutMs: 300 });
+      await callTool(raw, "get_price", { q: "x" });
+      process.emit("SIGTERM", "SIGTERM");
+      await callTool(raw, "get_price", { q: "late" }); // in flight at the hand-back
+      await vi.waitFor(() => expect(process.listenerCount("SIGTERM")).toBe(0), {
+        timeout: 2_000,
+      });
+      // The cycle's line: the two events the deadline gave up plus the one
+      // in flight. Before the fix the exit hook, run by process.exit()
+      // inside the re-raise, printed "Process exit with 1 events not
+      // delivered" for that same in-flight event.
+      expect(lines1205()).toHaveLength(1);
+      expect(lines1205()[0]).toContain("Shutdown deadline of 300 ms");
+      expect(lines1205()[0]).toContain("3 events not delivered");
+    });
+  });
+
   it("a batch given up for good before the signal (a 400 at noon) is no deadline loss: a healthy drain prints no line, and the exit hook nothing", async () => {
     _setSignalReraise(() => {});
     await withoutOtherListeners("SIGTERM", async () => {
