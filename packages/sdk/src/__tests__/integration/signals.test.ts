@@ -4,6 +4,7 @@
  * default exit, so an app without a handler of its own would otherwise keep
  * running after Ctrl-C or `docker stop` once the SDK had drained.
  */
+import fs from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -40,6 +41,24 @@ async function withoutOtherListeners(
 
 const ok = async () => ({ content: [{ type: "text" as const, text: "ok" }] });
 
+/**
+ * The cycle's line before a re-raise is written with `fs.writeSync(2, …)`
+ * (#148 review round 2): record what goes to fd 2 in `lines` instead of
+ * printing it, and let every other write through.
+ */
+function spyStderr(lines: string[]): ReturnType<typeof vi.spyOn> {
+  const real = fs.writeSync;
+  return vi.spyOn(fs, "writeSync").mockImplementation(((
+    fd: number,
+    data: unknown,
+    ...rest: unknown[]
+  ): number => {
+    if (fd !== 2) return Reflect.apply(real, fs, [fd, data, ...rest]) as number;
+    lines.push(String(data).trimEnd());
+    return String(data).length;
+  }) as typeof fs.writeSync);
+}
+
 describe("SIGTERM/SIGINT hand-back (#138)", () => {
   let ingest: MockIngest;
   /** What the SDK re-raised, with the number of tool_call events delivered at that moment. */
@@ -59,15 +78,19 @@ describe("SIGTERM/SIGINT hand-back (#138)", () => {
     return raw;
   }
 
+  let stderr: ReturnType<typeof vi.spyOn>;
+
   beforeEach(async () => {
     _resetGlobalState(); // also restores the real re-raise
     reraised = [];
     _setSignalReraise((signal) => reraised.push({ signal, delivered: deliveredCalls() }));
+    stderr = spyStderr([]);
     ingest = await startMockIngest();
   });
 
   afterEach(async () => {
     _resetGlobalState();
+    stderr.mockRestore();
     await ingest.close();
   });
 
@@ -1045,9 +1068,11 @@ describe("one process deadline from the signal (#148)", () => {
  */
 describe("loss accounting (#148)", () => {
   let ingest: MockIngest;
-  let warn: { mock: { calls: unknown[][] }; mockRestore: () => void };
-  const lines1205 = () =>
-    warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("YAVIO-1205"));
+  let warn: ReturnType<typeof vi.spyOn>;
+  let stderr: ReturnType<typeof vi.spyOn>;
+  /** Every `console.warn` line and every line written to fd 2, in order. */
+  let lines: string[];
+  const lines1205 = () => lines.filter((l) => l.includes("YAVIO-1205"));
   const exitHooks = () => process.listeners("exit").filter((l) => l.name === "yavioReportAtExit");
 
   function build(apiKey: string, options: { shutdownTimeoutMs?: number } = {}) {
@@ -1059,7 +1084,11 @@ describe("loss accounting (#148)", () => {
 
   beforeEach(async () => {
     _resetGlobalState();
-    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    lines = [];
+    warn = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      lines.push(String(args[0]));
+    });
+    stderr = spyStderr(lines);
     ingest = await startMockIngest();
     ingest.hangEvents = true;
   });
@@ -1068,6 +1097,7 @@ describe("loss accounting (#148)", () => {
     await ingest.answerHung();
     _resetGlobalState();
     warn.mockRestore();
+    stderr.mockRestore();
     await ingest.close();
   });
 
@@ -1092,6 +1122,10 @@ describe("loss accounting (#148)", () => {
       expect(lines1205()[0]).toContain("deadline of 300 ms");
       expect(lines1205()[0]).toContain("5 events not delivered");
       expect(lines1205()[0]).toContain("shutdownTimeoutMs");
+      // Written synchronously to fd 2, not through console.warn: where
+      // stderr is an asynchronous pipe the re-raise would lose the line.
+      expect(stderr).toHaveBeenCalledWith(2, expect.stringContaining("YAVIO-1205"));
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("YAVIO-1205"));
       expect(ingest.batches).toHaveLength(3); // every batch reached ingest, none was answered
     });
   });

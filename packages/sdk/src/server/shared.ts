@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import os from "node:os";
 import { DEFAULT_SHUTDOWN_TIMEOUT_MS, shutdownTimeoutFromEnv } from "../core/config.js";
 import { LruMap } from "../core/lru.js";
@@ -420,9 +421,23 @@ function reportCycleLoss(cycle: SignalCycle, at: "hand-back" | "drain-settled"):
     n -= cycle.pendingReported;
   }
   if (n <= 0) return;
-  console.warn(
-    `[YAVIO-1205] Shutdown deadline of ${cycle.budgetMs} ms reached — ${n} events not delivered (queued, in flight or refused after the deadline). ${RAISE_HINT}`,
-  );
+  const line = `[YAVIO-1205] Shutdown deadline of ${cycle.budgetMs} ms reached — ${n} events not delivered (queued, in flight or refused after the deadline). ${RAISE_HINT}`;
+  if (at === "hand-back" && cycle.sole) writeStderrLine(line);
+  else console.warn(line);
+}
+
+/**
+ * One line to stderr, synchronously: the re-raise that follows ends the
+ * process, and where stderr is an asynchronous pipe (macOS and BSD under
+ * `npm run` or a log collector) a `console.warn` just before it can be
+ * lost with the process (#148 review round 2). `console.warn` elsewhere.
+ */
+function writeStderrLine(line: string): void {
+  try {
+    fs.writeSync(2, `${line}\n`);
+  } catch {
+    console.warn(line); // a full non-blocking pipe (EAGAIN): the stream's turn
+  }
 }
 
 /**
