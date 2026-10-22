@@ -518,12 +518,14 @@ export class HttpTransport implements Transport {
             const delayMs =
               retryAfterMs(response.headers.get("Retry-After")) ??
               BASE_RETRY_DELAY_MS * 2 ** attempt;
-            if (!this.canWait(delayMs)) return this.giveUp("deadline");
-            console.warn(
-              `[${ErrorCode.SDK.FLUSH_RATE_LIMITED}] Rate limited, retrying in ${delayMs}ms`,
-            );
-            await this.delay(delayMs);
-            if (this.deadlineReached) return this.giveUp("deadline");
+            if (
+              !(await this.waitForRetry(
+                delayMs,
+                `[${ErrorCode.SDK.FLUSH_RATE_LIMITED}] Rate limited, retrying in ${delayMs}ms`,
+              ))
+            ) {
+              return;
+            }
             continue;
           }
           // The last allowed attempt: the batch is given up like a 5xx on
@@ -538,13 +540,14 @@ export class HttpTransport implements Transport {
         // 5xx — retry with backoff
         if (response.status >= 500) {
           if (attempt < this.maxRetries) {
-            const delayMs = BASE_RETRY_DELAY_MS * 2 ** attempt;
-            if (!this.canWait(delayMs)) return this.giveUp("deadline");
-            console.warn(
-              `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Server error ${response.status}, retry ${attempt + 1}/${this.maxRetries}`,
-            );
-            await this.delay(delayMs);
-            if (this.deadlineReached) return this.giveUp("deadline");
+            if (
+              !(await this.waitForRetry(
+                BASE_RETRY_DELAY_MS * 2 ** attempt,
+                `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Server error ${response.status}, retry ${attempt + 1}/${this.maxRetries}`,
+              ))
+            ) {
+              return;
+            }
             continue;
           }
           console.error(
@@ -558,13 +561,14 @@ export class HttpTransport implements Transport {
       } catch (error) {
         // Network error (or the abort at the deadline) — retry with backoff
         if (attempt < this.maxRetries) {
-          const delayMs = BASE_RETRY_DELAY_MS * 2 ** attempt;
-          if (!this.canWait(delayMs)) return this.giveUp("deadline");
-          console.warn(
-            `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Network error, retry ${attempt + 1}/${this.maxRetries}`,
-          );
-          await this.delay(delayMs);
-          if (this.deadlineReached) return this.giveUp("deadline");
+          if (
+            !(await this.waitForRetry(
+              BASE_RETRY_DELAY_MS * 2 ** attempt,
+              `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Network error, retry ${attempt + 1}/${this.maxRetries}`,
+            ))
+          ) {
+            return;
+          }
           continue;
         }
         console.error(
@@ -588,6 +592,26 @@ export class HttpTransport implements Transport {
   private canWait(ms: number): boolean {
     if (this.deadlineReached) return false;
     return this.deadlineAt === undefined || Date.now() + ms < this.deadlineAt;
+  }
+
+  /**
+   * The retry step the 429, 5xx and network branches share: announce the
+   * retry and wait `delayMs`, true once the next attempt may go out. False
+   * — the batch given up to the deadline — when the deadline forbids the
+   * wait or ends it (#148 review round 5, one copy instead of three).
+   */
+  private async waitForRetry(delayMs: number, message: string): Promise<boolean> {
+    if (!this.canWait(delayMs)) {
+      this.giveUp("deadline");
+      return false;
+    }
+    console.warn(message);
+    await this.delay(delayMs);
+    if (this.deadlineReached) {
+      this.giveUp("deadline");
+      return false;
+    }
+    return true;
   }
 
   /**
