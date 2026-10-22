@@ -1,4 +1,5 @@
 import {
+  formatAbsoluteTime,
   formatBucketLabel,
   formatBucketTooltip,
   formatCountry,
@@ -9,6 +10,7 @@ import {
   formatRelativeTime,
   formatShare,
   granularityToFunction,
+  parseTimestamp,
 } from "@/lib/analytics/format";
 import { describe, expect, it } from "vitest";
 
@@ -150,6 +152,36 @@ describe("formatRelativeTime", () => {
   it("handles ISO string input", () => {
     const date = new Date(Date.now() - 2 * 3_600_000).toISOString();
     expect(formatRelativeTime(date)).toBe("2h ago");
+  });
+});
+
+describe("parseTimestamp", () => {
+  it("reads a ClickHouse timestamp as UTC, not local time", () => {
+    expect(parseTimestamp("2026-07-17 14:03:09.250").toISOString()).toBe(
+      "2026-07-17T14:03:09.250Z",
+    );
+  });
+
+  it("passes ISO strings and dates through", () => {
+    expect(parseTimestamp("2026-07-17T14:03:09.000Z").toISOString()).toBe(
+      "2026-07-17T14:03:09.000Z",
+    );
+    const date = new Date("2026-07-17T14:03:09.000Z");
+    expect(parseTimestamp(date)).toBe(date);
+  });
+});
+
+describe("formatAbsoluteTime", () => {
+  it("renders the exact moment in UTC and says so (#45)", () => {
+    expect(formatAbsoluteTime("2026-07-17 14:03:09.250")).toBe("2026-07-17 14:03:09 UTC");
+    expect(formatAbsoluteTime("2026-01-05T04:07:00.000Z")).toBe("2026-01-05 04:07:00 UTC");
+    expect(formatAbsoluteTime(new Date("2026-12-31T23:59:59.999Z"))).toBe(
+      "2026-12-31 23:59:59 UTC",
+    );
+  });
+
+  it("returns unparseable input as is instead of 'Invalid Date'", () => {
+    expect(formatAbsoluteTime("not a time")).toBe("not a time");
   });
 });
 

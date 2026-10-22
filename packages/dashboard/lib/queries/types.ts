@@ -207,12 +207,34 @@ export interface IntentKPIs {
 }
 
 /**
- * Response contract of GET /api/analytics/[projectId]/intents. Shared by the
- * route and the page so a rename on either side is a compile error rather
- * than a silently undefined field at runtime.
+ * One row of the project-wide invocation list (#44): every tool call in the
+ * range, newest first, with its intent inline when one was captured.
  */
-export interface IntentsResponse {
-  intents: IntentFeedItem[];
+export interface InvocationFeedItem {
+  eventId: string;
+  timestamp: string;
+  toolName: string;
+  /** Empty when the call carried no intent. */
+  intent: string;
+  intentSource: string;
+  platform: string;
+  status: string;
+  latencyMs: number | null;
+  errorCategory: string | null;
+  errorMessage: string | null;
+  /** user_id, else the platform's subject_id; null when the event has neither. */
+  userId: string | null;
+  sessionId: string;
+  traceId: string;
+  countryCode: string | null;
+  inputValues: string | null;
+  outputContent: string | null;
+  metadata: string | null;
+}
+
+/** Response contract of GET /api/analytics/[projectId]/invocations. */
+export interface InvocationsResponse {
+  invocations: InvocationFeedItem[];
   total: number;
   kpis: IntentKPIs;
   intentStatus: IntentStatus;
@@ -250,6 +272,8 @@ export interface ToolInvocation {
   platform: string | null;
   errorCategory: string | null;
   errorMessage: string | null;
+  /** From the client platform's location (#47); null when not captured. */
+  countryCode: string | null;
   isRetry: number;
   inputValues: string | null;
   outputContent: string | null;

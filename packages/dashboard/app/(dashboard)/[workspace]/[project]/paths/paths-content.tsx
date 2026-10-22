@@ -47,7 +47,7 @@ export function PathsContent({ projectId }: { projectId: string }) {
 
   return (
     <div className={`space-y-6 ${isRefetching ? "opacity-50 transition-opacity" : ""}`}>
-      <PageHeader title="Paths">
+      <PageHeader title="Paths" onRefresh={retry} refreshing={isRefetching}>
         <div className="flex items-center gap-2">
           {data && data.nodes.length > 0 && (
             <>

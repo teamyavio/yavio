@@ -3,7 +3,7 @@
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { DATE_PRESETS } from "@/lib/analytics/date-presets";
+import { DATE_PRESETS, presetFor, presetWindow } from "@/lib/analytics/date-presets";
 import { cn } from "@/lib/utils";
 import { format } from "date-fns";
 import { CalendarIcon } from "lucide-react";
@@ -24,9 +24,11 @@ export function DateRangePicker({ from, to, onChange }: DateRangePickerProps) {
 
   useEffect(() => setMounted(true), []);
 
-  const handlePreset = (days: number) => {
-    const now = new Date();
-    onChange(new Date(now.getTime() - days * 86_400_000), now);
+  const activePreset = presetFor(from, to);
+
+  const handlePreset = (preset: (typeof PRESETS)[number]) => {
+    const window = presetWindow(preset);
+    onChange(window.from, window.to);
   };
 
   const handleCalendarSelect = (range: DateRange | undefined) => {
@@ -43,12 +45,8 @@ export function DateRangePicker({ from, to, onChange }: DateRangePickerProps) {
           key={preset.label}
           variant="ghost"
           size="sm"
-          className={cn(
-            "text-xs",
-            Math.abs(to.getTime() - from.getTime() - preset.days * 86_400_000) < 3_600_000 &&
-              "bg-accent",
-          )}
-          onClick={() => handlePreset(preset.days)}
+          className={cn("text-xs", activePreset?.label === preset.label && "bg-accent")}
+          onClick={() => handlePreset(preset)}
         >
           {preset.label}
         </Button>

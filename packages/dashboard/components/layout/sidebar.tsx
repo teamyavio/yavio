@@ -1,5 +1,6 @@
 "use client";
 
+import { McpConnectDialog } from "@/components/layout/mcp-connect-dialog";
 import { ScopeSwitcher } from "@/components/layout/scope-switcher";
 import { YavioLogo } from "@/components/layout/yavio-logo";
 import {
@@ -11,6 +12,15 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
+import {
+  type AnalyticsSection,
+  type LastView,
+  analyticsFilterSearch,
+  analyticsSection,
+  lastViewKey,
+  parseLastView,
+  serializeLastView,
+} from "@/lib/navigation";
 import {
   accountSettingsTabs,
   resolveAccountTab,
@@ -57,12 +67,19 @@ interface SidebarProps {
   workspaces: Workspace[];
   projects: Project[];
   user: { name: string | null; email: string };
+  /** This deployment's MCP server URL, resolved server-side (#53). */
+  mcpUrl: string;
 }
 
-const analyticsNavItems = [
+const analyticsNavItems: {
+  path: AnalyticsSection;
+  label: string;
+  icon: typeof LayoutDashboard;
+  comingSoon?: boolean;
+}[] = [
   { path: "overview", label: "Overview", icon: LayoutDashboard },
   { path: "tools", label: "Tools", icon: Wrench },
-  { path: "intents", label: "Intents", icon: Target },
+  { path: "invocations", label: "Invocations", icon: Target },
   { path: "funnels", label: "Funnels", icon: Filter, comingSoon: true },
   { path: "users", label: "Users", icon: Users },
   { path: "paths", label: "Paths", icon: GitBranch, comingSoon: true },
@@ -81,13 +98,18 @@ const WIDE_VIEWPORT_QUERY = "(min-width: 1024px)";
 const LAST_WORKSPACE_KEY = "yavio.last-workspace";
 const lastProjectKey = (workspaceSlug: string) => `yavio.last-project.${workspaceSlug}`;
 
-export function Sidebar({ workspaces, projects, user }: SidebarProps) {
+export function Sidebar({ workspaces, projects, user, mcpUrl }: SidebarProps) {
   const pathname = usePathname();
   const params = useParams();
   const searchParams = useSearchParams();
   const [mounted, setMounted] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [isWide, setIsWide] = useState(true);
+  // Where the user last was in the current project (#43); settings pages
+  // return there, and links from a page without filters in its URL carry
+  // those filters. Read from localStorage after mount and whenever the
+  // effect below stores a new value, never during render.
+  const [lastView, setLastView] = useState<LastView | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -115,14 +137,36 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
   const paramWorkspace = params.workspace as string | undefined;
   const paramProject = params.project as string | undefined;
 
+  // The analytics filters in the URL (#43): carried on every sidebar link
+  // and remembered per project together with the section, so leaving for
+  // settings or another project does not reset them.
+  const filterSearch = analyticsFilterSearch(searchParams);
+  const paramSection =
+    paramWorkspace && paramProject
+      ? analyticsSection(pathname, `/${paramWorkspace}/${paramProject}`)
+      : null;
+
   useEffect(() => {
     if (paramWorkspace) {
       localStorage.setItem(LAST_WORKSPACE_KEY, paramWorkspace);
       if (paramProject) {
         localStorage.setItem(lastProjectKey(paramWorkspace), paramProject);
+        if (paramSection) {
+          // A page without filters in its URL (Live, a fresh link) keeps the
+          // filters remembered before it rather than clearing them. Reading
+          // them back through parseLastView drops a window that went stale.
+          const key = lastViewKey(paramWorkspace, paramProject);
+          const previous = parseLastView(localStorage.getItem(key));
+          const stored = serializeLastView({
+            section: paramSection,
+            search: filterSearch || previous?.search || "",
+          });
+          localStorage.setItem(key, stored);
+          setLastView(parseLastView(stored));
+        }
       }
     }
-  }, [paramWorkspace, paramProject]);
+  }, [paramWorkspace, paramProject, paramSection, filterSearch]);
 
   // localStorage is only consulted after mount so the first client
   // render matches the server-rendered HTML.
@@ -152,6 +196,21 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
     currentWorkspaceSlug && currentProjectSlug
       ? `/${currentWorkspaceSlug}/${currentProjectSlug}`
       : "";
+
+  // Settings pages carry no project in the URL, so the write effect above
+  // does not run there; the remembered view of the current project is read
+  // here instead (after the write effect, which is declared first).
+  useEffect(() => {
+    if (!mounted) return;
+    setLastView(
+      currentWorkspaceSlug && currentProjectSlug
+        ? parseLastView(localStorage.getItem(lastViewKey(currentWorkspaceSlug, currentProjectSlug)))
+        : null,
+    );
+  }, [mounted, currentWorkspaceSlug, currentProjectSlug]);
+
+  const navSearch = filterSearch || lastView?.search || "";
+  const currentSection = paramSection ?? lastView?.section ?? "overview";
 
   // Settings pages are workspace- (or account-)scoped: the project
   // selector has no honest job there, so it is replaced by an explicit
@@ -215,6 +274,8 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
             currentProjectSlug={currentProjectSlug}
             collapsed={collapsed}
             mode={inSettings ? "workspace-settings" : "scope"}
+            section={currentSection}
+            search={navSearch}
           />
         </div>
       )}
@@ -292,7 +353,7 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
               return (
                 <Link
                   key={item.path}
-                  href={href}
+                  href={`${href}${navSearch}`}
                   title={collapsed ? item.label : undefined}
                   className={cn(
                     "flex h-9 items-center gap-3 rounded-md text-sm font-medium transition-colors",
@@ -332,7 +393,7 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
       {inSettings && basePath && (
         <div className="p-2">
           <Link
-            href={`${basePath}/overview`}
+            href={`${basePath}/${currentSection}${navSearch}`}
             title={collapsed ? "Back to Dashboard" : (currentProjectName ?? undefined)}
             className={cn(
               "flex h-9 items-center gap-3 rounded-md border text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
@@ -347,7 +408,8 @@ export function Sidebar({ workspaces, projects, user }: SidebarProps) {
 
       <Separator />
 
-      <div className="p-2">
+      <div className="space-y-1 p-2">
+        <McpConnectDialog url={mcpUrl} collapsed={collapsed} />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button

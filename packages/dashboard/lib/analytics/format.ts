@@ -134,16 +134,40 @@ export function formatBucketTooltip(bucket: string, granularity: Granularity): s
 }
 
 /**
+ * Parse an event timestamp. ClickHouse returns "YYYY-MM-DD HH:mm:ss.SSS"
+ * with no timezone, which JS would read as local time; it is UTC, so "Z"
+ * is appended first. ISO strings and Date objects pass through.
+ */
+export function parseTimestamp(timestamp: string | Date): Date {
+  if (typeof timestamp !== "string") return timestamp;
+  const raw =
+    !timestamp.includes("T") && !timestamp.endsWith("Z")
+      ? `${timestamp.replace(" ", "T")}Z`
+      : timestamp;
+  return new Date(raw);
+}
+
+const pad = (n: number) => String(n).padStart(2, "0");
+
+/**
+ * The exact moment of an event, always in UTC and labelled as such
+ * ("2026-07-17 14:03:09 UTC"), so it can be matched against server logs and
+ * support reports without guessing the viewer's zone (#45). Unparseable
+ * input is returned as is rather than as "Invalid Date".
+ */
+export function formatAbsoluteTime(timestamp: string | Date): string {
+  const date = parseTimestamp(timestamp);
+  if (Number.isNaN(date.getTime())) return String(timestamp);
+  const day = `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
+  const time = `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`;
+  return `${day} ${time} UTC`;
+}
+
+/**
  * Format a timestamp as relative time (e.g., "2h ago", "3d ago").
  */
 export function formatRelativeTime(timestamp: string | Date): string {
-  // ClickHouse returns "YYYY-MM-DD HH:mm:ss.SSS" (no timezone).
-  // Append "Z" so JS parses it as UTC instead of local time.
-  const raw =
-    typeof timestamp === "string" && !timestamp.includes("T") && !timestamp.endsWith("Z")
-      ? `${timestamp.replace(" ", "T")}Z`
-      : timestamp;
-  const date = typeof raw === "string" ? new Date(raw) : raw;
+  const date = parseTimestamp(timestamp);
   const now = Date.now();
   const diffMs = now - date.getTime();
 

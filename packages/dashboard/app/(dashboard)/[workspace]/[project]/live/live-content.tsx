@@ -3,8 +3,10 @@
 import { EVENT_TYPE_COLORS } from "@/components/analytics/chart-config";
 import { EmptyState } from "@/components/analytics/empty-state";
 import { EventBadge } from "@/components/analytics/event-badge";
+import { EventDetail } from "@/components/analytics/event-detail";
 import { PageHeader } from "@/components/analytics/page-header";
 import { platformLabel } from "@/components/analytics/platform-meta";
+import { Timestamp } from "@/components/analytics/timestamp";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -13,7 +15,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { formatLatency, formatRelativeTime } from "@/lib/analytics/format";
+import { formatLatency } from "@/lib/analytics/format";
 import type { LiveEvent } from "@/lib/queries/types";
 import { cn } from "@/lib/utils";
 import { Pause, Play } from "lucide-react";
@@ -158,9 +160,11 @@ export function LiveContent({ projectId }: { projectId: string }) {
                 }}
                 onClick={() => setExpandedId(expandedId === event.eventId ? null : event.eventId)}
               >
-                <span className="w-20 shrink-0 text-xs text-muted-foreground">
-                  {formatRelativeTime(event.timestamp)}
-                </span>
+                <Timestamp
+                  value={event.timestamp}
+                  show="relative"
+                  className="w-20 shrink-0 text-xs text-muted-foreground"
+                />
                 <EventBadge eventType={event.eventType} />
                 <span className="flex-1 truncate font-mono text-xs">
                   {event.eventName ?? event.eventType}
@@ -173,39 +177,28 @@ export function LiveContent({ projectId }: { projectId: string }) {
                 {event.status === "error" && <span className="text-xs text-red-600">error</span>}
               </button>
               {expandedId === event.eventId && (
-                <div className="ml-4 rounded-md border bg-muted/50 px-4 py-3 text-xs">
-                  <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
-                    <dt className="text-muted-foreground">Timestamp</dt>
-                    <dd className="font-mono">{event.timestamp}</dd>
-                    <dt className="text-muted-foreground">Session</dt>
-                    <dd className="font-mono">{event.sessionId}</dd>
-                    <dt className="text-muted-foreground">Trace</dt>
-                    <dd className="font-mono">{event.traceId}</dd>
-                    {event.userId && (
-                      <>
-                        <dt className="text-muted-foreground">User</dt>
-                        <dd className="font-mono">{event.userId}</dd>
-                      </>
-                    )}
-                    {event.platform && (
-                      <>
-                        <dt className="text-muted-foreground">Platform</dt>
-                        <dd>{platformLabel(event.platform)}</dd>
-                      </>
-                    )}
-                    {event.errorCategory && (
-                      <>
-                        <dt className="text-muted-foreground">Error Category</dt>
-                        <dd className="text-red-600">{event.errorCategory}</dd>
-                      </>
-                    )}
-                    {event.errorMessage && (
-                      <>
-                        <dt className="text-muted-foreground">Error Message</dt>
-                        <dd className="text-red-600">{event.errorMessage}</dd>
-                      </>
-                    )}
-                  </dl>
+                <div className="mt-1 mb-2 ml-4 rounded-md border bg-muted/50 px-4 py-3">
+                  <EventDetail
+                    raw={event}
+                    fields={[
+                      { label: "Time", value: <Timestamp value={event.timestamp} />, mono: true },
+                      { label: "Event", value: event.eventName ?? event.eventType, mono: true },
+                      { label: "Session", value: event.sessionId, mono: true },
+                      { label: "Trace", value: event.traceId, mono: true },
+                      { label: "User", value: event.userId, mono: true },
+                      {
+                        label: "Platform",
+                        value: event.platform ? platformLabel(event.platform) : null,
+                      },
+                      { label: "Status", value: event.status },
+                      {
+                        label: "Latency",
+                        value: event.latencyMs != null ? formatLatency(event.latencyMs) : null,
+                      },
+                      { label: "Error category", value: event.errorCategory, tone: "error" },
+                      { label: "Error message", value: event.errorMessage, tone: "error" },
+                    ]}
+                  />
                 </div>
               )}
             </div>

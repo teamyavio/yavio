@@ -46,6 +46,30 @@ export const paginationSchema = z.object({
 
 export type PaginationParams = z.infer<typeof paginationSchema>;
 
+/** Longest tool-name filter; the client cuts there too before querying. */
+export const TOOL_FILTER_MAX_LENGTH = 200;
+
+/**
+ * Extra filters of the invocation list (#44), on top of the analytics
+ * filters. `hasIntent` is a flag ("1"/"true"); anything else, including
+ * its absence, means "all invocations". The tool name is a free-text
+ * filter: a blank value means "no filter" and a pasted overlong value is
+ * cut, since neither should blank the page with a 400.
+ */
+export const invocationFiltersSchema = z.object({
+  tool: z
+    .string()
+    .optional()
+    .transform((v) => v?.trim().slice(0, TOOL_FILTER_MAX_LENGTH) || undefined),
+  status: z.enum(["success", "error"]).optional(),
+  hasIntent: z
+    .string()
+    .optional()
+    .transform((v) => v === "1" || v === "true"),
+});
+
+export type InvocationFilters = z.infer<typeof invocationFiltersSchema>;
+
 /**
  * Parse analytics filters + pagination from URLSearchParams.
  */

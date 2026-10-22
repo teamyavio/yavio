@@ -68,7 +68,7 @@ export function OverviewContent({ projectId }: { projectId: string }) {
 
   return (
     <div className={`space-y-6 ${isRefetching ? "opacity-50 transition-opacity" : ""}`}>
-      <PageHeader title="Overview">
+      <PageHeader title="Overview" onRefresh={retry} refreshing={isRefetching}>
         <PlatformFilter selected={filters.platform} onChange={(p) => setFilter({ platform: p })} />
         <DateRangePicker
           from={filters.from}

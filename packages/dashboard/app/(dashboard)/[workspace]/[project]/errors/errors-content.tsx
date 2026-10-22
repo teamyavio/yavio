@@ -17,14 +17,10 @@ import { errorCategoryTitle } from "@/components/analytics/error-category-meta";
 import { PageHeader } from "@/components/analytics/page-header";
 import { PlatformFilter } from "@/components/analytics/platform-filter";
 import { platformLabel } from "@/components/analytics/platform-meta";
+import { Timestamp } from "@/components/analytics/timestamp";
 import { useAnalyticsFilters } from "@/hooks/use-analytics-filters";
 import { useAnalyticsQuery } from "@/hooks/use-analytics-query";
-import {
-  formatBucketLabel,
-  formatBucketTooltip,
-  formatPercent,
-  formatRelativeTime,
-} from "@/lib/analytics/format";
+import { formatBucketLabel, formatBucketTooltip, formatPercent } from "@/lib/analytics/format";
 import type { ErrorCategoryCount, ErrorListItem, TimeSeriesPoint } from "@/lib/queries/types";
 import { useEffect, useState } from "react";
 import {
@@ -48,7 +44,7 @@ const columns: Column<ErrorListItem>[] = [
   {
     key: "timestamp",
     label: "Time",
-    render: (row: ErrorListItem) => formatRelativeTime(row.timestamp),
+    render: (row: ErrorListItem) => <Timestamp value={row.timestamp} />,
   },
   { key: "toolName", label: "Tool" },
   {
@@ -95,7 +91,7 @@ export function ErrorsContent({ projectId }: { projectId: string }) {
 
   return (
     <div className={`space-y-6 ${isRefetching ? "opacity-50 transition-opacity" : ""}`}>
-      <PageHeader title="Errors">
+      <PageHeader title="Errors" onRefresh={retry} refreshing={isRefetching}>
         <PlatformFilter selected={filters.platform} onChange={(p) => setFilter({ platform: p })} />
         <DateRangePicker
           from={filters.from}
