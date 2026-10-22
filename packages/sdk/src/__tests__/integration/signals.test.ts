@@ -42,6 +42,16 @@ async function withoutOtherListeners(
 const ok = async () => ({ content: [{ type: "text" as const, text: "ok" }] });
 
 /**
+ * Put an environment variable back as it was. Not `process.env.X =
+ * undefined`: Node coerces the value to the string "undefined", which the
+ * next test reads as a set, invalid value (#148 review round 2).
+ */
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+/**
  * The cycle's line before a re-raise is written with `fs.writeSync(2, …)`
  * (#148 review round 2): record what goes to fd 2 in `lines` instead of
  * printing it, and let every other write through.
@@ -906,6 +916,9 @@ describe("one process deadline from the signal (#148)", () => {
     _resetGlobalState();
     warn.mockRestore();
     await ingest.close();
+    // No test leaves the env var behind — and none leaves the string
+    // "undefined" behind, which `process.env.X = undefined` stores.
+    expect(process.env.YAVIO_SHUTDOWN_TIMEOUT_MS).toBeUndefined();
   });
 
   it("one deadline across keys: a client with 3 s on key A and a pin with 300 ms on key B — A's handler shutdown() resolves at about 300 ms", async () => {
@@ -1005,6 +1018,7 @@ describe("one process deadline from the signal (#148)", () => {
 
   it("a send() after the hand-back still goes out, and a shutdown() after it waits at most D from its call", async () => {
     await withoutOtherListeners("SIGTERM", async () => {
+      const saved = process.env.YAVIO_SHUTDOWN_TIMEOUT_MS;
       process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "300";
       try {
         const { client, raw } = build("yav_148_after", { shutdownTimeoutMs: 3_000 });
@@ -1030,13 +1044,14 @@ describe("one process deadline from the signal (#148)", () => {
           ingest.events.map((e) => (e.input_values as { q?: string } | undefined)?.q),
         ).toContain("after");
       } finally {
-        process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = undefined;
+        restoreEnv("YAVIO_SHUTDOWN_TIMEOUT_MS", saved);
       }
     });
   });
 
   it("YAVIO_SHUTDOWN_TIMEOUT_MS counts even when no participant set a value: a plain client is bounded by it", async () => {
     await withoutOtherListeners("SIGTERM", async () => {
+      const saved = process.env.YAVIO_SHUTDOWN_TIMEOUT_MS;
       process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "300";
       try {
         // Resolved with the option, so the client's own value is 3 s and
@@ -1050,7 +1065,7 @@ describe("one process deadline from the signal (#148)", () => {
         expect(fromSignal).toBeGreaterThanOrEqual(250);
         expect(fromSignal).toBeLessThan(1_000);
       } finally {
-        process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = undefined;
+        restoreEnv("YAVIO_SHUTDOWN_TIMEOUT_MS", saved);
       }
     });
   });

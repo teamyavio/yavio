@@ -14,8 +14,8 @@ describe("resolveConfig", () => {
 
   beforeEach(() => {
     process.env = { ...originalEnv };
-    process.env.YAVIO_API_KEY = undefined;
-    process.env.YAVIO_ENDPOINT = undefined;
+    delete process.env.YAVIO_API_KEY;
+    delete process.env.YAVIO_ENDPOINT;
   });
 
   afterEach(() => {
@@ -189,7 +189,7 @@ describe("per-tool capture overrides (tools)", () => {
 
   beforeEach(() => {
     process.env = { ...originalEnv };
-    process.env.YAVIO_API_KEY = undefined;
+    delete process.env.YAVIO_API_KEY;
     tempDir = mkdtempSync(join(tmpdir(), "yavio-tools-test-"));
   });
 
@@ -309,7 +309,7 @@ describe("endpoint validation", () => {
   const originalEnv = process.env;
   beforeEach(() => {
     process.env = { ...originalEnv, YAVIO_API_KEY: "yav_test" };
-    process.env.YAVIO_ENDPOINT = undefined;
+    delete process.env.YAVIO_ENDPOINT;
     _resetConfigWarnings();
   });
   afterEach(() => {
@@ -509,7 +509,7 @@ describe("shutdownTimeoutMs (#142)", () => {
   beforeEach(() => {
     process.env = { ...originalEnv };
     process.env.YAVIO_API_KEY = "yav_test";
-    process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = undefined;
+    delete process.env.YAVIO_SHUTDOWN_TIMEOUT_MS;
     _resetConfigWarnings();
   });
 
@@ -553,7 +553,7 @@ describe("shutdownTimeoutMs (#142)", () => {
       );
       process.cwd = () => tempDir;
       expect(resolveConfig()?.shutdownTimeoutMsSource).toBe("env");
-      process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = undefined;
+      delete process.env.YAVIO_SHUTDOWN_TIMEOUT_MS;
       expect(resolveConfig()).toMatchObject({
         shutdownTimeoutMs: 3_000,
         shutdownTimeoutMsSource: "file",

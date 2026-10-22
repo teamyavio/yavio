@@ -12,8 +12,8 @@ describe("withYavio", () => {
 
   beforeEach(() => {
     process.env = { ...originalEnv };
-    process.env.YAVIO_API_KEY = undefined;
-    process.env.YAVIO_ENDPOINT = undefined;
+    delete process.env.YAVIO_API_KEY;
+    delete process.env.YAVIO_ENDPOINT;
   });
 
   afterEach(() => {
