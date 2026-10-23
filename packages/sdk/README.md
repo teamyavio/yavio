@@ -161,7 +161,7 @@ What holds across instances **and across processes** (a fleet behind a load bala
 | 5 | Your `sessionKey` option | `custom` |
 | — | None of them: the connection's own session — on an HTTP request that is one request, on stdio one client process | `per_request` / `connection` |
 
-Keys 3 and 4 apply on stdio too, so since 0.5.4 a VS Code stdio server gets one session per conversation instead of one per client process. The other clients known today — Claude Code, claude.ai connectors, Cursor, Zed — send no conversation key; if your host knows the conversation (a header your gateway sets, a conversation id in your own auth layer), tell the SDK:
+Keys 3 and 4 apply on stdio too, so since 0.5.4 a VS Code stdio server gets one session per conversation instead of one per client process — more sessions there, and `identify()` no longer carries from one conversation to the next. The other clients known today — Claude Code, claude.ai connectors, Cursor, Zed — send no conversation key; if your host knows the conversation (a header your gateway sets, a conversation id in your own auth layer), tell the SDK:
 
 ```typescript
 const analytics = createYavio({
