@@ -6,14 +6,13 @@ import { SDK_VERSION as REACT_SDK_VERSION } from "../react/constants.js";
 import { SDK_VERSION, createYavio, withYavio, yavio } from "../server/index.js";
 import { _resetGlobalState } from "../server/proxy.js";
 import { _sharedStateCount } from "../server/shared.js";
+import { without } from "./env.js";
 
 describe("withYavio", () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
-    process.env = { ...originalEnv };
-    process.env.YAVIO_API_KEY = undefined;
-    process.env.YAVIO_ENDPOINT = undefined;
+    process.env = without(originalEnv, "YAVIO_API_KEY", "YAVIO_ENDPOINT");
   });
 
   afterEach(() => {

@@ -13,7 +13,6 @@ function makeEvent(id = "evt-1"): EnrichedEvent {
     source: "server",
     workspace_id: "ws-1",
     project_id: "proj-1",
-    ingested_at: new Date().toISOString(),
   };
 }
 
@@ -240,23 +239,28 @@ describe("BatchWriter", () => {
     }
   });
 
-  it("gives the same batch enriched again (an SDK resend) a different token", async () => {
-    // The token is hashed from event_id, timestamp and ingested_at (#114),
-    // not the whole batch: a resend is enriched anew and must still be
-    // stored, to be collapsed by FINAL later (#90).
+  it("gives the same rows enriched again (an SDK resend making up a block of its own) the same token, and a clamped resend a new one", async () => {
+    // The token is hashed from event_id and timestamp (#114; ingested_at
+    // left the rows in #148 review round 5): a block of the same rows is
+    // dropped by the deduplication window — the end state FINAL would
+    // reach one merge later — while a resend whose timestamp the
+    // normalizer clamped anew is told apart (#90).
     const insertFn = vi.fn().mockResolvedValue(undefined);
     const writer = new BatchWriter({ clickhouse: mockClickHouse(insertFn), flushSize: 5 });
     const first = makeEvent("evt-same");
     writer.enqueue([first]);
     await writer.flush();
-    writer.enqueue([{ ...first, ingested_at: new Date(Date.now() + 1_000).toISOString() }]);
+    writer.enqueue([{ ...first }]);
     await writer.flush();
-    const [a, b] = insertFn.mock.calls.map(
-      (c) =>
-        (c[0] as { clickhouse_settings: Record<string, unknown> }).clickhouse_settings
+    writer.enqueue([{ ...first, timestamp: new Date(Date.now() + 1_000).toISOString() }]);
+    await writer.flush();
+    const [a, b, c] = insertFn.mock.calls.map(
+      (call) =>
+        (call[0] as { clickhouse_settings: Record<string, unknown> }).clickhouse_settings
           .insert_deduplication_token,
     );
-    expect(a).not.toBe(b);
+    expect(a).toBe(b);
+    expect(c).not.toBe(a);
   });
 
   it("gives different batches different tokens", async () => {

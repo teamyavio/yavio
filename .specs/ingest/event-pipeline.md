@@ -109,7 +109,7 @@ Ingestion API
   │      → resolve project_id + workspace_id
   ├─ 2. Rate limit check (per API key, per IP)
   ├─ 3. Schema validation (reject malformed events)
-  ├─ 4. Event enrichment (add workspace_id, project_id, ingested_at)
+  ├─ 4. Event enrichment (add workspace_id, project_id; ingested_at is the column DEFAULT, stamped by ClickHouse at insert — #148 review round 5)
   ├─ 5. PII stripping (all string fields)
   ├─ 6. Batch buffering (accumulate for efficient ClickHouse insert)
   └─ 7. ClickHouse batch write

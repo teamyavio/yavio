@@ -209,6 +209,6 @@ describe("POST /v1/events — processing scenarios", () => {
     const event = enqueuedEvents[0] as Record<string, string>;
     expect(event.workspace_id).toBe(TEST_WORKSPACE_ID);
     expect(event.project_id).toBe(TEST_PROJECT_ID);
-    expect(event.ingested_at).toBeDefined();
+    expect(event).not.toHaveProperty("ingested_at"); // ClickHouse's, at insert (#148 review round 5)
   });
 });

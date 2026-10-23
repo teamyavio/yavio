@@ -3,7 +3,7 @@ import { createDb } from "@yavio/db/client";
 import { loadConfig } from "./config.js";
 import { createApp } from "./index.js";
 import { BatchWriter } from "./lib/batch-writer.js";
-import type { EnrichedEvent } from "./lib/event-enricher.js";
+import { type EnrichedEvent, toClickHouseDateTime } from "./lib/event-enricher.js";
 import { RateLimiter } from "./lib/rate-limiter.js";
 import { StatsJob } from "./stats/job.js";
 import { PgStatsJobStore } from "./stats/store.js";
@@ -22,7 +22,10 @@ function mapToolRegistryRow(event: EnrichedEvent): Record<string, unknown> {
     description: event.description ?? null,
     input_schema: inputSchemaStr,
     registered_at: String(event.timestamp),
-    updated_at: String(event.ingested_at),
+    // The registry's version column (ReplacingMergeTree keeps the latest):
+    // stamped here, not on the event — `ingested_at` is ClickHouse's to set
+    // since #148 review round 5, and tool_registry.updated_at has no DEFAULT.
+    updated_at: toClickHouseDateTime(new Date().toISOString()),
   };
 }
 

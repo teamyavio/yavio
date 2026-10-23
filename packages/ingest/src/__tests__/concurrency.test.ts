@@ -171,7 +171,6 @@ describe("Concurrency scenarios", () => {
           source: "server",
           workspace_id: "ws-1",
           project_id: "proj-1",
-          ingested_at: new Date().toISOString(),
         }));
         return Promise.resolve(writer.enqueue(events));
       }),

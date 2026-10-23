@@ -48,7 +48,7 @@
 |-----------|-----------------|
 | Event without `workspace_id` | `workspace_id` added from auth context |
 | Event without `project_id` | `project_id` added from auth context |
-| `ingested_at` timestamp added | Timestamp reflects server receive time |
+| `ingested_at` not set by ingest | The enriched row carries no `ingested_at`; ClickHouse stamps it at insert from the column DEFAULT (`now64(3)`), so the live feed's `ingested_at` cursor is monotonic with visibility (#148 review round 5) |
 | Existing fields not overwritten | SDK-provided `timestamp` preserved |
 
 ### JWT Minting & Verification
@@ -146,7 +146,7 @@
 |-----------|-------------|
 | POST valid batch → ClickHouse | Query ClickHouse, verify all events present with correct fields |
 | PII in event metadata → ClickHouse | Query ClickHouse, assert zero PII in stored data |
-| Event enrichment fields | Verify `workspace_id`, `project_id`, `ingested_at` populated in ClickHouse |
+| Event enrichment fields | Verify `workspace_id`, `project_id` populated in ClickHouse, and `ingested_at` stamped by ClickHouse within seconds of the insert |
 | Batch accumulation | Send multiple small requests, verify ClickHouse receives single batch insert |
 | ClickHouse restart during writes | Verify events are retried and eventually written after recovery |
 

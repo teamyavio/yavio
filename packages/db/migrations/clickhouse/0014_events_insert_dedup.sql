@@ -10,10 +10,15 @@
 -- greater than 0 (the default is 0): the hashes of the last N inserted blocks
 -- are kept, and a block whose token is among them is dropped.
 --
--- Scope: retries of one batch by ingest. An SDK that times out and re-sends a
--- request ingest had already written lands in a different batch, with a
--- different token; ReplacingMergeTree still collapses those rows on merge
--- (same sort key, event_id included), and the #85 job reads FINAL with
--- LIMIT 1 BY event_id.
+-- Scope: retries of one batch by ingest — and, since #148 review round 5, an
+-- SDK resend whose rows make up a block of their own: the token is the hash of
+-- the rows' event_id and timestamp (it carried ingested_at until then, which
+-- ingest stamped per request, so a resend got a new token and was stored
+-- again), so the same rows resent land with the same token and are dropped by
+-- the window. A resend that lands in a block with other rows is a different
+-- block, stored, and collapsed by ReplacingMergeTree on merge (same sort key,
+-- event_id included); the #85 job reads FINAL with LIMIT 1 BY event_id.
+-- (Comment corrected in #148 review round 6; the migrator records versions
+-- only and never re-reads an applied file, so the statement is untouched.)
 
 ALTER TABLE events MODIFY SETTING non_replicated_deduplication_window = 1000;

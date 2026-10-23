@@ -2,15 +2,19 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { _resetConfigWarnings, lastNoopReason, resolveConfig } from "../core/config.js";
+import {
+  _resetConfigWarnings,
+  lastNoopReason,
+  resolveConfig,
+  shutdownTimeoutFromEnv,
+} from "../core/config.js";
+import { without } from "./env.js";
 
 describe("resolveConfig", () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
-    process.env = { ...originalEnv };
-    process.env.YAVIO_API_KEY = undefined;
-    process.env.YAVIO_ENDPOINT = undefined;
+    process.env = without(originalEnv, "YAVIO_API_KEY", "YAVIO_ENDPOINT");
   });
 
   afterEach(() => {
@@ -183,8 +187,7 @@ describe("per-tool capture overrides (tools)", () => {
   let tempDir: string;
 
   beforeEach(() => {
-    process.env = { ...originalEnv };
-    process.env.YAVIO_API_KEY = undefined;
+    process.env = without(originalEnv, "YAVIO_API_KEY");
     tempDir = mkdtempSync(join(tmpdir(), "yavio-tools-test-"));
   });
 
@@ -303,8 +306,7 @@ describe("per-tool capture overrides (tools)", () => {
 describe("endpoint validation", () => {
   const originalEnv = process.env;
   beforeEach(() => {
-    process.env = { ...originalEnv, YAVIO_API_KEY: "yav_test" };
-    process.env.YAVIO_ENDPOINT = undefined;
+    process.env = { ...without(originalEnv, "YAVIO_ENDPOINT"), YAVIO_API_KEY: "yav_test" };
     _resetConfigWarnings();
   });
   afterEach(() => {
@@ -502,9 +504,8 @@ describe("shutdownTimeoutMs (#142)", () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
-    process.env = { ...originalEnv };
+    process.env = without(originalEnv, "YAVIO_SHUTDOWN_TIMEOUT_MS");
     process.env.YAVIO_API_KEY = "yav_test";
-    process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = undefined;
     _resetConfigWarnings();
   });
 
@@ -513,32 +514,32 @@ describe("shutdownTimeoutMs (#142)", () => {
     vi.restoreAllMocks();
   });
 
-  it("defaults to 10 s", () => {
-    expect(resolveConfig()?.shutdownTimeoutMs).toBe(10_000);
+  it("defaults to 4 s (#148)", () => {
+    expect(resolveConfig()?.shutdownTimeoutMs).toBe(4_000);
   });
 
   it("reads the code option", () => {
-    expect(resolveConfig({ shutdownTimeoutMs: 4_000 })?.shutdownTimeoutMs).toBe(4_000);
+    expect(resolveConfig({ shutdownTimeoutMs: 7_000 })?.shutdownTimeoutMs).toBe(7_000);
   });
 
   it("reads YAVIO_SHUTDOWN_TIMEOUT_MS, and the code option wins over it", () => {
     process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "2500";
     expect(resolveConfig()?.shutdownTimeoutMs).toBe(2_500);
-    expect(resolveConfig({ shutdownTimeoutMs: 4_000 })?.shutdownTimeoutMs).toBe(4_000);
+    expect(resolveConfig({ shutdownTimeoutMs: 7_000 })?.shutdownTimeoutMs).toBe(7_000);
   });
 
   it("an empty env var falls through to the default", () => {
     process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "";
-    expect(resolveConfig()?.shutdownTimeoutMs).toBe(10_000);
+    expect(resolveConfig()?.shutdownTimeoutMs).toBe(4_000);
     expect(resolveConfig()?.shutdownTimeoutMsSource).toBe("default");
   });
 
   it("reports the source: option, env, file or default (review round 3)", () => {
     expect(resolveConfig()?.shutdownTimeoutMsSource).toBe("default");
-    expect(resolveConfig({ shutdownTimeoutMs: 4_000 })?.shutdownTimeoutMsSource).toBe("option");
+    expect(resolveConfig({ shutdownTimeoutMs: 7_000 })?.shutdownTimeoutMsSource).toBe("option");
     process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "2500";
     expect(resolveConfig()?.shutdownTimeoutMsSource).toBe("env");
-    expect(resolveConfig({ shutdownTimeoutMs: 4_000 })?.shutdownTimeoutMsSource).toBe("option");
+    expect(resolveConfig({ shutdownTimeoutMs: 7_000 })?.shutdownTimeoutMsSource).toBe("option");
     const tempDir = mkdtempSync(join(tmpdir(), "yavio-shutdown-source-test-"));
     const originalCwd = process.cwd;
     try {
@@ -548,7 +549,7 @@ describe("shutdownTimeoutMs (#142)", () => {
       );
       process.cwd = () => tempDir;
       expect(resolveConfig()?.shutdownTimeoutMsSource).toBe("env");
-      process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = undefined;
+      process.env = without(process.env, "YAVIO_SHUTDOWN_TIMEOUT_MS");
       expect(resolveConfig()).toMatchObject({
         shutdownTimeoutMs: 3_000,
         shutdownTimeoutMsSource: "file",
@@ -558,7 +559,7 @@ describe("shutdownTimeoutMs (#142)", () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "soon";
       expect(resolveConfig()).toMatchObject({
-        shutdownTimeoutMs: 10_000,
+        shutdownTimeoutMs: 4_000,
         shutdownTimeoutMsSource: "default",
       });
       expect(warn).toHaveBeenCalledTimes(1);
@@ -566,6 +567,18 @@ describe("shutdownTimeoutMs (#142)", () => {
       process.cwd = originalCwd;
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it("shutdownTimeoutFromEnv(): the env var as an explicit value, undefined when unset, empty or rejected (#148)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(shutdownTimeoutFromEnv()).toBeUndefined();
+    process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "";
+    expect(shutdownTimeoutFromEnv()).toBeUndefined();
+    process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "2500";
+    expect(shutdownTimeoutFromEnv()).toBe(2_500);
+    process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = "soon";
+    expect(shutdownTimeoutFromEnv()).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 
   it("accepts both bounds: 100 and 2147483647", () => {
@@ -599,9 +612,9 @@ describe("shutdownTimeoutMs (#142)", () => {
   ])("rejects %s with one warning and uses the default", (value) => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     process.env.YAVIO_SHUTDOWN_TIMEOUT_MS = value;
-    expect(resolveConfig()?.shutdownTimeoutMs).toBe(10_000);
+    expect(resolveConfig()?.shutdownTimeoutMs).toBe(4_000);
     expect(resolveConfig()).toMatchObject({
-      shutdownTimeoutMs: 10_000,
+      shutdownTimeoutMs: 4_000,
       shutdownTimeoutMsSource: "default",
     });
     const lines = warn.mock.calls
@@ -621,7 +634,7 @@ describe("shutdownTimeoutMs (#142)", () => {
         JSON.stringify({ apiKey: "file_key", shutdownTimeoutMs: value }),
       );
       process.cwd = () => tempDir;
-      expect(resolveConfig()?.shutdownTimeoutMs).toBe(10_000);
+      expect(resolveConfig()?.shutdownTimeoutMs).toBe(4_000);
       expect(warn).toHaveBeenCalledTimes(1);
       expect(String(warn.mock.calls[0]?.[0])).toContain("YAVIO-1006");
     } finally {
@@ -632,7 +645,7 @@ describe("shutdownTimeoutMs (#142)", () => {
 
   it("rejects a zero code option the same way", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(resolveConfig({ shutdownTimeoutMs: 0 })?.shutdownTimeoutMs).toBe(10_000);
+    expect(resolveConfig({ shutdownTimeoutMs: 0 })?.shutdownTimeoutMs).toBe(4_000);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]?.[0])).toContain("between 100 and 2147483647");
   });
@@ -641,7 +654,7 @@ describe("shutdownTimeoutMs (#142)", () => {
     "rejects the out-of-range or non-integer code option %s",
     (value) => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      expect(resolveConfig({ shutdownTimeoutMs: value })?.shutdownTimeoutMs).toBe(10_000);
+      expect(resolveConfig({ shutdownTimeoutMs: value })?.shutdownTimeoutMs).toBe(4_000);
       expect(warn).toHaveBeenCalledTimes(1);
     },
   );

@@ -149,8 +149,12 @@ describe("E2E: Ingest API → ClickHouse", () => {
     expect(intentSignals).toEqual({ intent: "search" });
     expect(row.intent_context).toBe("optional"); // #73, migration 0019
 
-    // Enrichment
-    expect(row.ingested_at).toBeDefined();
+    // Enrichment. ingested_at is ClickHouse's: the row carried none (the
+    // insert omits the key, and JSONEachRow fills an omitted column from
+    // its DEFAULT), so it is stamped at insert on ClickHouse's clock, not
+    // on receipt by ingest (#148 review round 5).
+    const ingestedAt = Date.parse(`${String(row.ingested_at).replace(" ", "T")}Z`);
+    expect(Math.abs(ingestedAt - Date.now())).toBeLessThan(10_000);
 
     await batchWriter.shutdown();
   });

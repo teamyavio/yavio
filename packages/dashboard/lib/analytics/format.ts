@@ -1,3 +1,4 @@
+import { parseUtc } from "@/lib/clickhouse/datetime";
 import type { Granularity } from "./validation";
 
 /**
@@ -134,17 +135,12 @@ export function formatBucketTooltip(bucket: string, granularity: Granularity): s
 }
 
 /**
- * Parse an event timestamp. ClickHouse returns "YYYY-MM-DD HH:mm:ss.SSS"
- * with no timezone, which JS would read as local time; it is UTC, so "Z"
- * is appended first. ISO strings and Date objects pass through.
+ * Parse an event timestamp: ClickHouse's "YYYY-MM-DD HH:mm:ss.SSS" is UTC
+ * with no zone marker (`parseUtc`); ISO strings and Date objects pass
+ * through.
  */
 export function parseTimestamp(timestamp: string | Date): Date {
-  if (typeof timestamp !== "string") return timestamp;
-  const raw =
-    !timestamp.includes("T") && !timestamp.endsWith("Z")
-      ? `${timestamp.replace(" ", "T")}Z`
-      : timestamp;
-  return new Date(raw);
+  return parseUtc(timestamp);
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");

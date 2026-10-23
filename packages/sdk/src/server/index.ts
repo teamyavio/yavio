@@ -14,6 +14,9 @@ import {
   type SharedHold,
   type SharedState,
   acquireShared,
+  armExitHook,
+  awaitBounded,
+  dropHoldDeadline,
   isLiveHold,
   logOnce,
   pinShared,
@@ -213,6 +216,10 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
   let closing: Promise<void> = Promise.resolve();
   const state = (): SharedState => {
     if (hold && isLiveHold(config, hold)) return hold.state;
+    // A stale hold is replaced, not released: its explicit value leaves the
+    // live set here, or it would count towards D after this client's
+    // shutdown() released the new one (#148 review round 7).
+    if (hold) dropHoldDeadline(hold);
     hold = acquireShared(config, SDK_VERSION, onEvict);
     return hold.state;
   };
@@ -229,6 +236,7 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
       return wrapServer(server, config, state, true, "createYavio().wrap()");
     },
     shutdown: async () => {
+      armExitHook(); // from now on an exit with events undelivered is reported (#148)
       const released = hold;
       hold = null;
       // With a hold: deliver and release it. Without one (a second call, or
@@ -236,17 +244,10 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
       // the signal drain and the key's post-signal transport still carry.
       const work = released ? releaseShared(config, released) : settleShared(config);
       closing = Promise.all([closing, work.catch(() => {})]).then(() => {});
-      // One deadline per call, whatever the chain behind it waits for.
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const deadline = new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, config.shutdownTimeoutMs);
-        if (timer && typeof timer === "object" && "unref" in timer) timer.unref();
-      });
-      try {
-        await Promise.race([closing, deadline]);
-      } finally {
-        clearTimeout(timer);
-      }
+      // One deadline per call, whatever the chain behind it waits for: this
+      // client's own value from the call, cut to the process deadline once a
+      // signal fixed one — before or during the call (#148).
+      await awaitBounded(closing, config.shutdownTimeoutMs);
     },
   };
 }

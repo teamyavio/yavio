@@ -100,7 +100,9 @@ describe("Full pipeline integration", () => {
     // Check enrichment
     expect(written[0].workspace_id).toBe(TEST_WORKSPACE_ID);
     expect(written[0].project_id).toBe(TEST_PROJECT_ID);
-    expect(written[0].ingested_at).toBeDefined();
+    // Not stamped by ingest: ClickHouse's column DEFAULT sets it when the
+    // row is stored (#148 review round 5).
+    expect(written[0]).not.toHaveProperty("ingested_at");
 
     // Check PII was stripped from metadata (stringified for ClickHouse)
     const meta = JSON.parse(written[0].metadata as string);

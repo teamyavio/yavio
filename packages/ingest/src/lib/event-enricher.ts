@@ -1,10 +1,20 @@
 import type { BaseEvent } from "@yavio/shared/events";
 import type { AuthContext } from "../types.js";
 
+/**
+ * A validated event with its tenant columns, as the batch writer inserts
+ * it. No `ingested_at`: the column's DEFAULT (`now64(3)`, migration 0002)
+ * stamps it when ClickHouse stores the row — the batch writer may insert
+ * seconds after ingest received the batch (its 1 s flush, then retries that
+ * each wait out the failed insert's own duration), and the live feed tails
+ * `ingested_at` with a 10 s overlap, so a value stamped on receipt could
+ * become visible after the window had moved past it and the row was never
+ * shown; stamped at insert, `ingested_at` is monotonic with visibility and
+ * on ClickHouse's own clock (#148 review round 5).
+ */
 export interface EnrichedEvent extends Record<string, unknown> {
   workspace_id: string;
   project_id: string;
-  ingested_at: string;
 }
 
 /**
@@ -28,7 +38,7 @@ const JSON_FIELDS = new Set([
  * the format ClickHouse DateTime64 expects in JSONEachRow:
  * `2026-02-19 13:48:25.105` (space separator, no trailing `Z`).
  */
-function toClickHouseDateTime(iso: string): string {
+export function toClickHouseDateTime(iso: string): string {
   return iso.replace("T", " ").replace("Z", "");
 }
 
@@ -44,13 +54,12 @@ function stringifyJsonFields(event: Record<string, unknown>): Record<string, unk
 }
 
 /**
- * Enrich validated events with auth context and ingestion timestamp.
- * Also serializes object-valued fields to JSON strings for ClickHouse
- * and converts DateTime fields to ClickHouse-compatible format.
+ * Enrich validated events with the auth context. Also serializes
+ * object-valued fields to JSON strings for ClickHouse and converts DateTime
+ * fields to ClickHouse-compatible format. `ingested_at` is left to the
+ * column DEFAULT (see `EnrichedEvent`).
  */
 export function enrichEvents(events: BaseEvent[], authContext: AuthContext): EnrichedEvent[] {
-  const ingestedAt = toClickHouseDateTime(new Date().toISOString());
-
   return events.map(
     (event) =>
       stringifyJsonFields({
@@ -58,7 +67,6 @@ export function enrichEvents(events: BaseEvent[], authContext: AuthContext): Enr
         timestamp: toClickHouseDateTime(event.timestamp),
         workspace_id: authContext.workspaceId,
         project_id: authContext.projectId,
-        ingested_at: ingestedAt,
       }) as EnrichedEvent,
   );
 }

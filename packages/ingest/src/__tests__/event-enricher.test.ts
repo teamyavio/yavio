@@ -23,13 +23,17 @@ const authContext: AuthContext = {
 };
 
 describe("enrichEvents", () => {
-  it("adds workspace_id, project_id, and ingested_at", () => {
+  it("adds workspace_id and project_id, and leaves ingested_at to the column DEFAULT", () => {
     const events = [makeEvent()];
     const enriched = enrichEvents(events, authContext);
     expect(enriched).toHaveLength(1);
     expect(enriched[0].workspace_id).toBe("workspace-1");
     expect(enriched[0].project_id).toBe("project-1");
-    expect(enriched[0].ingested_at).toBeDefined();
+    // Stamped by ClickHouse when the row is stored (`DEFAULT now64(3)`),
+    // not by ingest on receipt: the batch writer inserts up to seconds
+    // later, and the live feed's 10 s overlap on `ingested_at` must cover
+    // the insert, not the write delay (#148 review round 5).
+    expect(enriched[0]).not.toHaveProperty("ingested_at");
   });
 
   it("preserves original event fields", () => {
@@ -43,7 +47,8 @@ describe("enrichEvents", () => {
     const events = [makeEvent(), makeEvent()];
     const enriched = enrichEvents(events, authContext);
     expect(enriched).toHaveLength(2);
-    expect(enriched[0].ingested_at).toBe(enriched[1].ingested_at);
+    expect(enriched.map((e) => e.project_id)).toEqual(["project-1", "project-1"]);
+    expect(enriched.map((e) => e.event_id)).toEqual(events.map((e) => e.event_id));
   });
 
   it("stringifies metadata objects for ClickHouse", () => {

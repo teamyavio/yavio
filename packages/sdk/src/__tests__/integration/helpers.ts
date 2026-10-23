@@ -18,6 +18,8 @@ export interface ReceivedBatch {
   /** `Date.now()` when the batch was received, and when its response was written. */
   receivedAt: number;
   answeredAt?: number;
+  /** `Date.now()` when the client closed the connection before any response was written: its fetch was aborted (#148 review round 3). */
+  abortedAt?: number;
   events: Event[];
   sdk_version?: string;
   sent_at?: string;
@@ -50,6 +52,13 @@ export interface MockIngest {
   hangMints: boolean;
   /** While true, the events endpoint records batches but never answers them. */
   hangEvents: boolean;
+  /**
+   * While set, the events endpoint answers every batch with this status
+   * instead of 200 — a 400 the SDK gives up on at once, a 503 it retries —
+   * recorded and counted as responded like any other answer (#148 review
+   * round 2).
+   */
+  failWith: number | undefined;
   /**
    * Answer every batch held back by `hangEvents` with 200 now, so the SDK's
    * fetch settles instead of failing when `close()` cuts the socket — a
@@ -85,6 +94,7 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
     mints,
     hangMints: false,
     hangEvents: false,
+    failWith: undefined,
     responded: 0,
     respondAfterMs: options.respondAfterMs,
     ofType: (eventType) => events.filter((e) => e.event_type === eventType),
@@ -148,12 +158,22 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
       };
       batches.push(received);
       events.push(...batch.events);
+      res.on("close", () => {
+        if (received.answeredAt === undefined) received.abortedAt = Date.now();
+      });
       const respond = () => {
         ingest.responded++;
         received.answeredAt = Date.now();
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ accepted: batch.events.length, rejected: 0 }));
       };
+      if (ingest.failWith !== undefined) {
+        ingest.responded++;
+        received.answeredAt = Date.now();
+        res.writeHead(ingest.failWith);
+        res.end();
+        return;
+      }
       if (ingest.hangEvents) {
         hung.push(respond);
         return;
@@ -176,6 +196,19 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   ingest.endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/events`;
   return ingest;
+}
+
+/**
+ * An endpoint nothing listens on: a port that was bound and released, so a
+ * fetch to it is refused at once (ECONNREFUSED), like an ingest that is down
+ * or a hostname that resolves to a closed port (#148).
+ */
+export async function refusedEndpoint(): Promise<string> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return `http://127.0.0.1:${port}/v1/events`;
 }
 
 /**
