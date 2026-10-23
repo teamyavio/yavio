@@ -43,6 +43,13 @@ const instrumented = withYavio(server, {
   // or file) by any client, withYavio() call or shutdown() in progress —
   // unset participants do not lower it; with nothing set, 4 s.
   shutdownTimeoutMs: 4_000,
+
+  // Optional (#144, 0.5.4): the conversation of a call that carries no
+  // session key the SDK knows (see 3.7.1). Code only; synchronous; returns a
+  // conversation id (never a per-user id alone, the OAuth clientId, the
+  // bearer token, a constant or a per-request id), at most 1 024 characters,
+  // or undefined. Stored as a keyed hash. A non-function: YAVIO-1006 once.
+  sessionKey: ({ headers }) => headers["x-conversation-id"],
 });
 ```
 
@@ -50,7 +57,7 @@ const instrumented = withYavio(server, {
 
 `withYavio()` resolves configuration in priority order:
 
-1. **Code options:** Values passed directly to `withYavio(server, { apiKey, endpoint })`. Highest priority.
+1. **Code options:** Values passed directly to `withYavio(server, { apiKey, endpoint })`. Highest priority. `sessionKey` exists only here (a function).
 2. **Environment variables:** `YAVIO_API_KEY` and `YAVIO_ENDPOINT` (also `YAVIO_SERVER_ONLY`, `YAVIO_INTENT`, `YAVIO_SHUTDOWN_TIMEOUT_MS`). Used when code options are not provided.
 3. **`.yaviorc.json`:** Reads `apiKey` and `endpoint` from the nearest `.yaviorc.json` file (walks up from `process.cwd()`). Lowest priority. Created by `yavio init`.
 
@@ -62,7 +69,7 @@ The proxy uses JavaScript `Proxy` to intercept method calls on the `McpServer` i
 
 - **`server.tool()` and `server.registerTool()` registration:** Intercepts both the deprecated `tool()` method and the modern `registerTool()` method (MCP SDK v1.26+) to capture tool names, descriptions, and schemas. Wraps the handler function with identical instrumentation via a shared `wrapToolCallback()` helper. For `tool()`, the callback is located by scanning for the first function argument (handles all overloads). For `registerTool()`, the callback is always the 3rd positional argument.
 - **Tool handler execution:** Before/after hooks capture invocation timestamp, measure latency, catch errors, detect platform, and capture full input values and derive input patterns.
-- **`server.connect()` / transport:** Intercepts transport connection to detect platform from headers, user-agent, or protocol-specific signals. Intercepts the MCP `initialize` request to derive the `session_id` (see [Section 3.7](#37-session-lifecycle)).
+- **`server.connect()` / transport:** Intercepts transport connection to keep a reference to the MCP transport (its `sessionId`, when it has one, is the first session key) and to start the connection's own session. The `session_id` of a call is derived per `tools/call` (see [Section 3.7](#37-session-lifecycle)); nothing is read from `initialize`, which a per-request instance never sees.
 - **`tools/list` requests:** Wraps the low-level `tools/list` handler and sends one `tool_discovery` per instrumented tool per process, carrying the JSON Schema the client was shown (#83). Listing frequency and client capabilities are not recorded.
 - **Tool response inspection:** After the handler returns, the proxy inspects the response content. Captures response size (bytes), content type distribution (text/image/resource), result count for list-type responses, and detects zero-result responses via empty array and "no results" text heuristics.
 
@@ -338,46 +345,57 @@ When detection is ambiguous, the SDK records the platform as `"unknown"` with al
 
 ## 3.7 Session Lifecycle
 
-An **analytics session** represents a single MCP connection between a client (AI platform) and the instrumented server. The session boundary is defined by the MCP protocol's `initialize` handshake: **one `initialize` handshake = one session**.
+An **analytics session** represents one conversation between a client (AI platform) and the instrumented server. It is derived **per `tools/call`** from the first conversation key the call carries (rewritten 2026-10-23, #144): a per-request host (stateless Streamable HTTP, a new `McpServer` per request) never sees `initialize` on the instance that serves the call, a stateless transport issues no `Mcp-Session-Id`, and the 2026-07-28 protocol era (SEP-2567) drops the header altogether — so neither the handshake nor the transport is a session boundary there.
 
-### 3.7.1 Session Derivation from MCP
+### 3.7.1 Session Derivation
 
-The proxy intercepts the MCP `initialize` request (which fires exactly once per transport connection) and uses it as the session boundary. The `session_id` is derived differently depending on the MCP transport:
+`openCallContext()` (`server/proxy.ts`) takes the first key of this table (`findSessionKey()`, `server/session-key.ts`), and every server event records which one in `session_source` (`@yavio/shared` `SESSION_SOURCES`, ClickHouse migration 0022):
 
-| Transport | Session ID Source | Rationale |
-|-----------|------------------|-----------|
-| **Streamable HTTP** | Adopt the server-assigned `Mcp-Session-Id` header from the `InitializeResult` HTTP response: `"ses_" + Mcp-Session-Id`. If the server does not assign one (the header is optional per the MCP spec), fall back to generating one. | 1:1 mapping with the MCP protocol session. Reconnections via `Last-Event-ID` stay in the same session; a fresh `initialize` starts a new one. |
-| **stdio** | Generate on `initialize` interception: `"ses_" + nanoid(21)`. | No protocol-level session ID exists for stdio. The `initialize` request fires once per subprocess lifetime, providing a natural boundary. |
-| **Legacy SSE** | Generate on `initialize` interception: `"ses_" + nanoid(21)`. | Deprecated transport with no session ID mechanism. Same generation strategy as stdio. |
+| Order | Key | `session_id` | `session_source` |
+|---|---|---|---|
+| 1 | The transport's session id — `extra.sessionId` (v1) / `ctx.sessionId` (v2), else the connected transport's `sessionId` (`Mcp-Session-Id`) | `deriveSessionId(key)` | `mcp_session_id` |
+| 2 | `_meta["openai/session"]` (ChatGPT) | `deriveSessionId(key)` | `openai_session` |
+| 3 | `_meta["vscode.conversationId"]` (VS Code ≥ 1.105 / Copilot Chat), from any client | `deriveSessionId(key)` | `vscode_conversation` |
+| 4 | `_meta.threadId`, only when the client is `codex-mcp-client` (envelope, `getClientVersion()` or User-Agent, the order of the connection event's client identity) — a bare `threadId` from an unknown client could merge users | `deriveSessionId(key)` | `codex_thread` |
+| 5 | The integrator's `sessionKey(request)` option | `deriveCustomSessionId(apiKey, key)` | `custom` |
+| — | None: the connection's own session (`"ses_" + nanoid(21)` on `connect()`, or `deriveSessionId(transport.sessionId)` when the transport had one by then) | — | `per_request` on an HTTP request (`requestInfo` / `http.req` present), `connection` otherwise (stdio, in-memory) |
 
-The generated or adopted `session_id` is stored in the `InstrumentationLayer` state. All subsequent events on that connection (tool calls, steps, conversions, resource accesses, etc.) inherit it automatically.
+- `deriveSessionId(key)` = `"ses_"` + the first 21 base64url characters of SHA-256(key). `deriveCustomSessionId(apiKey, key)` = `"ses_"` + the first 21 base64url characters of HMAC-SHA256(apiKey, `"custom\0" + key`): an integrator may return an email or a user id, and an unkeyed hash of a guessable value is a pseudonym anyone can recompute. Both are deterministic across instances and processes; a custom session splits once when the API key is rotated. Empty strings are no key at every step.
+- `sessionKey` gets `SessionKeyRequest = { headers, meta, authInfo, extra }`, the same on MCP SDK v1 and v2: the headers as a fresh record (names lower-cased, a repeated header's values joined with `", "`, `{}` off HTTP), the request `_meta` (`{}` without one), v1 `extra.authInfo` / v2 `ctx.http.authInfo` (what the host's middleware set as `req.auth`), and the raw handler context. It is called only when keys 1–4 are absent, at most once per call (the protocol-layer frame resolves the context once; the callback wrapper reuses it), synchronously, before the handler. `undefined` or `""` is no key. A throw, a non-string, a thenable (its rejection is caught: an unhandled one would end the process) or more than 1 024 characters is no key plus one `YAVIO-1102` warning per process — `openCallContext()` runs outside McpServer's own error handling, so nothing may escape it. A non-function option is one `YAVIO-1006` warning; code only (no env or file form). Its presence is part of the re-wrap fingerprint (1108).
+- What to return is a **conversation** id: a session keeps its first identified user (1302) and funnels, paths and the step sequence are per session, so a per-user key (an auth subject) would chain all of a user's conversations into one session. `authInfo.clientId` is the OAuth client, shared by every user of a client app; the bearer token, a constant and a per-request id are wrong for the obvious reasons (#144, #145).
+- The built-in keys apply on every transport: a VS Code stdio server moves from one session per client process (`connection`) to one per conversation.
+
+All events of a call (tool calls, identify, steps, track, conversions, the connection event) inherit its session and `session_source`; `tool_discovery` stamps the session of the most recent call, or the connection's session before any call, labelled by the `tools/list` request that lists it.
 
 ### 3.7.2 Session Boundary Rules
 
 | Rule | Behavior |
 |------|----------|
-| New `initialize` handshake | Always starts a new session, regardless of transport. |
-| Transport reconnection without re-initialization | Continues the existing session. This applies to Streamable HTTP resumability (`Last-Event-ID` + same `Mcp-Session-Id`), where no new `initialize` fires. |
-| Transport disconnect | Ends the session. The `connection` event (disconnect variant) is the last event in the session. |
-| Multiple traces per session | Expected. A single MCP connection typically serves multiple tool invocations, each with its own `trace_id`. All traces within one connection share the same `session_id`. |
-| `userId` scope | Bound to the session. `.identify()` sets `user_id` for all subsequent events in the session. Cannot change within a session. |
+| The same key on another request, instance or process | The same `session_id` (3.7.1). |
+| New connection without a key | A new connection session: on stdio one per client process, on a per-request host one per request (`per_request`). |
+| Transport reconnection without re-initialization | Continues the existing session. This applies to Streamable HTTP resumability (`Last-Event-ID` + same `Mcp-Session-Id`). |
+| Transport disconnect | No event; the SDK sends no disconnect variant of `connection`. A session has no end event. |
+| Multiple traces per session | Expected. A conversation typically holds multiple tool invocations, each with its own `trace_id`. |
+| `userId` scope | Bound to the session. `.identify()` sets `user_id` for all subsequent events in the session, in that process. Cannot change within a session. In a `per_request` session it covers one call. |
 
-**Many conversations through one proxy (added 2026-10-14, 0.4.0).** Stateless transports and OpenAI's per-call reconnects serve every conversation through one `withYavio()` proxy. The proxy therefore keeps session state — `session_id`, `userId`, traits, the step sequence — **per derived session id** (from `extra.sessionId`, `_meta["openai/session"]` or the transport's session id), in a bounded map of 1,000 least-recently-used entries. Before, one shared session object was mutated per call: a user identified in conversation A appeared on conversation B's events, and two overlapping calls could swap session ids. Calls without any session key keep using the connection's session.
+**Many conversations through one proxy (added 2026-10-14, 0.4.0).** Stateless transports and OpenAI's per-call reconnects serve every conversation through one `withYavio()` proxy. The proxy therefore keeps session state — `session_id`, `userId`, traits, the step sequence, `session_source` — **per derived session id** (any key of 3.7.1), in a bounded map of 1,000 least-recently-used entries. Before, one shared session object was mutated per call: a user identified in conversation A appeared on conversation B's events, and two overlapping calls could swap session ids. Calls without any session key keep using the connection's session.
 
 **Several processes (added 2026-10-21, 0.5.2, #142).** The connection-event dedup is per process: a conversation served by N instances of a stateless fleet, or restarted after an LRU eviction, has N `connection` rows with random ids and their own timestamps, which never collapse under `ReplacingMergeTree`. The event therefore means "this session connected, as seen by one process", at least once per session per process, and sessions are counted as `uniqExact(session_id)` over every event — never as connection rows — in every dashboard query, in the #85 statistics job (`events` for connection cells is the number of distinct sessions) and, by its schema note, in `run_query`. `tool_discovery` is unaffected: ingest writes it to `tool_registry`, a `ReplacingMergeTree(updated_at)` read with `FINAL`, so N reports are one row (`registered_at` is the latest report). Not shared across processes: `identify()`, traits and the step sequence (per-process LRU; the dashboard stitches ChatGPT users by `subject_id`).
 
-Two limits of this. **No key, no separation:** a stateless transport serving a client that sends no session key — no `Mcp-Session-Id`, no `openai/session` (ChatGPT is the only platform that sends one) — still lands every conversation on the connection's one session; identify() and steps are shared there exactly as before. **Eviction resets the conversation:** once a conversation falls out of the 1,000-entry map (1,000 other conversations touched the proxy in between), its next call starts a fresh state under the same `session_id` — `user_id` is gone until identify() runs again, the step sequence restarts at 1, and the one-user-per-session guard is reset. A second `connection` event for the same `session_id` marks the restart: the connection-event dedup (module-level, so a server that builds a new proxy per request still emits one per conversation) is a 10,000-entry least-recently-used map — a hit refreshes the entry, so an active conversation is never aged out by newer ones — that also drops an id when its proxy evicts the session (#120). The map is shared by every proxy in the process: two long-lived instrumented servers in one process that see the same conversation key share one mark. Tool discovery events stamp the session of the most recent tool call, or the connection's session before any call.
+**Per-request sessions (added 2026-10-23, 0.5.4, #144).** A call with no key on an HTTP request is a `per_request` session: on a per-request host the connection's session lives for one request, so 50 calls are 50 sessions of one call. Its `connection` event is emitted **once per process per client** — the `emittedConnections` mark is `per_request\0platform\0client_name\0client_version\0protocol_version\0intent_enabled` under the API key, with the client identity computed before the check — instead of once per (one-call) session; keyed and `connection` sessions keep one mark per session. The read side does not count a `per_request` session as a session (the Sessions KPI and users `totalSessions` exclude it, with a hint; the statistics job counts such an event as an individual only through its user key and leaves its connection rows out of the cells — see [storage-layer.md](../infrastructure/storage-layer.md)). Measured on 0.5.3 vs 0.5.4 (50 key-less calls, MCP SDK v1 stateless, v2 `createMcpHandler` in both eras, v1 with `req.auth`): connection events 50 → 1; with `sessionKey` from a header, VS Code's or the Codex CLI's key: sessions 50 → 1.
+
+Two limits of this. **No key, no separation:** a long-lived server on one stateless transport (MCP SDK v1 1.24/1.25 allow reusing it) serving a client that sends no session key still lands every conversation on the connection's one session, labelled `per_request`; identify() and steps are shared there exactly as before. **Eviction resets the conversation:** once a conversation falls out of the 1,000-entry map (1,000 other conversations touched the proxy in between), its next call starts a fresh state under the same `session_id` — `user_id` is gone until identify() runs again, the step sequence restarts at 1, and the one-user-per-session guard is reset. A second `connection` event for the same `session_id` marks the restart: the connection-event dedup (module-level, so a server that builds a new proxy per request still emits one per conversation) is a 10,000-entry least-recently-used map — a hit refreshes the entry, so an active conversation is never aged out by newer ones — that also drops an id when its proxy evicts the session (#120). The map is shared by every proxy in the process: two long-lived instrumented servers in one process that see the same conversation key share one mark. Tool discovery events stamp the session of the most recent tool call, or the connection's session before any call.
 
 ### 3.7.3 Widget Sessions
 
-Widget events share the **server session ID** (`ses_` prefix). The server's `session_id` is included in `window.__YAVIO__` alongside the `traceId` and widget JWT (see [Section 3.4.2](#342-injection)), and the widget SDK stamps all outgoing events with it. This means all events — server-side and widget-side — for a single MCP connection share the same `session_id`, and the `trace_id` handles the finer-grained binding of a specific tool call to the widget it spawned.
+Widget events share the **server session ID** (`ses_` prefix). The server's `session_id` is included in `window.__YAVIO__` alongside the `traceId` and widget JWT (see [Section 3.4.2](#342-injection)), and the widget SDK stamps all outgoing events with it. This means all events — server-side and widget-side — for a single conversation share the same `session_id`, and the `trace_id` handles the finer-grained binding of a specific tool call to the widget it spawned.
 
 There is no separate widget session ID. The `trace_id` is sufficient to correlate a widget interaction with its originating tool call, while the shared `session_id` ensures session-level aggregations (duration, tool count, conversions, retention) naturally include both server and widget activity without needing cross-session joins.
 
 ### 3.7.4 Hierarchy
 
 ```
-Session (ses_xxx) ← one MCP connection, shared by server + widget events
+Session (ses_xxx) ← one conversation (3.7.1), shared by server + widget events
   ├── Trace 1 (tr_aaa) ← tool_call "search_rooms"
   │   ├── step: "rooms_found"              (source: server)
   │   ├── widget_render                    (source: widget, same ses_xxx)

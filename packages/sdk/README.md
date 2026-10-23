@@ -62,6 +62,7 @@ withYavio(server, {
     "book-contract": { inputValues: false, outputValues: false, intent: false },
   },
   shutdownTimeoutMs: 4_000, // deadline for delivering queued events on shutdown: an integer in [100, 2147483647] ms (default: 4 s); on SIGTERM/SIGINT one deadline for the whole process, the smallest value set explicitly, see Stateless
+  sessionKey: ({ headers }) => headers["x-conversation-id"], // the conversation of a call that carries no session key the SDK knows (default: none; code only), see Stateless
 });
 ```
 
@@ -147,11 +148,45 @@ app.post("/mcp", async (req, res) => {
 
 On MCP SDK v2 only the imports differ: `McpServer` from `@modelcontextprotocol/server`, `NodeStreamableHTTPServerTransport` from `@modelcontextprotocol/node`, or `createMcpHandler((ctx) => analytics.wrap(buildServer()))`.
 
-What holds across instances **and across processes** (a fleet behind a load balancer, where any instance serves any request): the same `session_id` for the same conversation (`Mcp-Session-Id` or ChatGPT's `openai/session`), and the client identity on the `connection` event even though the instance serving `tools/call` never saw `initialize` (see [Captured data](#captured-data)). What is **per process**: `yavio.identify()` on one request is visible on the next only when the same process serves it (the dashboard stitches ChatGPT users by `openai/subject` across processes); the step sequence restarts per process; the `connection` event is emitted at least once per session per process and `tool_discovery` once per tool per process, so a conversation served by six instances has six connection rows — nothing counts them (sessions are distinct `session_id`s everywhere, discovery rows collapse per tool). A client that sends neither session key gets one session per request. Widget tokens are minted per tool call in non-serverOnly mode, as the ingest contract requires (a token is bound to the trace of the call that minted it); the mint is bounded by a 2 s timeout, after which the result goes out without `_meta.yavio`.
+What holds across instances **and across processes** (a fleet behind a load balancer, where any instance serves any request): the same `session_id` for the same conversation (any key in the table below), and the client identity on the `connection` event even though the instance serving `tools/call` never saw `initialize` (see [Captured data](#captured-data)). What is **per process**: `yavio.identify()` on one request is visible on the next only when the same process serves it (the dashboard stitches ChatGPT users by `openai/subject` across processes); the step sequence restarts per process; the `connection` event is emitted at least once per session per process and `tool_discovery` once per tool per process, so a conversation served by six instances has six connection rows — nothing counts them (sessions are distinct `session_id`s everywhere, discovery rows collapse per tool). Widget tokens are minted per tool call in non-serverOnly mode, as the ingest contract requires (a token is bound to the trace of the call that minted it); the mint is bounded by a 2 s timeout, after which the result goes out without `_meta.yavio`.
+
+**Sessions.** A per-request server has no session of its own: a stateless transport never issues `Mcp-Session-Id`, and the 2026-07-28 protocol era drops the header. The SDK takes a call's session from the first of these keys it finds, and every event says which in `session_source`:
+
+| Order | Key | `session_source` |
+|---|---|---|
+| 1 | `Mcp-Session-Id` (a sessionful transport) | `mcp_session_id` |
+| 2 | ChatGPT's `_meta["openai/session"]` | `openai_session` |
+| 3 | VS Code / Copilot Chat's `_meta["vscode.conversationId"]`, from any client | `vscode_conversation` |
+| 4 | The Codex CLI's `_meta.threadId` — only from `codex-mcp-client` (named by its envelope, its `initialize` or its User-Agent): a bare `threadId` from another client is not trusted | `codex_thread` |
+| 5 | Your `sessionKey` option | `custom` |
+| — | None of them: the connection's own session — on an HTTP request that is one request, on stdio one client process | `per_request` / `connection` |
+
+Keys 3 and 4 apply on stdio too, so since 0.5.4 a VS Code stdio server gets one session per conversation instead of one per client process. The other clients known today — Claude Code, claude.ai connectors, Cursor, Zed — send no conversation key; if your host knows the conversation (a header your gateway sets, a conversation id in your own auth layer), tell the SDK:
+
+```typescript
+const analytics = createYavio({
+  serverOnly: true,
+  sessionKey: ({ headers }) => headers["x-conversation-id"],
+});
+```
+
+`sessionKey(request)` receives `{ headers, meta, authInfo, extra }` — the HTTP request's headers (names lower-cased, a repeated header's values joined with `", "`, `{}` off HTTP), the request `_meta` (`{}` without one), what your auth middleware set as `req.auth` (`undefined` without one) and the MCP SDK's own handler context — the same on MCP SDK v1 and v2. It is called only when none of keys 1–4 is there, at most once per call, synchronously, before your handler. Return a string of at most 1 024 characters, or `undefined` / `""` for none. A throw, a promise (an `async` function), a non-string or a longer string counts as none, with one `YAVIO-1102` warning per process; the call itself is never affected. The SDK stores `ses_` + an HMAC of the value keyed with your API key, never the value, so an id you return does not become a pseudonym anyone could recompute; it is the same in every process of the project, and rotating the API key splits a session once. `sessionKey` is code only (a function); anything else logs `YAVIO-1006` once and is ignored.
+
+Return a **conversation** id. Funnels, paths, the step sequence and `identify()` work per session, and a session keeps its first identified user (`YAVIO-1302`). Never return:
+
+- a per-user id on its own, such as an auth subject (`authInfo.extra.sub`) — it would chain all of that user's conversations into one endless session and one funnel attempt (combine it with a conversation id if you need both);
+- `authInfo.clientId` — the OAuth client, shared by every user of a client app;
+- the bearer token — a credential, and it changes when it is refreshed;
+- a constant — one session for everybody;
+- a per-request id (`traceparent`, a request id) — one session per call again.
+
+Every session a process sees takes an entry in its session store (1 000, least recently used first out) and in the connection-event marks (10 000): with more concurrent conversations than that, an idle one ages out, and its next call starts over with a fresh `connection` event, no identified user and the step sequence at 0.
+
+A call without any key on an HTTP request is `session_source: "per_request"` — on a per-request host a session of one call. The dashboard does not count it as a session (the Sessions KPI says how many such calls there were), the anonymous statistics do not count it as a person, and its `connection` event is emitted once per process per client (platform, client name and version, protocol version) instead of once per call. A widget event carries no `session_source`, so a per-request session with a widget still counts once through its widget rows. On MCP SDK v1 1.24 and 1.25 one stateless transport can also be reused for every request of a long-lived server; its calls then share one connection session, labelled `per_request` all the same.
 
 `wrap()` instruments **every tool on the server**, including the ones `buildServer()` registered before the wrap. That is the one behavioural difference to `withYavio()`, which tracks only the tools registered through the proxy it returns — a tool kept on the raw server on purpose stays untracked under `withYavio()`, and the way to limit capture for a sensitive tool under either entry point is the `tools` overrides.
 
-`withYavio(server, options)` is safe for a server created per request too: the transport, the session store and the shutdown hooks are shared per API key and endpoint. It resolves the configuration (environment, `.yaviorc.json`) on every call, which `createYavio()` does once. Wrapping the same long-lived server again — with either entry point — returns the existing proxy, so a host that wraps on every request never stacks instrumentation. The first wrap wins: later options are ignored — any difference (another key or endpoint, other `capture` flags or `tools` overrides, `serverOnly`, intent, or a `wrap()` after a `withYavio()`) logs one `YAVIO-1108` warning and the first wrap's configuration keeps applying.
+`withYavio(server, options)` is safe for a server created per request too: the transport, the session store and the shutdown hooks are shared per API key and endpoint. It resolves the configuration (environment, `.yaviorc.json`) on every call, which `createYavio()` does once. Wrapping the same long-lived server again — with either entry point — returns the existing proxy, so a host that wraps on every request never stacks instrumentation. The first wrap wins: later options are ignored — any difference (another key or endpoint, other `capture` flags or `tools` overrides, `serverOnly`, intent, a `sessionKey` added or dropped, or a `wrap()` after a `withYavio()`) logs one `YAVIO-1108` warning and the first wrap's configuration keeps applying.
 
 **Graceful shutdown.** Events are batched, so the ones from the last seconds before a scale-down or redeploy are still in memory when the signal arrives. With no handler of your own the SDK drains them within 4 s and hands the signal back (below). With a handler, stop accepting, give the requests in flight a bounded time to finish, then await `shutdown()`, then exit — `http` is the server `app.listen(port)` returned:
 
@@ -210,6 +245,8 @@ A value that is not an `McpServer` (no `registerTool()` / `connect()`) comes bac
 ## Captured data
 
 Every call to a tool registered through the wrapped server produces one `tool_call` event with the tool name, latency, status and — subject to the `capture` flags — the inputs and the output.
+
+Every server event (`tool_call`, `connection`, `tool_discovery`, `identify`, `step`, `track`, `conversion`) also carries `session_source`, how its `session_id` was derived: `mcp_session_id`, `openai_session`, `vscode_conversation`, `codex_thread`, `custom` (your `sessionKey`), `connection` (no key, not HTTP) or `per_request` (no key on an HTTP request) — see [Sessions](#stateless--per-request-servers). It names a source, never a key, and is recorded whatever the `capture` flags. Events from SDKs before 0.5.4 and widget events have none.
 
 ### Status and errors
 

@@ -14,14 +14,27 @@ Every event carries these fields:
 | `event_id` | Unique identifier (UUID), used for deduplication |
 | `event_type` | The type of event (e.g., `tool_call`, `step`, `widget_render`) |
 | `trace_id` | Correlation key linking server and widget events for the same tool invocation |
-| `session_id` | Represents a single MCP connection (`ses_` prefix) |
+| `session_id` | The conversation the event belongs to (`ses_` prefix), see below |
+| `session_source` | How the server SDK derived `session_id` (SDK 0.5.4 and later; absent on widget events), see below |
 | `timestamp` | When the event occurred |
 | `platform` | Which AI platform initiated the action (e.g., `chatgpt`, `claude`, `cursor`) |
 | `source` | Whether the event originated from `server` or `widget` |
 
 ## Session Semantics
 
-A `session_id` represents a single MCP connection, derived from the MCP `initialize` handshake. Both server and widget events share the same session ID — the server propagates it to the widget via the configuration injection. Multiple traces (tool invocations) can share the same session.
+A `session_id` stands for one conversation. The server SDK derives it from the first key the call carries, and records which in `session_source`:
+
+| `session_source` | Derived from |
+|---|---|
+| `mcp_session_id` | The transport's `Mcp-Session-Id` (a sessionful Streamable HTTP server) |
+| `openai_session` | ChatGPT's `_meta["openai/session"]` |
+| `vscode_conversation` | VS Code / Copilot Chat's `_meta["vscode.conversationId"]` |
+| `codex_thread` | The Codex CLI's `_meta.threadId` (only from `codex-mcp-client`) |
+| `custom` | Your [`sessionKey`](/docs/02-sdk/03-configuration#session-key) option — stored as a hash keyed with your API key |
+| `connection` | No key, a non-HTTP transport (stdio): one session per client process |
+| `per_request` | No key on an HTTP request. On a server that builds a new `McpServer` per request this is **one call**, not a conversation, so it is not counted as a session |
+
+The same key gives the same `session_id` on every server instance and process. Both server and widget events share the session ID — the server propagates it to the widget via the configuration injection. Multiple traces (tool invocations) can share the same session.
 
 ## Server-Side Auto-Captured Events
 
@@ -51,7 +64,7 @@ Fires on every tool invocation. This is the core event that powers most analytic
 
 ### connection
 
-Fires on transport connect and disconnect. Captures `protocol_version`, `client_name`, `client_version`, and `connection_duration_ms`.
+Fires on transport connect and disconnect. Captures `protocol_version`, `client_name`, `client_version`, and `connection_duration_ms`. Emitted at least once per session per server process; for key-less HTTP calls (`session_source: per_request`) once per process per client (platform, client name and version, protocol version) instead of once per call.
 
 ### resource_access
 

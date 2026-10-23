@@ -1,8 +1,8 @@
 # Captured Events
 
-All events stored as rows in the `events` table. Each event carries `event_id` (UUID, dedup key), `trace_id`, `session_id`, `timestamp`, `platform`, and `source` (server | widget).
+All events stored as rows in the `events` table. Each event carries `event_id` (UUID, dedup key), `trace_id`, `session_id`, `timestamp`, `platform`, and `source` (server | widget). Server events from SDK 0.5.4 on also carry `session_source`.
 
-**Session ID semantics:** A `session_id` represents a single MCP connection, derived from the MCP `initialize` handshake (`ses_` prefix). Both server and widget events share the same `session_id` — the server propagates it to the widget via `window.__YAVIO__.sessionId`. Multiple traces (tool invocations) can share the same `session_id`. The `trace_id` provides finer-grained correlation between a specific tool call and its widget. See [server-sdk.md Section 3.7](../sdk/server-sdk.md#37-session-lifecycle) for derivation rules.
+**Session ID semantics:** A `session_id` represents one conversation (`ses_` prefix), derived per tool call from the first conversation key the call carries — `Mcp-Session-Id`, `_meta["openai/session"]`, `_meta["vscode.conversationId"]`, the Codex CLI's `_meta.threadId`, the integrator's `sessionKey` — else the connection's own session. `session_source` (LowCardinality Nullable String, migration 0022, #144) records which: `mcp_session_id` | `openai_session` | `vscode_conversation` | `codex_thread` | `custom` | `connection` (no key, non-HTTP) | `per_request` (no key on an HTTP request: on a per-request host one call, which the read side does not count as a session); NULL is an SDK before 0.5.4 or a widget event. The schema takes a string of at most 32 characters, not an enum, and ingest NULLs a value it does not know. Both server and widget events share the same `session_id` — the server propagates it to the widget via `window.__YAVIO__.sessionId`. Multiple traces (tool invocations) can share the same `session_id`. The `trace_id` provides finer-grained correlation between a specific tool call and its widget. See [server-sdk.md Section 3.7](../sdk/server-sdk.md#37-session-lifecycle) for derivation rules.
 
 ---
 
@@ -34,14 +34,14 @@ Fires on every tool invocation. The core event.
 
 ### connection
 
-Fires on transport connect and disconnect.
+Deferred to a session's first tool call: at least once per session per server process (#142); for a `per_request` session once per process per client — platform, client name and version, protocol version, `intent_enabled` — instead of once per call (#144). No disconnect variant is sent.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| protocol_version | TEXT | MCP protocol version |
-| client_name | TEXT | `clientInfo.name` from initialize |
-| client_version | TEXT | `clientInfo.version` from initialize |
-| connection_duration_ms | REAL | Connection lifetime (on disconnect) |
+| protocol_version | TEXT | MCP protocol version (the `mcp-protocol-version` header, date-shaped only) |
+| client_name | TEXT | The client's name: the 2026-07-28 envelope, else `clientInfo.name` from initialize, else the request's User-Agent (known MCP clients only) |
+| client_version | TEXT | The same source's version |
+| connection_duration_ms | REAL | Reserved: connection lifetime (never set) |
 
 ### resource_access
 
