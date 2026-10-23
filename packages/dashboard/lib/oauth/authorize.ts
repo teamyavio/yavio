@@ -3,29 +3,21 @@ import { ANALYTICS_SCOPE, OFFLINE_ACCESS_SCOPE, mcpResourceUri, oauthIssuer } fr
 import { OAuthError } from "./errors";
 
 /**
- * Authorization-request validation. Failure handling is two-tier (RFC 6749
- * §4.1.2.1): until the redirect_uri itself is proven registered, errors must
- * RENDER (redirecting would build an open redirector); after that, protocol
- * errors REDIRECT back to the client with an error code.
+ * Authorization-request validation. Every failure is shown on our own page
+ * and never redirected (RFC 9700 §4.11.2, RFC 6749 §4.1.2.1): registration
+ * accepts any https redirect_uri, so a registered one is not a trusted one,
+ * and the client hears back through its redirect_uri only once the user has
+ * seen the consent page and decided (see the consent actions).
  */
 
-/** Error shown on our own page — never redirected. */
+/** Error shown on our own page, with its RFC 6749 error code. */
 export class RenderAuthorizeError extends Error {
-  constructor(public readonly description: string) {
-    super(description);
-    this.name = "RenderAuthorizeError";
-  }
-}
-
-/** Error sent back to the (validated) client redirect_uri. */
-export class RedirectAuthorizeError extends Error {
   constructor(
-    public readonly redirectTo: string,
     public readonly error: string,
     public readonly description: string,
   ) {
     super(`${error}: ${description}`);
-    this.name = "RedirectAuthorizeError";
+    this.name = "RenderAuthorizeError";
   }
 }
 
@@ -69,7 +61,7 @@ export async function validateAuthorizeRequest(
 ): Promise<AuthorizeRequest> {
   const clientId = params.client_id;
   if (!clientId) {
-    throw new RenderAuthorizeError("Missing client_id.");
+    throw new RenderAuthorizeError("invalid_request", "Missing client_id.");
   }
 
   let client: OAuthClient;
@@ -77,41 +69,36 @@ export async function validateAuthorizeRequest(
     client = await resolveClient(clientId);
   } catch (err) {
     if (err instanceof OAuthError) {
-      throw new RenderAuthorizeError(`Client could not be verified: ${err.description}`);
+      throw new RenderAuthorizeError(err.error, `Client could not be verified: ${err.description}`);
     }
     throw err;
   }
 
   const redirectUri = params.redirect_uri;
   if (!redirectUri) {
-    throw new RenderAuthorizeError("Missing redirect_uri.");
+    throw new RenderAuthorizeError("invalid_request", "Missing redirect_uri.");
   }
   try {
     validateRedirectUri(client, redirectUri);
   } catch {
     throw new RenderAuthorizeError(
+      "invalid_request",
       "The redirect address is not registered for this client. For your safety the request was stopped.",
     );
   }
 
-  const state = params.state ?? null;
-  const fail = (error: string, description: string): never => {
-    throw new RedirectAuthorizeError(
-      errorRedirect(redirectUri, state, error, description),
-      error,
-      description,
-    );
-  };
-
   if (params.response_type !== "code") {
-    fail("unsupported_response_type", "only response_type=code is supported");
+    throw new RenderAuthorizeError(
+      "unsupported_response_type",
+      "Only response_type=code is supported.",
+    );
   }
   const codeChallenge = params.code_challenge;
   if (!codeChallenge || !/^[A-Za-z0-9\-_]{43}$/.test(codeChallenge)) {
-    fail("invalid_request", "a S256 code_challenge is required");
+    throw new RenderAuthorizeError("invalid_request", "An S256 code_challenge is required.");
   }
   if (params.code_challenge_method !== "S256") {
-    fail("invalid_request", "code_challenge_method must be S256");
+    throw new RenderAuthorizeError("invalid_request", "The code_challenge_method must be S256.");
   }
 
   // RFC 6749 §3.3: the AS may ignore scopes it does not grant. Hard-failing
@@ -124,14 +111,17 @@ export async function validateAuthorizeRequest(
 
   const resource = params.resource ?? null;
   if (resource !== null && resource !== mcpResourceUri()) {
-    fail("invalid_target", "resource does not identify this MCP server");
+    throw new RenderAuthorizeError(
+      "invalid_target",
+      "The resource does not identify this MCP server.",
+    );
   }
 
   return {
     client,
     redirectUri,
-    state,
-    codeChallenge: codeChallenge as string,
+    state: params.state ?? null,
+    codeChallenge,
     scope: granted.join(" "),
     resource,
   };
