@@ -1789,13 +1789,18 @@ describe("loss accounting (#148)", () => {
     // The reset zeroes the count and releases the wait; before the fix the
     // wait's own decrement then ran too. A negative count would read as no
     // shutdown() waiting in the next test's cycle.
-    const { client, raw } = build("yav_154_waits", { shutdownTimeoutMs: 5_000 });
+    const { client, raw } = build("yav_154_waits", { shutdownTimeoutMs: 2_000 });
     await callTool(raw, "get_price", { q: "a" });
     const closing = client.shutdown(); // the hanging ingest keeps it waiting
     expect(_appWaitCount()).toBe(1);
     _resetGlobalState();
     await closing;
     expect(_appWaitCount()).toBe(0);
+    // The released stop goes on in the background: let it deliver, or its
+    // own deadline prints a shutdown() line into a later test.
+    await vi.waitFor(() => expect(ingest.batches).toHaveLength(1));
+    await ingest.answerHung();
+    await vi.waitFor(() => expect(ingest.responded).toBe(1));
   });
 
   describe("one late line per cycle, whichever deadline timer runs first (#154, CI)", () => {
