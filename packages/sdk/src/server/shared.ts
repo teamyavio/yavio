@@ -247,24 +247,43 @@ interface SignalCycle {
   budgetMs: number;
   deadlineAt: number;
   /**
-   * Events the cycle's line counted as "in flight when the re-raise is
-   * about to end the process". Lost for good only if the process goes on
-   * (a test's stubbed re-raise): a later count of the cycle's stops leaves
-   * out what a deadline gave up OF THEM (`marks`), so no event is in two
-   * lines — and nothing else, so an event sent after the hand-back and
-   * lost at the deadline is still printed (#148 review round 5).
+   * Per transport, the events the hand-back line counted while they were
+   * still pending, and the counters it stood at: as the only listener
+   * every transport's, which the re-raise is about to cut; next to an app
+   * listener, at the drain's end, what the cycle's own stops still hold —
+   * at the deadline that is what they give up (#148 review round 10). A
+   * later count leaves out what of them a deadline then gave up
+   * (`lostOfMarked`) or what is left of them (the exit hook,
+   * `outstandingOfMarked`), so no event is in two lines — and nothing
+   * else, so an event sent after the hand-back and lost at the deadline is
+   * still printed (#148 review round 5).
    */
-  pendingReported: number;
-  /** Per transport, what the hand-back line pre-counted and the counters it stood at. */
   marks: PendingMark[];
+  /**
+   * The transports the cycle's drain stops: the registry's, and the stops
+   * already in progress at the signal, cut to its deadline
+   * (`shutdownAllShared`).
+   */
+  stops: Set<Transport>;
+  /**
+   * Resolves once every one of `stops` has settled; `stopsRunning` until
+   * then. The drain's wait for them ends at the deadline whether or not
+   * they did, and their deadline timers run in the same tick as the
+   * cycle's, often after it.
+   */
+  stopsSettled: Promise<void>;
+  stopsRunning: boolean;
+  /** `resets` when the cycle started: a cycle from before a test reset reports nothing after it. */
+  epoch: number;
 }
 
 /**
  * A transport's counters when the hand-back line counted its pending
- * events. `lostOfMarked` reads them back when the cycle's drain settles:
- * a transport settles its queue in order, and a deadline ends delivery, so
- * whatever was delivered or failed since came from the pending events
- * first, and what remains of them is what a deadline gave up of them.
+ * events. `lostOfMarked` reads them back when the cycle's stops settle,
+ * `outstandingOfMarked` at exit: a transport settles its queue in order,
+ * and a deadline ends delivery, so whatever was delivered or failed since
+ * came from the pending events first, and what remains of them is what a
+ * deadline gave up of them or what is still pending.
  */
 interface PendingMark {
   transport: HttpTransport;
@@ -422,31 +441,43 @@ function releaseWaiters(): void {
  * A cycle handed back early (a second signal) ends before the stops it
  * started reach their deadline. What those stops give up afterwards is
  * still the cycle's: one more line with the cycle's wording and budget
- * when the drain settles — not one `shutdown()` line per transport, which
+ * when they have settled — not one `shutdown()` line per transport, which
  * is what a stop the registry started outside a signal gets (#148 review
- * round 1). `signalStops` marks the transports a cycle stopped.
+ * round 1). `signalStops` marks the transports a cycle stopped. A cycle
+ * handed back at its deadline with a stop already in progress at the
+ * signal may end before its stops' deadline timers have run: the
+ * hand-back line counts what they still hold (review round 10).
  */
 let reportedLost = 0;
 let exitHookArmed = false;
 let exitReported = false;
 /**
- * While the re-raise runs: the in-flight events the hand-back line just
- * counted. On win32, or when `process.kill` throws, the re-raise ends the
- * process through `process.exit()`, whose `exit` listeners run inside it —
- * the exit hook must not count those events a second time (#148 review
- * round 2). Zero otherwise, so the POSIX output is unchanged.
+ * The marks of the last hand-back line that counted pending events, until
+ * the cycle's stops have settled and the drain-settled report has taken
+ * them in: the exit hook leaves out what is left of them. On win32, or
+ * when `process.kill` throws, the re-raise ends the process through
+ * `process.exit()`, whose `exit` listeners run inside it (#148 review
+ * round 2); next to an app listener the app's `process.exit()` can follow
+ * the line before the stops it pre-counted have settled (review round 10).
+ * Either way the exit hook must not count those events a second time.
  */
-let pendingInHandBackLine = 0;
+let preCounted: PendingMark[] = [];
+/** Bumped by the test reset, so a cycle from before it reports nothing after it. */
+let resets = 0;
 const signalStops = new WeakSet<Transport>();
 
 const lostTotal = (): number =>
   [...transports].reduce((n, t) => n + t.deadlineLostEvents(), lostFromClosed);
 const pendingTotal = (): number => [...transports].reduce((n, t) => n + t.pendingEvents(), 0);
 
-/** Every transport's pending events and the counters they stand at, for `lostOfMarked`. */
-function markPending(): PendingMark[] {
+/**
+ * The pending events and the counters they stand at — of every transport,
+ * or of those in `within` — for `lostOfMarked` and `outstandingOfMarked`.
+ */
+function markPending(within?: Set<Transport>): PendingMark[] {
   const marks: PendingMark[] = [];
   for (const transport of transports) {
+    if (within && !within.has(transport)) continue;
     const pending = transport.pendingEvents();
     if (pending === 0) continue;
     marks.push({
@@ -461,24 +492,44 @@ function markPending(): PendingMark[] {
 }
 
 /**
+ * Of a mark's pending events, how many were neither delivered nor failed
+ * since: the queue is settled in order and nothing is delivered after a
+ * deadline, so the events delivered or failed since the mark are the
+ * pending ones first.
+ */
+function leftOfMark(mark: PendingMark): number {
+  const t = mark.transport;
+  const settledOtherwise =
+    t.deliveredEvents() - mark.delivered + (t.lostEvents() - t.deadlineLostEvents() - mark.failed);
+  return Math.max(0, mark.pending - settledOtherwise);
+}
+
+/**
  * Of the events the hand-back line pre-counted, how many a deadline gave
- * up since. Per transport: the queue is settled in order and nothing is
- * delivered after a deadline, so the events delivered or failed since the
- * mark are the pending ones first; what is left of the pending count is
- * lost, capped at the deadline losses since (events sent after the mark
- * and refused after the deadline are counted there too, and are not the
- * mark's).
+ * up since: what is left of each mark, capped at the deadline losses since
+ * (events sent after the mark and refused after the deadline are counted
+ * there too, and are not the mark's).
  */
 function lostOfMarked(marks: PendingMark[]): number {
   let n = 0;
   for (const mark of marks) {
+    const lostSince = mark.transport.deadlineLostEvents() - mark.deadlineLost;
+    n += Math.min(lostSince, leftOfMark(mark));
+  }
+  return n;
+}
+
+/**
+ * Of the events the hand-back line pre-counted, how many the exit hook
+ * would count again: what is left of each mark, given up by a deadline
+ * since or still pending.
+ */
+function outstandingOfMarked(marks: PendingMark[]): number {
+  let n = 0;
+  for (const mark of marks) {
     const t = mark.transport;
-    const settledOtherwise =
-      t.deliveredEvents() -
-      mark.delivered +
-      (t.lostEvents() - t.deadlineLostEvents() - mark.failed);
     const lostSince = t.deadlineLostEvents() - mark.deadlineLost;
-    n += Math.min(lostSince, Math.max(0, mark.pending - settledOtherwise));
+    n += Math.min(lostSince + t.pendingEvents(), leftOfMark(mark));
   }
   return n;
 }
@@ -489,7 +540,7 @@ const RAISE_HINT =
 function yavioReportAtExit(): void {
   if (exitReported) return;
   exitReported = true;
-  const n = lostTotal() - reportedLost + pendingTotal() - pendingInHandBackLine;
+  const n = lostTotal() - reportedLost + pendingTotal() - outstandingOfMarked(preCounted);
   if (n <= 0) return;
   reportedLost = lostTotal();
   // Synchronous: `process.exit()` ends the process right after its `exit`
@@ -509,30 +560,45 @@ export function armExitHook(): void {
 
 /**
  * The cycle's one line: everything the deadline gave up, plus — at the
- * hand-back — what the re-raise is about to cut. Called again when a drain
- * settles after its cycle was handed back early, for what was given up
+ * hand-back — what is still pending and will not be delivered: as the
+ * only listener everything the re-raise is about to cut; next to an app
+ * listener, when the drain ends (`drain-end`), what the cycle's own stops
+ * still hold. Their deadline is the cycle's, and the cycle's timer, made
+ * first in the same run for the same duration, usually ends the drain's
+ * wait before theirs have counted what they give up: before #148 review
+ * round 10 those events went to the exit hook's line, or to none if the
+ * process was killed first. After a drain that settled they hold nothing.
+ * Called again once the cycle's stops have settled after a hand-back that
+ * came first (a second signal, or the deadline), for what was given up
  * since — less what the hand-back line pre-counted and a deadline then
  * gave up (`lostOfMarked`), not less the whole pre-count: with the batch
  * in flight at the hand-back delivered afterwards, subtracting all of it
  * swallowed the later losses of other sends for good, since `reportedLost`
  * moved past them and the exit hook never saw them (#148 review round 5).
+ * A response that arrived at the deadline's instant and is read after it,
+ * or one a fetch that ignores its abort delivers within `ABORT_SETTLE_MS`,
+ * is a pre-counted event that was delivered: the line counted it, nothing
+ * counts it twice.
  */
-function reportCycleLoss(cycle: SignalCycle, at: "hand-back" | "drain-settled"): void {
+function reportCycleLoss(
+  cycle: SignalCycle,
+  at: "hand-back" | "drain-end" | "drain-settled",
+): void {
   const total = lostTotal();
   let n = total - reportedLost;
   reportedLost = total;
-  if (at === "hand-back") {
-    if (cycle.sole) {
-      cycle.pendingReported = pendingTotal();
-      cycle.marks = markPending();
-    }
-    n += cycle.pendingReported;
-  } else {
+  if (at === "drain-settled") {
     n -= lostOfMarked(cycle.marks);
+    if (preCounted === cycle.marks) preCounted = [];
+  } else {
+    if (cycle.sole) cycle.marks = markPending();
+    else if (at === "drain-end") cycle.marks = markPending(cycle.stops);
+    if (cycle.marks.length > 0) preCounted = cycle.marks;
+    for (const mark of cycle.marks) n += mark.pending;
   }
   if (n <= 0) return;
   const line = `[YAVIO-1205] Shutdown deadline of ${cycle.budgetMs} ms reached — ${n} events not delivered (queued, in flight or refused after the deadline). ${RAISE_HINT}`;
-  if (at === "hand-back" && cycle.sole) writeStderrLine(line);
+  if (at !== "drain-settled" && cycle.sole) writeStderrLine(line);
   else console.warn(line);
 }
 
@@ -609,7 +675,7 @@ function onSignal(signal: HandledSignal): void {
     if (running.signal === signal && Date.now() - running.startedAt < SAME_DELIVERY_MS) return;
     running.signal = signal;
     running.sole = process.listenerCount(signal) === 1;
-    finishSignal(running);
+    finishSignal(running, "hand-back");
     return;
   }
   const budgetMs = processBudgetMs();
@@ -620,8 +686,11 @@ function onSignal(signal: HandledSignal): void {
     startedAt,
     budgetMs,
     deadlineAt: startedAt + budgetMs,
-    pendingReported: 0,
     marks: [],
+    stops: new Set(),
+    stopsSettled: Promise.resolve(),
+    stopsRunning: false,
+    epoch: resets,
   };
   signalInFlight = cycle;
   clearTimeout(cycleTimer);
@@ -631,11 +700,18 @@ function onSignal(signal: HandledSignal): void {
   beginProcessShutdown()
     .catch(() => {})
     .then(() => {
-      // Still this cycle: end it. Handed back already: its stops have
-      // settled now, and what they gave up since the hand-back is reported
-      // as the cycle's, in one line.
-      if (signalInFlight === cycle) finishSignal(cycle);
-      else reportCycleLoss(cycle, "drain-settled");
+      // Still this cycle: end it — the drain is done, or the deadline cut
+      // its wait with the cycle's stops still settling.
+      const handedBack = signalInFlight !== cycle;
+      if (!handedBack) finishSignal(cycle, "drain-end");
+      // Handed back before its stops settled (a second signal, or the
+      // deadline): once they have, what they gave up since the hand-back
+      // is reported as the cycle's, in one line.
+      if (handedBack || cycle.stopsRunning) {
+        void cycle.stopsSettled.then(() => {
+          if (cycle.epoch === resets) reportCycleLoss(cycle, "drain-settled");
+        });
+      }
     });
 }
 
@@ -648,20 +724,14 @@ function onSignal(signal: HandledSignal): void {
  * only re-raises when it is the last listener (signal-exit, used by execa and
  * ora) does not get its turn either — that app must handle the signal itself.
  */
-function finishSignal(cycle: SignalCycle): void {
+function finishSignal(cycle: SignalCycle, at: "hand-back" | "drain-end"): void {
   if (signalInFlight !== cycle) return; // handed back already, or a later cycle is running
   signalInFlight = null;
   lastBudgetMs = cycle.budgetMs;
   lastDeadlineAt = cycle.deadlineAt;
-  reportCycleLoss(cycle, "hand-back"); // before the re-raise: a POSIX re-raise skips `exit` listeners
+  reportCycleLoss(cycle, at); // before the re-raise: a POSIX re-raise skips `exit` listeners
   removeSignalHandlers();
-  if (!cycle.sole) return;
-  pendingInHandBackLine = cycle.pendingReported;
-  try {
-    reraise(cycle.signal);
-  } finally {
-    pendingInHandBackLine = 0; // the process went on: a stubbed re-raise, or a survived one
-  }
+  if (cycle.sole) reraise(cycle.signal);
 }
 
 /**
@@ -934,10 +1004,12 @@ export function beginProcessShutdown(): Promise<void> {
  * loss was nobody's but the exit hook's (review round 6).
  */
 export async function shutdownAllShared(): Promise<void> {
+  const cycle = signalInFlight;
   const deadlineMs = remainingMs() ?? processBudgetMs();
-  const deadlineAt = signalInFlight?.deadlineAt ?? Date.now() + deadlineMs;
+  const deadlineAt = cycle?.deadlineAt ?? Date.now() + deadlineMs;
   for (const transport of stopsInProgress.values()) {
     signalStops.add(transport); // what it gives up at the cut deadline is the cycle's loss, not a shutdown() line
+    cycle?.stops.add(transport);
     transport.cutDeadline?.(deadlineAt);
   }
   const entries = [...registry.values()];
@@ -947,18 +1019,26 @@ export async function shutdownAllShared(): Promise<void> {
     entry.slot.live = null;
     if (!live) return undefined;
     signalStops.add(live); // its deadline loss is the cycle's, even after a hand-back
+    cycle?.stops.add(live);
     return live.shutdown(deadlineMs).catch(() => {});
   });
   const inProgress = [...stopsInProgress.keys()];
+  const settled = Promise.all([...stops, ...inProgress]).then(() => {
+    if (cycle) cycle.stopsRunning = false;
+  });
+  if (cycle) {
+    cycle.stopsRunning = true;
+    cycle.stopsSettled = settled;
+  }
   if (inProgress.length === 0) {
-    await Promise.all(stops);
+    await settled;
     return;
   }
   // Released early by the cycle's deadline timer and by the test reset,
-  // like every bounded shutdown() wait (#148 review round 2).
-  await raceDeadline(Promise.all([...stops, ...inProgress]), deadlineMs, {
-    waiters: deadlineWaiters,
-  });
+  // like every bounded shutdown() wait (#148 review round 2): this may
+  // return before the stops have settled, and the hand-back line then
+  // pre-counts what they still hold (review round 10).
+  await raceDeadline(settled, deadlineMs, { waiters: deadlineWaiters });
 }
 
 /** @internal Number of live shared states — exposed for testing only. */
@@ -1011,7 +1091,8 @@ export function _resetSharedState(): void {
   lostFromClosed = 0;
   stopsInProgress.clear();
   reportedLost = 0;
-  pendingInHandBackLine = 0;
+  preCounted = [];
+  resets++;
   if (exitHookArmed) process.off("exit", yavioReportAtExit);
   exitHookArmed = false;
   exitReported = false;

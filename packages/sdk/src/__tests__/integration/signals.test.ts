@@ -1653,6 +1653,99 @@ describe("loss accounting (#148)", () => {
     });
   }, 15_000);
 
+  it("the same next to an app listener: the cycle's line still holds the four events the deadline cuts, whichever of the deadline's timers runs first, and the exit hook has nothing left", async () => {
+    // The cycle's deadline timer is created in the same synchronous run as
+    // the stops' deadline timers, for the same duration, so it usually runs
+    // first: the cycle was handed back before the stops had counted what
+    // they gave up. As the only listener the hand-back line pre-counts what
+    // is pending; next to an app listener it did not, and before the fix
+    // the four events were the exit hook's ("Process exit with 4 events
+    // not delivered — await analytics.shutdown() …") or, split by the timer
+    // order, half the cycle's and half the exit hook's (#148 review round 9).
+    await withoutOtherListeners("SIGTERM", async () => {
+      const app = vi.fn();
+      process.on("SIGTERM", app);
+      try {
+        const { client: a, raw: rawA } = build("yav_148_cut_app_a", { shutdownTimeoutMs: 20_000 });
+        await callTool(rawA, "get_price", { q: "a" });
+        const { raw: rawB } = build("yav_148_cut_app_b", { shutdownTimeoutMs: 2_000 });
+        await callTool(rawB, "get_price", { q: "b" });
+        // A's last holder releases: its stop runs under A's own 20 s, its
+        // batch of two in flight; B's two are queued in the registry.
+        const closing = a.shutdown();
+        await vi.waitFor(() => expect(ingest.batches).toHaveLength(1));
+        const signalAt = Date.now();
+        process.emit("SIGTERM", "SIGTERM"); // D = 2 s; the app keeps control
+        expect(app).toHaveBeenCalledTimes(1);
+        await closing;
+        expect(Date.now() - signalAt).toBeLessThan(2_600);
+        await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0), { timeout: 3_000 });
+        expect(process.listenerCount("SIGTERM")).toBe(1); // the app's; no re-raise
+        expect(lines1205()).toHaveLength(1);
+        expect(lines1205()[0]).toContain("Shutdown deadline of 2000 ms");
+        expect(lines1205()[0]).toContain("4 events not delivered");
+        expect(lines.some((l) => l.includes("shutdown() deadline"))).toBe(false);
+        // The app exits now: every event was in the cycle's line already.
+        exitHooks()[0]?.call(process, 0);
+        expect(lines1205()).toHaveLength(1);
+      } finally {
+        process.off("SIGTERM", app);
+      }
+    });
+  }, 15_000);
+
+  it("and an app that exits right after that line, before the cut stops have settled, gets no second line from the exit hook for the events the line pre-counted", async () => {
+    // Fetches that ignore their abort: both stops still hold their batch for
+    // ABORT_SETTLE_MS after the deadline, whichever timer ran first, so the
+    // exit below always finds the four events pending, not yet counted lost.
+    const realFetch = globalThis.fetch;
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation((input: string | URL | Request, init?: RequestInit) =>
+        realFetch(input, { ...init, signal: undefined }),
+      );
+    let lineSeen: () => void = () => {};
+    const cycleLine = new Promise<void>((resolve) => {
+      lineSeen = resolve;
+    });
+    warn.mockImplementation((...args: unknown[]) => {
+      lines.push(String(args[0]));
+      if (String(args[0]).includes("YAVIO-1205")) lineSeen();
+    });
+    try {
+      await withoutOtherListeners("SIGTERM", async () => {
+        const app = vi.fn();
+        process.on("SIGTERM", app);
+        try {
+          const { client: a, raw: rawA } = build("yav_148_cut_exit_a", {
+            shutdownTimeoutMs: 20_000,
+          });
+          await callTool(rawA, "get_price", { q: "a" });
+          const { raw: rawB } = build("yav_148_cut_exit_b", { shutdownTimeoutMs: 1_000 });
+          await callTool(rawB, "get_price", { q: "b" });
+          void a.shutdown();
+          await vi.waitFor(() => expect(ingest.batches).toHaveLength(1));
+          process.emit("SIGTERM", "SIGTERM");
+          await Promise.race([cycleLine, new Promise((r) => setTimeout(r, 3_000))]);
+          // `process.exit(0)` right after the line, as an app whose own
+          // wait the same deadline cut: the stops are still settling.
+          expect(_trackedTransportCount()).toBe(2);
+          exitHooks()[0]?.call(process, 0);
+          expect(lines1205()).toHaveLength(1);
+          expect(lines1205()[0]).toContain("Shutdown deadline of 1000 ms");
+          expect(lines1205()[0]).toContain("4 events not delivered");
+          // Once they have settled, the cycle's late report has nothing to add.
+          await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0), { timeout: 2_000 });
+          expect(lines1205()).toHaveLength(1);
+        } finally {
+          process.off("SIGTERM", app);
+        }
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  }, 15_000);
+
   it("a client created and shut down per request leaves no transport behind, and its losses stay counted", async () => {
     // A stateless host that follows the README per request: before the fix
     // every transport stayed in the registry's set for the process lifetime.
