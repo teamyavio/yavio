@@ -88,7 +88,7 @@ export function PathsContent({ projectId }: { projectId: string }) {
       </PageHeader>
 
       {error ? (
-        <ErrorAlert message={error.message} retry={retry} />
+        <ErrorAlert error={error} retry={retry} />
       ) : !isLoading && (!data || data.links.length === 0) ? (
         <EmptyState
           title="No path data"

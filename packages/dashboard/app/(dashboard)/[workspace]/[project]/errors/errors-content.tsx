@@ -101,7 +101,7 @@ export function ErrorsContent({ projectId }: { projectId: string }) {
       </PageHeader>
 
       {error ? (
-        <ErrorAlert message={error.message} retry={retry} />
+        <ErrorAlert error={error} retry={retry} />
       ) : !isLoading && (!data || data.total === 0) ? (
         <EmptyState
           title="No errors recorded"

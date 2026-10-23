@@ -87,7 +87,7 @@ export function ToolsContent({ projectId }: { projectId: string }) {
       </PageHeader>
 
       {error ? (
-        <ErrorAlert message={error.message} retry={retry} />
+        <ErrorAlert error={error} retry={retry} />
       ) : !isLoading && (!data || data.tools.length === 0) ? (
         <EmptyState
           title="No tool calls recorded"
