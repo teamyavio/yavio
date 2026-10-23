@@ -228,6 +228,180 @@ describe.skipIf(!url)("user queries on a real ClickHouse (#89)", () => {
     expect(inRange).toHaveLength(1);
     expect(inRange[0].sessionId).toBe("b2");
   });
+
+  // #145: identify() stamps user_id only on the events of the SDK process
+  // that called it. Each scenario has its own project and its own session
+  // ids: several users above share the default session "s", which is safe
+  // only because the session map reads identify rows.
+  describe("the session stitch (#145)", () => {
+    const scoped = (name: string) => {
+      const projectId = `${project}-${name}`;
+      return {
+        projectId,
+        ctx: (from: string, to: string) => ({ workspaceId: ws, projectId, from, to }),
+        insert: (rows: Array<Record<string, unknown>>) =>
+          admin.insert({
+            table: "events",
+            values: rows.map((r) => ({
+              event_id: randomUUID(),
+              workspace_id: ws,
+              project_id: projectId,
+              trace_id: `t-${randomUUID().slice(0, 8)}`,
+              event_type: "tool_call",
+              event_name: "search",
+              source: "server",
+              ...r,
+            })),
+            format: "JSONEachRow",
+          }),
+      };
+    };
+    const identify = (user: string, session: string, timestamp: string) => ({
+      event_type: "identify",
+      event_name: null,
+      user_id: user,
+      session_id: session,
+      timestamp,
+    });
+
+    describe("a second process's calls go to the user the first identified", () => {
+      // Process A identifies and calls; process B serves the next call of the
+      // same conversation a day later and has never seen identify().
+      const p = scoped("fleet");
+      beforeAll(async () => {
+        await p.insert([
+          identify("eve", "conv-eve", day(-4, "08:00:00.000")),
+          { user_id: "eve", session_id: "conv-eve", timestamp: day(-4, "08:00:00.001") },
+          { session_id: "conv-eve", timestamp: day(-3, "09:00:00.000") },
+        ]);
+      });
+
+      it("in the users list", async () => {
+        const { users, total } = await q.queryUserList(p.ctx(day(-60), day(1)), 1, 50);
+        expect(
+          users.map((u) => [u.userId, Number(u.totalToolCalls), Number(u.totalSessions)]),
+        ).toEqual([["eve", 2, 1]]);
+        expect(total).toBe(1);
+      });
+
+      it("in the user detail", async () => {
+        const detail = await q.queryUserDetail(p.ctx(day(-60), day(1)), "eve");
+        expect(detail.map((e) => `${e.eventType} ${String(e.timestamp).slice(0, 10)}`)).toEqual([
+          `tool_call ${day(-3).slice(0, 10)}`,
+          `tool_call ${day(-4).slice(0, 10)}`,
+          `identify ${day(-4).slice(0, 10)}`,
+        ]);
+      });
+
+      it("in active users, on process B's day", async () => {
+        const points = await q.queryActiveUsers(
+          p.ctx(day(-4, "00:00:00.000"), day(-2, "00:00:00.000")),
+          "day",
+        );
+        const dayB = points.find((pt) => pt.bucket.slice(0, 10) === day(-3).slice(0, 10));
+        expect(Number(dayB?.dau)).toBe(1);
+      });
+    });
+
+    it("counts the session's events before identify() for the user", async () => {
+      const p = scoped("before");
+      await p.insert([
+        { session_id: "conv-fay", timestamp: day(-2, "07:00:00.000") },
+        identify("fay", "conv-fay", day(-2, "07:05:00.000")),
+        { user_id: "fay", session_id: "conv-fay", timestamp: day(-2, "07:06:00.000") },
+      ]);
+      const { users } = await q.queryUserList(p.ctx(day(-60), day(1)), 1, 50);
+      expect(users).toHaveLength(1);
+      expect(users[0].userId).toBe("fay");
+      expect(Number(users[0].totalEvents)).toBe(3);
+      expect(Number(users[0].totalToolCalls)).toBe(2);
+      expect(users[0].firstSeen).toBe(day(-2, "07:00:00.000"));
+    });
+
+    it("gives unstamped rows to the session's first identified user; stamped rows keep their id", async () => {
+      // Two processes accepted different ids for one conversation (YAVIO-1302
+      // is per process); a third never identified.
+      const p = scoped("two-ids");
+      await p.insert([
+        identify("gus", "conv-two", day(-2, "10:00:00.000")),
+        { user_id: "gus", session_id: "conv-two", timestamp: day(-2, "10:01:00.000") },
+        identify("hal", "conv-two", day(-2, "11:00:00.000")),
+        { user_id: "hal", session_id: "conv-two", timestamp: day(-2, "11:01:00.000") },
+        { session_id: "conv-two", timestamp: day(-2, "12:00:00.000") },
+      ]);
+      const { users, total } = await q.queryUserList(p.ctx(day(-60), day(1)), 1, 50);
+      const rows = users.map((u) => [u.userId, Number(u.totalToolCalls), Number(u.totalEvents)]);
+      expect(rows.sort()).toEqual([
+        ["gus", 2, 3],
+        ["hal", 1, 2],
+      ]);
+      expect(total).toBe(2);
+    });
+
+    it("prefers the session's identify over the user last seen with the subject", async () => {
+      // One ChatGPT subject, two people (a shared account): mo in an earlier
+      // conversation, ned identified in this one. The call before ned's
+      // identify is ned's — direct evidence beats the cross-conversation
+      // inference.
+      const p = scoped("order");
+      await p.insert([
+        {
+          user_id: "mo",
+          subject_id: "sub-shared",
+          session_id: "conv-mo",
+          timestamp: day(-5, "10:00:00.000"),
+        },
+        { subject_id: "sub-shared", session_id: "conv-ned", timestamp: day(-2, "10:00:00.000") },
+        identify("ned", "conv-ned", day(-2, "10:05:00.000")),
+      ]);
+      const { users } = await q.queryUserList(p.ctx(day(-60), day(1)), 1, 50);
+      const rows = users.map((u) => [u.userId, Number(u.totalToolCalls), Number(u.totalEvents)]);
+      expect(rows.sort()).toEqual([
+        ["mo", 1, 1],
+        ["ned", 1, 2],
+      ]);
+    });
+
+    it("never maps an event without a session, nor across projects", async () => {
+      const p = scoped("guards");
+      const other = scoped("guards-other");
+      // The same session id, identified in another project of the workspace.
+      await other.insert([identify("ivy", "conv-shared", day(-2, "09:00:00.000"))]);
+      await p.insert([
+        { session_id: "conv-shared", timestamp: day(-2, "09:01:00.000") },
+        // An identify and a call without a session: the identify counts for
+        // jon by its own user_id, the call for nobody.
+        identify("jon", "", day(-2, "10:00:00.000")),
+        { session_id: "", timestamp: day(-2, "10:01:00.000") },
+      ]);
+      const { users, total } = await q.queryUserList(p.ctx(day(-60), day(1)), 1, 50);
+      expect(users.map((u) => [u.userId, Number(u.totalToolCalls), Number(u.totalEvents)])).toEqual(
+        [["jon", 0, 1]],
+      );
+      expect(total).toBe(1);
+    });
+
+    it("stitches windowed counts from their window, the list and the detail from all of it (#112)", async () => {
+      // kim identified 40 days ago; the conversation goes on yesterday on
+      // another process. The active-users window (the range plus 30 days)
+      // does not reach the identify; the list and the detail of kim do.
+      const p = scoped("window");
+      await p.insert([
+        identify("kim", "conv-kim", day(-40, "09:00:00.000")),
+        { session_id: "conv-kim", timestamp: day(-1, "09:00:00.000") },
+      ]);
+      const detail = await q.queryUserDetail(p.ctx(day(-2), day(1)), "kim");
+      expect(detail.map((e) => e.eventType)).toEqual(["tool_call"]);
+      const { users } = await q.queryUserList(p.ctx(day(-60), day(1)), 1, 50);
+      expect(users.map((u) => [u.userId, Number(u.totalToolCalls)])).toEqual([["kim", 1]]);
+
+      const points = await q.queryActiveUsers(
+        p.ctx(day(-1, "00:00:00.000"), day(0, "00:00:00.000")),
+        "day",
+      );
+      expect(points.map((pt) => Number(pt.dau))).toEqual([0]);
+    });
+  });
 });
 
 describe("no query reads users_mv / sessions_mv any more (#89 release 1)", () => {
