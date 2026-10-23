@@ -19,6 +19,7 @@ const baseCtx = {
   to: "2025-01-08T00:00:00.000Z",
 };
 
+// The real-ClickHouse behaviour is in queries-funnels-clickhouse.test.ts.
 describe("funnel queries", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -27,13 +28,14 @@ describe("funnel queries", () => {
   describe("queryFunnelProgression", () => {
     it("calculates drop-off percentages from max count", async () => {
       mockQueryAnalytics.mockResolvedValue([
-        { stepSequence: 1, eventName: "start", traceCount: 100 },
-        { stepSequence: 2, eventName: "search", traceCount: 80 },
-        { stepSequence: 3, eventName: "purchase", traceCount: 20 },
+        { stepSequence: 1, eventName: "start", attempts: 100 },
+        { stepSequence: 2, eventName: "search", attempts: 80 },
+        { stepSequence: 3, eventName: "purchase", attempts: 20 },
       ]);
 
       const result = await queryFunnelProgression(baseCtx);
       expect(result).toHaveLength(3);
+      expect(result.map((r) => r.count)).toEqual([100, 80, 20]);
       expect(result[0].dropOffPercent).toBe(0);
       expect(result[1].dropOffPercent).toBeCloseTo(0.2);
       expect(result[2].dropOffPercent).toBeCloseTo(0.8);
@@ -43,6 +45,22 @@ describe("funnel queries", () => {
       mockQueryAnalytics.mockResolvedValue([]);
       const result = await queryFunnelProgression(baseCtx);
       expect(result).toEqual([]);
+    });
+
+    it("ranks a session's steps by time, counting sessions, not traces (#145)", async () => {
+      mockQueryAnalytics.mockResolvedValue([]);
+      await queryFunnelProgression(baseCtx);
+      const { query, params } = mockQueryAnalytics.mock.calls[0][0];
+      expect(query).toContain(
+        "row_number() OVER (PARTITION BY session_id ORDER BY timestamp, seq, event_id)",
+      );
+      expect(query).toContain("LIMIT 1 BY event_id");
+      expect(query).toContain("uniqExact(attempt)");
+      expect(query).not.toContain("uniqExact(trace_id)");
+      expect(query).not.toContain("GROUP BY step_sequence");
+      // The session's steps before the range count for the rank.
+      expect(query).toContain("AND timestamp < {to:DateTime64(3)}\n          AND session_id IN");
+      expect(params).toMatchObject({ projectId: "proj_1", from: baseCtx.from, to: baseCtx.to });
     });
   });
 
@@ -55,6 +73,8 @@ describe("funnel queries", () => {
 
       const call = mockQueryAnalytics.mock.calls[0][0];
       expect(call.params.step).toBe(2);
+      // By session: the last position of each attempt (#145).
+      expect(call.query).toContain("WHERE last_position = {step:UInt32}");
     });
   });
 
@@ -69,6 +89,7 @@ describe("funnel queries", () => {
 
       const call = mockQueryAnalytics.mock.calls[0][0];
       expect(call.params.traceId).toBe("tr_123");
+      expect(call.query).toContain("ORDER BY timestamp, step_sequence, event_id");
     });
   });
 });
