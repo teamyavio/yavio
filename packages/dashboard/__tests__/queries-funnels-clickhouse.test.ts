@@ -31,6 +31,7 @@ function at(offsetMs: number): string {
 }
 const MIN = 60_000;
 const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
 
 interface Step {
   session: string;
@@ -220,6 +221,23 @@ describe.skipIf(!url)("funnels on a real ClickHouse (#145)", () => {
       expect(sorted(now)).toEqual(sorted(await oldProgression(ctx)));
       expect(compact(now)).toEqual(["1 start 1", "2 search 1", "3 book 2"]);
     });
+  });
+
+  it("ranks with steps up to 30 days before the range: one 29 days before counts, one 31 days before does not (review round 1)", async () => {
+    // Unbounded, the rank read every step the project ever stored before
+    // the range's end. A conversation that began more than 30 days before
+    // the range start is renumbered from its first step inside the bound.
+    const projectId = `p-lookback-${randomUUID().slice(0, 8)}`;
+    await insertSteps(projectId, [
+      { session: "recent", seq: 1, name: "start", ms: -29 * DAY },
+      { session: "recent", seq: 2, name: "search", ms: HOUR },
+      { session: "recent", seq: 3, name: "book", ms: 2 * HOUR },
+      { session: "old", seq: 1, name: "start", ms: -31 * DAY },
+      { session: "old", seq: 2, name: "search", ms: HOUR },
+      { session: "old", seq: 3, name: "book", ms: 2 * HOUR },
+    ]);
+    const steps = await q.queryFunnelProgression(range(projectId, 0, DAY));
+    expect(compact(steps)).toEqual(["1 search 1", "2 book 1", "2 search 1", "3 book 1"]);
   });
 
   it("counts a conversation served by two instances as one attempt, its steps in time order", async () => {

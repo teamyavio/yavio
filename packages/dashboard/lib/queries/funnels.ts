@@ -21,8 +21,17 @@ interface QueryContext {
  * event_id).
  *
  * - The rank counts the session's steps before the range's end, also those
- *   before its start: a session that straddles the start keeps its
- *   positions. Only the steps inside the range are counted.
+ *   up to FUNNEL_LOOKBACK_DAYS before its start: a session that straddles
+ *   the start keeps its positions. Only the steps inside the range are
+ *   counted. The look-back is bounded (#145 review round 1): unbounded, the
+ *   rank read every step row the project ever stored before the range's
+ *   end — 5M stored steps made a 7-day funnel read 5.09M rows (1.1 s instead
+ *   of 0.2 s) and a 12-month one 1.45 GiB. A conversation that began more
+ *   than 30 days before the range start is renumbered from its first step
+ *   inside the look-back; MCP conversations last hours, not weeks.
+ * - Every funnel query runs under FUNNEL_LIMITS: ClickHouse stops it before
+ *   the request times out, and a year of steps cannot take more than 2 GiB
+ *   (the dashboard's database user has no memory cap of its own).
  * - One process gives exactly what grouping by step_sequence gave: its
  *   steps are stamped in order, and step_sequence breaks a tie within one
  *   millisecond.
@@ -35,6 +44,14 @@ interface QueryContext {
  *   clock stepping backwards, the browser clock of widget steps.
  * - Conversions carry no step_sequence and stay out, as before.
  */
+export const FUNNEL_LOOKBACK_DAYS = 30;
+
+/** Per-query limits for the funnel queries (ClickHouse settings). */
+export const FUNNEL_LIMITS = {
+  max_execution_time: 25,
+  max_memory_usage: 2 * 1024 * 1024 * 1024,
+};
+
 const RANKED_STEPS = `
       in_range AS (
         SELECT DISTINCT session_id
@@ -51,6 +68,7 @@ const RANKED_STEPS = `
         WHERE project_id = {projectId:String}
           AND event_type IN ('step', 'conversion')
           AND step_sequence IS NOT NULL
+          AND timestamp >= {from:DateTime64(3)} - INTERVAL ${FUNNEL_LOOKBACK_DAYS} DAY
           AND timestamp < {to:DateTime64(3)}
           AND session_id IN (SELECT session_id FROM in_range)
         LIMIT 1 BY event_id
@@ -83,6 +101,7 @@ export async function queryFunnelProgression(ctx: QueryContext): Promise<FunnelS
       ORDER BY stepSequence, eventName
     `,
     params: { projectId: ctx.projectId, from: ctx.from, to: ctx.to },
+    settings: FUNNEL_LIMITS,
   });
 
   if (rows.length === 0) return [];
@@ -127,6 +146,7 @@ export async function queryDropOffTraces(
       LIMIT 10
     `,
     params: { projectId: ctx.projectId, step: stepSequence, from: ctx.from, to: ctx.to },
+    settings: FUNNEL_LIMITS,
   });
 
   return rows.map((r) => r.traceId);
@@ -156,5 +176,6 @@ export async function queryTraceTimeline(
       ORDER BY timestamp, step_sequence, event_id
     `,
     params: { projectId: ctx.projectId, traceId },
+    settings: FUNNEL_LIMITS,
   });
 }

@@ -181,7 +181,7 @@ Combined server + widget funnel. Answers: **"Where do users drop off?"**
 
 See [metrics/metrics.md — Funnel Metrics](metrics/metrics.md#funnel-metrics) for the full list of metrics surfaced in this view.
 
-- One conversation (session) is one attempt, its steps numbered in the order they happened, however many server instances served it (#145)
+- One conversation (session) is one attempt, its steps numbered in the order they happened, however many server instances served it (#145); the numbering looks back at most 30 days before the range start, and the funnel queries are capped at 25 s and 2 GiB
 - Filter by time range, platform, tool
 
 ### 7.5.4 Live Feed

@@ -58,9 +58,23 @@ describe("funnel queries", () => {
       expect(query).toContain("uniqExact(attempt)");
       expect(query).not.toContain("uniqExact(trace_id)");
       expect(query).not.toContain("GROUP BY step_sequence");
-      // The session's steps before the range count for the rank.
-      expect(query).toContain("AND timestamp < {to:DateTime64(3)}\n          AND session_id IN");
+      // The session's steps before the range count for the rank, up to 30
+      // days before it (review round 1).
+      expect(query).toContain(
+        "AND timestamp >= {from:DateTime64(3)} - INTERVAL 30 DAY\n          AND timestamp < {to:DateTime64(3)}\n          AND session_id IN",
+      );
       expect(params).toMatchObject({ projectId: "proj_1", from: baseCtx.from, to: baseCtx.to });
+    });
+
+    it("runs every funnel query under the execution-time and memory limits (review round 1)", async () => {
+      mockQueryAnalytics.mockResolvedValue([]);
+      await queryFunnelProgression(baseCtx);
+      await queryDropOffTraces(baseCtx, 2);
+      await queryTraceTimeline(baseCtx, "tr_1");
+      for (const [call] of mockQueryAnalytics.mock.calls) {
+        expect(call.settings).toEqual({ max_execution_time: 25, max_memory_usage: 2147483648 });
+      }
+      expect(mockQueryAnalytics).toHaveBeenCalledTimes(3);
     });
   });
 
