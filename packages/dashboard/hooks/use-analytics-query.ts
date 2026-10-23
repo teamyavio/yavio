@@ -35,8 +35,9 @@ export function useAnalyticsQuery<T>({
     // and with revalidateOnFocus off it keeps retrying in hidden tabs too. A
     // query that timed out, was rejected or needs more memory than allowed
     // fails the same way each time, at the full cost to ClickHouse, so it is
-    // not retried; a transient failure keeps SWR's backoff (5 s, doubling,
-    // jittered) for at most MAX_BACKGROUND_RETRIES retries (#159).
+    // not retried; a transient failure keeps SWR's backoff (retries after
+    // 10, 20, 40, 80 and 160 s, each jittered x0.5-1.5) for at most
+    // MAX_BACKGROUND_RETRIES retries (#159).
     shouldRetryOnError: isRetryableError,
     errorRetryCount: MAX_BACKGROUND_RETRIES,
   });

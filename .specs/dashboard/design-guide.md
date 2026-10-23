@@ -420,7 +420,7 @@ When a ClickHouse query fails, the affected component shows an inline error.
 
 - Replaces the chart/table content. Card shell remains.
 - No icons or color. Just text. Card retains its `shadow-sm`.
-- Retry link attempts the query again. It is shown only when a retry can help (a 5xx other than 504, a rate limit, no answer at all). A query that timed out, was rejected or needs more memory than allowed fails the same way again: its message says what to change (narrow the date range) and there is no Retry link (#159). See [architecture.md — Errors and client retries](architecture.md#796-analytics-query-routes).
+- Retry link attempts the query again. It is shown only when a retry can help (a 5xx other than 504, a request timeout or rate limit (408, 429), no answer at all). A query that timed out, was rejected or needs more memory than allowed fails the same way again: its message says what to change (narrow the date range) and there is no Retry link (#159). An expired session (401) shows a "Sign in again" link instead. See [architecture.md — Errors and client retries](architecture.md#796-analytics-query-routes).
 
 ### 9.2 Full Page Error
 
