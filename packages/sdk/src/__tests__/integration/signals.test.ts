@@ -1746,6 +1746,44 @@ describe("loss accounting (#148)", () => {
     }
   }, 15_000);
 
+  it("the README recipe in one process — an app listener that awaits shutdown() and exits as soon as it returns — against a hanging ingest: the cycle's line is out before shutdown() returns, with every event, a request served after the signal included, and the exit hook adds nothing (#154)", async () => {
+    // Before the fix the cycle's deadline timer released the app's wait
+    // first: at its return no line was out, and the exit hook's
+    // "Process exit with 3 events not delivered — await analytics.shutdown()
+    // before exiting" was the only one, a hint for an app that did.
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client, raw } = build("yav_154_recipe", { shutdownTimeoutMs: 1_000 });
+      await callTool(raw, "get_price", { q: "before" }); // connection + call, queued
+      let atReturn: string[] | undefined;
+      const app = vi.fn(async () => {
+        await client.shutdown();
+        atReturn = lines1205();
+        exitHooks()[0]?.call(process, 0); // process.exit(0)
+      });
+      process.on("SIGTERM", app);
+      try {
+        process.emit("SIGTERM", "SIGTERM"); // D = 1 s; the drain sends the two
+        // Served after the signal: its call goes out through a post-signal
+        // transport, whose fetch the deadline cuts at the same instant.
+        await callTool(raw, "get_price", { q: "after" });
+        await vi.waitFor(() => expect(atReturn).toBeDefined(), { timeout: 3_000 });
+        expect(atReturn).toHaveLength(1);
+        expect(atReturn?.[0]).toContain("Shutdown deadline of 1000 ms reached — 3 events");
+        expect(lines1205()).toHaveLength(1);
+        expect(lines.some((l) => l.includes("shutdown() deadline"))).toBe(false);
+        // Once both fetches were cut — the drain's and the late call's —
+        // the cycle's late report has nothing to add.
+        await vi.waitFor(() =>
+          expect(ingest.batches.filter((b) => b.abortedAt !== undefined)).toHaveLength(2),
+        );
+        await new Promise((r) => setTimeout(r, 50));
+        expect(lines1205()).toHaveLength(1);
+      } finally {
+        process.off("SIGTERM", app);
+      }
+    });
+  });
+
   it("a client created and shut down per request leaves no transport behind, and its losses stay counted", async () => {
     // A stateless host that follows the README per request: before the fix
     // every transport stayed in the registry's set for the process lifetime.

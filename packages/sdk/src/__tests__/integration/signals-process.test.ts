@@ -373,12 +373,19 @@ describe.each(STACKS)("a stateless host as a child process on MCP SDK %s (#142, 
       expect(exit.afterSignalMs).toBeGreaterThanOrEqual(3_900);
       expect(exit.afterSignalMs).toBeLessThan(5_000);
       // Everything reached ingest, nothing was answered, and every event is
-      // accounted for: the cycle's line (the drained transport) plus the exit
-      // hook's (the in-flight request's event, sent after the signal).
+      // in one line, the cycle's: the drained transport's and the in-flight
+      // request's (sent after the signal), counted before the deadline let
+      // the handler's shutdown() return. Before #154 the recipe's
+      // process.exit(0) ran first and the exit hook's "Process exit with 54
+      // events not delivered — await analytics.shutdown() before exiting" —
+      // a hint for an app that did — was the line, or one of two.
       expect(ingest.responded).toBe(0);
       expect(ingest.events).toHaveLength(EVENTS_BEFORE_SIGNAL + 1);
-      expect(child.lossLines().length).toBeLessThanOrEqual(2);
-      expect(sum(child.lossLines())).toBe(EVENTS_BEFORE_SIGNAL + 1);
+      expect(child.lossLines()).toEqual([EVENTS_BEFORE_SIGNAL + 1]);
+      expect(child.output()).toContain(
+        `Shutdown deadline of 4000 ms reached — ${EVENTS_BEFORE_SIGNAL + 1} events not delivered`,
+      );
+      expect(child.output()).not.toContain("Process exit");
     },
   );
 
@@ -480,6 +487,37 @@ describe("a stateless host as a child process: signals, handlers and budgets (#1
       expect(ingest.events).toHaveLength(EVENTS_BEFORE_SIGNAL + 1);
       expect(child.lossLines()).toEqual([EVENTS_BEFORE_SIGNAL + 1]);
       expect(child.output()).toContain("deadline of 4000 ms");
+    },
+  );
+
+  it.each([
+    ["nothing in flight", 0, EVENTS_BEFORE_SIGNAL],
+    ["a 1.5 s request in flight", 1_500, EVENTS_BEFORE_SIGNAL + 1],
+  ] as const)(
+    "the README recipe, ingest hanging, SIGINT 500 ms after SIGTERM, %s: one line, the cycle's, with every event, and none from the exit hook (#154)",
+    { timeout: 30_000 },
+    async (_label, inFlightMs, lost) => {
+      ingest.hangEvents = true;
+      const child = await start("readme");
+      await drive(child.port);
+      const slow = inFlightMs > 0 ? (await inFlight(child, inFlightMs)).done : undefined;
+      child.kill("SIGTERM");
+      // A different signal: the cycle is handed back at once, with nothing
+      // lost yet; its stops run on to the deadline and its late line must
+      // come before the handler's shutdown() returns there. Before #154:
+      // "Process exit with 53 events not delivered — await
+      // analytics.shutdown() before exiting", the exit hook's only.
+      setTimeout(() => child.proc.kill("SIGINT"), 500);
+      const exit = await child.exited;
+      await slow;
+
+      expect(exit, child.output()).toMatchObject({ code: 0, signal: null });
+      expect(exit.afterSignalMs).toBeGreaterThanOrEqual(3_900);
+      expect(exit.afterSignalMs).toBeLessThan(5_000);
+      expect(ingest.responded).toBe(0);
+      expect(child.lossLines()).toEqual([lost]);
+      expect(child.output()).toContain(`Shutdown deadline of 4000 ms reached — ${lost} events`);
+      expect(child.output()).not.toContain("Process exit");
     },
   );
 

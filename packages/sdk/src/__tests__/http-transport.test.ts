@@ -1092,6 +1092,46 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       expect(error).toHaveBeenCalledWith(expect.stringContaining("YAVIO-1201"));
     });
 
+    it("precountDue(): the batch in flight whose budget cuts its fetch by the time given is counted once, is no longer pending, and its loss is not a deadline loss again; a fetch the budget gives longer, and the queue behind it, are not due (#154)", async () => {
+      // A post-signal transport at the cycle's deadline (t0 + 300): the
+      // cycle's line counts the fetch that deadline cuts, before the app's
+      // shutdown() returns and the app exits.
+      const { fetch: hanging } = abortableFetch();
+      const t0 = Date.now();
+      const late = new HttpTransport({
+        ...base,
+        immediate: true,
+        maxRetries: 0,
+        fetchBudgetMs: (now) => t0 + 300 - now,
+        fetch: hanging,
+      });
+      late.send([fakeEvent(), fakeEvent()]);
+      late.send([fakeEvent()]); // queued behind the batch in flight
+      await vi.advanceTimersByTimeAsync(0);
+      expect(late.precountDue(t0 + 299)).toBe(0); // cut after that
+      expect(late.precountDue(t0 + 300)).toBe(2);
+      expect(late.precountDue(t0 + 300)).toBe(0); // once
+      expect(late.pendingEvents()).toBe(1); // the queued one
+      await vi.advanceTimersByTimeAsync(300); // the budget cuts it
+      expect(late.deadlineLostEvents()).toBe(0); // the line has it already
+      expect(late.lostEvents()).toBe(2);
+
+      // The 100 ms floor of a send just before the deadline: its fetch
+      // outlives the deadline, so it is not the deadline's to count.
+      const { fetch: hanging2 } = abortableFetch();
+      const floor = new HttpTransport({
+        ...base,
+        immediate: true,
+        maxRetries: 0,
+        fetchBudgetMs: () => 100,
+        fetch: hanging2,
+      });
+      floor.send([fakeEvent()]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(floor.precountDue(Date.now() + 50)).toBe(0);
+      expect(floor.pendingEvents()).toBe(1);
+    });
+
     it("an unparsable Retry-After falls back to the backoff, never to an immediate retry", async () => {
       let calls = 0;
       const fetch = vi.fn().mockImplementation(() => {

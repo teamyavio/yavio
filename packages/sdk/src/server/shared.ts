@@ -273,6 +273,13 @@ interface SignalCycle {
    */
   stopsSettled: Promise<void>;
   stopsRunning: boolean;
+  /**
+   * Set by the first line counted at the cycle's deadline — one of its
+   * deadline timers fired (`onCycleDeadline`), or its drain ended with a
+   * stop cut by its own — which also counted the post-signal fetches that
+   * deadline cuts (`precountLate`, #154). Once per cycle.
+   */
+  deadlineCounted: boolean;
   /** `resets` when the cycle started: a cycle from before a test reset reports nothing after it. */
   epoch: number;
 }
@@ -385,10 +392,10 @@ const MIN_LATE_FETCH_MS = 100;
  * cycle was gone, so a request finishing at signal + 3 s sent with a 4 s
  * budget and held the socket until signal + 7 s (review round 4).
  */
-function lateFetchBudgetMs(): number {
+function lateFetchBudgetMs(now = Date.now()): number {
   const deadlineAt = signalInFlight?.deadlineAt ?? lastDeadlineAt;
   if (deadlineAt !== undefined) {
-    const left = deadlineAt - Date.now();
+    const left = deadlineAt - now;
     if (signalInFlight || left > 0) return Math.max(MIN_LATE_FETCH_MS, left);
   }
   return currentBudgetMs();
@@ -411,9 +418,21 @@ export function boundedBy(ownMs: number): number {
  * it returns at once; the work goes on in the background.
  */
 export async function awaitBounded(work: Promise<void>, ownMs: number): Promise<void> {
+  const cycle = signalInFlight;
+  const remaining = remainingMs();
   const ms = boundedBy(ownMs);
-  if (ms <= 0) return;
-  await raceDeadline(work, ms, { waiters: deadlineWaiters });
+  // Bounded by the running cycle's deadline rather than by the caller's own
+  // value: when the wait ends there, the cycle's line comes before the
+  // caller goes on — a timer made after the cycle's can run before it (#154).
+  const atDeadline =
+    cycle && remaining !== undefined && remaining <= ownMs
+      ? () => onCycleDeadline(cycle)
+      : undefined;
+  if (ms <= 0) {
+    atDeadline?.();
+    return;
+  }
+  await raceDeadline(work, ms, { waiters: deadlineWaiters, onTimeout: atDeadline });
 }
 
 function releaseWaiters(): void {
@@ -512,11 +531,13 @@ function leftOfMark(mark: PendingMark): number {
  */
 function lostOfMarked(marks: PendingMark[]): number {
   let n = 0;
-  for (const mark of marks) {
-    const lostSince = mark.transport.deadlineLostEvents() - mark.deadlineLost;
-    n += Math.min(lostSince, leftOfMark(mark));
-  }
+  for (const mark of marks) n += lostOfMark(mark);
   return n;
+}
+
+function lostOfMark(mark: PendingMark): number {
+  const lostSince = mark.transport.deadlineLostEvents() - mark.deadlineLost;
+  return Math.min(lostSince, leftOfMark(mark));
 }
 
 /**
@@ -578,28 +599,83 @@ export function armExitHook(): void {
  * A response that arrived at the deadline's instant and is read after it,
  * or one a fetch that ignores its abort delivers within `ABORT_SETTLE_MS`,
  * is a pre-counted event that was delivered: the line counted it, nothing
- * counts it twice.
+ * counts it twice. At the deadline itself (`deadline`: the cycle's timer,
+ * or a wait it bounds, ran before the drain's end) the line counts what
+ * it counts at the drain's end, plus the post-signal fetches that deadline
+ * cuts (`precountLate`); a cycle handed back before its deadline with its
+ * stops still running reports then (`late-deadline`), not once they have
+ * settled — the app it released exits right after (#154).
  */
 function reportCycleLoss(
   cycle: SignalCycle,
-  at: "hand-back" | "drain-end" | "drain-settled",
+  at: "hand-back" | "drain-end" | "deadline" | "late-deadline" | "drain-settled",
 ): void {
   const total = lostTotal();
   let n = total - reportedLost;
   reportedLost = total;
+  // At the cycle's deadline (#154) — its own timers, or a drain ended by a
+  // stop its own deadline cut — the line also counts the post-signal
+  // fetches that deadline cuts in the same tick: the README recipe's
+  // request in flight, whose event the app's `process.exit(0)` right after
+  // this line would otherwise leave to the exit hook. First, so a mark
+  // made below no longer holds them.
+  if (at === "deadline" || at === "late-deadline" || (at !== "hand-back" && stopsCut(cycle))) {
+    if (!cycle.deadlineCounted) n += precountLate(cycle);
+    cycle.deadlineCounted = true;
+  }
   if (at === "drain-settled") {
     n -= lostOfMarked(cycle.marks);
     if (preCounted === cycle.marks) preCounted = [];
+  } else if (at === "late-deadline") {
+    n += precountStops(cycle);
   } else {
     if (cycle.sole) cycle.marks = markPending();
-    else if (at === "drain-end") cycle.marks = markPending(cycle.stops);
+    else if (at !== "hand-back") cycle.marks = markPending(cycle.stops);
     if (cycle.marks.length > 0) preCounted = cycle.marks;
     for (const mark of cycle.marks) n += mark.pending;
   }
   if (n <= 0) return;
   const line = `[YAVIO-1205] Shutdown deadline of ${cycle.budgetMs} ms reached — ${n} events not delivered (queued, in flight or refused after the deadline). ${RAISE_HINT}`;
-  if (at !== "drain-settled" && cycle.sole) writeStderrLine(line);
+  if (at !== "drain-settled" && at !== "late-deadline" && cycle.sole) writeStderrLine(line);
   else console.warn(line);
+}
+
+/**
+ * The post-signal fetches the cycle's deadline cuts — a request served
+ * after the signal sent its events through an immediate transport whose
+ * fetch runs to signal + D — counted as not delivered now, on the
+ * transport itself (`precountDue`), so no later line counts them again.
+ * Not the cycle's stops (marked), nor a transport an earlier line of the
+ * cycle marked.
+ */
+function precountLate(cycle: SignalCycle): number {
+  const marked = new Set<Transport>(cycle.marks.map((mark) => mark.transport));
+  let n = 0;
+  for (const transport of transports) {
+    if (cycle.stops.has(transport) || marked.has(transport)) continue;
+    n += transport.precountDue(cycle.deadlineAt);
+  }
+  return n;
+}
+
+/**
+ * At a deadline that comes after the cycle was handed back (a second
+ * signal), its stops still running: what they still hold is what the
+ * deadline gives up, counted now — less what an earlier line of the cycle
+ * pre-counted, and with the losses of those events since taken out — and
+ * marked afresh for the drain-settled report and the exit hook (#154).
+ */
+function precountStops(cycle: SignalCycle): number {
+  let n = -lostOfMarked(cycle.marks);
+  const marks = markPending(cycle.stops);
+  for (const mark of marks) {
+    const earlier = cycle.marks.find((m) => m.transport === mark.transport);
+    const stillPending = earlier ? leftOfMark(earlier) - lostOfMark(earlier) : 0;
+    n += Math.max(0, mark.pending - stillPending);
+  }
+  cycle.marks = marks;
+  preCounted = marks;
+  return n;
 }
 
 /**
@@ -690,11 +766,15 @@ function onSignal(signal: HandledSignal): void {
     stops: new Set(),
     stopsSettled: Promise.resolve(),
     stopsRunning: false,
+    deadlineCounted: false,
     epoch: resets,
   };
   signalInFlight = cycle;
   clearTimeout(cycleTimer);
-  cycleTimer = setTimeout(releaseWaiters, budgetMs);
+  cycleTimer = setTimeout(() => {
+    onCycleDeadline(cycle); // the cycle's line first, then the waiters (#154)
+    releaseWaiters();
+  }, budgetMs);
   unref(cycleTimer);
   armExitHook();
   beginProcessShutdown()
@@ -724,7 +804,7 @@ function onSignal(signal: HandledSignal): void {
  * only re-raises when it is the last listener (signal-exit, used by execa and
  * ora) does not get its turn either — that app must handle the signal itself.
  */
-function finishSignal(cycle: SignalCycle, at: "hand-back" | "drain-end"): void {
+function finishSignal(cycle: SignalCycle, at: "hand-back" | "drain-end" | "deadline"): void {
   if (signalInFlight !== cycle) return; // handed back already, or a later cycle is running
   signalInFlight = null;
   lastBudgetMs = cycle.budgetMs;
@@ -733,6 +813,30 @@ function finishSignal(cycle: SignalCycle, at: "hand-back" | "drain-end"): void {
   removeSignalHandlers();
   if (cycle.sole) reraise(cycle.signal);
 }
+
+/**
+ * The cycle's deadline has come (#154): its timer fired, or a wait bounded
+ * by it — an app's `shutdown()`, the drain's wait for a stop in progress —
+ * got there first; their order within the tick is not fixed. The cycle's
+ * line comes now, before whatever that wait releases: the README recipe's
+ * `process.exit(0)` runs as soon as its `await analytics.shutdown()`
+ * returns. Before #154 the waiters went first — the cycle's timer, made
+ * before the stops' deadline timers for the same duration, usually runs
+ * before them — and the exit hook's "Process exit … await
+ * analytics.shutdown()" line counted every event, with a hint for an app
+ * that did. Still in flight, the cycle ends here; handed back early (a
+ * second signal) with its stops still running, its late report comes now
+ * rather than when they settle. Once per cycle.
+ */
+function onCycleDeadline(cycle: SignalCycle): void {
+  if (cycle.epoch !== resets || cycle.deadlineCounted) return;
+  if (signalInFlight === cycle) finishSignal(cycle, "deadline");
+  else if (cycle.stopsRunning) reportCycleLoss(cycle, "late-deadline");
+}
+
+/** Whether one of the cycle's stops was cut by its own deadline timer: the deadline has come. */
+const stopsCut = (cycle: SignalCycle): boolean =>
+  [...cycle.stops].some((stop) => stop.reachedDeadline?.() === true);
 
 /**
  * Prepended, so the SDK's listener runs before the app's and counts them all
@@ -1037,8 +1141,12 @@ export async function shutdownAllShared(): Promise<void> {
   // Released early by the cycle's deadline timer and by the test reset,
   // like every bounded shutdown() wait (#148 review round 2): this may
   // return before the stops have settled, and the hand-back line then
-  // pre-counts what they still hold (review round 10).
-  await raceDeadline(settled, deadlineMs, { waiters: deadlineWaiters });
+  // pre-counts what they still hold (review round 10). Its own timer, when
+  // it runs first, counts the cycle's line first too (#154).
+  await raceDeadline(settled, deadlineMs, {
+    waiters: deadlineWaiters,
+    onTimeout: cycle ? () => onCycleDeadline(cycle) : undefined,
+  });
 }
 
 /** @internal Number of live shared states — exposed for testing only. */
