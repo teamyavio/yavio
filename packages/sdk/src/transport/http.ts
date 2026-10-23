@@ -427,7 +427,10 @@ export class HttpTransport implements Transport {
         }
       }
     };
+    // keepAlive: a drain is a `shutdown()` call's — its retry waits must
+    // not let Node exit before it is done or its deadline came (#164).
     await raceDeadline(loop(), deadlineMs, {
+      keepAlive: true,
       onTimeout: () => {
         expired = true;
       },
@@ -532,7 +535,12 @@ export class HttpTransport implements Transport {
     // exit and a hanging ingest cannot keep the process alive (#148).
     const lostBefore = this.deadlineLost;
     // `cutDeadline()` may end the race earlier through the waiters.
+    // keepAlive (#164): until the drain is done or its deadline came — the
+    // cut one included, whose timer fires because this one holds the loop —
+    // the process stays up through the unref'd backoff and `Retry-After`
+    // waits; never longer, the timer is cleared with the race.
     await raceDeadline(drain(), deadlineMs, {
+      keepAlive: true,
       onTimeout: () => this.reachDeadline(),
       waiters: this.shutdownWaiters,
     });
