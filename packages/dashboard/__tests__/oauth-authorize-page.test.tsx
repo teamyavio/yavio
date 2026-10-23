@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { OAuthError } from "../lib/oauth/errors";
 
 const mocks = vi.hoisted(() => ({
   getServerSession: vi.fn(),
@@ -82,6 +83,18 @@ const INVALID_REQUESTS: Array<[string, Record<string, string | undefined>, strin
   ["a foreign resource", { ...VALID, resource: "https://other.example/api/mcp" }, "invalid_target"],
 ];
 
+/** Consent form submissions that do not match a request the user was shown. */
+const INVALID_SUBMISSIONS: Array<[string, Record<string, string | undefined>]> = [
+  ...INVALID_REQUESTS.map(([label, params]): [string, Record<string, string | undefined>] => [
+    label,
+    params,
+  ]),
+  [
+    "an unregistered redirect_uri",
+    { ...VALID, redirect_uri: "https://elsewhere.example/callback" },
+  ],
+];
+
 /** The URL the code under test redirected to, or null when it returned normally. */
 async function redirectTarget(run: () => Promise<unknown>): Promise<string | null> {
   try {
@@ -96,6 +109,11 @@ async function redirectTarget(run: () => Promise<unknown>): Promise<string | nul
 async function renderPage(params: Record<string, string | undefined>): Promise<string> {
   const element = await AuthorizePage({ searchParams: Promise.resolve(params) });
   return renderToStaticMarkup(element);
+}
+
+function expectDashboardTarget(target: string | null): void {
+  expect(target).not.toBeNull();
+  expect(new URL(target as string, "https://dashboard.test").origin).toBe("https://dashboard.test");
 }
 
 function formOf(params: Record<string, string | undefined>, workspaceId?: string): FormData {
@@ -175,6 +193,7 @@ describe("authorization page and consent actions", () => {
     expect(url.origin + url.pathname).toBe(CLIENT_CALLBACK);
     expect(url.searchParams.get("code")).toBe("yvo_ac_test");
     expect(url.searchParams.get("state")).toBe("opaque-state-123");
+    expect(url.searchParams.get("iss")).toBe("https://dashboard.test");
   });
 
   it("reports access_denied to the client when the chosen workspace is not accessible", async () => {
@@ -183,6 +202,7 @@ describe("authorization page and consent actions", () => {
     const url = new URL(target as string);
     expect(url.origin + url.pathname).toBe(CLIENT_CALLBACK);
     expect(url.searchParams.get("error")).toBe("access_denied");
+    expect(url.searchParams.get("iss")).toBe("https://dashboard.test");
     expect(mocks.createAuthorizationCode).not.toHaveBeenCalled();
   });
 
@@ -192,19 +212,34 @@ describe("authorization page and consent actions", () => {
     expect(url.origin + url.pathname).toBe(CLIENT_CALLBACK);
     expect(url.searchParams.get("error")).toBe("access_denied");
     expect(url.searchParams.get("state")).toBe("opaque-state-123");
+    expect(url.searchParams.get("iss")).toBe("https://dashboard.test");
   });
 
-  it.each(INVALID_REQUESTS)(
+  it.each(INVALID_SUBMISSIONS)(
     "keeps a submitted request with %s on the dashboard",
     async (_label, params) => {
       for (const action of [approveConsent, denyConsent]) {
-        const target = await redirectTarget(() => action(formOf(params, "ws-1")));
-        expect(target).not.toBeNull();
-        expect(new URL(target as string, "https://dashboard.test").origin).toBe(
-          "https://dashboard.test",
-        );
+        expectDashboardTarget(await redirectTarget(() => action(formOf(params, "ws-1"))));
       }
       expect(mocks.createAuthorizationCode).not.toHaveBeenCalled();
     },
   );
+
+  it("keeps a request from a client that cannot be verified on the dashboard", async () => {
+    mocks.resolveClient.mockRejectedValue(
+      new OAuthError("invalid_client", "unknown client_id", 401),
+    );
+    let html = "";
+    expect(
+      await redirectTarget(async () => {
+        html = await renderPage(VALID);
+      }),
+    ).toBeNull();
+    expect(html).toContain("Connection request stopped");
+    expect(html).toContain("invalid_client");
+    for (const action of [approveConsent, denyConsent]) {
+      expectDashboardTarget(await redirectTarget(() => action(formOf(VALID, "ws-1"))));
+    }
+    expect(mocks.createAuthorizationCode).not.toHaveBeenCalled();
+  });
 });
