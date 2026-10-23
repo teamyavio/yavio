@@ -222,7 +222,10 @@ export interface InvocationFeedItem {
   latencyMs: number | null;
   errorCategory: string | null;
   errorMessage: string | null;
-  /** user_id, else the platform's subject_id; null when the event has neither. */
+  /**
+   * user_id, else the first user identified in its session (#145), else the
+   * platform's subject_id; null when there is none.
+   */
   userId: string | null;
   sessionId: string;
   traceId: string;
@@ -266,6 +269,7 @@ export interface ToolInvocation {
   timestamp: string;
   traceId: string;
   sessionId: string;
+  /** user_id, else the first user identified in its session (#145). */
   userId: string | null;
   status: string;
   latencyMs: number | null;
