@@ -170,6 +170,31 @@ describe.skipIf(!url)("location breakdown on a real ClickHouse (#129)", () => {
     expect(claude.unknown).toBeNull();
   });
 
+  it("counts a second process's calls for the user their session identified (#145)", async () => {
+    // Claude sends no subject_id: before the session stitch only the calls of
+    // the process that ran identify() had a user.
+    const fleet = { ws, project: `${project}-fleet` };
+    await insert(
+      [
+        { event_type: "identify", event_name: null, user_id: "lea", session_id: "conv-lea" },
+        { user_id: "lea", session_id: "conv-lea", country_code: "DE" },
+        { session_id: "conv-lea", country_code: "FR" },
+      ].map((r) => ({ ...r, platform: "claude" })),
+      fleet,
+    );
+    const r = await q.queryLocationBreakdown({
+      workspaceId: ws,
+      projectId: fleet.project,
+      from: day(-7),
+      to: day(1),
+    });
+    const rows = r.countries.map((c) => [c.countryCode, c.toolCalls, c.users]);
+    expect(rows.sort()).toEqual([
+      ["DE", 1, 1],
+      ["FR", 1, 1],
+    ]);
+  });
+
   it("sees nothing of another project or workspace", async () => {
     const r = await q.queryLocationBreakdown(ctx(day(-7), day(1)));
     const regions = r.countries.flatMap((c) => c.regions.map((x) => x.region));

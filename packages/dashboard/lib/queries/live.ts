@@ -72,6 +72,11 @@ import type { LiveEvent } from "./types";
  * fleet emits one connection per instance that served a session (the
  * SDK's once-only events are per process), and the ids are random, so
  * nothing collapses them on write.
+ *
+ * The user column is the event's raw user_id: the live feed is not
+ * stitched to the session's identified user (#145), unlike the Users page,
+ * the invocation feed and a tool's recent invocations. A call another
+ * instance served in an identified conversation shows no user here.
  */
 
 /** How far before the cursor a poll re-reads, in whole seconds (SQL `INTERVAL n SECOND`). */

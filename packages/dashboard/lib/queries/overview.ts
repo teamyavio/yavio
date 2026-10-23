@@ -191,9 +191,10 @@ export async function queryPlatformBreakdown(ctx: QueryContext): Promise<Platfor
 /**
  * Tool calls by country and region (#129), from raw events.
  *
- * Users are the Users page's key (keyedEvents, #89): user_id, else the
- * user_id stitched to the subject_id, else subject_id — never session_id —
- * stitched within the selected range like the windowed Users queries (#112).
+ * Users are the Users page's key (keyedEvents, #89, #145): user_id, else the
+ * session's first identified user_id, else the user_id stitched to the
+ * subject_id, else subject_id — never session_id — stitched within the
+ * selected range like the windowed Users queries (#112).
  * Calls without a key count as calls, not as users (uniqExact skips NULL).
  *
  * One pass with GROUPING SETS, not two aggregations under a UNION ALL: the
