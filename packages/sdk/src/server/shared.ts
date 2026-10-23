@@ -365,6 +365,19 @@ const deadlineWaiters = new Set<() => void>();
  * the deadline cut (#154 CI fix).
  */
 let appWaits = 0;
+/** The cycle whose timer last released the `shutdown()` waits (`releaseWaiters`). */
+let releasedBy: SignalCycle | null = null;
+/**
+ * The signal cycle at whose deadline the last `shutdown()` to return was
+ * cut with its work unfinished — its own timer bounded by the cycle, or the
+ * cycle's timer releasing every wait; cleared by one that returned with its
+ * work done. Set, what the exit hook finds is what that deadline left
+ * after the cycle's line — a request served after the signal that sent
+ * more than its batch in flight, a send in the deadline's last 100 ms —
+ * and its line says so in the cycle's wording: the app did await
+ * `shutdown()` (#154 review round 1).
+ */
+let returnedAtDeadline: SignalCycle | null = null;
 
 /**
  * D for a signal arriving now: the smallest `shutdownTimeoutMs` set
@@ -440,23 +453,43 @@ export async function awaitBounded(work: Promise<void>, ownMs: number): Promise<
   // Bounded by the running cycle's deadline rather than by the caller's own
   // value: when the wait ends there, the cycle's line comes before the
   // caller goes on — a timer made after the cycle's can run before it (#154).
-  const atDeadline =
-    cycle && remaining !== undefined && remaining <= ownMs
-      ? () => onCycleDeadline(cycle, true)
-      : undefined;
+  const byCycle = cycle && remaining !== undefined && remaining <= ownMs ? cycle : null;
   if (ms <= 0) {
-    atDeadline?.();
+    if (byCycle) {
+      onCycleDeadline(byCycle, true);
+      returnedAtDeadline = byCycle;
+    }
     return;
   }
   const epoch = resets;
+  let settled = false;
+  let ownTimer = false;
+  work.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
   appWaits++;
   try {
-    await raceDeadline(work, ms, { waiters: deadlineWaiters, onTimeout: atDeadline });
+    await raceDeadline(work, ms, {
+      waiters: deadlineWaiters,
+      onTimeout: () => {
+        ownTimer = true;
+        if (byCycle) onCycleDeadline(byCycle, true);
+      },
+    });
   } finally {
     // A test reset zeroes the count and releases this wait: not again here
     // (#154 review round 1).
     if (epoch === resets) appWaits--;
   }
+  if (epoch !== resets) return;
+  if (settled) returnedAtDeadline = null;
+  else if (byCycle) returnedAtDeadline = byCycle;
+  else if (!ownTimer && releasedBy) returnedAtDeadline = releasedBy;
 }
 
 function releaseWaiters(): void {
@@ -590,9 +623,14 @@ function yavioReportAtExit(): void {
   reportedLost = lostTotal();
   // Synchronous: `process.exit()` ends the process right after its `exit`
   // listeners, and an asynchronous stderr pipe would lose a console.warn
-  // (#148 review round 3, as the hand-back line in round 2).
+  // (#148 review round 3, as the hand-back line in round 2). After a
+  // `shutdown()` that a cycle's deadline cut, the rest is that deadline's,
+  // not an app's that forgot to await (#154 review round 1).
+  const cut = returnedAtDeadline;
   writeStderrLine(
-    `[YAVIO-1205] Process exit with ${n} events not delivered — await analytics.shutdown() before exiting, or raise shutdownTimeoutMs.`,
+    cut
+      ? `[YAVIO-1205] Shutdown deadline of ${cut.budgetMs} ms reached — ${n} more events not delivered (sent in its last 100 ms or after it, or queued behind a request it cut). ${RAISE_HINT}`
+      : `[YAVIO-1205] Process exit with ${n} events not delivered — await analytics.shutdown() before exiting, or raise shutdownTimeoutMs.`,
   );
 }
 
@@ -811,6 +849,7 @@ function onSignal(signal: HandledSignal): void {
   clearTimeout(cycleTimer);
   cycleTimer = setTimeout(() => {
     onCycleDeadline(cycle); // the cycle's line first, then the waiters (#154)
+    releasedBy = cycle;
     releaseWaiters();
   }, budgetMs);
   unref(cycleTimer);
@@ -1240,6 +1279,8 @@ export function _resetSharedState(): void {
   lastDeadlineAt = undefined;
   inProgressDeadlines.length = 0;
   appWaits = 0;
+  releasedBy = null;
+  returnedAtDeadline = null;
   holdDeadlines.length = 0;
   pinDeadlines.clear();
   releaseWaiters();

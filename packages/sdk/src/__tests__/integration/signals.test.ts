@@ -1372,7 +1372,7 @@ describe("loss accounting (#148)", () => {
     });
   });
 
-  it("with an app handler: the cycle's line counts the drained transports; an exit before shutdown() resolved gets one more line from the exit hook, which a plain exit never arms", async () => {
+  it("with an app handler: the cycle's line counts the drained transports; a late call cut after the deadline gets one more line from the exit hook, in the cycle's wording after a shutdown() the deadline cut, and a plain exit never arms it", async () => {
     _setSignalReraise(() => {});
     await withoutOtherListeners("SIGTERM", async () => {
       const { client, raw } = build("yav_148_exit", { shutdownTimeoutMs: 300 });
@@ -1401,14 +1401,24 @@ describe("loss accounting (#148)", () => {
       await vi.waitFor(() => expect(lines1205()).toHaveLength(1));
       expect(lines1205()[0]).toContain("2 events not delivered"); // connection + the first call
       // `process.exit(0)` now: the late call's event is still in flight.
+      // The handler's shutdown() returned at the deadline, so the line is
+      // the deadline's, without the hint to await it (#154 review round 1;
+      // before: "Process exit with 1 events not delivered — await
+      // analytics.shutdown() before exiting").
       exitHooks()[0]?.call(process, 0);
       expect(lines1205()).toHaveLength(2);
-      expect(lines1205()[1]).toContain("1 events not delivered");
+      expect(lines1205()[1]).toContain(
+        "Shutdown deadline of 300 ms reached — 1 more events not delivered (sent in its last 100 ms",
+      );
+      expect(lines1205()[1]).not.toContain("await analytics.shutdown()");
       // Written synchronously to fd 2, like the hand-back line: process.exit()
       // ends the process right after its listeners, and an asynchronous
       // stderr pipe would lose a console.warn (#148 review round 3).
-      expect(stderr).toHaveBeenCalledWith(2, expect.stringContaining("Process exit with 1 events"));
-      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("Process exit with"));
+      expect(stderr).toHaveBeenCalledWith(
+        2,
+        expect.stringContaining("1 more events not delivered"),
+      );
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("more events not delivered"));
       exitHooks()[0]?.call(process, 0);
       expect(lines1205()).toHaveLength(2); // counted once
     });
@@ -1785,6 +1795,67 @@ describe("loss accounting (#148)", () => {
     });
   });
 
+  it("the README recipe in one process, two requests served after the signal: what the cycle's line cannot count — the second request's events, queued behind the first's cut batch — comes at exit in the deadline's wording, not with a hint to await shutdown() (#154 review round 1)", async () => {
+    // Before the fix: "Process exit with 2 events not delivered — await
+    // analytics.shutdown() before exiting", for an app that did.
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client, raw } = build("yav_154_recipe2", { shutdownTimeoutMs: 1_000 });
+      await callTool(raw, "get_price", { q: "before" }); // connection + call, queued
+      let atReturn: string[] | undefined;
+      const app = vi.fn(async () => {
+        await client.shutdown();
+        atReturn = lines1205();
+        exitHooks()[0]?.call(process, 0); // process.exit(0)
+      });
+      process.on("SIGTERM", app);
+      try {
+        process.emit("SIGTERM", "SIGTERM"); // D = 1 s; the drain sends the two
+        // Two calls served after the signal, through one post-signal
+        // transport: the first's batch is in flight when the second's
+        // events are queued behind it.
+        await callTool(raw, "get_price", { q: "after-1" });
+        await callTool(raw, "get_price", { q: "after-2" });
+        await vi.waitFor(() => expect(atReturn).toBeDefined(), { timeout: 3_000 });
+        expect(atReturn).toHaveLength(1);
+        expect(atReturn?.[0]).toContain("Shutdown deadline of 1000 ms reached");
+        expect(lines1205()).toHaveLength(2);
+        expect(lines1205()[1]).toMatch(
+          /Shutdown deadline of 1000 ms reached — \d+ more events not delivered \(sent in its last 100 ms or after it, or queued behind a request it cut\)/,
+        );
+        expect(lines1205().join("\n")).not.toContain("await analytics.shutdown()");
+        // Every event once, in one of the two lines: the two before the
+        // signal and the first late call's at the deadline, the second late
+        // call's — queued behind it, sent once it was cut — at exit.
+        const counts = lines1205().map((l) => Number(/(\d+) (more )?events/.exec(l)?.[1]));
+        expect(counts).toEqual([3, 1]);
+      } finally {
+        process.off("SIGTERM", app);
+      }
+    });
+  });
+
+  it("an app that exits before its shutdown() resolved still gets the exit hook's hint to await it", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client, raw } = build("yav_154_noawait", { shutdownTimeoutMs: 1_000 });
+      await callTool(raw, "get_price", { q: "x" });
+      const app = vi.fn(() => {
+        void client.shutdown(); // not awaited
+        exitHooks()[0]?.call(process, 0); // process.exit(0) at once
+      });
+      process.on("SIGTERM", app);
+      try {
+        process.emit("SIGTERM", "SIGTERM");
+        expect(app).toHaveBeenCalledTimes(1);
+        expect(lines1205()).toHaveLength(1);
+        expect(lines1205()[0]).toContain(
+          "Process exit with 2 events not delivered — await analytics.shutdown() before exiting",
+        );
+      } finally {
+        process.off("SIGTERM", app);
+      }
+    });
+  });
+
   it("a test reset while a shutdown() waits leaves the count of waits at 0, not -1 (#154 review round 1)", async () => {
     // The reset zeroes the count and releases the wait; before the fix the
     // wait's own decrement then ran too. A negative count would read as no
@@ -1873,7 +1944,7 @@ describe("loss accounting (#148)", () => {
       });
     });
 
-    it("an app's shutdown() waiting: the late line comes at the deadline, before it returns, and stays the cycle's only one — Y, lost after it, is the exit hook's", async () => {
+    it("an app's shutdown() waiting: the late line comes at the deadline, before it returns, and stays the cycle's only one — Y, lost after it, is the exit hook's, in the deadline's wording", async () => {
       // Before the fix the stops' settling printed a second late line with
       // Y's event after the one at the deadline.
       await withoutOtherListeners("SIGTERM", async () => {
@@ -1905,7 +1976,13 @@ describe("loss accounting (#148)", () => {
             expect(exitHooks()).toHaveLength(1);
             exitHooks()[0]?.call(process, 0);
             expect(lines1205()).toHaveLength(2);
-            expect(lines1205()[1]).toContain("Process exit with 1 events not delivered"); // Y
+            // Y, in the deadline's wording: the app's shutdown() returned at
+            // it (#154 review round 1; before: "Process exit with 1 events
+            // not delivered — await analytics.shutdown() …").
+            expect(lines1205()[1]).toContain(
+              "Shutdown deadline of 600 ms reached — 1 more events not delivered",
+            );
+            expect(lines1205()[1]).not.toContain("await analytics.shutdown()");
           } finally {
             process.off("SIGTERM", app);
             process.off("SIGINT", app);

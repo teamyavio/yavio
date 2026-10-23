@@ -141,7 +141,9 @@ async function startChild(
     signalAt: () => signalAt,
     waitForOutput,
     lossLines: () =>
-      [...out.matchAll(/YAVIO-1205\][^\n]*?(\d+) events not delivered/g)].map((m) => Number(m[1])),
+      [...out.matchAll(/YAVIO-1205\][^\n]*?(\d+) (?:more )?events not delivered/g)].map((m) =>
+        Number(m[1]),
+      ),
   };
 }
 
@@ -518,6 +520,38 @@ describe("a stateless host as a child process: signals, handlers and budgets (#1
       expect(child.lossLines()).toEqual([lost]);
       expect(child.output()).toContain(`Shutdown deadline of 4000 ms reached — ${lost} events`);
       expect(child.output()).not.toContain("Process exit");
+    },
+  );
+
+  it(
+    "the README recipe, ingest hanging, a 1.5 s request in flight that also calls track(): the cycle's line with all but the event queued behind the cut batch, then that one in the deadline's wording — no hint to await shutdown() (#154 review round 1)",
+    { timeout: 30_000 },
+    async () => {
+      ingest.hangEvents = true;
+      const child = await start("readme");
+      await drive(child.port);
+      const slow = call(child.port, "slow", { sku: "late", ms: 1_500, track: true }).catch(
+        () => undefined,
+      );
+      await child.waitForOutput(/started late/);
+      child.kill("SIGTERM");
+      const exit = await child.exited;
+      await slow;
+
+      // The track() event goes out first, through the post-signal transport,
+      // and the deadline cuts it with the drain: the cycle's line. The
+      // tool_call queued behind it goes out once it was cut and is still in
+      // flight at process.exit(0): the exit hook's, after a shutdown() the
+      // deadline cut. Before: "Process exit with 1 events not delivered —
+      // await analytics.shutdown() before exiting".
+      expect(exit, child.output()).toMatchObject({ code: 0, signal: null });
+      expect(exit.afterSignalMs).toBeLessThan(5_000);
+      expect(child.lossLines()).toEqual([EVENTS_BEFORE_SIGNAL + 1, 1]);
+      expect(child.output()).toContain(
+        "Shutdown deadline of 4000 ms reached — 1 more events not delivered (sent in its last 100 ms or after it, or queued behind a request it cut)",
+      );
+      expect(child.output()).not.toContain("Process exit");
+      expect(child.output()).not.toContain("await analytics.shutdown()");
     },
   );
 

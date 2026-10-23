@@ -13,7 +13,9 @@
  * | "noexit" (the recipe without `process.exit()`: the process must exit on
  * its own once nothing keeps it alive). Prints `ready <port>` once listening
  * and `started <sku>` when the `slow` tool begins, so the test can send the
- * signal with that call in flight.
+ * signal with that call in flight. `slow` with `track: true` also calls
+ * `yavio.track()` before it returns: a request served after the signal
+ * that sends two events (#154 review round 1).
  *
  * The block between `shutdown-recipe:start` and `shutdown-recipe:end` is the
  * README's recipe, byte for byte: a test compares the two.
@@ -25,7 +27,7 @@ import { McpServer as McpServerV1 } from "@modelcontextprotocol/sdk/server/mcp.j
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { McpServer as McpServerV2, createMcpHandler } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { createYavio } from "../../../server/index.js";
+import { createYavio, yavio } from "../../../server/index.js";
 
 const endpoint = process.env.ENDPOINT;
 if (!endpoint) throw new Error("ENDPOINT is not set");
@@ -47,10 +49,14 @@ function buildV1(): McpServerV1 {
   );
   server.registerTool(
     "slow",
-    { description: "Takes a while", inputSchema: { sku: z.string(), ms: z.number() } },
-    async ({ sku, ms }) => {
+    {
+      description: "Takes a while",
+      inputSchema: { sku: z.string(), ms: z.number(), track: z.boolean().optional() },
+    },
+    async ({ sku, ms, track }) => {
       started(sku);
       await sleep(ms);
+      if (track) yavio.track("slow_done", { sku });
       return { content: [{ type: "text", text: `slow ${sku}` }] };
     },
   );
@@ -68,10 +74,14 @@ function buildV2(): McpServerV2 {
   );
   server.registerTool(
     "slow",
-    { description: "Takes a while", inputSchema: { sku: z.string(), ms: z.number() } },
-    async ({ sku, ms }: { sku: string; ms: number }) => {
+    {
+      description: "Takes a while",
+      inputSchema: { sku: z.string(), ms: z.number(), track: z.boolean().optional() },
+    },
+    async ({ sku, ms, track }: { sku: string; ms: number; track?: boolean }) => {
       started(sku);
       await sleep(ms);
+      if (track) yavio.track("slow_done", { sku });
       return { content: [{ type: "text" as const, text: `slow ${sku}` }] };
     },
   );
