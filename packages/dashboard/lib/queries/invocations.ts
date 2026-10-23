@@ -1,5 +1,6 @@
 import { queryAnalytics } from "@/lib/clickhouse/analytics-client";
 import { HAS_INTENT_SQL } from "./intents";
+import { querySessionUsers } from "./session-users";
 import type { InvocationFeedItem } from "./types";
 
 interface QueryContext {
@@ -25,9 +26,12 @@ export interface InvocationFeedOptions {
  * intent capture is opt-in and not every client fills optional parameters —
  * so the intent column is simply empty for them.
  *
- * The user column is the id on the event itself (user_id, else subject_id).
- * The Users page additionally stitches a subject_id to the user_id it was
- * later identified as; a per-row list does not need that join.
+ * The user column is the event's own user_id, else the first user
+ * identified in its session (#145: another instance of a stateless fleet,
+ * or the same one before identify(), stamps none), else its subject_id —
+ * the session resolved by one lookup over the page's rows. The Users page
+ * additionally stitches a subject_id to the user_id it was later identified
+ * as; a per-row list does not need that join.
  */
 export async function queryInvocationFeed(
   ctx: QueryContext,
@@ -64,9 +68,10 @@ export async function queryInvocationFeed(
 
   const where = `WHERE ${conditions.join("\n        AND ")}`;
 
-  // The page and its total are independent; one round trip, not two.
+  // The page and its total are independent; one round trip, not two. The
+  // page's session lookup follows the page, next to the count.
   const [invocations, countRows] = await Promise.all([
-    queryAnalytics<InvocationFeedItem>({
+    queryAnalytics<FeedRow>({
       workspaceId: ctx.workspaceId,
       projectId: ctx.projectId,
       query: `
@@ -81,7 +86,8 @@ export async function queryInvocationFeed(
         latency_ms AS latencyMs,
         error_category AS errorCategory,
         error_message AS errorMessage,
-        coalesce(nullIf(user_id, ''), nullIf(subject_id, '')) AS userId,
+        nullIf(user_id, '') AS ownUserId,
+        nullIf(subject_id, '') AS subjectId,
         session_id AS sessionId,
         trace_id AS traceId,
         country_code AS countryCode,
@@ -97,7 +103,7 @@ export async function queryInvocationFeed(
       LIMIT {limit:UInt32} OFFSET {offset:UInt32}
     `,
       params: { ...params, limit: pageSize, offset },
-    }),
+    }).then((rows) => withSessionUsers(ctx, rows)),
     queryAnalytics<{ total: number | string }>({
       workspaceId: ctx.workspaceId,
       projectId: ctx.projectId,
@@ -111,4 +117,20 @@ export async function queryInvocationFeed(
   ]);
 
   return { invocations, total: Number(countRows[0]?.total ?? 0) };
+}
+
+type FeedRow = Omit<InvocationFeedItem, "userId"> & {
+  ownUserId: string | null;
+  subjectId: string | null;
+};
+
+async function withSessionUsers(ctx: QueryContext, rows: FeedRow[]): Promise<InvocationFeedItem[]> {
+  const sessionUsers = await querySessionUsers(
+    ctx,
+    rows.filter((r) => !r.ownUserId).map((r) => r.sessionId),
+  );
+  return rows.map(({ ownUserId, subjectId, ...r }) => ({
+    ...r,
+    userId: ownUserId || sessionUsers.get(r.sessionId) || subjectId || null,
+  }));
 }
