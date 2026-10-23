@@ -198,11 +198,12 @@ describe("query limits (#157)", () => {
   });
 
   it("matches the timeout on the error type alone", async () => {
-    mockQuery.mockRejectedValue(
-      Object.assign(new Error("Timeout exceeded: elapsed 30001.42 ms, maximum: 30000 ms."), {
-        type: "TIMEOUT_EXCEEDED",
-      }),
-    );
+    // No code and no "timeout" in the text: only the type can match it.
+    const cut = Object.assign(new Error("elapsed 30001.42 ms, maximum: 30000 ms."), {
+      type: "TIMEOUT_EXCEEDED",
+    });
+    expect(cut.message).not.toMatch(/timeout/i);
+    mockQuery.mockRejectedValue(cut);
 
     const err = await run();
 
@@ -210,34 +211,87 @@ describe("query limits (#157)", () => {
     expect(err.code).toBe("YAVIO-3405");
   });
 
-  it("reports a memory-limit overrun as its own permanent error, without retry advice", async () => {
+  it.each([
+    [
+      "26.8",
+      "Code: 241. DB::Exception: Query memory limit exceeded: would use 9.32 GiB (attempt to allocate chunk of 4.00 MiB), maximum: 9.31 GiB.: While executing AggregatingTransform. (MEMORY_LIMIT_EXCEEDED) (version 26.8.1.1 (official build))",
+    ],
+    [
+      "older releases",
+      "Code: 241. DB::Exception: Memory limit (for query) exceeded: would use 9.32 GiB (attempt to allocate chunk of 4194304 bytes), maximum: 9.31 GiB.: While executing AggregatingTransform. (MEMORY_LIMIT_EXCEEDED) (version 23.8.1.1 (official build))",
+    ],
+  ])(
+    "reports the query's own memory limit (%s wording) as its own permanent error, without retry advice",
+    async (_version, body) => {
+      mockQuery.mockRejectedValue(parseError(body));
+
+      const err = await run();
+
+      expect(err).toBeInstanceOf(AnalyticsQueryError);
+      expect(err.status).toBe(422);
+      expect(err.code).toBe("YAVIO-3408");
+      expect(err.message).toContain("more memory than the database allows");
+      expect(err.message).toContain("Narrow the date range");
+      expect(err.message).not.toMatch(/try again|retry/i);
+      expect(err.detail).toMatch(/memory limit .*exceeded: would use/i);
+
+      // What every analytics API route returns for it (err.toResponse()).
+      const res = err.toResponse();
+      expect(res.status).toBe(422);
+      expect(await res.json()).toEqual({ error: err.message, code: "YAVIO-3408" });
+    },
+  );
+
+  it("matches the query's memory limit on the error type alone", async () => {
+    // No code: without the type check this would be a plain 502.
     mockQuery.mockRejectedValue(
-      parseError(
-        "Code: 241. DB::Exception: Query memory limit exceeded: would use 9.32 GiB (attempt to allocate chunk of 4194304 bytes), maximum: 9.31 GiB.: While executing AggregatingTransform. (MEMORY_LIMIT_EXCEEDED) (version 26.8.1.1 (official build))",
+      Object.assign(
+        new Error(
+          "Query memory limit exceeded: would use 9.32 GiB (attempt to allocate chunk of 4.00 MiB), maximum: 9.31 GiB.",
+        ),
+        { type: "MEMORY_LIMIT_EXCEEDED" },
       ),
     );
 
     const err = await run();
 
-    expect(err).toBeInstanceOf(AnalyticsQueryError);
     expect(err.status).toBe(422);
     expect(err.code).toBe("YAVIO-3408");
-    expect(err.message).toContain("more memory than the database allows");
-    expect(err.message).toContain("Narrow the date range");
-    expect(err.message).not.toMatch(/try again|retry/i);
-    expect(err.detail).toContain("memory limit exceeded");
+  });
 
-    // What every analytics API route returns for it (err.toResponse()).
-    const res = err.toResponse();
-    expect(res.status).toBe(422);
-    expect(await res.json()).toEqual({ error: err.message, code: "YAVIO-3408" });
+  it.each([
+    [
+      "the server's total, 26.8",
+      "Code: 241. DB::Exception: (total) memory limit exceeded: would use 447.49 MiB (attempt to allocate chunk of 4.00 MiB), current RSS: 1.01 GiB, maximum: 1.00 GiB. OvercommitTracker decision: Query was selected to stop by OvercommitTracker. Untracked memory across all threads: 2.31 MiB. (MEMORY_LIMIT_EXCEEDED) (version 26.8.1.1 (official build))",
+    ],
+    [
+      "the server's total, older releases",
+      "Code: 241. DB::Exception: Memory limit (total) exceeded: would use 3.60 GiB (attempt to allocate chunk of 4194304 bytes), maximum: 3.60 GiB. OvercommitTracker decision: Query was selected to stop by OvercommitTracker. (MEMORY_LIMIT_EXCEEDED) (version 23.8.1.1 (official build))",
+    ],
+    [
+      "the user's, 26.8",
+      "Code: 241. DB::Exception: User memory limit exceeded: would use 2.00 GiB (attempt to allocate chunk of 4.00 MiB), maximum: 2.00 GiB. (MEMORY_LIMIT_EXCEEDED) (version 26.8.1.1 (official build))",
+    ],
+    [
+      "the user's, older releases",
+      "Code: 241. DB::Exception: Memory limit (for user) exceeded: would use 2.00 GiB (attempt to allocate chunk of 4194304 bytes), maximum: 2.00 GiB. (MEMORY_LIMIT_EXCEEDED) (version 23.8.1.1 (official build))",
+    ],
+  ])("keeps a memory limit shared with other queries (%s) retryable", async (_source, body) => {
+    // Load-dependent: the same query passes alone and fails next to others.
+    mockQuery.mockRejectedValue(parseError(body));
+
+    const err = await run();
+
+    expect(err.status).toBe(502);
+    expect(err.code).toBe("YAVIO-3406");
+    expect(err.message).toContain("try again later");
   });
 
   it("hands the memory message to the model through the MCP tool boundary", async () => {
     const { runTool } = await import("@/lib/mcp/errors");
     mockQuery.mockRejectedValue(
       parseError(
-        "Code: 241. DB::Exception: (total) memory limit exceeded: would use 14.40 GiB (attempt to allocate chunk of 4194304 bytes), current RSS: 13.98 GiB, maximum: 14.40 GiB. OvercommitTracker decision: Query was selected to stop by OvercommitTracker. (MEMORY_LIMIT_EXCEEDED) (version 26.8.1.1 (official build))",
+        "Code: 241. DB::Exception: Query memory limit exceeded: would use 9.32 GiB (attempt to allocate chunk of 4.00 MiB), maximum: 9.31 GiB.: While executing AggregatingTransform. (MEMORY_LIMIT_EXCEEDED) (version 26.8.1.1 (official build))",
       ),
     );
 
@@ -250,7 +304,7 @@ describe("query limits (#157)", () => {
     const text = result.content[0].text;
     expect(text).toContain("YAVIO-3408");
     expect(text).toContain("more memory than the database allows");
-    expect(text).toContain("Database says: (total) memory limit exceeded");
+    expect(text).toContain("Database says: Query memory limit exceeded");
     expect(text).not.toContain("try again later");
   });
 

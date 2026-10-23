@@ -126,12 +126,20 @@ export async function queryAnalytics<T>(options: AnalyticsQueryOptions<T>): Prom
       );
     }
 
-    // 241 MEMORY_LIMIT_EXCEEDED: the query's own limit or the server's total.
-    // Either way the same query over the same range needs the same memory, so
-    // retry advice is wrong and narrowing is what works (#157). 422, not 400:
-    // the request is valid, it is too big to compute; not 5xx: nothing is
-    // down, and a retry is not the fix.
-    if (numericCode === 241 || clientType === "MEMORY_LIMIT_EXCEEDED") {
+    // 241 MEMORY_LIMIT_EXCEEDED has three sources, told apart by the text
+    // only. The query's own limit (max_memory_usage: "Query memory limit
+    // exceeded", in older releases "Memory limit (for query) exceeded") is
+    // deterministic: the same query over the same range needs the same
+    // memory, so retry advice is wrong and narrowing is what works (#157).
+    // 422, not 400: the request is valid, it is too big to compute; not 5xx:
+    // nothing is down. The server's total ("(total) memory limit exceeded")
+    // and the user's ("User memory limit exceeded", "(for user)") depend on
+    // what else runs at the same time: those stay the retryable 502 below,
+    // as does any 241 whose text names neither.
+    if (
+      (numericCode === 241 || clientType === "MEMORY_LIMIT_EXCEEDED") &&
+      /query memory limit exceeded|memory limit \(for query\) exceeded/i.test(message)
+    ) {
       throw new AnalyticsQueryError(
         ErrorCode.DASHBOARD.ANALYTICS_QUERY_MEMORY_EXCEEDED,
         "This query needs more memory than the database allows. Narrow the date range or simplify the query.",
@@ -143,7 +151,7 @@ export async function queryAnalytics<T>(options: AnalyticsQueryOptions<T>): Prom
     // Server-side codes that ARE worth retrying: overload and resource
     // pressure, not a malformed query. Misclassifying these would tell the
     // dashboard's own analytics routes that a transient spike is permanent.
-    // (159 and 241 are query limits, answered above.)
+    // (159 and the per-query 241 are query limits, answered above.)
     const TRANSIENT_SERVER_CODES = new Set([
       164, // READONLY
       201, // QUOTA_EXCEEDED
@@ -151,6 +159,7 @@ export async function queryAnalytics<T>(options: AnalyticsQueryOptions<T>): Prom
       203, // NO_FREE_CONNECTION
       209, // SOCKET_TIMEOUT
       210, // NETWORK_ERROR
+      241, // MEMORY_LIMIT_EXCEEDED of the server's total or the user's
       252, // TOO_MANY_PARTS
       373, // SESSION_IS_LOCKED
       425, // SYSTEM_ERROR
