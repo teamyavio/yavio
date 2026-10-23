@@ -33,9 +33,10 @@ export interface HttpTransportOptions {
    * when the transport was created — min(30 s, D) — let a send near the
    * deadline run for up to another D past signal + D, its socket keeping a
    * host without `process.exit()` alive past the platform's grace period
-   * (#148 review round 3).
+   * (#148 review round 3). `now` is the fetch's start, so the budget and the
+   * cut the transport records from it agree to the millisecond (#154).
    */
-  fetchBudgetMs?: () => number;
+  fetchBudgetMs?: (now: number) => number;
   /**
    * Called once a `shutdown()` whose deadline gave events up has settled,
    * with the count and the deadline (#148). Without it the transport logs
@@ -50,6 +51,14 @@ export interface HttpTransportOptions {
    * request does not keep one transport per request (#148 review round 1).
    */
   onClosed?: () => void;
+  /**
+   * Called when a fetch's budget (`fetchBudgetMs`), not the plain fetch
+   * timeout, aborts it, with the absolute time the budget ended — for a
+   * post-signal transport that is the signal cycle's deadline, or later (the
+   * 100 ms floor, D after it). How the registry knows a cycle's deadline
+   * came when this timer runs before the cycle's own (#154 review round 3).
+   */
+  onBudgetCut?: (atMs: number) => void;
 }
 
 const DEFAULT_FLUSH_INTERVAL_MS = 10_000;
@@ -156,6 +165,22 @@ export class HttpTransport implements Transport {
   /** Events in the batch in flight, until ingest answered or the batch was given up. */
   private inflightSize = 0;
   /**
+   * When the budget (`fetchBudgetMs`) cuts the fetch in flight, absolute;
+   * undefined when the fetch timeout bounds it or no fetch is out. What
+   * `precountDue()` compares with a signal cycle's deadline (#154).
+   */
+  private inflightCutAt: number | undefined;
+  /**
+   * Set while the batch in flight is one a signal cycle's line already
+   * counted as not delivered (`precountDue`, #154): it is not pending, and
+   * when a deadline gives it up it goes to `precountedLost`, not to
+   * `deadlineLost`, so no later line and not the exit hook count it again.
+   * Delivered after all, it was counted once, by that line.
+   */
+  private inflightPrecounted = false;
+  /** Events of pre-counted batches that a deadline then gave up. */
+  private precountedLost = 0;
+  /**
    * Absolute time of the shutdown deadline, once `shutdown()` ran: no
    * backoff or `Retry-After` wait that would end at or after it is
    * scheduled, and at the deadline the fetch in flight is aborted — the
@@ -222,15 +247,19 @@ export class HttpTransport implements Transport {
   private readonly shutdownTimeoutMs: number;
   private readonly _fetch: typeof globalThis.fetch;
   private readonly immediate: boolean;
-  private readonly fetchBudgetMs: (() => number) | undefined;
+  private readonly fetchBudgetMs: ((now: number) => number) | undefined;
   private readonly onShutdownLoss: ((lost: number, deadlineMs: number) => void) | undefined;
   private readonly onClosed: (() => void) | undefined;
+  private readonly onBudgetCut: ((atMs: number) => void) | undefined;
+  /** When a fetch's budget last aborted it (`onBudgetCut`), absolute; undefined before that. */
+  private lastBudgetCut: number | undefined;
 
   constructor(options: HttpTransportOptions) {
     this.immediate = options.immediate === true;
     this.fetchBudgetMs = options.fetchBudgetMs;
     this.onShutdownLoss = options.onShutdownLoss;
     this.onClosed = options.onClosed;
+    this.onBudgetCut = options.onBudgetCut;
     this.endpoint = options.endpoint;
     this.apiKey = options.apiKey;
     this.sdkVersion = options.sdkVersion;
@@ -253,9 +282,9 @@ export class HttpTransport implements Transport {
     unref(this.timer);
   }
 
-  /** Events ingest has not acknowledged: queued, plus the batch in flight. */
+  /** Events ingest has not acknowledged: queued, plus the batch in flight unless a line already counted it (`precountDue`). */
   pendingEvents(): number {
-    return this.buffer.length + this.inflightSize;
+    return this.buffer.length + (this.inflightPrecounted ? 0 : this.inflightSize);
   }
 
   /** Events a shutdown deadline gave up: queued, in flight or refused at or after it, or given up because a retry would have ended past it. What `YAVIO-1205` reports. */
@@ -263,14 +292,40 @@ export class HttpTransport implements Transport {
     return this.deadlineLost;
   }
 
-  /** Every event given up so far: what a deadline gave up plus the delivery failures (after a batch's last attempt, or on an unexpected status). */
+  /** Every event given up so far: what a deadline gave up (pre-counted or not) plus the delivery failures (after a batch's last attempt, or on an unexpected status). */
   lostEvents(): number {
-    return this.deadlineLost + this.failed;
+    return this.deadlineLost + this.precountedLost + this.failed;
   }
 
   /** Every event ingest acknowledged so far. */
   deliveredEvents(): number {
     return this.delivered;
+  }
+
+  /** When a fetch's budget last aborted one of this transport's fetches, absolute; undefined if none did. */
+  budgetCutAt(): number | undefined {
+    return this.lastBudgetCut;
+  }
+
+  /** Whether a shutdown deadline cut this transport: its timer fired with the drain unfinished (#154). */
+  reachedDeadline(): boolean {
+    return this.deadlineReached;
+  }
+
+  /**
+   * Count the batch in flight as not delivered now, if the budget cuts its
+   * fetch by `atMs`: what a signal cycle's line does at its deadline for a
+   * post-signal transport's fetch, which that deadline cuts in the same
+   * tick but whose outcome is a microtask away (#154). A fetch the budget
+   * gives longer (the 100 ms floor of a send just before the deadline) is
+   * not due. Returns how many events it counted, 0 when nothing is due or
+   * the batch was counted already.
+   */
+  precountDue(atMs: number): number {
+    if (this.inflightPrecounted || this.inflightSize === 0) return 0;
+    if (this.inflightCutAt === undefined || this.inflightCutAt > atMs) return 0;
+    this.inflightPrecounted = true;
+    return this.inflightSize;
   }
 
   send(events: BaseEvent[]): void {
@@ -332,6 +387,7 @@ export class HttpTransport implements Transport {
     this.inflight = this.sendBatch(batch).finally(() => {
       this.inflight = null;
       this.inflightSize = 0;
+      this.inflightPrecounted = false;
       then?.();
     });
     return this.inflight;
@@ -371,7 +427,10 @@ export class HttpTransport implements Transport {
         }
       }
     };
+    // keepAlive: a drain is a `shutdown()` call's — its retry waits must
+    // not let Node exit before it is done or its deadline came (#164).
     await raceDeadline(loop(), deadlineMs, {
+      keepAlive: true,
       onTimeout: () => {
         expired = true;
       },
@@ -476,7 +535,12 @@ export class HttpTransport implements Transport {
     // exit and a hanging ingest cannot keep the process alive (#148).
     const lostBefore = this.deadlineLost;
     // `cutDeadline()` may end the race earlier through the waiters.
+    // keepAlive (#164): until the drain is done or its deadline came — the
+    // cut one included, whose timer fires because this one holds the loop —
+    // the process stays up through the unref'd backoff and `Retry-After`
+    // waits; never longer, the timer is cleared with the race.
     await raceDeadline(drain(), deadlineMs, {
+      keepAlive: true,
       onTimeout: () => this.reachDeadline(),
       waiters: this.shutdownWaiters,
     });
@@ -486,10 +550,7 @@ export class HttpTransport implements Transport {
       // that ignores its signal is given this long, then its batch is
       // taken for lost — no deadline waits for it.
       await raceDeadline(this.inflight, ABORT_SETTLE_MS, {
-        onTimeout: () => {
-          this.deadlineLost += this.inflightSize;
-          this.inflightSize = 0;
-        },
+        onTimeout: () => this.giveUp("deadline"),
       });
     }
     // Counted here, not in the timer: a batch given up before the deadline
@@ -549,12 +610,24 @@ export class HttpTransport implements Transport {
       const controller = new AbortController();
       // Read before the try: the catch needs it to tell a cut by the budget
       // from the plain fetch timeout (#151).
-      const budgetMs = this.fetchBudgetMs?.();
+      const now = Date.now();
+      const budgetMs = this.fetchBudgetMs?.(now);
       try {
         this.inflightController = controller;
         const timeoutMs =
           budgetMs === undefined ? this.fetchTimeoutMs : Math.min(this.fetchTimeoutMs, budgetMs);
-        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        const cutAt =
+          budgetMs !== undefined && budgetMs < this.fetchTimeoutMs ? now + budgetMs : undefined;
+        this.inflightCutAt = cutAt;
+        const timer = setTimeout(() => {
+          // The budget's timer, not the fetch timeout's (#151's rule): the
+          // deadline it carries has come (#154 review round 3).
+          if (cutAt !== undefined) {
+            this.lastBudgetCut = cutAt;
+            this.onBudgetCut?.(cutAt);
+          }
+          controller.abort();
+        }, timeoutMs);
         unref(timer);
         let response: Response;
         let partial: PartialBody | undefined;
@@ -577,6 +650,7 @@ export class HttpTransport implements Transport {
         } finally {
           clearTimeout(timer);
           this.inflightController = null;
+          this.inflightCutAt = undefined;
         }
 
         if (response.status === 200) {
@@ -751,8 +825,9 @@ export class HttpTransport implements Transport {
    * line and is not a deadline's loss.
    */
   private giveUp(cause: "deadline" | "failed"): void {
-    if (cause === "deadline") this.deadlineLost += this.inflightSize;
-    else this.failed += this.inflightSize;
+    if (cause === "failed") this.failed += this.inflightSize;
+    else if (this.inflightPrecounted) this.precountedLost += this.inflightSize;
+    else this.deadlineLost += this.inflightSize;
     this.inflightSize = 0;
   }
 

@@ -327,9 +327,10 @@ export interface YavioClient {
    * deadline (signal + D, see `shutdownTimeoutMs`), by that deadline: a call
    * running at or after the signal resolves by then, one with no time left
    * at once, and one after the hand-back waits at most D (#148). What the
-   * deadline gives up is counted in one `YAVIO-1205` line (one more with
-   * the rest once the transport stops have settled, when the signal was
-   * handed back before they had). The transport stops only when no other
+   * deadline gives up is counted in one `YAVIO-1205` line (one more when
+   * the signal was handed back before the transport stops had settled: at
+   * the deadline when a `shutdown()` is still waiting then, otherwise once
+   * they have settled). The transport stops only when no other
    * client with the same configuration holds it and no `withYavio()` call
    * pinned it; a later wrap by this client holds it again, or starts a
    * fresh one.
@@ -353,6 +354,13 @@ export interface SessionState {
   sessionId: string;
   userId: string | null;
   userTraits: Record<string, unknown>;
+  /**
+   * The stable JSON of `[user_id, user_traits]` of the last `identify`
+   * event this state sent: a repeat with the same id and traits sends
+   * nothing (#145). Unset on a fresh state — a new conversation, one the
+   * LRU evicted, another process — which therefore sends once.
+   */
+  identified?: string;
   platform: string;
   stepSequence: number;
   /**

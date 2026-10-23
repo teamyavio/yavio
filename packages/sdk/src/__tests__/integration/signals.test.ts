@@ -11,6 +11,7 @@ import { z } from "zod";
 import { createYavio, withYavio } from "../../server/index.js";
 import { _resetGlobalState } from "../../server/proxy.js";
 import {
+  _appWaitCount,
   _setSignalReraise,
   _sharedStateCount,
   _trackedTransportCount,
@@ -1371,7 +1372,7 @@ describe("loss accounting (#148)", () => {
     });
   });
 
-  it("with an app handler: the cycle's line counts the drained transports; an exit before shutdown() resolved gets one more line from the exit hook, which a plain exit never arms", async () => {
+  it("with an app handler: the cycle's line counts the drained transports; a late call cut after the deadline gets one more line from the exit hook, in the cycle's wording after a shutdown() the deadline cut, and a plain exit never arms it", async () => {
     _setSignalReraise(() => {});
     await withoutOtherListeners("SIGTERM", async () => {
       const { client, raw } = build("yav_148_exit", { shutdownTimeoutMs: 300 });
@@ -1400,14 +1401,24 @@ describe("loss accounting (#148)", () => {
       await vi.waitFor(() => expect(lines1205()).toHaveLength(1));
       expect(lines1205()[0]).toContain("2 events not delivered"); // connection + the first call
       // `process.exit(0)` now: the late call's event is still in flight.
+      // The handler's shutdown() returned at the deadline, so the line is
+      // the deadline's, without the hint to await it (#154 review round 1;
+      // before: "Process exit with 1 events not delivered — await
+      // analytics.shutdown() before exiting").
       exitHooks()[0]?.call(process, 0);
       expect(lines1205()).toHaveLength(2);
-      expect(lines1205()[1]).toContain("1 events not delivered");
+      expect(lines1205()[1]).toContain(
+        "Shutdown deadline of 300 ms reached — 1 more events not delivered (in flight when the deadline cut it, sent in its last 100 ms",
+      );
+      expect(lines1205()[1]).not.toContain("await analytics.shutdown()");
       // Written synchronously to fd 2, like the hand-back line: process.exit()
       // ends the process right after its listeners, and an asynchronous
       // stderr pipe would lose a console.warn (#148 review round 3).
-      expect(stderr).toHaveBeenCalledWith(2, expect.stringContaining("Process exit with 1 events"));
-      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("Process exit with"));
+      expect(stderr).toHaveBeenCalledWith(
+        2,
+        expect.stringContaining("1 more events not delivered"),
+      );
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("more events not delivered"));
       exitHooks()[0]?.call(process, 0);
       expect(lines1205()).toHaveLength(2); // counted once
     });
@@ -1665,6 +1676,10 @@ describe("loss accounting (#148)", () => {
     // the four events were the exit hook's ("Process exit with 4 events
     // not delivered — await analytics.shutdown() …") or, split by the timer
     // order, half the cycle's and half the exit hook's (#148 review round 9).
+    // Since #154 the line comes from `onCycleDeadline`, whichever of the
+    // deadline's timers runs first, before the drain's end: the round-10
+    // pre-count at "drain-end" finds the stops settled and stays as a
+    // safety net for a drain whose wait something else ends early.
     await withoutOtherListeners("SIGTERM", async () => {
       const app = vi.fn();
       process.on("SIGTERM", app);
@@ -1751,18 +1766,20 @@ describe("loss accounting (#148)", () => {
     }
   }, 15_000);
 
-  it("a cycle handed back early with a stop in progress at the signal, next to an app listener: one cycle line with the four events once its stops have settled, and nothing from the exit hook", async () => {
+  it("a cycle handed back early with a stop in progress at the signal, next to an app listener: one cycle line with the four events — at the deadline, a shutdown() still waiting then — and nothing from the exit hook", async () => {
     // The round-6 setup next to an app listener on both signals, and a
     // SIGINT 500 ms after the SIGTERM: a different signal, so the cycle is
     // handed back 1.5 s before its deadline, with nothing lost yet and,
     // next to an app listener, nothing pre-counted. Its stops give up the
-    // four events at the deadline, after the hand-back, and the cycle's
-    // late report must wait for the stops themselves, not for the drain's
-    // race against the deadline: the cycle's timer, made first for the same
+    // four events at the deadline, after the hand-back. A's shutdown() is
+    // still waiting then, so the cycle's late report comes at the deadline,
+    // with the four its stops still hold pre-counted (#154; with no
+    // shutdown() waiting it would wait for the stops to settle) — not at
+    // the drain's race end: the cycle's timer, made first for the same
     // duration, ends that race before the stops have counted what they give
     // up. Fetches that ignore their abort make that order certain here —
     // both stops hold their batch for ABORT_SETTLE_MS after the deadline —
-    // so a report at the race end finds nothing lost, and the four go to
+    // so a report at the race end finds nothing lost, and the four went to
     // the exit hook's "Process exit with 4 events not delivered — await
     // analytics.shutdown() …", a wrong hint for an app that did (#148
     // review round 10, #152).
@@ -1817,6 +1834,433 @@ describe("loss accounting (#148)", () => {
       fetchSpy.mockRestore();
     }
   }, 15_000);
+
+  it("the README recipe in one process — an app listener that awaits shutdown() and exits as soon as it returns — against a hanging ingest: the cycle's line is out before shutdown() returns, with every event, a request served after the signal included, and the exit hook adds nothing (#154)", async () => {
+    // Before the fix the cycle's deadline timer released the app's wait
+    // first: at its return no line was out, and the exit hook's
+    // "Process exit with 3 events not delivered — await analytics.shutdown()
+    // before exiting" was the only one, a hint for an app that did.
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client, raw } = build("yav_154_recipe", { shutdownTimeoutMs: 1_000 });
+      await callTool(raw, "get_price", { q: "before" }); // connection + call, queued
+      let atReturn: string[] | undefined;
+      const app = vi.fn(async () => {
+        await client.shutdown();
+        atReturn = lines1205();
+        exitHooks()[0]?.call(process, 0); // process.exit(0)
+      });
+      process.on("SIGTERM", app);
+      try {
+        process.emit("SIGTERM", "SIGTERM"); // D = 1 s; the drain sends the two
+        // Served after the signal: its call goes out through a post-signal
+        // transport, whose fetch the deadline cuts at the same instant.
+        await callTool(raw, "get_price", { q: "after" });
+        await vi.waitFor(() => expect(atReturn).toBeDefined(), { timeout: 3_000 });
+        expect(atReturn).toHaveLength(1);
+        expect(atReturn?.[0]).toContain("Shutdown deadline of 1000 ms reached — 3 events");
+        expect(lines1205()).toHaveLength(1);
+        expect(lines.some((l) => l.includes("shutdown() deadline"))).toBe(false);
+        // Once both fetches were cut — the drain's and the late call's —
+        // the cycle's late report has nothing to add.
+        await vi.waitFor(() =>
+          expect(ingest.batches.filter((b) => b.abortedAt !== undefined)).toHaveLength(2),
+        );
+        await new Promise((r) => setTimeout(r, 50));
+        expect(lines1205()).toHaveLength(1);
+      } finally {
+        process.off("SIGTERM", app);
+      }
+    });
+  });
+
+  it("the README recipe in one process, two requests served after the signal: what the cycle's line cannot count — the second request's events, queued behind the first's cut batch — comes at exit in the deadline's wording, not with a hint to await shutdown() (#154 review round 1)", async () => {
+    // Before the fix: "Process exit with 2 events not delivered — await
+    // analytics.shutdown() before exiting", for an app that did.
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client, raw } = build("yav_154_recipe2", { shutdownTimeoutMs: 1_000 });
+      await callTool(raw, "get_price", { q: "before" }); // connection + call, queued
+      let atReturn: string[] | undefined;
+      const app = vi.fn(async () => {
+        await client.shutdown();
+        atReturn = lines1205();
+        exitHooks()[0]?.call(process, 0); // process.exit(0)
+      });
+      process.on("SIGTERM", app);
+      try {
+        process.emit("SIGTERM", "SIGTERM"); // D = 1 s; the drain sends the two
+        // Two calls served after the signal, through one post-signal
+        // transport: the first's batch is in flight when the second's
+        // events are queued behind it.
+        await callTool(raw, "get_price", { q: "after-1" });
+        await callTool(raw, "get_price", { q: "after-2" });
+        await vi.waitFor(() => expect(atReturn).toBeDefined(), { timeout: 3_000 });
+        expect(atReturn).toHaveLength(1);
+        expect(atReturn?.[0]).toContain("Shutdown deadline of 1000 ms reached");
+        expect(lines1205()).toHaveLength(2);
+        expect(lines1205()[1]).toMatch(
+          /Shutdown deadline of 1000 ms reached — \d+ more events not delivered \(in flight when the deadline cut it, sent in its last 100 ms or after it, or queued behind a request it cut\)/,
+        );
+        expect(lines1205().join("\n")).not.toContain("await analytics.shutdown()");
+        // Every event once, in one of the two lines: the two before the
+        // signal and the first late call's at the deadline, the second late
+        // call's — queued behind it, sent once it was cut — at exit.
+        const counts = lines1205().map((l) => Number(/(\d+) (more )?events/.exec(l)?.[1]));
+        expect(counts).toEqual([3, 1]);
+      } finally {
+        process.off("SIGTERM", app);
+      }
+    });
+  });
+
+  it("an app that exits before its shutdown() resolved still gets the exit hook's hint to await it", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client, raw } = build("yav_154_noawait", { shutdownTimeoutMs: 1_000 });
+      await callTool(raw, "get_price", { q: "x" });
+      const app = vi.fn(() => {
+        void client.shutdown(); // not awaited
+        exitHooks()[0]?.call(process, 0); // process.exit(0) at once
+      });
+      process.on("SIGTERM", app);
+      try {
+        process.emit("SIGTERM", "SIGTERM");
+        expect(app).toHaveBeenCalledTimes(1);
+        expect(lines1205()).toHaveLength(1);
+        expect(lines1205()[0]).toContain(
+          "Process exit with 2 events not delivered — await analytics.shutdown() before exiting",
+        );
+      } finally {
+        process.off("SIGTERM", app);
+      }
+    });
+  });
+
+  it("a second cycle starts afresh: after the first cycle cut an app's shutdown() — and a late fetch's budget at its deadline — a shutdown() that returns done in the second, then a send not awaited and an exit, gets the hint to await (#154 review rounds 2 and 3)", async () => {
+    // Round 2: the first cycle's mark outlived it, "Shutdown deadline of
+    // 300 ms reached — 1 more events not delivered (…)" for a second cycle
+    // whose deadline was never reached. Round 3: the first cycle's budget
+    // cut must not say the second's deadline came — it is before that
+    // deadline (`lastBudgetCut >= cycle.deadlineAt`).
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client, raw } = build("yav_154_two_cycles", { shutdownTimeoutMs: 300 });
+      await callTool(raw, "get_price", { q: "first" });
+      let cycles = 0;
+      let firstReturned = false;
+      let again = raw; // the server the second cycle's requests are served by
+      const app = vi.fn(async () => {
+        cycles++;
+        if (cycles === 1) {
+          // Served after the signal: its fetch's budget ends at the deadline.
+          await callTool(raw, "get_price", { q: "late" });
+          await client.shutdown(); // cut at the 300 ms deadline; the process lives on
+          firstReturned = true;
+          return;
+        }
+        await client.shutdown(); // done, well before the second deadline
+        ingest.hangEvents = true;
+        await callTool(again, "get_price", { q: "unawaited" }); // sent, not awaited
+        exitHooks()[0]?.call(process, 0); // process.exit(0)
+      });
+      process.on("SIGTERM", app);
+      try {
+        process.emit("SIGTERM", "SIGTERM");
+        await vi.waitFor(() => expect(firstReturned).toBe(true), { timeout: 2_000 });
+        expect(lines1205()).toHaveLength(1); // the first cycle's line
+        // Both of the first cycle's batches were cut at its deadline: the
+        // drain's by the stop's deadline, the late call's by its budget.
+        await vi.waitFor(() =>
+          expect(ingest.batches.filter((b) => b.abortedAt !== undefined)).toHaveLength(2),
+        );
+        await ingest.answerHung();
+        ingest.hangEvents = false; // healthy for the second cycle
+        // A request served later wraps again — the SDK's listeners come back.
+        again = client.wrap(new McpServer({ name: "app", version: "1.0" }));
+        again.registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+        await callTool(again, "get_price", { q: "second" });
+        process.emit("SIGTERM", "SIGTERM");
+        expect(cycles).toBe(2);
+        await vi.waitFor(() => expect(lines1205()).toHaveLength(2), { timeout: 2_000 });
+        expect(lines1205()[1]).toContain("Process exit with");
+        expect(lines1205()[1]).toContain("await analytics.shutdown() before exiting");
+      } finally {
+        process.off("SIGTERM", app);
+      }
+    });
+  });
+
+  it("a cycle that ended early and healthy, a later request's batch still in flight when its deadline comes: the app's shutdown() released by the cycle's timer, the exit line is the deadline's — not \"more\", no hint to await (#154 review round 2)", async () => {
+    // The late batch's fetch ignores its abort, so no loss is counted when
+    // the deadline cuts it: the only sign that the deadline came is the
+    // cycle's timer, which also releases the app's wait. Without that sign
+    // the line is "Process exit with 1 events not delivered — await
+    // analytics.shutdown() …" for an app that did.
+    const realFetch = globalThis.fetch;
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation((input: string | URL | Request, init?: RequestInit) =>
+        realFetch(input, { ...init, signal: undefined }),
+      );
+    ingest.hangEvents = false; // healthy at the signal
+    try {
+      await withoutOtherListeners("SIGTERM", async () => {
+        const { client, raw } = build("yav_154_healthy_late", { shutdownTimeoutMs: 1_000 });
+        await callTool(raw, "get_price", { q: "before" });
+        let atExit: string[] | undefined;
+        const app = vi.fn(async () => {
+          await new Promise((r) => setTimeout(r, 300)); // the drain delivers meanwhile
+          ingest.hangEvents = true; // hanging from now on
+          await callTool(raw, "get_price", { q: "late" }); // in flight at the deadline
+          await client.shutdown(); // released by the cycle's timer at the deadline
+          exitHooks()[0]?.call(process, 0); // process.exit(0)
+          atExit = lines1205();
+        });
+        process.on("SIGTERM", app);
+        try {
+          process.emit("SIGTERM", "SIGTERM");
+          await vi.waitFor(() => expect(atExit).toBeDefined(), { timeout: 3_000 });
+          expect(ingest.responded).toBe(1); // the drain's batch
+          expect(atExit).toEqual([
+            `[YAVIO-1205] Shutdown deadline of 1000 ms reached — 1 events not delivered (in flight when the deadline cut it, sent in its last 100 ms or after it, or queued behind a request it cut). Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.`,
+          ]);
+        } finally {
+          process.off("SIGTERM", app);
+        }
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("the same when the late fetch's budget timer runs before the cycle's: the app's wait settles at the cut and it exits before the cycle's timer — the budget cut is what says the deadline came (#154 review round 3)", async () => {
+    // The order the cycle's own timer cannot be relied on to precede: here
+    // forced by giving that timer (the first one of the cycle's duration
+    // set while the signal is handled) 300 ms more. The budget timer then
+    // aborts the late fetch at the deadline, the app's shutdown() settles
+    // and it exits with nothing else to tell it the deadline came. Without
+    // the budget cut's record the line is "Process exit with 1 events not
+    // delivered — await analytics.shutdown() …".
+    ingest.hangEvents = false; // healthy at the signal
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client, raw } = build("yav_154_budget_first", { shutdownTimeoutMs: 1_000 });
+      await callTool(raw, "get_price", { q: "before" });
+      let atExit: string[] | undefined;
+      const app = vi.fn(async () => {
+        await new Promise((r) => setTimeout(r, 300)); // the drain delivers meanwhile
+        ingest.hangEvents = true;
+        await callTool(raw, "get_price", { q: "late" }); // its fetch's budget ends at the deadline
+        await client.shutdown(); // settles when the budget cuts that fetch
+        exitHooks()[0]?.call(process, 0); // process.exit(0) at once
+        atExit = lines1205();
+      });
+      process.on("SIGTERM", app);
+      const realSetTimeout = globalThis.setTimeout;
+      let delayed = false;
+      const timers = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+        fn: (...args: unknown[]) => void,
+        ms?: number,
+        ...rest: unknown[]
+      ) => {
+        if (!delayed && ms === 1_000) {
+          delayed = true; // the cycle's timer
+          return realSetTimeout(fn, 1_300, ...rest);
+        }
+        return realSetTimeout(fn, ms, ...rest);
+      }) as typeof setTimeout);
+      try {
+        process.emit("SIGTERM", "SIGTERM");
+        timers.mockRestore();
+        expect(delayed).toBe(true);
+        await vi.waitFor(() => expect(atExit).toBeDefined(), { timeout: 3_000 });
+        expect(atExit).toEqual([
+          `[YAVIO-1205] Shutdown deadline of 1000 ms reached — 1 events not delivered (in flight when the deadline cut it, sent in its last 100 ms or after it, or queued behind a request it cut). Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.`,
+        ]);
+        // The cycle's timer had not run when the app exited.
+        await new Promise((r) => setTimeout(r, 400));
+      } finally {
+        timers.mockRestore();
+        process.off("SIGTERM", app);
+      }
+    });
+  });
+
+  it("several waits end at one cycle deadline — two apps' shutdown() timers and the cycle's — and the cycle prints one line (#154 review round 1)", async () => {
+    // Each of the three runs onCycleDeadline at the same deadline; once per
+    // cycle. Here a second call would count nothing — what the first line
+    // marked is reconciled, the post-signal fetches are flagged — so a
+    // mutant dropping the guard survives this test, which pins the outcome.
+    // The guard is not redundant: triggers at one deadline need not run in
+    // one tick (timers start from the loop's cached time), and a send in
+    // the deadline's last 100 ms cut between two of them, while a stop that
+    // ignores its abort is still settling, would without it be a second
+    // cycle line instead of the exit line (each event still counted once;
+    // #154 review round 2).
+    await withoutOtherListeners("SIGTERM", async () => {
+      const a = build("yav_154_two_a", { shutdownTimeoutMs: 800 });
+      const b = build("yav_154_two_b", { shutdownTimeoutMs: 800 });
+      await callTool(a.raw, "get_price", { q: "a" });
+      await callTool(b.raw, "get_price", { q: "b" });
+      const returned: string[][] = [];
+      const app = vi.fn(async () => {
+        await Promise.all(
+          [a.client, b.client].map((client) =>
+            client.shutdown().then(() => {
+              returned.push(lines1205());
+            }),
+          ),
+        );
+      });
+      process.on("SIGTERM", app);
+      try {
+        process.emit("SIGTERM", "SIGTERM");
+        await vi.waitFor(() => expect(returned).toHaveLength(2), { timeout: 3_000 });
+        expect(returned.map((l) => l.length)).toEqual([1, 1]);
+        expect(lines1205()[0]).toContain("Shutdown deadline of 800 ms reached — 4 events");
+        await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0), { timeout: 2_000 });
+        await new Promise((r) => setTimeout(r, 50));
+        expect(lines1205()).toHaveLength(1);
+        expect(exitHooks()).toHaveLength(1);
+        exitHooks()[0]?.call(process, 0);
+        expect(lines1205()).toHaveLength(1);
+      } finally {
+        process.off("SIGTERM", app);
+      }
+    });
+  });
+
+  it("a test reset while a shutdown() waits leaves the count of waits at 0, not -1 (#154 review round 1)", async () => {
+    // The reset zeroes the count and releases the wait; before the fix the
+    // wait's own decrement then ran too. A negative count would read as no
+    // shutdown() waiting in the next test's cycle.
+    const { client, raw } = build("yav_154_waits", { shutdownTimeoutMs: 2_000 });
+    await callTool(raw, "get_price", { q: "a" });
+    const closing = client.shutdown(); // the hanging ingest keeps it waiting
+    expect(_appWaitCount()).toBe(1);
+    _resetGlobalState();
+    await closing;
+    expect(_appWaitCount()).toBe(0);
+    // The released stop goes on in the background: let it deliver, or its
+    // own deadline prints a shutdown() line into a later test.
+    await vi.waitFor(() => expect(ingest.batches).toHaveLength(1));
+    await ingest.answerHung();
+    await vi.waitFor(() => expect(ingest.responded).toBe(1));
+  });
+
+  describe("one late line per cycle, whichever deadline timer runs first (#154, CI)", () => {
+    // D = 600 ms from B's explicit value; B's fetch ignores its abort, so its
+    // stop settles at the deadline + ABORT_SETTLE_MS. A second signal hands
+    // the cycle back at once. X sends before the deadline's last 100 ms (the
+    // deadline cuts its fetch); Y sends within them, so the 100 ms floor
+    // cuts its fetch after the deadline, before B settles. Connection
+    // batches hang; the tool_call batch behind each is answered at once.
+    let fetchSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      const realFetch = globalThis.fetch;
+      fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+          const headers = init?.headers as Record<string, string> | undefined;
+          if (headers?.Authorization === "Bearer yav_154_once_b") {
+            return realFetch(input, { ...init, signal: undefined });
+          }
+          return realFetch(input, init);
+        });
+      ingest.hangEvents = false;
+      ingest.respondAfterMs = (batch) =>
+        batch.events.some((e) => e.event_type === "connection") ? 60_000 : 0;
+    });
+    afterEach(() => fetchSpy.mockRestore());
+
+    const sentAt = (key: string) =>
+      ingest.batches.find((batch) => batch.authorization === `Bearer ${key}`)?.receivedAt ?? 0;
+    const cycleLines = () => lines1205().filter((l) => l.includes("Shutdown deadline"));
+
+    /** X right away, Y at t0 + 530 ms; both sends checked against the deadline's last 100 ms. */
+    async function lateSends(t0: number): Promise<void> {
+      const { raw: x } = build("yav_154_once_x");
+      await callTool(x, "get_price", { q: "x" });
+      await new Promise((r) => setTimeout(r, Math.max(0, t0 + 530 - Date.now())));
+      const { raw: y } = build("yav_154_once_y");
+      await callTool(y, "get_price", { q: "y" });
+      await vi.waitFor(() => expect(sentAt("yav_154_once_y")).toBeGreaterThan(0));
+      expect(sentAt("yav_154_once_x")).toBeGreaterThan(0);
+      expect(sentAt("yav_154_once_x")).toBeLessThan(t0 + 500);
+      expect(sentAt("yav_154_once_y")).toBeGreaterThan(t0 + 510);
+      expect(sentAt("yav_154_once_y")).toBeLessThan(t0 + 600);
+    }
+
+    it("no shutdown() waiting: nothing is released at the deadline, so the late report waits for the stops — one line with what the deadline and the floor cut", async () => {
+      // Before the fix the cycle's timer printed a late line at the deadline
+      // whether or not anything was waiting on it — X's one event — and the
+      // stops' settling printed a second with Y's: three lines in all, and
+      // in CI, where the test then reached the exit hook within the tool
+      // call responses, one more from the exit hook.
+      _setSignalReraise(() => {});
+      await withoutOtherListeners("SIGTERM", async () => {
+        await withoutOtherListeners("SIGINT", async () => {
+          const { raw: b } = build("yav_154_once_b", { shutdownTimeoutMs: 600 });
+          await callTool(b, "get_price", { q: "b" });
+          const t0 = Date.now();
+          process.emit("SIGTERM", "SIGTERM"); // the drain sends B's two
+          await vi.waitFor(() => expect(ingest.batches).toHaveLength(1));
+          process.emit("SIGINT", "SIGINT"); // handed back at once, B's two pre-counted
+          expect(lines1205()).toHaveLength(1);
+          expect(lines1205()[0]).toContain("2 events not delivered");
+          await lateSends(t0);
+          await vi.waitFor(() => expect(_trackedTransportCount()).toBe(2), { timeout: 2_000 }); // B settled
+          await new Promise((r) => setTimeout(r, 100));
+          expect(lines1205(), lines1205().join("\n")).toHaveLength(2);
+          expect(lines1205()[1]).toContain("Shutdown deadline of 600 ms");
+          expect(lines1205()[1]).toContain("2 events not delivered"); // X and Y
+        });
+      });
+    });
+
+    it("an app's shutdown() waiting: the late line comes at the deadline, before it returns, and stays the cycle's only one — Y, lost after it, is the exit hook's, in the deadline's wording", async () => {
+      // Before the fix the stops' settling printed a second late line with
+      // Y's event after the one at the deadline.
+      await withoutOtherListeners("SIGTERM", async () => {
+        await withoutOtherListeners("SIGINT", async () => {
+          const { client, raw: b } = build("yav_154_once_b", { shutdownTimeoutMs: 600 });
+          await callTool(b, "get_price", { q: "b" });
+          let closing: Promise<void> | undefined;
+          let atReturn: string[] | undefined;
+          const app = vi.fn(() => {
+            closing ??= client.shutdown().then(() => {
+              atReturn = cycleLines();
+            });
+          });
+          process.on("SIGTERM", app);
+          process.on("SIGINT", app);
+          try {
+            const t0 = Date.now();
+            process.emit("SIGTERM", "SIGTERM"); // the app's shutdown() waits for the drain
+            await vi.waitFor(() => expect(ingest.batches).toHaveLength(1));
+            process.emit("SIGINT", "SIGINT"); // handed back at once, nothing pre-counted
+            expect(lines1205()).toHaveLength(0);
+            await lateSends(t0);
+            await closing;
+            expect(atReturn).toHaveLength(1);
+            expect(atReturn?.[0]).toContain("Shutdown deadline of 600 ms reached — 3 events"); // B's two and X
+            await vi.waitFor(() => expect(_trackedTransportCount()).toBe(2), { timeout: 2_000 }); // B settled
+            await new Promise((r) => setTimeout(r, 100));
+            expect(cycleLines(), lines1205().join("\n")).toHaveLength(1);
+            expect(exitHooks()).toHaveLength(1);
+            exitHooks()[0]?.call(process, 0);
+            expect(lines1205()).toHaveLength(2);
+            // Y, in the deadline's wording: the app's shutdown() returned at
+            // it (#154 review round 1; before: "Process exit with 1 events
+            // not delivered — await analytics.shutdown() …").
+            expect(lines1205()[1]).toContain(
+              "Shutdown deadline of 600 ms reached — 1 more events not delivered",
+            );
+            expect(lines1205()[1]).not.toContain("await analytics.shutdown()");
+          } finally {
+            process.off("SIGTERM", app);
+            process.off("SIGINT", app);
+          }
+        });
+      });
+    });
+  });
 
   it("a client created and shut down per request leaves no transport behind, and its losses stay counted", async () => {
     // A stateless host that follows the README per request: before the fix

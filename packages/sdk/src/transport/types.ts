@@ -25,4 +25,10 @@ export interface Transport {
    * before `shutdown()` or after its deadline.
    */
   cutDeadline?(atMs: number): void;
+  /**
+   * Whether a shutdown deadline cut this transport — its deadline came
+   * with the drain unfinished — so a signal cycle whose drain ends that
+   * way knows its deadline has come (#154). Optional.
+   */
+  reachedDeadline?(): boolean;
 }

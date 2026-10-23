@@ -129,6 +129,122 @@ describe("AsyncLocalStorage context", () => {
         expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("ignoring"));
         warnSpy.mockRestore();
       });
+
+      describe("once per session state (#145)", () => {
+        const identifies = (transport: ReturnType<typeof createMockTransport>) =>
+          transport.sent.flat().filter((e) => e.event_type === "identify") as Array<
+            BaseEvent & { user_traits?: Record<string, unknown> }
+          >;
+
+        it("the same id twice sends one event", () => {
+          // Before: one event per call — and the docs recommend calling
+          // identify() in every handler, so one identify row per tool call.
+          const transport = createMockTransport();
+          const store = createStore({ transport });
+          const ctx = createYavioContext();
+          runInContext(store, () => {
+            ctx.identify("user-1");
+            ctx.identify("user-1");
+          });
+          expect(identifies(transport)).toHaveLength(1);
+          expect(identifies(transport)[0]?.user_id).toBe("user-1");
+        });
+
+        it("the same traits written in another order send one event", () => {
+          const transport = createMockTransport();
+          const store = createStore({ transport });
+          const ctx = createYavioContext();
+          runInContext(store, () => {
+            ctx.identify("user-1", { plan: "pro", region: "EU" });
+            ctx.identify("user-1", { region: "EU", plan: "pro" });
+          });
+          expect(identifies(transport)).toHaveLength(1);
+        });
+
+        it("a changed trait sends again with the merged traits, a repeat of it sends nothing, and a trait set back sends again", () => {
+          const transport = createMockTransport();
+          const store = createStore({ transport });
+          const ctx = createYavioContext();
+          runInContext(store, () => {
+            ctx.identify("user-1", { plan: "free", region: "EU" });
+            ctx.identify("user-1", { plan: "pro" });
+            ctx.identify("user-1", { plan: "pro" });
+            ctx.identify("user-1", { plan: "free" });
+          });
+          // Compared with the last event sent, not with every one seen.
+          expect(identifies(transport).map((e) => e.user_traits)).toEqual([
+            { plan: "free", region: "EU" },
+            { plan: "pro", region: "EU" },
+            { plan: "free", region: "EU" },
+          ]);
+        });
+
+        it("a conflicting id sends nothing and warns once (YAVIO-1302); the first id again sends nothing either", () => {
+          const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+          try {
+            const transport = createMockTransport();
+            const store = createStore({ transport });
+            const ctx = createYavioContext();
+            runInContext(store, () => {
+              ctx.identify("user-1");
+              ctx.identify("user-2");
+              ctx.identify("user-1");
+            });
+            expect(identifies(transport).map((e) => e.user_id)).toEqual(["user-1"]);
+            const conflicts = warnSpy.mock.calls.filter((c) => String(c[0]).includes("YAVIO-1302"));
+            expect(conflicts).toHaveLength(1);
+          } finally {
+            warnSpy.mockRestore();
+          }
+        });
+
+        it("a trait with no JSON form (a BigInt) sends as before, never throws, and keeps no fingerprint: the next serialisable call sends", () => {
+          const transport = createMockTransport();
+          const store = createStore({ transport });
+          const ctx = createYavioContext();
+          runInContext(store, () => {
+            ctx.identify("user-1", { seats: 1 });
+            expect(() => ctx.identify("user-1", { seats: 2n })).not.toThrow();
+            expect(() => ctx.identify("user-1", { seats: 2n })).not.toThrow();
+            // The last event sent had the BigInt: { seats: 1 } is a change.
+            ctx.identify("user-1", { seats: 1 });
+            ctx.identify("user-1", { seats: 1 });
+          });
+          expect(identifies(transport).map((e) => e.user_traits?.seats)).toEqual([1, 2n, 2n, 1]);
+        });
+
+        it("a circular trait never throws, and its repeat sends nothing (the PII walk replaces the cycle)", () => {
+          const transport = createMockTransport();
+          const store = createStore({ transport });
+          const ctx = createYavioContext();
+          const company: Record<string, unknown> = { name: "Acme" };
+          company.self = company;
+          runInContext(store, () => {
+            expect(() => ctx.identify("user-1", { company })).not.toThrow();
+            ctx.identify("user-1", { company });
+          });
+          expect(identifies(transport)).toHaveLength(1);
+          expect(identifies(transport)[0]?.user_traits).toEqual({
+            company: { name: "Acme", self: "[Circular]" },
+          });
+        });
+
+        it("a fresh state for the same session — after an LRU eviction, or in another process — sends again", () => {
+          const transport = createMockTransport();
+          const ctx = createYavioContext();
+          const before = createStore({ transport });
+          runInContext(before, () => {
+            ctx.identify("user-1", { plan: "pro" });
+            ctx.identify("user-1", { plan: "pro" });
+          });
+          const after = createStore({ transport, session: createSession() });
+          runInContext(after, () => {
+            ctx.identify("user-1", { plan: "pro" });
+            ctx.identify("user-1", { plan: "pro" });
+          });
+          expect(identifies(transport).map((e) => e.session_id)).toEqual(["ses_test", "ses_test"]);
+        });
+      });
     });
 
     describe(".step()", () => {

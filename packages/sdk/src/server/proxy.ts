@@ -16,6 +16,7 @@ import {
 } from "../core/ids.js";
 import { LruMap } from "../core/lru.js";
 import { detectPlatform } from "../core/platform.js";
+import { stable } from "../core/stable.js";
 import type { CaptureConfig, McpServerLike, SessionState, YavioConfig } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
 import { type RequestStore, runInContext } from "./context.js";
@@ -561,18 +562,6 @@ export function configFingerprint(config: YavioConfig): string {
   // and every wrap() compares and records the same string.
   const known = fingerprints.get(config);
   if (known !== undefined) return known;
-  const stable = (value: unknown): unknown => {
-    if (typeof value === "function") return "[function]";
-    if (Array.isArray(value)) return value.map(stable);
-    if (value && typeof value === "object") {
-      return Object.fromEntries(
-        Object.keys(value as Record<string, unknown>)
-          .sort()
-          .map((key) => [key, stable((value as Record<string, unknown>)[key])]),
-      );
-    }
-    return value;
-  };
   const fingerprint = JSON.stringify(
     stable({
       capture: config.capture,

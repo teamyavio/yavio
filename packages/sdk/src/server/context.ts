@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ErrorCode } from "@yavio/shared/error-codes";
+import type { IdentifyEvent } from "@yavio/shared/events";
 import {
   type EventContext,
   buildConversionEvent,
@@ -7,6 +8,7 @@ import {
   buildStepEvent,
   buildTrackEvent,
 } from "../core/events.js";
+import { stable } from "../core/stable.js";
 import type { SessionState, YavioContext } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
 
@@ -63,6 +65,20 @@ function droppedOutsideContext(method: string): void {
   );
 }
 
+/**
+ * `[user_id, user_traits]` of an identify event as stable JSON (keys sorted,
+ * so the order the traits were written in does not matter), or undefined
+ * when it cannot be computed — a BigInt trait: such an event is sent as it
+ * always was, and no fingerprint is kept for the next call to match.
+ */
+function identifyFingerprint(event: IdentifyEvent): string | undefined {
+  try {
+    return JSON.stringify(stable([event.user_id, event.user_traits ?? null]));
+  } catch {
+    return undefined;
+  }
+}
+
 function buildCtx(store: RequestStore): EventContext {
   return {
     traceId: store.traceId,
@@ -103,6 +119,14 @@ export function createYavioContext(fallbackStore?: RequestStore): YavioContext {
       }
 
       const event = buildIdentifyEvent(buildCtx(store), userId, store.session.userTraits);
+      // Once per session state (#145): the docs have always told integrators
+      // to call identify() in every handler, and every call sent an event.
+      // A repeat with the same id and traits sends nothing; a changed trait
+      // sends the merged traits. Per process and per state: after an LRU
+      // eviction, or on another instance, the state is fresh and sends once.
+      const fingerprint = identifyFingerprint(event);
+      if (fingerprint !== undefined && fingerprint === store.session.identified) return;
+      store.session.identified = fingerprint;
       store.transport.send([event]);
     },
 

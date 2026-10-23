@@ -150,8 +150,8 @@ yavio.track("server_started", { version: "1.0.0" }); // dropped
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `.identify()` | `identify(userId: string, traits?: Record<string, unknown>)` | Ties the current session and all subsequent events to a known user. Traits are persisted as user properties. Enables retention, cohort, and per-user analytics. |
-| `.step()` | `step(name: string, meta?: Record<string, unknown>)` | Marks a funnel step. Each step receives an auto-incrementing `step_sequence` (per trace) for deterministic ordering. Powers the combined funnel visualization. |
+| `.identify()` | `identify(userId: string, traits?: Record<string, unknown>)` | Ties the current session and all subsequent events to a known user. Traits travel on the `identify` event (no dashboard code reads `user_traits` yet). Enables retention and per-user analytics. One `identify` event per session state (0.5.4, #145, see 3.2.4). |
+| `.step()` | `step(name: string, meta?: Record<string, unknown>)` | Marks a funnel step. Each step receives an auto-incrementing `step_sequence`, per session in each process (it starts again at 1 on another instance and after an LRU eviction; the dashboard orders a session's steps by time and uses it as the tie-breaker, #145). Powers the combined funnel visualization. |
 | `.track()` | `track(event: string, properties?: Record<string, unknown>)` | Generic custom event. Escape hatch for anything not auto-captured or not a funnel step. |
 | `.conversion()` | `conversion(name: string, data: { value: number; currency: string; meta?: Record<string, unknown> })` | Revenue attribution event. Value and currency are required. Powers ROI analytics. |
 
@@ -163,7 +163,7 @@ yavio.track("server_started", { version: "1.0.0" }); // dropped
 
 - **userId** is a developer-provided string (e.g., database ID, external ID). It is NOT stripped by PII — it is the developer's chosen identifier.
 - **traits** are optional key-value pairs describing the user (e.g., `{ plan: "pro", company: "Acme" }`). Traits are PII-stripped like all other metadata.
-- Calling `.identify()` emits an `identify` event and sets `user_id` on all subsequent events in the current session (server-side via AsyncLocalStorage, widget-side via the singleton).
+- Calling `.identify()` emits an `identify` event and sets `user_id` on all subsequent events in the current session (server-side via AsyncLocalStorage, widget-side via the singleton). Server-side, since 0.5.4 (#145), only when `[user_id, user_traits]` of the event, as stable JSON (keys sorted at every level, `core/stable.ts`), differs from the last one this session state sent (`SessionState.identified`): a repeat with the same id and traits sends nothing, a changed trait sends the merged traits, a trait with no JSON form (a BigInt) sends every time and keeps no fingerprint. A fresh state — a new conversation, one the LRU evicted, another process — sends once, and the read side takes a session's first identify. The one-user-per-session check (`YAVIO-1302`, next bullet) is per process and best effort for the same reason. The widget hook keeps its own rule (one event per call).
 - Multiple `.identify()` calls in the same session update the traits (merge, not replace). The `userId` cannot change within a session — a second call with a different `userId` logs a warning and is ignored.
 - Events emitted before `.identify()` in a session will have `user_id = null`, and so will the session's events on every other process of a stateless fleet. The read side stitches them (#145): the dashboard and the #85 statistics job map each `session_id` to the `user_id` of its first `identify` event at query time and count the session's unstamped events for that user (an event's own `user_id` wins); see [storage-layer.md §5.1.4](../infrastructure/storage-layer.md#514-sessions-and-users-no-materialized-views).
 

@@ -1092,6 +1092,81 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       expect(error).toHaveBeenCalledWith(expect.stringContaining("YAVIO-1201"));
     });
 
+    it("precountDue(): the batch in flight whose budget cuts its fetch by the time given is counted once, is no longer pending, and its loss is not a deadline loss again; a fetch the budget gives longer, and the queue behind it, are not due (#154)", async () => {
+      // A post-signal transport at the cycle's deadline (t0 + 300): the
+      // cycle's line counts the fetch that deadline cuts, before the app's
+      // shutdown() returns and the app exits.
+      const { fetch: hanging } = abortableFetch();
+      const t0 = Date.now();
+      const late = new HttpTransport({
+        ...base,
+        immediate: true,
+        maxRetries: 0,
+        fetchBudgetMs: (now) => t0 + 300 - now,
+        fetch: hanging,
+      });
+      late.send([fakeEvent(), fakeEvent()]);
+      late.send([fakeEvent()]); // queued behind the batch in flight
+      await vi.advanceTimersByTimeAsync(0);
+      expect(late.precountDue(t0 + 299)).toBe(0); // cut after that
+      expect(late.precountDue(t0 + 300)).toBe(2);
+      expect(late.precountDue(t0 + 300)).toBe(0); // once
+      expect(late.pendingEvents()).toBe(1); // the queued one
+      await vi.advanceTimersByTimeAsync(300); // the budget cuts it
+      expect(late.deadlineLostEvents()).toBe(0); // the line has it already
+      expect(late.lostEvents()).toBe(2);
+
+      // The 100 ms floor of a send just before the deadline: its fetch
+      // outlives the deadline, so it is not the deadline's to count.
+      const { fetch: hanging2 } = abortableFetch();
+      const floor = new HttpTransport({
+        ...base,
+        immediate: true,
+        maxRetries: 0,
+        fetchBudgetMs: () => 100,
+        fetch: hanging2,
+      });
+      floor.send([fakeEvent()]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(floor.precountDue(Date.now() + 50)).toBe(0);
+      expect(floor.pendingEvents()).toBe(1);
+    });
+
+    it("budgetCutAt(): the time a fetch's budget aborted it is recorded and reported; a fetch the plain fetch timeout aborts records nothing (#154 review round 3, #151's rule)", async () => {
+      const { fetch: hanging } = abortableFetch();
+      const t0 = Date.now();
+      const reported: number[] = [];
+      const cut = new HttpTransport({
+        ...base,
+        immediate: true,
+        maxRetries: 0,
+        fetchBudgetMs: (now) => t0 + 300 - now,
+        onBudgetCut: (at) => reported.push(at),
+        fetch: hanging,
+      });
+      cut.send([fakeEvent()]);
+      await vi.advanceTimersByTimeAsync(299);
+      expect(cut.budgetCutAt()).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(cut.budgetCutAt()).toBe(t0 + 300);
+      expect(reported).toEqual([t0 + 300]);
+
+      const { fetch: hanging2 } = abortableFetch();
+      const timedOut = new HttpTransport({
+        ...base,
+        immediate: true,
+        maxRetries: 0,
+        fetchTimeoutMs: 300,
+        fetchBudgetMs: () => 10_000,
+        onBudgetCut: (at) => reported.push(at),
+        fetch: hanging2,
+      });
+      timedOut.send([fakeEvent()]);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(timedOut.budgetCutAt()).toBeUndefined();
+      expect(reported).toHaveLength(1);
+    });
+
     it("an unparsable Retry-After falls back to the backoff, never to an immediate retry", async () => {
       let calls = 0;
       const fetch = vi.fn().mockImplementation(() => {
@@ -1411,39 +1486,98 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
     expect(transport.pendingEvents()).toBe(0);
   });
 
-  it("every timer it sets is unref'd: fetch timeout, backoff, drain and shutdown deadlines", async () => {
+  /** Every `setTimeout` the test's code makes, with its delay, through the real timers. */
+  function recordTimers() {
     const realSetTimeout = globalThis.setTimeout;
-    const handles: NodeJS.Timeout[] = [];
+    const timers: Array<{ ms: number | undefined; handle: NodeJS.Timeout }> = [];
     const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
       fn: (...args: unknown[]) => void,
       ms?: number,
     ) => {
       const handle = realSetTimeout(fn, ms);
-      handles.push(handle);
+      timers.push({ ms, handle });
       return handle;
     }) as typeof setTimeout);
+    const sleep = (ms: number) => new Promise((resolve) => realSetTimeout(resolve, ms));
+    return { timers, spy, sleep };
+  }
+
+  /** A Node timer that fired or was cleared (`_destroyed`, set by both). */
+  const settled = (handle: NodeJS.Timeout) =>
+    (handle as unknown as { _destroyed: boolean })._destroyed;
+
+  it("outside a drain every timer it sets is unref'd: flush interval, fetch timeout, backoff (#148, #164)", async () => {
+    const { timers, spy, sleep } = recordTimers();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const interval = vi.spyOn(globalThis, "setInterval");
     try {
       const { fetch } = abortableFetch();
       const transport = new HttpTransport({
         ...base,
         fetchTimeoutMs: 30,
         maxRetries: 1,
+        maxBatchSize: 1,
+        flushIntervalMs: 60_000,
+        fetch,
+      });
+      transport.start();
+      transport.send([fakeEvent()]); // the early flush: no drain, no shutdown
+      await sleep(60); // its fetch timeout fired, the backoff is scheduled
+      expect(timers.map((t) => t.ms)).toEqual([30, 1_000]);
+      expect(timers.map((t) => t.handle.hasRef())).toEqual([false, false]);
+      expect((interval.mock.results[0]?.value as NodeJS.Timeout).hasRef()).toBe(false);
+      await transport.shutdown(0);
+    } finally {
+      spy.mockRestore();
+      interval.mockRestore();
+      warn.mockRestore();
+      error.mockRestore();
+    }
+  });
+
+  it("a drain's and a shutdown's deadline keep the process alive while they run and are cleared when they settle; every other timer stays unref'd (#164)", async () => {
+    const { timers, spy, sleep } = recordTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // The first attempt is answered 503, the second 200: the retry waits
+      // out the 1 s backoff, and nothing but the deadline holds the loop.
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce({ status: 503, headers: { get: () => null }, json: () => ({}) })
+        .mockResolvedValue(ok);
+      const transport = new HttpTransport({
+        ...base,
         shutdownTimeoutMs: 5_000,
         flushIntervalMs: 60_000,
         fetch,
       });
       transport.send([fakeEvent()]);
-      const draining = transport.drain(100); // its deadline timer
-      await new Promise((resolve) => realSetTimeout(resolve, 60)); // fetch timeout fired, backoff scheduled
-      await draining;
-      const closing = transport.shutdown(); // its deadline timer
-      await new Promise((resolve) => realSetTimeout(resolve, 10));
-      expect(handles.length).toBeGreaterThanOrEqual(4);
-      expect(handles.map((h) => h.hasRef())).toEqual(handles.map(() => false));
-      // The second attempt's fetch timeout ends it: the shutdown resolves at ~1.06 s.
+      const closing = transport.shutdown();
+      await sleep(20); // the 503 is in, the backoff scheduled
+      const deadline = timers.find((t) => t.ms === 5_000);
+      const backoff = timers.find((t) => t.ms === 1_000);
+      expect(deadline?.handle.hasRef()).toBe(true);
+      expect(backoff?.handle.hasRef()).toBe(false);
+      expect(timers.filter((t) => t.handle.hasRef())).toHaveLength(1);
       await closing;
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(transport.deliveredEvents()).toBe(1);
+      // Settled: the deadline timer is gone, so nothing outlives the drain.
+      expect(timers.every((t) => settled(t.handle))).toBe(true);
+
+      const draining = new HttpTransport({
+        ...base,
+        flushIntervalMs: 60_000,
+        fetch: vi.fn().mockResolvedValue(ok),
+      });
+      draining.send([fakeEvent()]);
+      const drained = draining.drain(2_000);
+      const drainDeadline = timers.find((t) => t.ms === 2_000);
+      expect(drainDeadline?.handle.hasRef()).toBe(true);
+      await drained;
+      expect(settled(drainDeadline?.handle as NodeJS.Timeout)).toBe(true);
     } finally {
       spy.mockRestore();
       warn.mockRestore();
