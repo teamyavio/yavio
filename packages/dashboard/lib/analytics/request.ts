@@ -17,6 +17,13 @@ export class AnalyticsRequestError extends Error {
   }
 }
 
+/**
+ * What a 504 without the route's own message says: a gateway cut the
+ * request, which is the route's timeout (YAVIO-3405) seen from outside, so
+ * it gets the same advice.
+ */
+const GATEWAY_TIMEOUT_MESSAGE = "Analytics query timed out. Please try a smaller date range.";
+
 /** SWR fetcher for the analytics API routes: throws AnalyticsRequestError on a non-2xx answer. */
 export async function fetchAnalytics<T>(url: string): Promise<T> {
   const res = await fetch(url);
@@ -26,8 +33,10 @@ export async function fetchAnalytics<T>(url: string): Promise<T> {
       typeof body === "object" && body !== null
         ? (body as { error?: unknown; code?: unknown })
         : {};
+    const fallback =
+      res.status === 504 ? GATEWAY_TIMEOUT_MESSAGE : `Request failed (HTTP ${res.status})`;
     throw new AnalyticsRequestError(
-      typeof error === "string" ? error : `Request failed (HTTP ${res.status})`,
+      typeof error === "string" ? error : fallback,
       res.status,
       typeof code === "string" ? code : undefined,
     );

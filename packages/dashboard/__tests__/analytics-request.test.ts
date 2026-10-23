@@ -57,19 +57,34 @@ describe("fetchAnalytics", () => {
     expect(err.code).toBe("YAVIO-3408");
   });
 
+  const TIMED_OUT = "Analytics query timed out. Please try a smaller date range.";
+
   it.each([
-    ["a body that is not JSON (a proxy's HTML page)", undefined],
-    ["a JSON null body", null],
-    ["a body without error or code", { detail: 1 }],
-    ["fields of the wrong type", { error: 42, code: 3405 }],
-  ])("falls back to the status for %s", async (_label, body) => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(answer(504, body)));
+    [
+      "a 502 whose body is not JSON (a proxy's HTML page)",
+      502,
+      undefined,
+      "Request failed (HTTP 502)",
+    ],
+    ["a 500 with a JSON null body", 500, null, "Request failed (HTTP 500)"],
+    ["a 503 body without error or code", 503, { detail: 1 }, "Request failed (HTTP 503)"],
+    [
+      "a 502 with fields of the wrong type",
+      502,
+      { error: 42, code: 3405 },
+      "Request failed (HTTP 502)",
+    ],
+    // A gateway cut the request: the same advice as the route's own timeout.
+    ["a gateway 504 without a body", 504, undefined, TIMED_OUT],
+    ["a 504 body without error", 504, { detail: 1 }, TIMED_OUT],
+  ])("falls back on the status for %s", async (_label, status, body, message) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(answer(status, body)));
 
     const err = await rejection("/api/analytics/p/overview");
 
     expect(err).toBeInstanceOf(AnalyticsRequestError);
-    expect(err.message).toBe("Request failed (HTTP 504)");
-    expect(err.status).toBe(504);
+    expect(err.message).toBe(message);
+    expect(err.status).toBe(status);
     expect(err.code).toBeUndefined();
   });
 });
