@@ -252,7 +252,7 @@ export function InvocationsContent({
       </PageHeader>
 
       {error ? (
-        <ErrorAlert message={error.message} retry={retry} />
+        <ErrorAlert error={error} retry={retry} />
       ) : !data ? (
         // Counts and capture-status copy are claims about the customer's
         // data — never render them before the first response arrives.

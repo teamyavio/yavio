@@ -3,11 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { getServerSession } from "@/lib/auth/get-session";
 import { getDb } from "@/lib/db";
-import {
-  RedirectAuthorizeError,
-  RenderAuthorizeError,
-  validateAuthorizeRequest,
-} from "@/lib/oauth/authorize";
+import { RenderAuthorizeError, validateAuthorizeRequest } from "@/lib/oauth/authorize";
 import { sanitizeClientName } from "@/lib/oauth/display";
 import { rateLimitConfigs } from "@/lib/rate-limit/config";
 import { RateLimiter } from "@/lib/rate-limit/rate-limiter";
@@ -15,7 +11,9 @@ import { clientIp } from "@/lib/security/client-ip";
 import { workspaceMembers, workspaces } from "@yavio/db/schema";
 import { eq } from "drizzle-orm";
 import { headers } from "next/headers";
+import Link from "next/link";
 import { redirect } from "next/navigation";
+import type { ReactNode } from "react";
 import { approveConsent, denyConsent } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -50,13 +48,26 @@ function authorizeValues(params: SearchParams): Record<string, string | undefine
   return result;
 }
 
-function ErrorCard({ message }: { message: string }) {
+function ErrorCard({
+  message,
+  code,
+  hint = "You can close this window and reconnect from the app.",
+}: {
+  message: string;
+  code?: string;
+  /** What the user can do next; the default suits every request error. */
+  hint?: ReactNode;
+}) {
   return (
     <AuthCard
       title="Connection request stopped"
       description="This authorization request could not be processed"
     >
       <p className="text-sm text-muted-foreground">{message}</p>
+      {code !== undefined && (
+        <p className="mt-2 font-mono text-xs text-muted-foreground">Error: {code}</p>
+      )}
+      <p className="mt-4 text-sm text-muted-foreground">{hint}</p>
     </AuthCard>
   );
 }
@@ -84,15 +95,14 @@ export default async function AuthorizePage({
     redirect(`/login?callbackUrl=${encodeURIComponent(`/oauth/authorize?${query.toString()}`)}`);
   }
 
+  // Any invalid request is shown here, never redirected to the client: the
+  // user has not seen a consent page for it yet.
   let request: Awaited<ReturnType<typeof validateAuthorizeRequest>>;
   try {
     request = await validateAuthorizeRequest(params);
   } catch (err) {
     if (err instanceof RenderAuthorizeError) {
-      return <ErrorCard message={err.description} />;
-    }
-    if (err instanceof RedirectAuthorizeError) {
-      redirect(err.redirectTo);
+      return <ErrorCard message={err.description} code={err.error} />;
     }
     throw err;
   }
@@ -106,7 +116,17 @@ export default async function AuthorizePage({
 
   if (memberships.length === 0) {
     return (
-      <ErrorCard message="Your account is not a member of any workspace, so there is nothing to share. Create a workspace first." />
+      <ErrorCard
+        message="Your account is not a member of any workspace, so there is nothing to share."
+        hint={
+          <>
+            <Link href="/setup" className="font-medium text-foreground hover:underline">
+              Create a workspace in the dashboard
+            </Link>
+            , then reconnect from the app.
+          </>
+        }
+      />
     );
   }
 

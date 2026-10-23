@@ -10,8 +10,8 @@ vi.mock("../lib/oauth/clients", async (importOriginal) => {
 });
 
 import {
-  RedirectAuthorizeError,
   RenderAuthorizeError,
+  errorRedirect,
   successRedirect,
   validateAuthorizeRequest,
 } from "../lib/oauth/authorize";
@@ -88,11 +88,15 @@ describe("authorization request validation", () => {
     ).rejects.toBeInstanceOf(RenderAuthorizeError);
   });
 
-  it("REDIRECTS protocol errors back to the validated client with iss + state", async () => {
+  it("reports an invalid request on the page, never as a redirect to the client", async () => {
     const cases: Array<[Record<string, string | undefined>, string]> = [
       [{ ...VALID, response_type: "token" }, "unsupported_response_type"],
+      [{ ...VALID, response_type: undefined }, "invalid_request"],
+      [{ ...VALID, response_type: "" }, "invalid_request"],
       [{ ...VALID, code_challenge: undefined }, "invalid_request"],
+      [{ ...VALID, code_challenge: "too-short" }, "invalid_request"],
       [{ ...VALID, code_challenge_method: "plain" }, "invalid_request"],
+      [{ ...VALID, code_challenge_method: undefined }, "invalid_request"],
       [{ ...VALID, resource: "https://other.example/api/mcp" }, "invalid_target"],
     ];
     for (const [params, expectedError] of cases) {
@@ -102,13 +106,45 @@ describe("authorization request validation", () => {
         },
         (e) => e,
       );
-      expect(err).toBeInstanceOf(RedirectAuthorizeError);
-      const url = new URL((err as RedirectAuthorizeError).redirectTo);
-      expect(url.origin + url.pathname).toBe("https://claude.ai/api/mcp/auth_callback");
-      expect(url.searchParams.get("error")).toBe(expectedError);
-      expect(url.searchParams.get("state")).toBe("opaque-state-123");
-      expect(url.searchParams.get("iss")).toBe("https://dashboard.test");
+      expect(err).toBeInstanceOf(RenderAuthorizeError);
+      expect((err as RenderAuthorizeError).error).toBe(expectedError);
+      expect((err as RenderAuthorizeError).description.length).toBeGreaterThan(0);
+      expect(err).not.toHaveProperty("redirectTo");
     }
+  });
+
+  it("gives every rendered error an OAuth error code", async () => {
+    const codeOf = (params: Record<string, string | undefined>) =>
+      validateAuthorizeRequest(params).then(
+        () => {
+          throw new Error("expected rejection");
+        },
+        (e: RenderAuthorizeError) => e.error,
+      );
+
+    expect(await codeOf({ ...VALID, client_id: undefined })).toBe("invalid_request");
+    expect(await codeOf({ ...VALID, redirect_uri: undefined })).toBe("invalid_request");
+    expect(await codeOf({ ...VALID, redirect_uri: "https://elsewhere.example/cb" })).toBe(
+      "invalid_request",
+    );
+    mockResolveClient.mockRejectedValue(new OAuthError("invalid_client", "unknown", 401));
+    expect(await codeOf(VALID)).toBe("invalid_client");
+  });
+
+  it("builds error redirects with error, description, state and iss", () => {
+    const url = new URL(
+      errorRedirect(
+        "https://claude.ai/api/mcp/auth_callback",
+        "opaque-state-123",
+        "access_denied",
+        "the user denied the request",
+      ),
+    );
+    expect(url.origin + url.pathname).toBe("https://claude.ai/api/mcp/auth_callback");
+    expect(url.searchParams.get("error")).toBe("access_denied");
+    expect(url.searchParams.get("error_description")).toBe("the user denied the request");
+    expect(url.searchParams.get("state")).toBe("opaque-state-123");
+    expect(url.searchParams.get("iss")).toBe("https://dashboard.test");
   });
 
   it("defaults empty scope to analytics:read", async () => {
