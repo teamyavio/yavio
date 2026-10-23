@@ -258,6 +258,12 @@ describe("statistics job (#85)", { timeout: 30_000 }, () => {
       identify(project, "2026-10-01 22:00:00.000", "gus", "s8"),
       identify(project, "2026-10-02 14:30:00.000", "hal", "s8"),
       event(project, "2026-10-02 15:00:00.000", { session_id: "s8" }),
+      // An identify with an empty id first (the SDK accepts it), then kai on
+      // the same session state: s9's call on the 2nd is kai's, and kai is
+      // active that day through it alone (review round 2).
+      identify(project, "2026-09-30 10:00:00.000", "", "s9"),
+      identify(project, "2026-10-01 10:00:00.000", "kai", "s9"),
+      event(project, "2026-10-02 16:00:00.000", { session_id: "s9" }),
     ]);
     await job(new MemoryStore([project, other])).runIfDue(NOW);
 
@@ -301,12 +307,12 @@ describe("statistics job (#85)", { timeout: 30_000 }, () => {
       tier1: Number(tier1[0].dau),
       individuals: Number(total[0].individuals),
     }).toEqual({
-      // anna, subB, erin, fred, jon, gus, hal.
-      dau: 7,
-      tier1: 7,
+      // anna, subB, erin, fred, jon, gus, hal, kai.
+      dau: 8,
+      tier1: 8,
       // individuals in stats_daily falls back to the session for nobody-cells:
-      // anna, subB, erin, fred, gus and the unidentified sessions s4 and s6.
-      individuals: 7,
+      // anna, subB, erin, fred, gus, kai and the unidentified sessions s4 and s6.
+      individuals: 8,
     });
   });
 
