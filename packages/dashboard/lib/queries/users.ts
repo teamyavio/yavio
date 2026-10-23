@@ -63,7 +63,10 @@ interface QueryContext {
  * page view, and growing with the 13 months now kept. Queries that name a
  * person — the all-time list, first seen, retention cohorts, and the detail
  * of one user — keep the full mapping, so the list and the detail agree on
- * whose the unstamped events are.
+ * whose the unstamped events are. "A later identify never re-attributes
+ * history" holds for that full mapping only: in a windowed count a session
+ * whose first identify falls before the window goes to the first id
+ * identified inside it, if there is one (#145 review round 1).
  */
 export interface TimeWindow {
   /** SQL expressions; the window is [from, to). */

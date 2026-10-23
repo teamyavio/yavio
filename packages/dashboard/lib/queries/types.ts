@@ -82,7 +82,11 @@ export interface ErrorListItem {
   platform: string;
 }
 
-/** User list row, computed from events (#89). userId is the user key: user_id, else subject_id. */
+/**
+ * User list row, computed from events (#89). userId is the user key: the
+ * event's own user_id, else the session's first identified user_id (#145),
+ * else the user_id stitched to its subject_id, else subject_id.
+ */
 export interface UserListItem {
   userId: string;
   firstSeen: string;
