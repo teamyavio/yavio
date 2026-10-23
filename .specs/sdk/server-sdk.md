@@ -143,7 +143,7 @@ yavio.track("server_started", { version: "1.0.0" }); // dropped
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `.identify()` | `identify(userId: string, traits?: Record<string, unknown>)` | Ties the current session and all subsequent events to a known user. Traits are persisted as user properties. Enables retention, cohort, and per-user analytics. One `identify` event per session state (0.5.4, #145, see 3.2.4). |
+| `.identify()` | `identify(userId: string, traits?: Record<string, unknown>)` | Ties the current session and all subsequent events to a known user. Traits travel on the `identify` event (no dashboard code reads `user_traits` yet). Enables retention and per-user analytics. One `identify` event per session state (0.5.4, #145, see 3.2.4). |
 | `.step()` | `step(name: string, meta?: Record<string, unknown>)` | Marks a funnel step. Each step receives an auto-incrementing `step_sequence`, per session in each process (it starts again at 1 on another instance and after an LRU eviction; the dashboard orders a session's steps by time and uses it as the tie-breaker, #145). Powers the combined funnel visualization. |
 | `.track()` | `track(event: string, properties?: Record<string, unknown>)` | Generic custom event. Escape hatch for anything not auto-captured or not a funnel step. |
 | `.conversion()` | `conversion(name: string, data: { value: number; currency: string; meta?: Record<string, unknown> })` | Revenue attribution event. Value and currency are required. Powers ROI analytics. |
