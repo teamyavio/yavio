@@ -9,7 +9,10 @@
  *   events of the SDK process that called it, from that call on, so another
  *   instance's events in the conversation, and the earlier ones, carry none.
  *   Same rule as the dashboard's keyedEvents(); same window and retention
- *   floor as `base`;
+ *   floor as `base`. Never a `per_request` session (#144): it is one call,
+ *   and a long-lived MCP SDK v1 1.24/1.25 server that reuses one stateless
+ *   transport puts every key-less caller into one such session, so one
+ *   caller's identify would key everybody's events;
  * - `stitch`: per project, each subject_id mapped to the user_id last seen
  *   together with it (#89), so a person counted before identify() and after it
  *   is one person — read from the same window as `base` (#112): the mapping
@@ -83,6 +86,7 @@ function prelude(from: string, to: string): string {
       AND event_type = 'identify'
       AND user_id IS NOT NULL AND user_id != ''
       AND session_id != ''
+      AND ifNull(session_source, '') != 'per_request'
       AND timestamp >= ${from} AND timestamp < ${to}
       AND ${COLLECTED} >= ${FLOOR("project_id")}
     GROUP BY session_project, stitched_session

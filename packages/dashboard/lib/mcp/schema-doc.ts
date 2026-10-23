@@ -11,7 +11,8 @@ export const USER_KEY_SQL = `WITH session_map AS (
          argMin(assumeNotNull(user_id), (timestamp, event_id)) AS session_user_id
   FROM events
   WHERE event_type = 'identify' AND user_id IS NOT NULL AND user_id != ''
-    AND session_id != '' AND timestamp >= now() - INTERVAL 30 DAY
+    AND session_id != '' AND ifNull(session_source, '') != 'per_request'
+    AND timestamp >= now() - INTERVAL 30 DAY
   GROUP BY stitched_session
 ),
 subject_map AS (
@@ -116,7 +117,9 @@ the same conversation carry none. The dashboard counts one person per event as
 coalesce(the event's own user_id, the FIRST user_id an 'identify' event gave its
 session_id, the user_id last seen with its subject_id, subject_id) — never the
 session itself. Once a session is identified, all its events count for that
-user. The same key as one query (tool calls per person over the last 30 days;
+user — except a per_request session (see session_source), which is never
+mapped: it is one call, and a server that reuses one stateless transport puts
+every key-less caller into one such session. The same key as one query (tool calls per person over the last 30 days;
 person NULL = calls without a known user; uniqExact(person) counts users):
 ${USER_KEY_SQL}
 Keep both maps bounded to the query's window, as here and in the dashboard's

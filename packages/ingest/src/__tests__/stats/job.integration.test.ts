@@ -281,6 +281,7 @@ describe("statistics job (#85)", { timeout: 30_000 }, () => {
          FROM events
          WHERE project_id = {p:String} AND event_type = 'identify'
            AND user_id IS NOT NULL AND user_id != '' AND session_id != ''
+           AND ifNull(session_source, '') != 'per_request'
          GROUP BY stitched_session),
        stitch AS (
          SELECT assumeNotNull(subject_id) AS stitched_subject,
@@ -313,6 +314,78 @@ describe("statistics job (#85)", { timeout: 30_000 }, () => {
       // individuals in stats_daily falls back to the session for nobody-cells:
       // anna, subB, erin, fred, gus, kai and the unidentified sessions s4 and s6.
       individuals: 8,
+    });
+  });
+
+  it("never maps a per_request session: one caller's identify keys nobody else's events, as on the dashboard (#144)", async () => {
+    // A long-lived MCP SDK v1 1.24/1.25 server that reuses one stateless
+    // transport puts every key-less caller into one per_request session:
+    // ann identifies on the 1st, two other callers' calls follow on the 2nd.
+    await insert([
+      event(project, "2026-10-01 09:00:00.000", {
+        event_type: "identify",
+        event_name: null,
+        user_id: "ann",
+        session_id: "pr-shared",
+        session_source: "per_request",
+      }),
+      event(project, "2026-10-02 09:00:00.000", {
+        session_id: "pr-shared",
+        session_source: "per_request",
+      }),
+      event(project, "2026-10-02 09:05:00.000", {
+        session_id: "pr-shared",
+        session_source: "per_request",
+      }),
+      // A keyed conversation is mapped as before.
+      event(project, "2026-10-01 10:00:00.000", {
+        event_type: "identify",
+        event_name: null,
+        user_id: "bea",
+        session_id: "conv-bea",
+        session_source: "custom",
+      }),
+      event(project, "2026-10-02 10:00:00.000", {
+        session_id: "conv-bea",
+        session_source: "custom",
+      }),
+    ]);
+    await job(new MemoryStore([project])).runIfDue(NOW);
+
+    const dau = await rows(
+      "SELECT dau FROM stats_users_daily WHERE project_id = {p:String} AND day = '2026-10-02'",
+      { p: project },
+    );
+    const calls = await rows(
+      `SELECT events, individuals FROM stats_daily WHERE project_id = {p:String} AND slice = 'total'
+       AND day = '2026-10-02' AND event_type = 'tool_call'`,
+      { p: project },
+    );
+    // The same pinned copy of the dashboard's key as above, per_request rule included.
+    const tier1 = await rows(
+      `WITH session_map AS (
+         SELECT session_id AS stitched_session,
+                argMin(assumeNotNull(user_id), (timestamp, event_id)) AS session_user_id
+         FROM events
+         WHERE project_id = {p:String} AND event_type = 'identify'
+           AND user_id IS NOT NULL AND user_id != '' AND session_id != ''
+           AND ifNull(session_source, '') != 'per_request'
+         GROUP BY stitched_session)
+       SELECT uniqExact(coalesce(nullIf(e.user_id, ''), nullIf(m.session_user_id, ''))) AS dau
+       FROM events AS e
+       LEFT JOIN session_map AS m ON m.stitched_session = e.session_id
+       WHERE e.project_id = {p:String} AND toDate(e.timestamp) = '2026-10-02'`,
+      { p: project },
+    );
+    expect({
+      dau: Number(dau[0].dau),
+      tier1: Number(tier1[0].dau),
+      calls: calls.map((r) => [Number(r.events), Number(r.individuals)]),
+    }).toEqual({
+      // bea only: the per_request calls are nobody's, not ann's.
+      dau: 1,
+      tier1: 1,
+      calls: [[3, 1]],
     });
   });
 

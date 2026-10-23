@@ -33,7 +33,13 @@ interface QueryContext {
  *   (YAVIO-1302) and what a single process would have produced, so a later
  *   identify never re-attributes history. Only identify rows are read — a
  *   primary-key range, a few percent of the events. An event without a
- *   session never maps to anyone.
+ *   session never maps to anyone, nor does a `per_request` session (#144):
+ *   it is one call, and a long-lived MCP SDK v1 1.24/1.25 server that reuses
+ *   one stateless transport puts every key-less caller into one such
+ *   session, so one caller's identify would key everybody's rows. Every
+ *   copy of this map — querySessionUsers() in session-users.ts, USER_KEY_SQL
+ *   in lib/mcp/schema-doc.ts, the statistics prelude in packages/ingest —
+ *   has the same rule.
  * - subject_id: the platform's stable pseudonymous per-user-per-app id
  *   (ChatGPT's openai/subject), so apps that never call identify() still have
  *   user metrics.
@@ -106,6 +112,7 @@ export function keyedEvents({
           AND event_type = 'identify'
           AND user_id IS NOT NULL AND user_id != ''
           AND session_id != ''
+          AND ${COUNTED_SESSION}
           ${bound("timestamp", stitch)}
         GROUP BY stitched_session
       ),

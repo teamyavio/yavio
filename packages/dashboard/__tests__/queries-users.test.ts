@@ -446,6 +446,56 @@ describe.skipIf(!url)("user queries on a real ClickHouse (#89)", () => {
       expect(points.map((pt) => Number(pt.dau))).toEqual([0]);
     });
 
+    it("never maps a per_request session: one caller's identify keys nobody else's calls (#144)", async () => {
+      // A long-lived MCP SDK v1 1.24/1.25 server that reuses one stateless
+      // transport puts every key-less caller into one per_request session.
+      const p = scoped("per-request");
+      await p.insert([
+        { ...identify("ann", "pr-shared", day(-2, "09:00:00.000")), session_source: "per_request" },
+        {
+          session_id: "pr-shared",
+          session_source: "per_request",
+          timestamp: day(-2, "09:01:00.000"),
+        },
+        {
+          session_id: "pr-shared",
+          session_source: "per_request",
+          timestamp: day(-2, "09:02:00.000"),
+        },
+        // A keyed session is mapped as before.
+        { ...identify("bea", "conv-bea", day(-2, "10:00:00.000")), session_source: "custom" },
+        { session_id: "conv-bea", session_source: "custom", timestamp: day(-2, "10:01:00.000") },
+      ]);
+      const { users, total } = await q.queryUserList(p.ctx(day(-60), day(1)), 1, 50);
+      expect(
+        users.map((u) => [u.userId, Number(u.totalToolCalls), Number(u.totalEvents)]).sort(),
+      ).toEqual([
+        // ann: her own identify row only, by its user_id.
+        ["ann", 0, 1],
+        ["bea", 1, 2],
+      ]);
+      expect(total).toBe(2);
+
+      // The invocation feed's lookup and get_schema's recipe follow the same rule.
+      const { querySessionUsers } = await import("@/lib/queries/session-users");
+      const bySession = await querySessionUsers({ workspaceId: ws, projectId: p.projectId }, [
+        "pr-shared",
+        "conv-bea",
+      ]);
+      expect(Object.fromEntries(bySession)).toEqual({ "conv-bea": "bea" });
+      const { USER_KEY_SQL } = await import("@/lib/mcp/schema-doc");
+      const { validateFreeQuery } = await import("@/lib/mcp/sql-guard");
+      const { queryAnalytics } = await import("@/lib/clickhouse/analytics-client");
+      const recipe = await queryAnalytics<{ person: string | null; tool_calls: string }>({
+        workspaceId: ws,
+        projectId: p.projectId,
+        query: validateFreeQuery(USER_KEY_SQL),
+      });
+      expect(
+        Object.fromEntries(recipe.map((r) => [String(r.person), Number(r.tool_calls)])),
+      ).toEqual({ bea: 1, null: 2 });
+    });
+
     it("get_schema's run_query recipe passes the SQL guard and keys calls like the dashboard's windowed counts", async () => {
       const { USER_KEY_SQL } = await import("@/lib/mcp/schema-doc");
       const { validateFreeQuery } = await import("@/lib/mcp/sql-guard");
