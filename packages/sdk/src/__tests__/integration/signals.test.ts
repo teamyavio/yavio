@@ -11,6 +11,7 @@ import { z } from "zod";
 import { createYavio, withYavio } from "../../server/index.js";
 import { _resetGlobalState } from "../../server/proxy.js";
 import {
+  _appWaitCount,
   _setSignalReraise,
   _sharedStateCount,
   _trackedTransportCount,
@@ -1782,6 +1783,19 @@ describe("loss accounting (#148)", () => {
         process.off("SIGTERM", app);
       }
     });
+  });
+
+  it("a test reset while a shutdown() waits leaves the count of waits at 0, not -1 (#154 review round 1)", async () => {
+    // The reset zeroes the count and releases the wait; before the fix the
+    // wait's own decrement then ran too. A negative count would read as no
+    // shutdown() waiting in the next test's cycle.
+    const { client, raw } = build("yav_154_waits", { shutdownTimeoutMs: 5_000 });
+    await callTool(raw, "get_price", { q: "a" });
+    const closing = client.shutdown(); // the hanging ingest keeps it waiting
+    expect(_appWaitCount()).toBe(1);
+    _resetGlobalState();
+    await closing;
+    expect(_appWaitCount()).toBe(0);
   });
 
   describe("one late line per cycle, whichever deadline timer runs first (#154, CI)", () => {

@@ -448,11 +448,14 @@ export async function awaitBounded(work: Promise<void>, ownMs: number): Promise<
     atDeadline?.();
     return;
   }
+  const epoch = resets;
   appWaits++;
   try {
     await raceDeadline(work, ms, { waiters: deadlineWaiters, onTimeout: atDeadline });
   } finally {
-    appWaits--;
+    // A test reset zeroes the count and releases this wait: not again here
+    // (#154 review round 1).
+    if (epoch === resets) appWaits--;
   }
 }
 
@@ -1191,6 +1194,11 @@ export async function shutdownAllShared(): Promise<void> {
 /** @internal Number of live shared states — exposed for testing only. */
 export function _sharedStateCount(): number {
   return registry.size;
+}
+
+/** @internal `shutdown()` waits in progress — exposed for testing only. */
+export function _appWaitCount(): number {
+  return appWaits;
 }
 
 /** @internal Number of transports not yet shut down — exposed for testing only. */
