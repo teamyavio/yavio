@@ -420,14 +420,16 @@ describe.skipIf(!url)("user queries on a real ClickHouse (#89)", () => {
       expect(points.map((pt) => Number(pt.dau))).toEqual([0]);
     });
 
-    it("get_schema's run_query recipe passes the SQL guard and counts the same users", async () => {
+    it("get_schema's run_query recipe passes the SQL guard and keys calls like the dashboard's windowed counts", async () => {
       const { USER_KEY_SQL } = await import("@/lib/mcp/schema-doc");
       const { validateFreeQuery } = await import("@/lib/mcp/sql-guard");
       const { queryAnalytics } = await import("@/lib/clickhouse/analytics-client");
+      const { keyedEvents } = await import("@/lib/queries/users");
       const p = scoped("recipe");
       await p.insert([
-        // A second instance, a call before identify, two ids in one session,
-        // a subject seen with a user, a subject never identified.
+        // A call before identify and one on a second instance, two ids in one
+        // session, a subject seen with a user, a subject never identified, a
+        // call without any key.
         { session_id: "r1", timestamp: day(-3, "08:00:00.000") },
         identify("ana", "r1", day(-3, "08:01:00.000")),
         { session_id: "r1", timestamp: day(-2, "08:00:00.000") },
@@ -438,18 +440,32 @@ describe.skipIf(!url)("user queries on a real ClickHouse (#89)", () => {
         { subject_id: "sub-dee", session_id: "r4", timestamp: day(-1) },
         { subject_id: "sub-eli", session_id: "r5", timestamp: day(-1) },
         { session_id: "r6", timestamp: day(-1) },
-        // Identified 40 days ago: inside the 30 days only through the map.
+        // Identified 40 days ago: outside the window, so no user inside it.
         identify("fay", "r7", day(-40)),
         { session_id: "r7", timestamp: day(-1) },
       ]);
-      const [row] = await queryAnalytics<{ users: string }>({
+      type Row = { person: string | null; tool_calls: string };
+      const asMap = (rows: Row[]) =>
+        Object.fromEntries(rows.map((r) => [String(r.person), Number(r.tool_calls)]));
+      const recipe = await queryAnalytics<Row>({
         workspaceId: ws,
         projectId: p.projectId,
         query: validateFreeQuery(USER_KEY_SQL),
       });
-      const { total } = await q.queryUserList(p.ctx(day(-60), day(1)), 1, 50);
-      // ana, bo, cy, dee, sub-eli, fay.
-      expect([Number(row.users), total]).toEqual([6, 6]);
+      const window = { from: "now() - INTERVAL 30 DAY", to: "now() + INTERVAL 1 DAY" };
+      const keyed = keyedEvents({
+        events: window,
+        stitch: window,
+        rows: "AND e.event_type = 'tool_call'",
+      });
+      const dashboard = await queryAnalytics<Row>({
+        workspaceId: ws,
+        projectId: p.projectId,
+        query: `WITH ${keyed} SELECT user_key AS person, count() AS tool_calls FROM keyed GROUP BY person`,
+        params: { projectId: p.projectId },
+      });
+      expect(asMap(recipe)).toEqual({ ana: 2, bo: 1, dee: 2, "sub-eli": 1, null: 2 });
+      expect(asMap(recipe)).toEqual(asMap(dashboard));
     });
   });
 });

@@ -1,14 +1,17 @@
 /**
  * The dashboard's user key (keyedEvents() in lib/queries/users.ts, #89 and
- * #145) as one run_query statement: distinct users of the last 30 days.
- * Exported so a test runs it through the SQL guard and against ClickHouse.
+ * #145) as one run_query statement: tool calls per user over the last 30
+ * days, both maps bounded to the same window as the dashboard's windowed
+ * counts (review round 1: run_query stops at 50M rows read, and unbounded
+ * maps read 13 months). Exported so a test runs it through the SQL guard
+ * and against ClickHouse.
  */
 export const USER_KEY_SQL = `WITH session_map AS (
   SELECT session_id AS stitched_session,
          argMin(assumeNotNull(user_id), (timestamp, event_id)) AS session_user_id
   FROM events
   WHERE event_type = 'identify' AND user_id IS NOT NULL AND user_id != ''
-    AND session_id != ''
+    AND session_id != '' AND timestamp >= now() - INTERVAL 30 DAY
   GROUP BY stitched_session
 ),
 subject_map AS (
@@ -16,15 +19,19 @@ subject_map AS (
          argMax(assumeNotNull(user_id), timestamp) AS mapped_user_id
   FROM events
   WHERE subject_id IS NOT NULL AND subject_id != ''
-    AND user_id IS NOT NULL AND user_id != ''
+    AND user_id IS NOT NULL AND user_id != '' AND timestamp >= now() - INTERVAL 30 DAY
   GROUP BY stitched_subject
 )
-SELECT uniqExact(coalesce(nullIf(e.user_id, ''), nullIf(m.session_user_id, ''),
-                          nullIf(s.mapped_user_id, ''), nullIf(e.subject_id, ''))) AS users
+SELECT coalesce(nullIf(e.user_id, ''), nullIf(m.session_user_id, ''),
+                nullIf(s.mapped_user_id, ''), nullIf(e.subject_id, '')) AS person,
+       count() AS tool_calls
 FROM events AS e
 LEFT JOIN session_map AS m ON m.stitched_session = e.session_id
 LEFT JOIN subject_map AS s ON s.stitched_subject = ifNull(e.subject_id, '')
-WHERE e.timestamp >= now() - INTERVAL 30 DAY`;
+WHERE e.event_type = 'tool_call' AND e.timestamp >= now() - INTERVAL 30 DAY
+GROUP BY person
+ORDER BY tool_calls DESC
+LIMIT 100`;
 
 /**
  * Table/column reference returned by get_schema so the model can write
@@ -93,11 +100,13 @@ the same conversation carry none. The dashboard counts one person per event as
 coalesce(the event's own user_id, the FIRST user_id an 'identify' event gave its
 session_id, the user_id last seen with its subject_id, subject_id) — never the
 session itself. Once a session is identified, all its events count for that
-user. The same key as one query (distinct users of the last 30 days):
+user. The same key as one query (tool calls per person over the last 30 days;
+person NULL = calls without a known user; uniqExact(person) counts users):
 ${USER_KEY_SQL}
-Both maps read the whole 13 months here, which keeps a person's key stable; for
-a count over a short range, bounding both maps to the range is cheaper (the
-dashboard's windowed counts do that).
+Keep both maps bounded to the query's window, as here and in the dashboard's
+windowed counts: run_query stops at 50M rows read, counting every scan, and
+unbounded maps read all 13 months. With bounded maps a session whose first
+identify falls before the window goes to a later id inside it, if it has one.
 
 ## tool_registry — registered tool definitions per project
 project_id, tool_name, description, input_schema (JSON), registered_at, updated_at
