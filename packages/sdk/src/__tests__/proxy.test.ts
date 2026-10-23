@@ -2979,6 +2979,23 @@ describe("session keys and session_source (#144)", () => {
     }
   });
 
+  it("undefined and an empty string from sessionKey are no key, silently: no YAVIO-1102 line (#144 review round 1)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const value of [undefined, ""]) {
+        const sessionKey = vi.fn(() => value);
+        const { handler, calls } = setup({ ...testConfig, sessionKey });
+        await handler(http({ "user-agent": "node" }));
+        await handler(call());
+        expect(sessionKey).toHaveBeenCalledTimes(2);
+        expect(calls().map((e) => e.session_source)).toEqual(["per_request", "connection"]);
+      }
+      expect(warn.mock.calls.filter((args) => String(args[0]).includes("YAVIO-1102"))).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("identify, step, track and conversion inside the call carry its session and session_source", async () => {
     const yavio = createYavioContext();
     const { handler, events } = setup(
