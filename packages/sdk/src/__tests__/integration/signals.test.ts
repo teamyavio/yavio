@@ -1686,6 +1686,7 @@ describe("loss accounting (#148)", () => {
         expect(lines1205()[0]).toContain("4 events not delivered");
         expect(lines.some((l) => l.includes("shutdown() deadline"))).toBe(false);
         // The app exits now: every event was in the cycle's line already.
+        expect(exitHooks()).toHaveLength(1);
         exitHooks()[0]?.call(process, 0);
         expect(lines1205()).toHaveLength(1);
       } finally {
@@ -1730,6 +1731,7 @@ describe("loss accounting (#148)", () => {
           // `process.exit(0)` right after the line, as an app whose own
           // wait the same deadline cut: the stops are still settling.
           expect(_trackedTransportCount()).toBe(2);
+          expect(exitHooks()).toHaveLength(1);
           exitHooks()[0]?.call(process, 0);
           expect(lines1205()).toHaveLength(1);
           expect(lines1205()[0]).toContain("Shutdown deadline of 1000 ms");
@@ -1799,6 +1801,7 @@ describe("loss accounting (#148)", () => {
             expect(lines1205()[0]).toContain("4 events not delivered");
             expect(lines.some((l) => l.includes("shutdown() deadline"))).toBe(false);
             // The app exits now: every event was in the cycle's line already.
+            expect(exitHooks()).toHaveLength(1);
             exitHooks()[0]?.call(process, 0);
             expect(lines1205()).toHaveLength(1);
           } finally {
