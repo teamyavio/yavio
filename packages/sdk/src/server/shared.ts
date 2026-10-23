@@ -288,6 +288,16 @@ interface SignalCycle {
    * two).
    */
   lateReported: boolean;
+  /**
+   * Set once the cycle printed a line: the exit hook's line after a
+   * `shutdown()` this cycle's deadline cut says "more" only then (#154
+   * review round 2).
+   */
+  printed: boolean;
+  /** Set when one of the cycle's deadline timers ran (`onCycleDeadline`, the cycle's own timer). */
+  deadlinePassed: boolean;
+  /** `lostTotal()` when the cycle started: more since means a deadline gave something up. */
+  lostAtStart: number;
   /** `resets` when the cycle started: a cycle from before a test reset reports nothing after it. */
   epoch: number;
 }
@@ -365,19 +375,21 @@ const deadlineWaiters = new Set<() => void>();
  * the deadline cut (#154 CI fix).
  */
 let appWaits = 0;
-/** The cycle whose timer last released the `shutdown()` waits (`releaseWaiters`). */
-let releasedBy: SignalCycle | null = null;
+/** The latest signal cycle, running or ended; a new one replaces it. */
+let lastCycle: SignalCycle | null = null;
 /**
- * The signal cycle at whose deadline the last `shutdown()` to return was
- * cut with its work unfinished — its own timer bounded by the cycle, or the
- * cycle's timer releasing every wait; cleared by one that returned with its
- * work done or on its own timer, and when a new cycle starts. Set, what the exit hook finds is what that deadline left
- * after the cycle's line — a request served after the signal that sent
- * more than its batch in flight, a send in the deadline's last 100 ms —
- * and its line says so in the cycle's wording: the app did await
- * `shutdown()` (#154 review round 1).
+ * The cycle in which the last `shutdown()` to return returned — null when
+ * its own value cut it outside a cycle's bound. With no `shutdown()` in
+ * progress at exit, the latest cycle's deadline come, and this the latest
+ * cycle, the app did await `shutdown()`, and what the exit hook finds is
+ * what that deadline left after the cycle's line: a request served after
+ * the signal whose batch it cut in flight, or that sent more than that
+ * batch, or a send in its last 100 ms. The exit line then says so in the
+ * cycle's wording (#154 review rounds 1 and 2). Decided at exit, not when
+ * the wait returns: a wait can end because its work settled at the
+ * deadline's own cut, before the cycle's timer ran (round 2).
  */
-let returnedAtDeadline: SignalCycle | null = null;
+let returnedIn: SignalCycle | null = null;
 
 /**
  * D for a signal arriving now: the smallest `shutdownTimeoutMs` set
@@ -455,23 +467,12 @@ export async function awaitBounded(work: Promise<void>, ownMs: number): Promise<
   // caller goes on — a timer made after the cycle's can run before it (#154).
   const byCycle = cycle && remaining !== undefined && remaining <= ownMs ? cycle : null;
   if (ms <= 0) {
-    if (byCycle) {
-      onCycleDeadline(byCycle, true);
-      returnedAtDeadline = byCycle;
-    }
+    if (byCycle) onCycleDeadline(byCycle, true);
+    returnedIn = lastCycle;
     return;
   }
   const epoch = resets;
-  let settled = false;
   let ownTimer = false;
-  work.then(
-    () => {
-      settled = true;
-    },
-    () => {
-      settled = true;
-    },
-  );
   appWaits++;
   try {
     await raceDeadline(work, ms, {
@@ -487,12 +488,18 @@ export async function awaitBounded(work: Promise<void>, ownMs: number): Promise<
     if (epoch === resets) appWaits--;
   }
   if (epoch !== resets) return;
-  if (settled) returnedAtDeadline = null;
-  else if (byCycle) returnedAtDeadline = byCycle;
-  // Its own value cut it, not a cycle's deadline.
-  else if (ownTimer) returnedAtDeadline = null;
-  else if (releasedBy) returnedAtDeadline = releasedBy;
+  // Its own value cut it, not a cycle's deadline (#154 review round 2).
+  returnedIn = ownTimer && !byCycle ? null : lastCycle;
 }
+
+/**
+ * Whether the cycle's deadline has come: one of its deadline timers ran
+ * (`deadlinePassed`), one of its stops was cut by its own, or a deadline
+ * gave something up since it started — a post-signal fetch cut by its
+ * budget, the timer that may run first of all (#154 review round 2).
+ */
+const deadlineCame = (cycle: SignalCycle): boolean =>
+  cycle.deadlinePassed || stopsCut(cycle) || lostTotal() > cycle.lostAtStart;
 
 function releaseWaiters(): void {
   const waiters = [...deadlineWaiters];
@@ -628,10 +635,14 @@ function yavioReportAtExit(): void {
   // (#148 review round 3, as the hand-back line in round 2). After a
   // `shutdown()` that a cycle's deadline cut, the rest is that deadline's,
   // not an app's that forgot to await (#154 review round 1).
-  const cut = returnedAtDeadline;
+  const cycle = lastCycle;
+  const cut =
+    cycle && cycle.epoch === resets && appWaits === 0 && returnedIn === cycle && deadlineCame(cycle)
+      ? cycle
+      : null;
   writeStderrLine(
     cut
-      ? `[YAVIO-1205] Shutdown deadline of ${cut.budgetMs} ms reached — ${n} more events not delivered (sent in its last 100 ms or after it, or queued behind a request it cut). ${RAISE_HINT}`
+      ? `[YAVIO-1205] Shutdown deadline of ${cut.budgetMs} ms reached — ${n} ${cut.printed ? "more " : ""}events not delivered (in flight when the deadline cut it, sent in its last 100 ms or after it, or queued behind a request it cut). ${RAISE_HINT}`
       : `[YAVIO-1205] Process exit with ${n} events not delivered — await analytics.shutdown() before exiting, or raise shutdownTimeoutMs.`,
   );
 }
@@ -719,6 +730,7 @@ function reportCycleLoss(
   }
   if (n <= 0) return;
   if (at === "late-deadline" || at === "drain-settled") cycle.lateReported = true;
+  cycle.printed = true;
   const line = `[YAVIO-1205] Shutdown deadline of ${cycle.budgetMs} ms reached — ${n} events not delivered (queued, in flight or refused after the deadline). ${RAISE_HINT}`;
   if (at !== "drain-settled" && at !== "late-deadline" && cycle.sole) writeStderrLine(line);
   else console.warn(line);
@@ -852,17 +864,19 @@ function onSignal(signal: HandledSignal): void {
     stopsRunning: false,
     deadlineCounted: false,
     lateReported: false,
+    printed: false,
+    deadlinePassed: false,
+    lostAtStart: lostTotal(),
     epoch: resets,
   };
   signalInFlight = cycle;
-  // A new cycle starts afresh: what an earlier one's deadline cut is not
-  // what an exit in this one leaves behind (#154 review round 2).
-  returnedAtDeadline = null;
-  releasedBy = null;
+  // A new cycle starts afresh: a `shutdown()` that returned in an earlier
+  // one says nothing about an exit in this one (#154 review round 2).
+  lastCycle = cycle;
   clearTimeout(cycleTimer);
   cycleTimer = setTimeout(() => {
     onCycleDeadline(cycle); // the cycle's line first, then the waiters (#154)
-    releasedBy = cycle;
+    cycle.deadlinePassed = true;
     releaseWaiters();
   }, budgetMs);
   unref(cycleTimer);
@@ -923,6 +937,7 @@ function finishSignal(cycle: SignalCycle, at: "hand-back" | "drain-end" | "deadl
  * then, in one line (#154 CI fix). Once per cycle.
  */
 function onCycleDeadline(cycle: SignalCycle, releases = appWaits > 0): void {
+  cycle.deadlinePassed = true;
   if (cycle.epoch !== resets || cycle.deadlineCounted) return;
   if (signalInFlight === cycle) finishSignal(cycle, "deadline");
   else if (cycle.stopsRunning && releases) reportCycleLoss(cycle, "late-deadline");
@@ -1292,8 +1307,8 @@ export function _resetSharedState(): void {
   lastDeadlineAt = undefined;
   inProgressDeadlines.length = 0;
   appWaits = 0;
-  releasedBy = null;
-  returnedAtDeadline = null;
+  lastCycle = null;
+  returnedIn = null;
   holdDeadlines.length = 0;
   pinDeadlines.clear();
   releaseWaiters();

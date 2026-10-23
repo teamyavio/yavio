@@ -548,7 +548,7 @@ describe("a stateless host as a child process: signals, handlers and budgets (#1
       expect(exit.afterSignalMs).toBeLessThan(5_000);
       expect(child.lossLines()).toEqual([EVENTS_BEFORE_SIGNAL + 1, 1]);
       expect(child.output()).toContain(
-        "Shutdown deadline of 4000 ms reached — 1 more events not delivered (sent in its last 100 ms or after it, or queued behind a request it cut)",
+        "Shutdown deadline of 4000 ms reached — 1 more events not delivered (in flight when the deadline cut it, sent in its last 100 ms or after it, or queued behind a request it cut)",
       );
       expect(child.output()).not.toContain("Process exit");
       expect(child.output()).not.toContain("await analytics.shutdown()");
@@ -651,6 +651,39 @@ describe("a stateless host as a child process: signals, handlers and budgets (#1
       expect(ingest.events).toHaveLength(EVENTS_BEFORE_SIGNAL + 1);
       expect(ingest.batches.length - ingest.responded).toBe(1); // the late batch, never answered
       expect(sum(child.lossLines())).toBe(1);
+    },
+  );
+
+  it(
+    "the README recipe, ingest healthy at the signal then hanging, a 2.5 s request in flight: the request's event, cut in flight at the deadline, is one line in the deadline's wording — not \"more\" (the healthy drain printed nothing) and no hint to await shutdown() (#154 review round 2)",
+    { timeout: 30_000 },
+    async () => {
+      const child = await start("readme");
+      await drive(child.port);
+      const { done: slow } = await inFlight(child, 2_500);
+      child.kill("SIGTERM");
+      // The drain's batch is answered at once and the cycle ends early and
+      // healthy; ingest hangs from then on, so the request's event, sent at
+      // signal + 2.5 s, is cut in flight at signal + D. The handler's
+      // shutdown() returns there (released by the cycle's timer) and the
+      // process exits: the exit hook's line, the only one.
+      await vi.waitFor(() => expect(ingest.responded).toBeGreaterThan(0), { timeout: 2_000 });
+      ingest.hangEvents = true;
+      const exit = await child.exited;
+      await slow;
+
+      // Before: "Shutdown deadline of 4000 ms reached — 1 more events not
+      // delivered (sent in its last 100 ms or after it, or queued behind a
+      // request it cut)" — "more" than a line that never came, for an event
+      // none of the three. Without the releasedBy branch: "Process exit with
+      // 1 events not delivered — await analytics.shutdown() …".
+      expect(exit, child.output()).toMatchObject({ code: 0, signal: null });
+      expect(exit.afterSignalMs).toBeLessThan(5_000);
+      expect(child.lossLines()).toEqual([1]);
+      expect(child.output()).toContain(
+        "[YAVIO-1205] Shutdown deadline of 4000 ms reached — 1 events not delivered (in flight when the deadline cut it, sent in its last 100 ms or after it, or queued behind a request it cut).",
+      );
+      expect(child.output()).not.toContain("Process exit");
     },
   );
 

@@ -1408,7 +1408,7 @@ describe("loss accounting (#148)", () => {
       exitHooks()[0]?.call(process, 0);
       expect(lines1205()).toHaveLength(2);
       expect(lines1205()[1]).toContain(
-        "Shutdown deadline of 300 ms reached — 1 more events not delivered (sent in its last 100 ms",
+        "Shutdown deadline of 300 ms reached — 1 more events not delivered (in flight when the deadline cut it, sent in its last 100 ms",
       );
       expect(lines1205()[1]).not.toContain("await analytics.shutdown()");
       // Written synchronously to fd 2, like the hand-back line: process.exit()
@@ -1824,7 +1824,7 @@ describe("loss accounting (#148)", () => {
         expect(atReturn?.[0]).toContain("Shutdown deadline of 1000 ms reached");
         expect(lines1205()).toHaveLength(2);
         expect(lines1205()[1]).toMatch(
-          /Shutdown deadline of 1000 ms reached — \d+ more events not delivered \(sent in its last 100 ms or after it, or queued behind a request it cut\)/,
+          /Shutdown deadline of 1000 ms reached — \d+ more events not delivered \(in flight when the deadline cut it, sent in its last 100 ms or after it, or queued behind a request it cut\)/,
         );
         expect(lines1205().join("\n")).not.toContain("await analytics.shutdown()");
         // Every event once, in one of the two lines: the two before the
@@ -1897,6 +1897,49 @@ describe("loss accounting (#148)", () => {
         process.off("SIGTERM", app);
       }
     });
+  });
+
+  it("a cycle that ended early and healthy, a later request's batch still in flight when its deadline comes: the app's shutdown() released by the cycle's timer, the exit line is the deadline's — not \"more\", no hint to await (#154 review round 2)", async () => {
+    // The late batch's fetch ignores its abort, so no loss is counted when
+    // the deadline cuts it: the only sign that the deadline came is the
+    // cycle's timer, which also releases the app's wait. Without that sign
+    // the line is "Process exit with 1 events not delivered — await
+    // analytics.shutdown() …" for an app that did.
+    const realFetch = globalThis.fetch;
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation((input: string | URL | Request, init?: RequestInit) =>
+        realFetch(input, { ...init, signal: undefined }),
+      );
+    ingest.hangEvents = false; // healthy at the signal
+    try {
+      await withoutOtherListeners("SIGTERM", async () => {
+        const { client, raw } = build("yav_154_healthy_late", { shutdownTimeoutMs: 1_000 });
+        await callTool(raw, "get_price", { q: "before" });
+        let atExit: string[] | undefined;
+        const app = vi.fn(async () => {
+          await new Promise((r) => setTimeout(r, 300)); // the drain delivers meanwhile
+          ingest.hangEvents = true; // hanging from now on
+          await callTool(raw, "get_price", { q: "late" }); // in flight at the deadline
+          await client.shutdown(); // released by the cycle's timer at the deadline
+          exitHooks()[0]?.call(process, 0); // process.exit(0)
+          atExit = lines1205();
+        });
+        process.on("SIGTERM", app);
+        try {
+          process.emit("SIGTERM", "SIGTERM");
+          await vi.waitFor(() => expect(atExit).toBeDefined(), { timeout: 3_000 });
+          expect(ingest.responded).toBe(1); // the drain's batch
+          expect(atExit).toEqual([
+            `[YAVIO-1205] Shutdown deadline of 1000 ms reached — 1 events not delivered (in flight when the deadline cut it, sent in its last 100 ms or after it, or queued behind a request it cut). Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.`,
+          ]);
+        } finally {
+          process.off("SIGTERM", app);
+        }
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it("several waits end at one cycle deadline — two apps' shutdown() timers and the cycle's — and the cycle prints one line (#154 review round 1)", async () => {
