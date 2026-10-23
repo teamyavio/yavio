@@ -95,6 +95,7 @@ export function OverviewContent({ projectId }: { projectId: string }) {
                 previousValue={kpi.previousValue}
                 format={kpi.format}
                 invertTrend={kpi.label === "Error Rate" || kpi.label === "Avg Latency"}
+                hint={kpi.hint}
               />
             ))}
           </div>

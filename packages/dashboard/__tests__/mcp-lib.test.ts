@@ -5,6 +5,7 @@ vi.mock("../lib/auth/workspace-access", () => ({ checkWorkspaceAccess: vi.fn() }
 const db = { select: vi.fn() };
 vi.mock("@/lib/db", () => ({ getDb: vi.fn(() => db) }));
 
+import { SESSION_SOURCES } from "@yavio/shared/events";
 import { checkWorkspaceAccess } from "../lib/auth/workspace-access";
 import { AnalyticsQueryError } from "../lib/clickhouse/analytics-client";
 import { mcpAuthContext, verifyMcpBearerToken } from "../lib/mcp/auth";
@@ -184,5 +185,13 @@ describe("get_schema doc", () => {
   it("lists the geo columns with what region holds (#128)", () => {
     expect(SCHEMA_DOC).toMatch(/Geo: country_code \(Nullable[^)]*\), region \(Nullable: state or/);
     expect(SCHEMA_DOC).toContain("not ISO 3166-2");
+  });
+
+  // Read by the dashboard role like every events column (pinned in packages/db, 0022).
+  it("lists session_source with every value, and how to count sessions without per_request (#144)", () => {
+    for (const value of SESSION_SOURCES) expect(SCHEMA_DOC).toContain(`'${value}'`);
+    expect(SCHEMA_DOC).toMatch(
+      /uniqExactIf\(session_id,\s+ifNull\(session_source, ''\) != 'per_request'\)/,
+    );
   });
 });

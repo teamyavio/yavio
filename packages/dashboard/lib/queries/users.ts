@@ -59,6 +59,15 @@ const bound = (column: string, window?: TimeWindow): string =>
   window ? `AND ${column} >= ${window.from} AND ${column} < ${window.to}` : "";
 
 /**
+ * The rows whose session counts as a session (#144). A session the SDK
+ * labelled `per_request` is one call: a client that sends no session key on
+ * a per-request host has a new session per request. NULL (an SDK before
+ * 0.5.4, a widget event) counts as before. Used by the Sessions KPI and the
+ * users list's totalSessions; users themselves are never keyed by session.
+ */
+export const COUNTED_SESSION = "ifNull(session_source, '') != 'per_request'";
+
+/**
  * `rows`: an extra condition on the keyed rows, on `e.` columns (e.g.
  * `AND e.event_type = 'tool_call'`), so a caller that needs only some rows
  * joins only those — a filter outside the CTE runs after the join.
@@ -118,7 +127,7 @@ export async function queryUserList(
         min(timestamp) AS firstSeen,
         max(timestamp) AS lastSeen,
         count() AS totalEvents,
-        uniqExact(session_id) AS totalSessions,
+        uniqExactIf(session_id, ${COUNTED_SESSION}) AS totalSessions,
         countIf(event_type = 'tool_call') AS totalToolCalls,
         countIf(event_type = 'conversion') AS totalConversions,
         sumIf(ifNull(conversion_value, 0), event_type = 'conversion') AS totalRevenue,

@@ -43,12 +43,27 @@ Berlin' — English, not ISO 3166-2; only set next to a country_code; NULL befor
 SDK 0.4.1). Both come from ChatGPT's request _meta and need the app's argument
 capture on. Connection: protocol_version, client_name, client_version,
 connection_duration_ms. SDK: sdk_version.
+session_source (Nullable): how the SDK derived session_id — 'mcp_session_id'
+(the transport's Mcp-Session-Id), 'openai_session' (ChatGPT's conversation),
+'vscode_conversation' (VS Code's conversation id), 'codex_thread' (the Codex
+CLI's thread), 'custom' (the app's own sessionKey option), 'connection' (no
+key, a non-HTTP transport such as stdio: one session per client process) or
+'per_request' (no key on an HTTP request: on a server that builds a new MCP
+server per request this "session" is ONE CALL, not a conversation). NULL = SDK
+< 0.5.4 or a widget event. Count sessions as uniqExactIf(session_id,
+ifNull(session_source, '') != 'per_request') — what the dashboard's Sessions
+KPI and the users list do; countIf(event_type = 'tool_call' AND
+session_source = 'per_request') is the number of calls from clients that send
+no session key. Paths, funnels and identify() are per session, so they are
+empty or one call long for per_request traffic.
 A 'connection' event is emitted at least once per session per SDK process (a
-stateless fleet writes one per instance that served the conversation), so
-never count connection rows: count sessions as uniqExact(session_id), over
-any event type. client_name comes from the protocol envelope, the initialize
-handshake or the request's User-Agent; JSONExtractString(metadata,
-'client_info_source') says which ('envelope', 'initialize', 'user_agent').
+stateless fleet writes one per instance that served the conversation) — for
+per_request traffic once per SDK process per client (platform, client name and
+version, protocol version) instead — so never count connection rows: count
+sessions as above, over any event type. client_name comes from the protocol
+envelope, the initialize handshake or the request's User-Agent;
+JSONExtractString(metadata, 'client_info_source') says which ('envelope',
+'initialize', 'user_agent').
 Widget: viewport_width/height, scroll_depth_pct, click_count, visible_duration_ms,
 field_name, nav_from, nav_to, device_touch, device_pixel_ratio, load_time_ms.
 
@@ -79,15 +94,19 @@ conversions, conversion_value
 - event_name is a registered tool or a common event name; rare free-text
   names are '(other)'. platform outside the known list is 'other'.
 - individuals = distinct people (or sessions where the app identifies no one)
-  in that cell. NOT additive across days or cells.
+  in that cell. NOT additive across days or cells. A per_request session (see
+  session_source) is not one: such an event counts as an individual only
+  through its user key.
 - events = rows, except in cells with event_type = 'connection', where it is
-  the distinct sessions that connected that day, from the stats runs after
-  the ingest deploy that shipped #142 (date to be filled in at deploy time:
-  YYYY-MM-DD): NOT additive across days. The first run after that deploy
-  recomputes the previous month too, so only months before that keep
-  counting connection rows (one per session per server process); a
-  connection figure spanning them mixes the two. Use uniqExact(session_id)
-  over events for sessions whenever the raw data is still there.
+  the distinct sessions that connected that day, per_request ones left out.
+  Both rules apply from the stats runs after the ingest deploy that shipped
+  #142 and #144 (date to be filled in at deploy time: YYYY-MM-DD): NOT
+  additive across days. The first run after that deploy recomputes the
+  previous month too, so only months before that keep counting connection
+  rows (one per session per server process) and per-request sessions as
+  individuals; a figure spanning them mixes the two. Use
+  uniqExactIf(session_id, ifNull(session_source, '') != 'per_request') over
+  events for sessions whenever the raw data is still there.
 - Average latency: sum(latency_sum) / sum(latency_count).
 
 ### stats_users_daily — day, dau, wau, mau (7/30 days ending that day)
