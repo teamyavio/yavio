@@ -11,7 +11,13 @@
  * 3 s, then `shutdown()`, then exit 0, on both signals) | "none" (no handler
  * of its own: the SDK drains and hands the signal back, Node's default exit)
  * | "noexit" (the recipe without `process.exit()`: the process must exit on
- * its own once nothing keeps it alive). Prints `ready <port>` once listening
+ * its own once nothing keeps it alive; prints `shutdown resolved`) |
+ * "none-stdin" (no handler, and nothing of the app's keeps the process
+ * alive but stdin — a stdio server's shape: the listening socket is
+ * unref'd, so once the test ends stdin only the SDK can hold the loop, #164)
+ * | "idle" (no SIGTERM/SIGINT handler; SIGUSR2 closes the server and nothing
+ * else — no drain, no `shutdown()`: whatever the SDK still has queued must
+ * not keep the process alive, #164). Prints `ready <port>` once listening
  * and `started <sku>` when the `slow` tool begins, so the test can send the
  * signal with that call in flight. `slow` with `track: true` also calls
  * `yavio.track()` before it returns: a request served after the signal
@@ -143,6 +149,11 @@ if (mode !== "readme") {
   process.off("SIGTERM", stop);
   process.off("SIGINT", stop);
 }
+if (mode === "idle") {
+  process.on("SIGUSR2", () => {
+    void closeWithin(http, 3_000);
+  });
+}
 if (mode === "noexit") {
   // The recipe without its exit: whatever is still alive afterwards keeps
   // the process up, and the SDK must leave nothing.
@@ -151,6 +162,7 @@ if (mode === "noexit") {
     stoppingWithoutExit ??= (async () => {
       await closeWithin(http, 3_000);
       await analytics.shutdown();
+      process.stdout.write("shutdown resolved\n");
     })();
     return stoppingWithoutExit;
   };
@@ -159,5 +171,9 @@ if (mode === "noexit") {
 }
 
 http.listen(0, "127.0.0.1", () => {
+  if (mode === "none-stdin") {
+    http.unref();
+    process.stdin.resume();
+  }
   process.stdout.write(`ready ${(http.address() as AddressInfo).port}\n`);
 });

@@ -20,6 +20,8 @@ export interface ReceivedBatch {
   answeredAt?: number;
   /** `Date.now()` when the client closed the connection before any response was written: its fetch was aborted (#148 review round 3). */
   abortedAt?: number;
+  /** The status the batch was answered with, once it was. */
+  status?: number;
   events: Event[];
   sdk_version?: string;
   sent_at?: string;
@@ -60,6 +62,13 @@ export interface MockIngest {
    */
   failWith: number | undefined;
   /**
+   * Answers for the next event batches, one per batch, before `failWith`
+   * and everything else: a status (recorded and counted as responded), or
+   * "reset" to destroy the connection without an answer (recorded with
+   * `abortedAt`) — a one-off 5xx or reset at the signal (#164).
+   */
+  failNext: Array<number | "reset">;
+  /**
    * Answer every batch held back by `hangEvents` with 200 now, so the SDK's
    * fetch settles instead of failing when `close()` cuts the socket — a
    * failed fetch would retry (`YAVIO-1200`) into the next test's output.
@@ -95,6 +104,7 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
     hangMints: false,
     hangEvents: false,
     failWith: undefined,
+    failNext: [],
     responded: 0,
     respondAfterMs: options.respondAfterMs,
     ofType: (eventType) => events.filter((e) => e.event_type === eventType),
@@ -164,12 +174,27 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
       const respond = () => {
         ingest.responded++;
         received.answeredAt = Date.now();
+        received.status = 200;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ accepted: batch.events.length, rejected: 0 }));
       };
+      const next = ingest.failNext.shift();
+      if (next === "reset") {
+        req.socket.destroy();
+        return;
+      }
+      if (next !== undefined) {
+        ingest.responded++;
+        received.answeredAt = Date.now();
+        received.status = next;
+        res.writeHead(next);
+        res.end();
+        return;
+      }
       if (ingest.failWith !== undefined) {
         ingest.responded++;
         received.answeredAt = Date.now();
+        received.status = ingest.failWith;
         res.writeHead(ingest.failWith);
         res.end();
         return;

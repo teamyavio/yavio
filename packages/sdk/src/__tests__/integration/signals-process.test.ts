@@ -31,7 +31,7 @@ const UA = "openai-mcp/1.0.0";
 const PROTOCOL = "2025-06-18";
 const STACKS = ["v1", "v2"] as const;
 type Stack = (typeof STACKS)[number];
-type Mode = "readme" | "none" | "noexit";
+type Mode = "readme" | "none" | "noexit" | "none-stdin" | "idle";
 
 /** The events a run produces before the signal: 50 calls, one connection, two discoveries. */
 const EVENTS_BEFORE_SIGNAL = 53;
@@ -85,7 +85,7 @@ async function startChild(
       YAVIO_SHUTDOWN_TIMEOUT_MS: "",
       ...options.env,
     },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: [options.mode === "none-stdin" ? "pipe" : "ignore", "pipe", "pipe"],
   });
   // Handed out before anything can throw, so cleanup can reach a child
   // that never became ready.
@@ -402,7 +402,12 @@ describe.each(STACKS)("a stateless host as a child process on MCP SDK %s (#142, 
       const exit = await child.exited;
       await slow;
 
+      // Since #164 the drain's deadline holds the process while it retries:
+      // the exit comes when its third backoff would end past the deadline,
+      // about 3.05 s after the signal (before, at the 1.5 s request's end,
+      // with the drain cut mid-backoff by Node exiting).
       expect(exit, child.output()).toMatchObject({ code: 0, signal: null });
+      expect(exit.afterSignalMs).toBeGreaterThanOrEqual(2_900);
       expect(exit.afterSignalMs).toBeLessThan(5_000);
       expect(ingest.events).toHaveLength(0);
       // The drained transport's events are the deadline's loss (its third
@@ -594,9 +599,18 @@ describe("a stateless host as a child process: signals, handlers and budgets (#1
       // Before #148 the retry loop's timers and the 30 s fetch timeout kept
       // the process alive: 31 s against a refusing ingest, over 40 s against
       // a hanging one. The hanging case is the one that needs the abort.
+      // Since #164 the drain's own deadline holds the process while the
+      // drain retries: against a refusing ingest it exits when the third
+      // backoff would end past the deadline, about 3.05 s after the signal
+      // (in 0.5.3 at about 80 ms, Node exiting in the first backoff, the
+      // loss the exit hook's), against a hanging one at the deadline.
       expect(exit, child.output()).toMatchObject({ code: 0, signal: null });
+      expect(exit.afterSignalMs).toBeGreaterThanOrEqual(2_900);
       expect(exit.afterSignalMs).toBeLessThan(5_000);
-      expect(sum(child.lossLines())).toBe(EVENTS_BEFORE_SIGNAL);
+      expect(child.lossLines()).toEqual([EVENTS_BEFORE_SIGNAL]);
+      expect(child.output()).toContain(
+        `Shutdown deadline of 4000 ms reached — ${EVENTS_BEFORE_SIGNAL} events not delivered`,
+      );
     },
   );
 
@@ -702,6 +716,167 @@ describe("a stateless host as a child process: signals, handlers and budgets (#1
       expect(exit.afterSignalMs).toBeLessThan(9_000);
       expect(ingest.ofType("tool_call")).toHaveLength(50);
       expect(exit.atExit.responded).toBe(exit.atExit.batches);
+      expect(child.lossLines()).toEqual([]);
+    },
+  );
+});
+
+/**
+ * A single failed send at the signal (#164): nothing in flight, the events
+ * queued, ingest answers the drain's first request with a 503 — or resets
+ * its connection — and the retry with 200. In 0.5.3 every SDK timer was
+ * unref'd, the backoff before that retry included: once the app's server
+ * had closed nothing held the event loop, Node exited 70–115 ms after the
+ * signal with code 0, `shutdown()` never resolved and every queued event
+ * was lost, the exit hook's YAVIO-1205 line its only trace. 0.5.2 delivered
+ * on the retry (its backoff timer was ref'd).
+ */
+describe.each(STACKS)("a failed send at the signal on MCP SDK %s (#164)", (stack) => {
+  let ingest: MockIngest;
+  let spawned: ChildProcess[];
+
+  beforeEach(async () => {
+    spawned = [];
+    ingest = await startMockIngest();
+  });
+
+  afterEach(async () => {
+    for (const proc of spawned) {
+      if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+    }
+    agent.destroy();
+    agent = new Agent({ keepAlive: true, maxSockets: 1 });
+    await ingest.close();
+  });
+
+  const start = (mode: Mode) =>
+    startChild(
+      {
+        stack,
+        mode,
+        endpoint: ingest.endpoint,
+        counters: () => ({ responded: ingest.responded, batches: ingest.batches.length }),
+      },
+      (proc) => {
+        spawned.push(proc);
+      },
+    );
+
+  const failures = [
+    ["a 503", 503],
+    ["a connection reset", "reset"],
+  ] as const;
+
+  /** The drain's batch failed once and its retry carried the same events, each once, answered before the exit. */
+  function expectDeliveredOnRetry(failure: number | "reset", exit: Exit, exitAt: number) {
+    expect(ingest.batches).toHaveLength(2);
+    const [failed, retry] = ingest.batches;
+    if (failure === "reset") expect(failed?.abortedAt).toBeDefined();
+    else expect(failed?.status).toBe(failure);
+    expect(failed?.receivedAt).toBeGreaterThanOrEqual(exitAt - exit.afterSignalMs); // after the signal: nothing went out before it
+    expect(retry?.status).toBe(200);
+    expect(retry?.events).toHaveLength(EVENTS_BEFORE_SIGNAL);
+    expect(retry?.events.map((e) => e.event_id)).toEqual(failed?.events.map((e) => e.event_id));
+    expect(retry?.answeredAt).toBeLessThanOrEqual(exitAt);
+  }
+
+  it.each(failures)(
+    "the README recipe, nothing in flight, ingest answers the drain's first request with %s, then 200: every event arrives, exit 0 within D",
+    { timeout: 30_000 },
+    async (_label, failure) => {
+      ingest.failNext = [failure];
+      const child = await start("readme");
+      await drive(child.port);
+      child.kill("SIGTERM");
+      const exit = await child.exited;
+      const exitAt = Date.now();
+
+      expect(exit, child.output()).toMatchObject({ code: 0, signal: null });
+      // The retry goes out after the 1 s backoff: an exit before it is #164.
+      expect(exit.afterSignalMs).toBeGreaterThanOrEqual(1_000);
+      expect(exit.afterSignalMs).toBeLessThan(4_000);
+      expectDeliveredOnRetry(failure, exit, exitAt);
+      expect(child.output()).toContain("YAVIO-1200");
+      expect(child.lossLines()).toEqual([]);
+    },
+  );
+
+  it.each(failures)(
+    "the recipe without process.exit(), ingest answers with %s, then 200: shutdown() resolves, every event arrives, the process exits on its own within D",
+    { timeout: 30_000 },
+    async (_label, failure) => {
+      ingest.failNext = [failure];
+      const child = await start("noexit");
+      await drive(child.port);
+      child.kill("SIGTERM");
+      const exit = await child.exited;
+      const exitAt = Date.now();
+
+      expect(exit, child.output()).toMatchObject({ code: 0, signal: null });
+      expect(child.output()).toContain("shutdown resolved");
+      expect(exit.afterSignalMs).toBeGreaterThanOrEqual(1_000);
+      expect(exit.afterSignalMs).toBeLessThan(4_000);
+      expectDeliveredOnRetry(failure, exit, exitAt);
+      expect(child.lossLines()).toEqual([]);
+    },
+  );
+
+  it.each([
+    { host: "its server listening", mode: "none", failure: 503 },
+    { host: "its server listening", mode: "none", failure: "reset" },
+    { host: "the host held by stdin only", mode: "none-stdin", failure: 503 },
+    { host: "the host held by stdin only", mode: "none-stdin", failure: "reset" },
+  ] as const)(
+    "no handler (the SDK alone, $host), ingest answers the drain's first request with $failure, then 200: every event arrives before the hand-back, exit by SIGTERM within D",
+    { timeout: 30_000 },
+    async ({ mode, failure }) => {
+      ingest.failNext = [failure];
+      const child = await start(mode);
+      await drive(child.port);
+      if (mode === "none-stdin") {
+        // The client's keep-alive socket must not be what holds the loop.
+        agent.destroy();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      child.kill("SIGTERM");
+      // The app's last handle goes while the drain's first request is out.
+      if (mode === "none-stdin") setTimeout(() => child.proc.stdin?.end(), 10);
+      const exit = await child.exited;
+      const exitAt = Date.now();
+
+      // Before #164, held by stdin only: exit 0 (not by the signal) after
+      // about 80 ms, nothing delivered, no hand-back.
+      expect(exit, child.output()).toMatchObject({ code: null, signal: "SIGTERM" });
+      expect(exit.afterSignalMs).toBeGreaterThanOrEqual(1_000);
+      expect(exit.afterSignalMs).toBeLessThan(4_000);
+      expectDeliveredOnRetry(failure, exit, exitAt);
+      expect(child.lossLines()).toEqual([]);
+    },
+  );
+
+  it(
+    "no drain running: a host whose server closes with events queued and a background flush in its backoff still exits on its own, at once",
+    { timeout: 30_000 },
+    async () => {
+      // Two rounds: 106 events, so the batch of 100 goes out on its own (no
+      // drain) into a 503 and waits out its backoff; 6 stay queued.
+      ingest.failNext = [503];
+      const child = await start("idle");
+      await drive(child.port);
+      await drive(child.port);
+      await vi.waitFor(() => expect(child.output()).toContain("YAVIO-1200"), { timeout: 2_000 });
+      agent.destroy();
+      child.kill("SIGUSR2"); // the app closes its server; no signal the SDK handles, no shutdown()
+      const exit = await child.exited;
+
+      // Outside a drain the backoff and the flush interval stay unref'd:
+      // nothing of the SDK's keeps an idle host alive (0.5.2's ref'd backoff
+      // held it for the retry). No signal, no shutdown(): the exit hook is
+      // not armed and the exit is quiet.
+      // The retry was never sent: the process went before its backoff ended.
+      expect(ingest.batches).toHaveLength(1);
+      expect(exit, child.output()).toMatchObject({ code: 0, signal: null });
+      expect(exit.afterSignalMs).toBeLessThan(900); // at once, not after the 1 s backoff
       expect(child.lossLines()).toEqual([]);
     },
   );
