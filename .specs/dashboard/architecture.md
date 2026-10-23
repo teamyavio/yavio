@@ -112,6 +112,7 @@ Next.js 16 (yavio-dashboard container, port 3000)
 | OAuth | GitHub, Google | Link to existing account or create new. Auto-create workspace on first login. |
 | Invite | Email link | Invited user clicks link → register or login → auto-join workspace with assigned role |
 | Forgot password | Email reset link | Time-limited token (1 hour). Invalidates on use. |
+| MCP connector authorization | OAuth 2.1 authorization code + PKCE (`/oauth/authorize`) | An invalid authorization request is shown on the dashboard's own error page with its error code and never redirected to the client, whose registered `redirect_uri` receives a response only after the signed-in user has allowed or denied access on the consent page. |
 
 ### 7.2.2 Roles & Permissions
 
