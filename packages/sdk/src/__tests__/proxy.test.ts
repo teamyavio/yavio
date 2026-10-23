@@ -2952,6 +2952,33 @@ describe("session keys and session_source (#144)", () => {
     }
   });
 
+  it("a sessionKey that throws an error whose message cannot be read still leaves the call instrumented (#144 review round 1)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const hostile = new Error("unreadable");
+      Object.defineProperty(hostile, "message", {
+        get() {
+          throw new Error("no message for you");
+        },
+      });
+      const { handler, calls } = setup({
+        ...testConfig,
+        sessionKey: () => {
+          throw hostile;
+        },
+      });
+      expect(await handler(http({ "user-agent": "node" }))).toEqual({
+        content: [{ type: "text", text: "pong" }],
+      });
+      expect(calls().map((e) => e.session_source)).toEqual(["per_request"]);
+      const lines = warn.mock.calls.filter((args) => String(args[0]).includes("YAVIO-1102"));
+      expect(lines).toHaveLength(1);
+      expect(String(lines[0]?.[0])).toContain("threw a value that could not be described");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("identify, step, track and conversion inside the call carry its session and session_source", async () => {
     const yavio = createYavioContext();
     const { handler, events } = setup(

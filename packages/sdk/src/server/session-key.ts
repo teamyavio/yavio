@@ -147,12 +147,23 @@ function callSessionKey(
   return undefined;
 }
 
+/**
+ * A thrown value for the 1102 line. Never throws: an Error whose `name` or
+ * `message` getter throws (or a Proxy whose `instanceof` check does) would
+ * otherwise escape `callSessionKey` and cost the call its instrumentation
+ * (#144 review round 1).
+ */
 function describeError(error: unknown): string {
-  if (error instanceof Error) {
-    const message = error.message.length > 200 ? `${error.message.slice(0, 200)}…` : error.message;
-    return `${error.name}: ${message}`;
+  try {
+    if (error instanceof Error) {
+      const text = String(error.message);
+      const message = text.length > 200 ? `${text.slice(0, 200)}…` : text;
+      return `${String(error.name)}: ${message}`;
+    }
+    return typeof error;
+  } catch {
+    return "a value that could not be described";
   }
-  return typeof error;
 }
 
 function warnSessionKey(reason: string): void {
