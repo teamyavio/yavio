@@ -32,9 +32,10 @@ interface QueryContext {
  * - Every funnel query runs under FUNNEL_LIMITS: ClickHouse stops it before
  *   the request times out, and a year of steps cannot take more than 2 GiB
  *   (the dashboard's database user has no memory cap of its own).
- * - One process gives exactly what grouping by step_sequence gave: its
- *   steps are stamped in order, and step_sequence breaks a tie within one
- *   millisecond.
+ * - Within the look-back, one process gives exactly what grouping by
+ *   step_sequence gave: its steps are stamped in order, and step_sequence
+ *   breaks a tie within one millisecond. A conversation whose earlier steps
+ *   fall before the look-back is renumbered.
  * - Rows are deduplicated by event_id (events is a ReplacingMergeTree: an
  *   unmerged copy would take a position of its own).
  * - A lost step moves the later ones up instead of leaving a hole.
