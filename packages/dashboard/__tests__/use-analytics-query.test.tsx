@@ -147,6 +147,39 @@ describe("useAnalyticsQuery background retries (#159)", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("reports a refresh after a deterministic error as refetching", async () => {
+    const memory = { error: "needs more memory", code: "YAVIO-3408" };
+    fetchMock.mockResolvedValueOnce(answer(422, memory));
+
+    const result = renderQuery();
+    // The first load is loading, not refetching.
+    expect(result.current).toMatchObject({ isLoading: true, isRefetching: false });
+    await advance(0);
+    expect(result.current).toMatchObject({ isLoading: false, isRefetching: false });
+
+    // The error has no cached data behind it, so SWR reports the refresh as
+    // isLoading; the page keeps showing the error and needs isRefetching to
+    // show that something is happening.
+    let settle: (res: Response) => void = () => {};
+    fetchMock.mockReturnValueOnce(
+      new Promise<Response>((resolve) => {
+        settle = resolve;
+      }),
+    );
+    await act(async () => {
+      result.current.retry();
+    });
+    expect(result.current.isRefetching).toBe(true);
+    expect(result.current.error?.message).toBe("needs more memory");
+
+    await act(async () => {
+      settle(answer(422, memory));
+    });
+    await advance(0);
+    expect(result.current).toMatchObject({ isLoading: false, isRefetching: false });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("does not refetch on focus, and refetches once per reconnect", async () => {
     fetchMock.mockResolvedValue(answer(422, { error: "needs more memory", code: "YAVIO-3408" }));
 

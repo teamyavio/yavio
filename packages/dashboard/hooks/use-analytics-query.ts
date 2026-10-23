@@ -44,7 +44,10 @@ export function useAnalyticsQuery<T>({
   return {
     data,
     isLoading,
-    isRefetching: isValidating && !isLoading,
+    // After an error there is no cached data, so SWR reports a refresh as
+    // isLoading; the page keeps showing the error, and isRefetching is what
+    // dims it and spins the header's refresh button meanwhile (#159).
+    isRefetching: isValidating && (!isLoading || error !== undefined),
     error: error as Error | undefined,
     retry: () => mutate(),
   };
