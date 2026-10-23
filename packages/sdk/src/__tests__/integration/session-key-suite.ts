@@ -71,7 +71,12 @@ export function perRequestSessionSuite(stack: PerRequestStack): void {
     afterEach(async () => {
       warn.mockRestore();
       await ingest.close();
-      if (http) await new Promise<void>((resolve) => http?.close(() => resolve()));
+      if (http) {
+        // The client's keep-alive sockets would hold close() for the
+        // server's keepAliveTimeout (about 4 s per test on v1).
+        http.closeAllConnections();
+        await new Promise<void>((resolve) => http?.close(() => resolve()));
+      }
       http = undefined;
       _resetGlobalState();
     });

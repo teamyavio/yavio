@@ -30,7 +30,10 @@ describe("stateless Streamable HTTP, a new McpServer per request", () => {
 
   afterEach(async () => {
     await ingest.close();
-    if (mcp) await new Promise<void>((resolve) => mcp?.close(() => resolve()));
+    if (mcp) {
+      mcp.closeAllConnections(); // keep-alive sockets would hold close() ~4 s
+      await new Promise<void>((resolve) => mcp?.close(() => resolve()));
+    }
     mcp = undefined;
     _resetGlobalState();
   });
@@ -143,7 +146,10 @@ describe("client identity on the connection event (#142)", () => {
 
   afterEach(async () => {
     await ingest.close();
-    if (mcp) await new Promise<void>((resolve) => mcp?.close(() => resolve()));
+    if (mcp) {
+      mcp.closeAllConnections(); // keep-alive sockets would hold close() ~4 s
+      await new Promise<void>((resolve) => mcp?.close(() => resolve()));
+    }
     mcp = undefined;
     _resetGlobalState();
   });
