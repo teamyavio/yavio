@@ -1,4 +1,4 @@
-import type { BaseEvent } from "@yavio/shared/events";
+import { type BaseEvent, SESSION_SOURCES } from "@yavio/shared/events";
 import { MAX_REGION_LENGTH } from "@yavio/shared/geo";
 import { describe, expect, it } from "vitest";
 import { MAX_FUTURE_MS, MAX_PAST_MS, normalizeEvents } from "../lib/event-normalizer.js";
@@ -165,6 +165,34 @@ describe("region (#128) — a name next to a valid country, else NULL", () => {
   it("leaves an absent region absent and counts nothing", () => {
     const r = normalizeEvents([event({ country_code: "DE" })], NOW);
     expect(r.events[0]).not.toHaveProperty("region");
+    expect(r.invalidFields).toBe(0);
+  });
+});
+
+describe("session_source (#144) — a known value as sent, else NULL", () => {
+  it("keeps every value the SDK emits", () => {
+    const r = normalizeEvents(
+      SESSION_SOURCES.map((value) => event({ session_source: value })),
+      NOW,
+    );
+    expect(r.events.map((e) => e.session_source)).toEqual([...SESSION_SOURCES]);
+    expect(r.invalidFields).toBe(0);
+  });
+
+  it.each([
+    ["a value a newer SDK may send", "future_source"],
+    ["another casing", "PER_REQUEST"],
+    ["padding", " custom"],
+    ["an empty string", ""],
+  ])("sets %s to NULL and counts it", (_label, value) => {
+    const r = normalizeEvents([event({ session_source: value })], NOW);
+    expect((r.events[0] as Record<string, unknown>).session_source).toBeNull();
+    expect(r.invalidFields).toBe(1);
+  });
+
+  it("leaves an absent session_source absent: an older SDK's event stores NULL", () => {
+    const r = normalizeEvents([event()], NOW);
+    expect(r.events[0]).not.toHaveProperty("session_source");
     expect(r.invalidFields).toBe(0);
   });
 });

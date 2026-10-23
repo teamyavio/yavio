@@ -1,6 +1,8 @@
-import type { BaseEvent } from "@yavio/shared/events";
+import { type BaseEvent, SESSION_SOURCES } from "@yavio/shared/events";
 import { normalizeRegionName } from "@yavio/shared/geo";
 import { COUNTRY_CODES, CURRENCY_CODES } from "./iso-codes.js";
+
+const KNOWN_SESSION_SOURCES: ReadonlySet<string> = new Set(SESSION_SOURCES);
 
 /**
  * Normalisation of client-supplied fields before PII stripping and enrichment
@@ -35,6 +37,10 @@ export interface NormalizeResult {
  *   the SDK applies too — and only next to a valid `country_code`: a region
  *   without its country says nothing; else NULL. Not mapped to ISO 3166-2.
  *   Checked last, so it sees the country as checked above.
+ * - `session_source` (#144): one of SESSION_SOURCES from @yavio/shared/events,
+ *   as sent; else NULL. The schema takes any short string so that this ingest
+ *   keeps accepting the events of a newer SDK; a value it does not know yet is
+ *   not stored, because the read side excludes sessions by this column.
  */
 export function normalizeEvents(events: BaseEvent[], now = Date.now()): NormalizeResult {
   let clampedTimestamps = 0;
@@ -58,6 +64,7 @@ export function normalizeEvents(events: BaseEvent[], now = Date.now()): Normaliz
       ],
       ["locale", canonicalLocale],
       ["region", (v) => (typeof out.country_code === "string" ? normalizeRegionName(v) : null)],
+      ["session_source", (v) => (KNOWN_SESSION_SOURCES.has(v) ? v : null)],
     ];
     for (const [field, check] of checks) {
       const value = out[field];
