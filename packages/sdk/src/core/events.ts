@@ -2,6 +2,7 @@ import type {
   ConnectionEvent,
   ConversionEvent,
   IdentifyEvent,
+  SessionSource,
   StepEvent,
   ToolCallEvent,
   ToolDiscoveryEvent,
@@ -16,6 +17,8 @@ export interface EventContext {
   userId?: string;
   platform?: string;
   sdkVersion: string;
+  /** How `sessionId` was derived (#144); sent as `session_source` on every event. */
+  sessionSource?: SessionSource;
 }
 
 function baseFields(ctx: EventContext, eventType: string) {
@@ -29,6 +32,7 @@ function baseFields(ctx: EventContext, eventType: string) {
     user_id: ctx.userId,
     platform: ctx.platform,
     sdk_version: ctx.sdkVersion,
+    session_source: ctx.sessionSource,
   };
 }
 
