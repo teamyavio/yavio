@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { safeCallbackPath } from "@/lib/auth/safe-callback";
 import { type LoginInput, loginSchema } from "@/lib/auth/validation";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { signIn } from "next-auth/react";
@@ -16,9 +17,6 @@ import { useForm } from "react-hook-form";
 export function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const rawCallback = searchParams.get("callbackUrl") ?? "/";
-  const callbackUrl =
-    rawCallback.startsWith("/") && !rawCallback.startsWith("//") ? rawCallback : "/";
   const [error, setError] = useState<string | null>(null);
 
   const {
@@ -38,7 +36,7 @@ export function LoginForm() {
     if (result?.error) {
       setError("Invalid email or password");
     } else {
-      router.push(callbackUrl);
+      router.push(safeCallbackPath(searchParams.get("callbackUrl"), window.location.origin));
     }
   }
 
