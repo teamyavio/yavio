@@ -11,7 +11,10 @@
 --   'per_request'          no key on an HTTP request. On a per-request host
 --                          (a new McpServer per request) every request has a
 --                          session of its own: one call, not a conversation.
--- NULL: an SDK before 0.5.4, or a widget event.
+-- Widget events carry their server session's source as well: the server
+-- injects it with the widget config (_meta.yavio.sessionSource) and the React
+-- SDK stamps it on every widget event.
+-- NULL: an SDK before 0.5.4, on the server or in the widget.
 --
 -- The read side does not count a 'per_request' session as a session: the
 -- dashboard's Sessions KPI and the users list exclude it (NULL counts as

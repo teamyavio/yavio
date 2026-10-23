@@ -49,8 +49,9 @@ session_source (Nullable): how the SDK derived session_id — 'mcp_session_id'
 CLI's thread), 'custom' (the app's own sessionKey option), 'connection' (no
 key, a non-HTTP transport such as stdio: one session per client process) or
 'per_request' (no key on an HTTP request: on a server that builds a new MCP
-server per request this "session" is ONE CALL, not a conversation). NULL = SDK
-< 0.5.4 or a widget event. Count sessions as uniqExactIf(session_id,
+server per request this "session" is ONE CALL, not a conversation). Widget
+events carry their server session's source too. NULL = SDK < 0.5.4 (server or
+widget). Count sessions as uniqExactIf(session_id,
 ifNull(session_source, '') != 'per_request') — what the dashboard's Sessions
 KPI and the users list do; countIf(event_type = 'tool_call' AND
 session_source = 'per_request') is the number of calls from clients that send
@@ -95,8 +96,9 @@ conversions, conversion_value
   names are '(other)'. platform outside the known list is 'other'.
 - individuals = distinct people (or sessions where the app identifies no one)
   in that cell. NOT additive across days or cells. A per_request session (see
-  session_source) is not one: such an event counts as an individual only
-  through its user key.
+  session_source) is not one: such an event — server or widget — counts as an
+  individual only through its user key. Widgets on SDKs before 0.5.4 send no
+  session_source, so their rows count as before.
 - events = rows, except in cells with event_type = 'connection', where it is
   the distinct sessions that connected that day, per_request ones left out.
   Both rules apply from the stats runs after the ingest deploy that shipped

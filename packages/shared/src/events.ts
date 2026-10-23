@@ -63,7 +63,11 @@ export type EventType = z.infer<typeof EventType>;
  *   request has a session of its own, so such a "session" is one call, not
  *   a conversation: the read side does not count it as a session.
  *
- * NULL in storage: an SDK before 0.5.4, or a widget event.
+ * Widget events carry their server session's source too: the server puts it
+ * into the injected config (`_meta.yavio.sessionSource`) and the React SDK
+ * stamps it on every event it sends.
+ *
+ * NULL in storage: an SDK before 0.5.4, on the server or in the widget.
  *
  * The schema takes any short string (`BaseEvent.session_source`), not this
  * enum: an enum would make an older ingest reject every event of a newer SDK

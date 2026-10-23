@@ -4,6 +4,15 @@ export interface WidgetConfig {
   endpoint: string;
   traceId: string;
   sessionId: string;
+  /**
+   * How the server derived `sessionId` (#144, server SDK 0.5.4 and later):
+   * stamped as `session_source` on every widget event, so a widget's rows
+   * count for their session the way the server's do — a `per_request`
+   * session's widget rows are neither a session nor a person on the read
+   * side. Optional: a server before 0.5.4 sends none, and the widget's
+   * events then carry none, as before.
+   */
+  sessionSource?: string;
 }
 
 /** The tracking API returned by `useYavio()`. */

@@ -70,6 +70,43 @@ describe("useYavio", () => {
     expect(trackEvent?.session_id).toBe("ses_test");
   });
 
+  it("stamps the server session's source on every widget event, auto-captured ones included (#144)", async () => {
+    const { result } = renderHook(() =>
+      useYavio({ _meta: { yavio: { ...FULL_CONFIG, sessionSource: "per_request" } } }),
+    );
+    result.current.identify("user-1");
+    result.current.step("picked");
+    result.current.track("note jane doe 1999");
+    result.current.conversion("booked", { value: 10, currency: "EUR" });
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const events = fetchSpy.mock.calls.flatMap(
+      (call) =>
+        (JSON.parse((call as [string, RequestInit])[1].body as string) as { events: BaseEvent[] })
+          .events,
+    );
+    const types = new Set(events.map((e) => e.event_type));
+    for (const type of ["widget_render", "identify", "step", "track", "conversion"]) {
+      expect(types.has(type as BaseEvent["event_type"])).toBe(true);
+    }
+    expect(new Set(events.map((e) => e.session_source))).toEqual(new Set(["per_request"]));
+  });
+
+  it("sends no session_source when the server sent none (a server before 0.5.4), or one the schema would reject", async () => {
+    for (const sessionSource of [undefined, "", "x".repeat(33)]) {
+      _resetWidgetInstance();
+      fetchSpy.mockClear();
+      const { result } = renderHook(() => useYavio({ ...FULL_CONFIG, sessionSource }));
+      result.current.track("viewed");
+      await vi.advanceTimersByTimeAsync(5_000);
+      const body = JSON.parse(
+        (fetchSpy.mock.calls[0] as [string, RequestInit])[1].body as string,
+      ) as { events: BaseEvent[] };
+      expect(body.events.length).toBeGreaterThan(0);
+      expect(body.events.every((e) => e.session_source === undefined)).toBe(true);
+    }
+  });
+
   it("identify() sets user_id on subsequent events", async () => {
     const { result } = renderHook(() => useYavio(FULL_CONFIG));
     result.current.identify("user123", { plan: "pro" });

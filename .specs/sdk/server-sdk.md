@@ -275,11 +275,14 @@ After the tool handler returns and a widget token is available, the proxy inject
       "token": "eyJhbGciOiJIUzI1NiJ9...",
       "endpoint": "https://ingest.yavio.ai/v1/events",
       "traceId": "tr_8f2a...",
-      "sessionId": "ses_abc..."
+      "sessionId": "ses_abc...",
+      "sessionSource": "custom"
     }
   }
 }
 ```
+
+`sessionSource` (#144, 0.5.4) is the session's `session_source` label (3.7.1), never a key; the React SDK stamps it on every widget event so a `per_request` session's widget rows are excluded like its server rows. Omitted while the session has no label. A widget before 0.5.4 ignores it.
 
 If the result already has a `_meta` object, the proxy preserves existing fields and adds `yavio` alongside them. If minting fails or the result is not an object, the result is returned unchanged.
 

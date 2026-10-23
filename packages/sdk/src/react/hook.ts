@@ -4,6 +4,7 @@ import { stripPii } from "../core/pii.js";
 import { initAutoCapture } from "./auto-capture.js";
 import { resolveWidgetConfig } from "./config.js";
 import { SDK_VERSION } from "./constants.js";
+import { widgetSessionSource } from "./extract.js";
 import { WidgetTransport } from "./transport.js";
 import type { WidgetConfig, YavioWidget } from "./types.js";
 
@@ -47,6 +48,9 @@ function createState(config: WidgetConfig): WidgetState {
       event_type: eventType as BaseEvent["event_type"],
       trace_id: config.traceId,
       session_id: config.sessionId,
+      // The server session's source (#144), so a per-request session's
+      // widget rows are not a session or a person on the read side either.
+      session_source: widgetSessionSource(config.sessionSource),
       timestamp: new Date().toISOString(),
       source: "widget",
       user_id: userId,

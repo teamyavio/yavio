@@ -438,6 +438,12 @@ function wrapToolCallback(
               endpoint: config.endpoint,
               traceId: store.traceId,
               sessionId: store.session.sessionId,
+              // The React SDK stamps it on the widget's events (#144), so a
+              // per-request session's widget rows are excluded like its
+              // server rows. A label, never a key.
+              ...(store.session.sessionSource
+                ? { sessionSource: store.session.sessionSource }
+                : {}),
             };
           }
         } catch {

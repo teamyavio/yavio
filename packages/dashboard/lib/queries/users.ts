@@ -61,8 +61,9 @@ const bound = (column: string, window?: TimeWindow): string =>
 /**
  * The rows whose session counts as a session (#144). A session the SDK
  * labelled `per_request` is one call: a client that sends no session key on
- * a per-request host has a new session per request. NULL (an SDK before
- * 0.5.4, a widget event) counts as before. Used by the Sessions KPI and the
+ * a per-request host has a new session per request; its widget rows carry
+ * the label too (0.5.4 widgets). NULL (an SDK before 0.5.4, server or
+ * widget) counts as before. Used by the Sessions KPI and the
  * users list's totalSessions; users themselves are never keyed by session.
  */
 export const COUNTED_SESSION = "ifNull(session_source, '') != 'per_request'";

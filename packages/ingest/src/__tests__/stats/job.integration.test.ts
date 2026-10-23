@@ -414,6 +414,53 @@ describe("statistics job (#85)", () => {
     expect(names.map((r) => r.event_name)).toEqual(["(other)"]);
   });
 
+  it("a per-request session's widget rows are nobody too once the widget stamps the source; an older widget's count as before (#144 review round 1)", async () => {
+    // The review's probe: five one-call sessions on a per-request host, no
+    // user key, each with a widget that tracks a free-text name. `labelled`:
+    // a 0.5.4 widget, which stamps the server session's source; `older`: a
+    // widget before 0.5.4, which sends none.
+    const labelled = project;
+    const older = `${project}-old`;
+    const rowsFor = (p: string, widgetSource: string | undefined) =>
+      Array.from({ length: 5 }, (_, i) => [
+        event(p, `2026-10-02 10:0${i}:00.000`, {
+          session_id: `s-pr-widget-${i}`,
+          session_source: "per_request",
+        }),
+        event(p, `2026-10-02 10:0${i}:30.000`, {
+          event_type: "track",
+          event_name: "note jane doe 1999",
+          source: "widget",
+          session_id: `s-pr-widget-${i}`,
+          ...(widgetSource ? { session_source: widgetSource } : {}),
+        }),
+      ]).flat();
+    await insert([...rowsFor(labelled, "per_request"), ...rowsFor(older, undefined)]);
+    await job(new MemoryStore([labelled, older])).runIfDue(NOW);
+
+    const track = async (p: string) =>
+      (
+        await rows(
+          "SELECT events, individuals FROM stats_daily WHERE project_id = {p:String} AND slice = 'total' AND event_type = 'track'",
+          { p },
+        )
+      ).map((r) => [Number(r.events), Number(r.individuals)]);
+    const names = async (p: string) =>
+      (
+        await rows(
+          "SELECT DISTINCT event_name FROM stats_daily WHERE project_id = {p:String} AND slice = 'tool' ORDER BY event_name",
+          { p },
+        )
+      ).map((r) => r.event_name);
+
+    expect(await track(labelled)).toEqual([[5, 0]]);
+    expect(await names(labelled)).toEqual(["(other)"]);
+    // The widget rows of an SDK before 0.5.4 carry no source and count as
+    // before: five individuals, the name admitted (documented).
+    expect(await track(older)).toEqual([[5, 5]]);
+    expect(await names(older)).toEqual(["(other)", "note jane doe 1999"]);
+  });
+
   it("per-request connection rows are no session cell; keyed and older (NULL) rows count as before (#144)", async () => {
     await insert([
       // A per-request host: one connection row per process per client, under

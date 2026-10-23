@@ -15,7 +15,7 @@ Every event carries these fields:
 | `event_type` | The type of event (e.g., `tool_call`, `step`, `widget_render`) |
 | `trace_id` | Correlation key linking server and widget events for the same tool invocation |
 | `session_id` | The conversation the event belongs to (`ses_` prefix), see below |
-| `session_source` | How the server SDK derived `session_id` (SDK 0.5.4 and later; absent on widget events), see below |
+| `session_source` | How the server SDK derived `session_id` (SDK 0.5.4 and later; a 0.5.4 widget stamps its server session's source too), see below |
 | `timestamp` | When the event occurred |
 | `platform` | Which AI platform initiated the action (e.g., `chatgpt`, `claude`, `cursor`) |
 | `source` | Whether the event originated from `server` or `widget` |

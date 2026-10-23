@@ -356,6 +356,8 @@ describe("E2E: Ingest API → ClickHouse", () => {
             device_pixel_ratio: 2.0,
             device_touch: 1,
             connection_type: "wifi",
+            // The server session's source, stamped by a 0.5.4 widget (#144).
+            session_source: "per_request",
           }),
         ],
       },
@@ -370,6 +372,7 @@ describe("E2E: Ingest API → ClickHouse", () => {
     const row = rows[0];
     expect(row.event_type).toBe("widget_render");
     expect(row.source).toBe("widget");
+    expect(row.session_source).toBe("per_request");
     expect(row.viewport_width).toBe(1920);
     expect(row.viewport_height).toBe(1080);
     expect(row.device_pixel_ratio).toBeCloseTo(2.0, 1);

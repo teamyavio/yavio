@@ -136,8 +136,10 @@ const MEASURES = `
  * would be five individuals: enough to admit a free-text event_name into a
  * table kept forever. Such an event without a user key is nobody, and the
  * per-request connection rows (one per process per client, not per session)
- * are left out of the cells altogether. A NULL session_source (an SDK
- * before 0.5.4, a widget event) counts as before.
+ * are left out of the cells altogether. Widget rows follow the same rule:
+ * a 0.5.4 widget stamps its server session's source (#144 review round 1).
+ * A NULL session_source (an SDK before 0.5.4, server or widget) counts as
+ * before.
  */
 export function statsDailyInsert(stage: string): string {
   return `

@@ -195,6 +195,34 @@ describe("createProxy — widget config injection", () => {
     expect(typeof yavio.sessionId).toBe("string");
   });
 
+  it("hands the widget the session's source with its session id (#144)", async () => {
+    mockedMint.mockResolvedValue({ token: "jwt_w", expiresAt: "2026-01-01T00:00:00Z" });
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server,
+      { ...testConfig, sessionKey: ({ headers }) => headers["x-conversation-id"] },
+      transport,
+      "0.0.1",
+    );
+    proxy.tool("widget_tool", () => ({ content: [{ type: "text", text: "ok" }] }));
+    const handler = registeredTool(server, "widget_tool")?.handler;
+    const call = (headers: Record<string, string>) =>
+      handler?.({
+        signal: new AbortController().signal,
+        requestId: "req-w",
+        sendNotification: async () => {},
+        sendRequest: async () => ({}),
+        requestInfo: { headers },
+      }) as Promise<{ _meta: { yavio: Record<string, unknown> } }>;
+
+    const perRequest = (await call({ "user-agent": "cursor/1.7.0" }))._meta.yavio;
+    expect(perRequest.sessionSource).toBe("per_request");
+    const keyed = (await call({ "x-conversation-id": "conv-w" }))._meta.yavio;
+    expect(keyed.sessionSource).toBe("custom");
+    expect(keyed.sessionId).toBe(deriveCustomSessionId("yav_test", "conv-w"));
+  });
+
   it("returns result unchanged when widget minting fails", async () => {
     mockedMint.mockResolvedValue(null);
 
