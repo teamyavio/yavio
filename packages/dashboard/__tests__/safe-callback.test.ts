@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { safeCallbackPath } from "../lib/auth/safe-callback";
 
 const ORIGIN = "https://dashboard.example.com";
+// Distinct from every accepted result, so a rejection cannot pass by
+// resolving to the default destination.
+const FALLBACK = "/__fallback";
 
 const ACCEPTED: Array<[raw: string, expected: string]> = [
   ["/", "/"],
@@ -44,11 +47,11 @@ const OUTSIDE_ORIGIN = [
 const PATH_LEAVES_ORIGIN = ["/.//example.org", "/a/..//example.org", "/./\\example.org"];
 
 const NON_HTTP = [
-  "javascript:alert(document.domain)",
-  " javascript:alert(1)",
-  "JaVaScRiPt:alert(1)",
+  "javascript:void(0)",
+  " javascript:void(0)",
+  "JaVaScRiPt:void(0)",
   "data:text/html,<p>x</p>",
-  "vbscript:msgbox(1)",
+  "vbscript:void(0)",
   "file:///etc/hosts",
 ];
 
@@ -77,26 +80,33 @@ describe("safeCallbackPath", () => {
 
   it("rejects a callback that resolves outside the app origin", () => {
     for (const raw of OUTSIDE_ORIGIN) {
-      expect(safeCallbackPath(raw, ORIGIN), JSON.stringify(raw)).toBe("/");
+      expect(safeCallbackPath(raw, ORIGIN, FALLBACK), JSON.stringify(raw)).toBe(FALLBACK);
     }
   });
 
   it("rejects a callback whose resolved path would not stay on the app origin", () => {
     for (const raw of PATH_LEAVES_ORIGIN) {
-      expect(safeCallbackPath(raw, ORIGIN), JSON.stringify(raw)).toBe("/");
+      expect(safeCallbackPath(raw, ORIGIN, FALLBACK), JSON.stringify(raw)).toBe(FALLBACK);
     }
   });
 
   it("rejects a callback with a non-http scheme", () => {
     for (const raw of NON_HTTP) {
-      expect(safeCallbackPath(raw, ORIGIN), JSON.stringify(raw)).toBe("/");
+      expect(safeCallbackPath(raw, ORIGIN, FALLBACK), JSON.stringify(raw)).toBe(FALLBACK);
     }
   });
 
   it("falls back when the callback or the origin does not parse", () => {
-    expect(safeCallbackPath("http://[", ORIGIN)).toBe("/");
-    expect(safeCallbackPath("/acme/default/overview", "not an origin")).toBe("/");
-    expect(safeCallbackPath("/acme/default/overview", "null")).toBe("/");
+    expect(safeCallbackPath("http://[", ORIGIN, FALLBACK)).toBe(FALLBACK);
+    expect(safeCallbackPath("/acme/default/overview", "not an origin", FALLBACK)).toBe(FALLBACK);
+    expect(safeCallbackPath("/acme/default/overview", "null", FALLBACK)).toBe(FALLBACK);
+  });
+
+  it("falls back when the base parses but has an opaque origin", () => {
+    // Two opaque origins both serialize to "null" without being the same
+    // origin, so the string comparison alone must not accept them.
+    expect(safeCallbackPath("/acme/default/overview", "file:///", FALLBACK)).toBe(FALLBACK);
+    expect(safeCallbackPath("file:///acme/default/overview", "file:///", FALLBACK)).toBe(FALLBACK);
   });
 
   it("returns the given fallback instead of the root", () => {
