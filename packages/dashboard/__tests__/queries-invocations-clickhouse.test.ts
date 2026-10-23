@@ -38,6 +38,7 @@ const ids = {
   hal: randomUUID(),
   two: randomUUID(),
   none: randomUUID(),
+  empty: randomUUID(),
 };
 
 async function insert(rows: Array<Record<string, unknown>>) {
@@ -123,6 +124,10 @@ describe.skipIf(!url)(
         // No session: never mapped, not even to an identify without one.
         identify("jon", "", day(-1, "13:00:00.000")),
         { event_id: ids.none, session_id: "", timestamp: day(-1, "13:00:00.001") },
+        // An identify with an empty id first (the SDK accepts it): skipped.
+        identify("", "conv-empty", day(-1, "14:00:00.000")),
+        identify("bob", "conv-empty", day(-1, "14:05:00.000")),
+        { event_id: ids.empty, session_id: "conv-empty", timestamp: day(-1, "14:10:00.000") },
       ]);
     });
 
@@ -140,7 +145,7 @@ describe.skipIf(!url)(
 
     it("in the invocation feed", async () => {
       const { invocations, total } = await feed.queryInvocationFeed(ctx, 1, 25);
-      expect(total).toBe(7);
+      expect(total).toBe(8);
       expect(byName(invocations)).toEqual({
         a: "eve",
         b: "eve",
@@ -149,12 +154,13 @@ describe.skipIf(!url)(
         hal: "hal",
         two: "gus",
         none: null,
+        empty: "bob",
       });
     });
 
     it("in a tool's recent invocations", async () => {
       const { invocations, total } = await tool.queryToolRecentInvocations(ctx, "search", 1, 25);
-      expect(Number(total)).toBe(7);
+      expect(Number(total)).toBe(8);
       expect(byName(invocations)).toEqual({
         a: "eve",
         b: "eve",
@@ -163,6 +169,7 @@ describe.skipIf(!url)(
         hal: "hal",
         two: "gus",
         none: null,
+        empty: "bob",
       });
     });
   },

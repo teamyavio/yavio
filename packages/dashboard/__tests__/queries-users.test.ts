@@ -362,6 +362,24 @@ describe.skipIf(!url)("user queries on a real ClickHouse (#89)", () => {
       ]);
     });
 
+    it("skips an identify with an empty id: the session's first real id takes its calls (review round 1)", async () => {
+      // The SDK accepts identify(""), and "" passes its YAVIO-1302 check, so
+      // identify("bob") on the same session state follows it.
+      const p = scoped("empty-id");
+      await p.insert([
+        identify("", "conv-empty", day(-2, "10:00:00.000")),
+        identify("bob", "conv-empty", day(-2, "10:05:00.000")),
+        { session_id: "conv-empty", timestamp: day(-2, "10:10:00.000") },
+      ]);
+      const { users, total } = await q.queryUserList(p.ctx(day(-60), day(1)), 1, 50);
+      expect(users.map((u) => [u.userId, Number(u.totalToolCalls), Number(u.totalEvents)])).toEqual(
+        // The call and both identify rows: the empty one is an unstamped
+        // event of the session like any other.
+        [["bob", 1, 3]],
+      );
+      expect(total).toBe(1);
+    });
+
     it("never maps an event without a session, nor across projects", async () => {
       const p = scoped("guards");
       const other = scoped("guards-other");
