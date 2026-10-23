@@ -31,7 +31,7 @@ const UA = "openai-mcp/1.0.0";
 const PROTOCOL = "2025-06-18";
 const STACKS = ["v1", "v2"] as const;
 type Stack = (typeof STACKS)[number];
-type Mode = "readme" | "none" | "noexit" | "none-stdin" | "idle";
+type Mode = "readme" | "none" | "noexit" | "none-stdin" | "idle" | "pinned-cli";
 
 /** The events a run produces before the signal: 50 calls, one connection, two discoveries. */
 const EVENTS_BEFORE_SIGNAL = 53;
@@ -847,6 +847,31 @@ describe.each(STACKS)("a failed send at the signal on MCP SDK %s (#164)", (stack
       // Before #164, held by stdin only: exit 0 (not by the signal) after
       // about 80 ms, nothing delivered, no hand-back.
       expect(exit, child.output()).toMatchObject({ code: null, signal: "SIGTERM" });
+      expect(exit.afterSignalMs).toBeGreaterThanOrEqual(1_000);
+      expect(exit.afterSignalMs).toBeLessThan(4_000);
+      expectDeliveredOnRetry(failure, exit, exitAt);
+      expect(child.lossLines()).toEqual([]);
+    },
+  );
+
+  it.each(failures)(
+    "no signal — a withYavio() pin and a client's awaited shutdown(), a CLI or cron shape — ingest answers with %s, then 200: the drain holds the process until its retry delivers, shutdown() resolves (#164 review round 4)",
+    { timeout: 30_000 },
+    async (_label, failure) => {
+      ingest.failNext = [failure];
+      const child = await start("pinned-cli");
+      await drive(child.port);
+      agent.destroy();
+      child.kill("SIGUSR2"); // the app closes its server and awaits shutdown(): no signal the SDK handles
+      const exit = await child.exited;
+      const exitAt = Date.now();
+
+      // The pin keeps the transport, so the shutdown drains it rather than
+      // stopping it: drain()'s own deadline (shutdownTimeoutMs, 4 s) is what
+      // holds the process through the 1 s backoff. Without its keepAlive the
+      // process exits mid-backoff, nothing delivered, shutdown() unresolved.
+      expect(exit, child.output()).toMatchObject({ code: 0, signal: null });
+      expect(child.output()).toContain("shutdown resolved");
       expect(exit.afterSignalMs).toBeGreaterThanOrEqual(1_000);
       expect(exit.afterSignalMs).toBeLessThan(4_000);
       expectDeliveredOnRetry(failure, exit, exitAt);

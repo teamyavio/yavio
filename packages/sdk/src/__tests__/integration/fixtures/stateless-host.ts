@@ -17,7 +17,12 @@
  * unref'd, so once the test ends stdin only the SDK can hold the loop, #164)
  * | "idle" (no SIGTERM/SIGINT handler; SIGUSR2 closes the server and nothing
  * else — no drain, no `shutdown()`: whatever the SDK still has queued must
- * not keep the process alive, #164). Prints `ready <port>` once listening
+ * not keep the process alive, #164) | "pinned-cli" (a CLI or cron shape: a
+ * `withYavio()` pin on the same key, and SIGUSR2 closes the server and
+ * awaits `analytics.shutdown()` — no signal the SDK handles; the pin keeps
+ * the transport, so the shutdown drains it, and that drain must hold the
+ * process until its retry delivers; prints `shutdown resolved`, #164 review
+ * round 4). Prints `ready <port>` once listening
  * and `started <sku>` when the `slow` tool begins, so the test can send the
  * signal with that call in flight. `slow` with `track: true` also calls
  * `yavio.track()` before it returns: a request served after the signal
@@ -33,7 +38,7 @@ import { McpServer as McpServerV1 } from "@modelcontextprotocol/sdk/server/mcp.j
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { McpServer as McpServerV2, createMcpHandler } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { createYavio, yavio } from "../../../server/index.js";
+import { createYavio, withYavio, yavio } from "../../../server/index.js";
 
 const endpoint = process.env.ENDPOINT;
 if (!endpoint) throw new Error("ENDPOINT is not set");
@@ -152,6 +157,20 @@ if (mode !== "readme") {
 if (mode === "idle") {
   process.on("SIGUSR2", () => {
     void closeWithin(http, 3_000);
+  });
+}
+if (mode === "pinned-cli") {
+  withYavio(stack === "v2" ? buildV2() : buildV1(), {
+    apiKey: "yav_child",
+    endpoint,
+    serverOnly: true,
+  });
+  process.on("SIGUSR2", () => {
+    void (async () => {
+      await closeWithin(http, 3_000);
+      await analytics.shutdown();
+      process.stdout.write("shutdown resolved\n");
+    })();
   });
 }
 if (mode === "noexit") {
