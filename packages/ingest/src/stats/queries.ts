@@ -4,6 +4,12 @@
  * into the stats table with REPLACE PARTITION.
  *
  * Every query starts from the same prelude:
+ * - `session_map`: per project, each session_id mapped to the first user_id
+ *   an identify row gave it (#145) — identify() stamps user_id only on the
+ *   events of the SDK process that called it, from that call on, so another
+ *   instance's events in the conversation, and the earlier ones, carry none.
+ *   Same rule as the dashboard's keyedEvents(); same window and retention
+ *   floor as `base`;
  * - `stitch`: per project, each subject_id mapped to the user_id last seen
  *   together with it (#89), so a person counted before identify() and after it
  *   is one person — read from the same window as `base` (#112): the mapping
@@ -13,7 +19,13 @@
  *   deduplicated with LIMIT 1 BY event_id (FINAL alone misses a clamped event
  *   the SDK re-sent: different timestamp, so a different sort key, #90);
  * - `keyed`: base plus the user key
- *   coalesce(user_id, stitched user_id, subject_id) — never the session.
+ *   coalesce(user_id, the session's first user_id, stitched user_id,
+ *   subject_id) — never the session itself.
+ *
+ * Both maps name their project column (`session_project`, `stitch_project`):
+ * with two LEFT JOINs whose maps both expose `project_id`, ClickHouse 26.8
+ * names the outer column `b.project_id` in `SELECT b.*`, and every later
+ * reference to `project_id` fails with UNKNOWN_IDENTIFIER (#145).
  *
  * Parameters are bound by ClickHouse ({name:Type}); nothing is interpolated
  * except the stage table names, which are constants.
@@ -63,8 +75,20 @@ const COLLECTED = "toDate(least(toDateTime(timestamp), toDateTime(ingested_at)))
 
 function prelude(from: string, to: string): string {
   return `
+  session_map AS (
+    SELECT project_id AS session_project, session_id AS stitched_session,
+           argMin(assumeNotNull(user_id), (timestamp, event_id)) AS session_user_id
+    FROM events
+    WHERE project_id IN {projects:Array(String)}
+      AND event_type = 'identify'
+      AND user_id IS NOT NULL AND user_id != ''
+      AND session_id != ''
+      AND timestamp >= ${from} AND timestamp < ${to}
+      AND ${COLLECTED} >= ${FLOOR("project_id")}
+    GROUP BY session_project, stitched_session
+  ),
   stitch AS (
-    SELECT project_id, assumeNotNull(subject_id) AS stitched_subject,
+    SELECT project_id AS stitch_project, assumeNotNull(subject_id) AS stitched_subject,
            argMax(assumeNotNull(user_id), timestamp) AS mapped_user_id
     FROM events
     WHERE project_id IN {projects:Array(String)}
@@ -72,7 +96,7 @@ function prelude(from: string, to: string): string {
       AND user_id IS NOT NULL AND user_id != ''
       AND timestamp >= ${from} AND timestamp < ${to}
       AND ${COLLECTED} >= ${FLOOR("project_id")}
-    GROUP BY project_id, stitched_subject
+    GROUP BY stitch_project, stitched_subject
   ),
   base AS (
     SELECT * FROM events FINAL
@@ -83,9 +107,11 @@ function prelude(from: string, to: string): string {
   ),
   keyed AS (
     SELECT b.*,
-           coalesce(nullIf(b.user_id, ''), nullIf(s.mapped_user_id, ''), nullIf(b.subject_id, '')) AS user_key
+           coalesce(nullIf(b.user_id, ''), nullIf(m.session_user_id, ''),
+                    nullIf(s.mapped_user_id, ''), nullIf(b.subject_id, '')) AS user_key
     FROM base AS b
-    LEFT JOIN stitch AS s ON s.project_id = b.project_id AND s.stitched_subject = ifNull(b.subject_id, '')
+    LEFT JOIN session_map AS m ON m.session_project = b.project_id AND m.stitched_session = b.session_id
+    LEFT JOIN stitch AS s ON s.stitch_project = b.project_id AND s.stitched_subject = ifNull(b.subject_id, '')
   )`;
 }
 
