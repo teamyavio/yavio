@@ -1,4 +1,5 @@
 import { queryAnalytics } from "@/lib/clickhouse/analytics-client";
+import { COUNTED_SESSION } from "./users";
 
 interface QueryContext {
   workspaceId: string;
@@ -13,7 +14,8 @@ interface QueryContext {
  * join under every row of the range.
  *
  * Same rule as the key: identify rows with a non-empty user_id, the first
- * by (timestamp, event_id), never for an empty session_id. Unbounded in
+ * by (timestamp, event_id), never for an empty session_id nor a
+ * `per_request` one (#144, see keyedEvents in users.ts). Unbounded in
  * time, like the stitch for a named person: a conversation identified
  * before the selected range still names its user. The live feed shows the
  * raw user_id and is not stitched.
@@ -38,6 +40,7 @@ export async function querySessionUsers(
       WHERE project_id = {projectId:String}
         AND event_type = 'identify'
         AND user_id IS NOT NULL AND user_id != ''
+        AND ${COUNTED_SESSION}
         AND session_id IN {sessionIds:Array(String)}
       GROUP BY session_id
     `,

@@ -110,7 +110,8 @@ const evictionHookFor =
  * server on every request must not stack a callback wrapper per request
  * (N wraps, N `tool_call` events per call). The first wrap wins: a later
  * call with any differing resolved option — endpoint, key, capture flags,
- * `tools` overrides, `serverOnly`, intent, or one that would instrument the
+ * `tools` overrides, `serverOnly`, intent, the presence of `sessionKey`
+ * (#144), or one that would instrument the
  * pre-registered tools where the first did not — gets the existing proxy
  * unchanged and one `YAVIO-1108` warning per process.
  */
@@ -142,7 +143,7 @@ function wrapServer<T extends McpServerLike>(
     if (differs) {
       logOnce(ErrorCode.SDK.REWRAP_OPTIONS_IGNORED, () =>
         console.warn(
-          `[${ErrorCode.SDK.REWRAP_OPTIONS_IGNORED}] ${entry} called on a server that is already wrapped with other options — the first wrap wins: its endpoint, API key, capture flags, tools overrides, serverOnly and intent settings stay, and tools registered before that first wrap are instrumented only if it was createYavio().wrap(). Returned the existing proxy. Shown once per process.`,
+          `[${ErrorCode.SDK.REWRAP_OPTIONS_IGNORED}] ${entry} called on a server that is already wrapped with other options — the first wrap wins: its endpoint, API key, capture flags, tools overrides, serverOnly, intent and sessionKey settings stay, and tools registered before that first wrap are instrumented only if it was createYavio().wrap(). Returned the existing proxy. Shown once per process.`,
         ),
       );
     } else {
@@ -309,6 +310,10 @@ export type {
   CaptureConfig,
   IntentOptions,
   McpServerLike,
+  SessionKeyAuthInfo,
+  SessionKeyFunction,
+  SessionKeyRequest,
+  SessionSource,
   ToolCaptureOverride,
   WithYavioOptions,
   YavioClient,

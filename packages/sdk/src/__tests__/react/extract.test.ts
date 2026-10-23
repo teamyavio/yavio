@@ -1,5 +1,6 @@
+import { MAX_SESSION_SOURCE_LENGTH } from "@yavio/shared/events";
 import { describe, expect, it } from "vitest";
-import { extractWidgetConfig } from "../../react/extract.js";
+import { WIDGET_MAX_SESSION_SOURCE_LENGTH, extractWidgetConfig } from "../../react/extract.js";
 
 describe("extractWidgetConfig", () => {
   it("extracts valid config from _meta.yavio", () => {
@@ -109,5 +110,26 @@ describe("extractWidgetConfig", () => {
       traceId: "tr_abc",
       sessionId: "ses_xyz",
     });
+  });
+
+  it("keeps the session's source the server injected (#144), but not one the schema would reject", () => {
+    const config = (sessionSource: unknown) =>
+      extractWidgetConfig({
+        _meta: {
+          yavio: {
+            token: "jwt_123",
+            endpoint: "http://test/v1/events",
+            traceId: "tr_abc",
+            sessionId: "ses_xyz",
+            sessionSource,
+          },
+        },
+      });
+    expect(config("per_request")?.sessionSource).toBe("per_request");
+    for (const rejected of [undefined, "", 7, "x".repeat(33)]) {
+      expect(config(rejected)).not.toHaveProperty("sessionSource");
+    }
+    // The widget's bound is the schema's (the widget bundle does not import it).
+    expect(WIDGET_MAX_SESSION_SOURCE_LENGTH).toBe(MAX_SESSION_SOURCE_LENGTH);
   });
 });

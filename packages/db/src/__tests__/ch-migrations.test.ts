@@ -119,7 +119,7 @@ describe("ClickHouse migrations", () => {
       expect(await result.json()).toHaveLength(1);
     });
 
-    it("records all 21 migration versions", async () => {
+    it("records all 22 migration versions", async () => {
       const ch = getClient();
       const result = await ch.query({
         query: "SELECT version FROM schema_migrations ORDER BY version",
@@ -148,7 +148,49 @@ describe("ClickHouse migrations", () => {
         "0019",
         "0020",
         "0021",
+        "0022",
       ]);
+    });
+  });
+
+  describe("session_source column (#144, 0022)", () => {
+    it("stores the SDK's value, NULL for a row without one, readable by yavio_dashboard", async () => {
+      const ch = getClient();
+      await ch.command({
+        query: "ALTER USER yavio_dashboard IDENTIFIED BY 'session-source-test'",
+      });
+      const timestamp = new Date().toISOString().replace("T", " ").replace("Z", "");
+      const row = (id: string, extra: Record<string, unknown>) => ({
+        event_id: `session-source-${id}`,
+        workspace_id: "ws-session-source",
+        project_id: "p-session-source",
+        trace_id: "t",
+        session_id: `s-${id}`,
+        event_type: "tool_call",
+        timestamp,
+        source: "server",
+        ...extra,
+      });
+      // An older SDK's event has no field at all: the column's default.
+      await ch.insert({
+        table: "events",
+        values: [row("keyed", { session_source: "custom" }), row("old", {})],
+        format: "JSONEachRow",
+      });
+
+      const res = await fetch(
+        `${CLICKHOUSE_HTTP}?SQL_workspace_id=ws-session-source&SQL_project_id=p-session-source`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Basic ${Buffer.from("yavio_dashboard:session-source-test").toString("base64")}`,
+          },
+          body: "SELECT session_id, session_source, toTypeName(session_source) FROM events WHERE workspace_id = 'ws-session-source' ORDER BY session_id FORMAT TSV",
+        },
+      );
+      expect(await res.text()).toBe(
+        "s-keyed\tcustom\tLowCardinality(Nullable(String))\ns-old\t\\N\tLowCardinality(Nullable(String))\n",
+      );
     });
   });
 

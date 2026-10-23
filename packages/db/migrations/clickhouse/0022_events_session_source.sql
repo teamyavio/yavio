@@ -1,0 +1,37 @@
+-- 0022_events_session_source.sql (#144)
+-- How the server SDK derived the event's session_id, in the SDK's order of
+-- precedence:
+--   'mcp_session_id'       the transport's session (Mcp-Session-Id);
+--   'openai_session'       ChatGPT's _meta["openai/session"];
+--   'vscode_conversation'  VS Code's _meta["vscode.conversationId"];
+--   'codex_thread'         _meta.threadId from the Codex CLI (codex-mcp-client);
+--   'custom'               the integrator's sessionKey option (a keyed hash);
+--   'connection'           no key, a non-HTTP transport (stdio): the
+--                          connection's own session;
+--   'per_request'          no key on an HTTP request. On a per-request host
+--                          (a new McpServer per request) every request has a
+--                          session of its own: one call, not a conversation.
+-- Widget events carry their server session's source as well: the server
+-- injects it with the widget config (_meta.yavio.sessionSource) and the React
+-- SDK stamps it on every widget event.
+-- NULL: an SDK before 0.5.4, on the server or in the widget.
+--
+-- The read side does not count a 'per_request' session as a session: the
+-- dashboard's Sessions KPI and the users list exclude it (NULL counts as
+-- before), and the statistics job (stats/queries.ts) neither counts a
+-- per-request event without a user key as an individual nor a per-request
+-- connection row as a session cell.
+--
+-- Ingest keeps the values above and sets anything else to NULL
+-- (event-normalizer.ts). Apply this BEFORE the ingest that writes the field.
+-- The inserts would not fail without it — input_format_skip_unknown_fields
+-- is on by default, so ClickHouse drops a field the table has no column for —
+-- but every row inserted in between would lose its session_source for good.
+-- Events from an older SDK simply lack the field and store NULL.
+--
+-- No backfill: what derived the session of an older event is not recorded
+-- anywhere. The 13-month TTL (0013) and the erasure worker cover this column
+-- like every other one on events; the dashboard and rollup roles read it
+-- through their table-level grants.
+
+ALTER TABLE events ADD COLUMN IF NOT EXISTS session_source LowCardinality(Nullable(String));

@@ -59,6 +59,33 @@ describe("AsyncLocalStorage context", () => {
   });
 
   describe("createYavioContext", () => {
+    it("identify, step, track and conversion carry the session's session_source (#144)", () => {
+      for (const sessionSource of ["custom", "per_request"] as const) {
+        const transport = createMockTransport();
+        const store = createStore({ transport, session: createSession({ sessionSource }) });
+        const ctx = createYavioContext();
+        runInContext(store, () => {
+          ctx.identify("user-1");
+          ctx.step("checkout");
+          ctx.track("viewed");
+          ctx.conversion("purchase", { value: 10, currency: "EUR" });
+        });
+        const events = transport.sent.flat();
+        expect(events.map((e) => e.event_type)).toEqual([
+          "identify",
+          "step",
+          "track",
+          "conversion",
+        ]);
+        expect(events.map((e) => e.session_source)).toEqual([
+          sessionSource,
+          sessionSource,
+          sessionSource,
+          sessionSource,
+        ]);
+      }
+    });
+
     describe(".identify()", () => {
       it("sets userId on session state", () => {
         const store = createStore();

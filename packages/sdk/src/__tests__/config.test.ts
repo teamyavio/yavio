@@ -659,3 +659,63 @@ describe("shutdownTimeoutMs (#142)", () => {
     },
   );
 });
+
+describe("sessionKey (#144)", () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = without(originalEnv);
+    process.env.YAVIO_API_KEY = "yav_test";
+    _resetConfigWarnings();
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    vi.restoreAllMocks();
+  });
+
+  it("accepts a function, unchanged, without a warning", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sessionKey = ({ headers }: { headers: Record<string, string | undefined> }) =>
+      headers["x-conversation-id"];
+    expect(resolveConfig({ sessionKey })?.sessionKey).toBe(sessionKey);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("leaves it unset when not given", () => {
+    expect(resolveConfig()?.sessionKey).toBeUndefined();
+  });
+
+  it.each([
+    ["a header name instead of a callback", "x-conversation-id"],
+    ["null", null],
+    ["an object", { header: "x-conversation-id" }],
+    ["a number", 1],
+  ])("ignores %s with one YAVIO-1006 warning per process", (_label, value) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const options = { sessionKey: value } as unknown as Parameters<typeof resolveConfig>[0];
+    expect(resolveConfig(options)?.sessionKey).toBeUndefined();
+    expect(resolveConfig(options)?.sessionKey).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = String(warn.mock.calls[0]?.[0]);
+    expect(line).toContain("YAVIO-1006");
+    expect(line).toContain("sessionKey must be a function");
+    // The type, never the value.
+    expect(line).not.toContain("x-conversation-id");
+  });
+
+  it("is not read from .yaviorc.json: a function cannot be written there", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "yavio-config-test-"));
+    writeFileSync(join(tempDir, ".yaviorc.json"), JSON.stringify({ sessionKey: "x-conv" }));
+    const originalCwd = process.cwd;
+    process.cwd = () => tempDir;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(resolveConfig()?.sessionKey).toBeUndefined();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      process.cwd = originalCwd;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});

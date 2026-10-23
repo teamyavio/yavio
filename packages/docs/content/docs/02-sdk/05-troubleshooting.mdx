@@ -48,7 +48,7 @@ All SDK error codes are prefixed with `YAVIO-1` and logged to stderr.
 | `YAVIO-1003` | Config loaded successfully (debug) |
 | `YAVIO-1004` | `.yaviorc.json` is malformed JSON |
 | `YAVIO-1005` | Config file version is not supported |
-| `YAVIO-1006` | A capture flag has a value it does not accept (`geo`: `true`, `false`, `"country"`, `"region"`; the others: `true`, `false`) — that capture turned off. Also: `shutdownTimeoutMs` (option, `YAVIO_SHUTDOWN_TIMEOUT_MS`, `.yaviorc.json`) is not an integer in [100, 2147483647] milliseconds — the default 4 s is used |
+| `YAVIO-1006` | A capture flag has a value it does not accept (`geo`: `true`, `false`, `"country"`, `"region"`; the others: `true`, `false`) — that capture turned off. Also: `shutdownTimeoutMs` (option, `YAVIO_SHUTDOWN_TIMEOUT_MS`, `.yaviorc.json`) is not an integer in [100, 2147483647] milliseconds — the default 4 s is used. Also: `sessionKey` is not a function (a header name passed instead of a callback, `null`) — it is ignored, as if not set |
 
 ### Proxy and instrumentation (1100-1199)
 
@@ -56,7 +56,7 @@ All SDK error codes are prefixed with `YAVIO-1` and logged to stderr.
 |------|-------------|
 | `YAVIO-1100` | Proxy interception failed — tool call not captured |
 | `YAVIO-1101` | Platform detection failed — defaulting to `"unknown"` |
-| `YAVIO-1102` | Session ID could not be derived from transport |
+| `YAVIO-1102` | Your `sessionKey` threw, returned a promise (an `async` function), a non-string or more than 1 024 characters. The call is recorded without a session key — `session_source` `per_request` over HTTP, `connection` otherwise — and is itself unaffected. Logged once per process, with the first reason. Make `sessionKey` synchronous and return a string or `undefined` |
 | `YAVIO-1103` | Widget token minting failed |
 | `YAVIO-1104` | Widget config injection skipped |
 | `YAVIO-1105` | Context injection unavailable (AsyncLocalStorage issue) |

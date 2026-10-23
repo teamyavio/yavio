@@ -8,7 +8,12 @@ import {
   buildToolDiscoveryEvent,
   normalizeErrorMessage,
 } from "../core/events.js";
-import { deriveSessionId, generateSessionId, generateTraceId } from "../core/ids.js";
+import {
+  deriveCustomSessionId,
+  deriveSessionId,
+  generateSessionId,
+  generateTraceId,
+} from "../core/ids.js";
 import { LruMap } from "../core/lru.js";
 import { detectPlatform } from "../core/platform.js";
 import type { CaptureConfig, McpServerLike, SessionState, YavioConfig } from "../core/types.js";
@@ -30,6 +35,7 @@ import {
   installProtocolWrappers,
   runInCallFrame,
 } from "./protocol.js";
+import { type SessionKey, findSessionKey } from "./session-key.js";
 import { type SharedSessions, _resetSharedState, createSharedSessions, logOnce } from "./shared.js";
 import { type MintResult, mintWidgetToken } from "./token.js";
 
@@ -121,16 +127,35 @@ function resolveToolCapture(config: YavioConfig, toolName: string): CaptureConfi
   };
 }
 
+/** What a call needs from its proxy to find its session (#144). */
+interface CallSessions {
+  /** The connected MCP transport's own session id (Mcp-Session-Id), when it has one. */
+  transportSessionId(): string | undefined;
+  /**
+   * The conversation's session for a key, or — without one — the
+   * connection's own, labelled `per_request` on an HTTP request and
+   * `connection` otherwise.
+   */
+  resolve(key: SessionKey | undefined, http: boolean): SessionState;
+}
+
+/** The client identity a call's connection event names, and where it came from. */
+interface ClientIdentity {
+  info?: { name?: string; version?: string };
+  source?: ClientInfoSource;
+}
+
 /**
  * Resolve everything a tool_call needs to know about its request before the
- * handler runs: the session (from the MCP session id, OpenAI's conversation
- * session, or the transport), lazy platform detection, the once-per-session
- * connection event, and a fresh trace id. Called once per tools/call by the
- * status wrapper, or by the callback wrapper when no frame is open.
+ * handler runs: the session (the first key of session-key.ts's order, or the
+ * connection's own), lazy platform detection, the connection event — once
+ * per session, or for a `per_request` session once per process per client
+ * (#144) — and a fresh trace id. Called once per tools/call by the status
+ * wrapper, or by the callback wrapper when no frame is open.
  */
 function openCallContext(
   extra: unknown,
-  resolveSession: (sessionKey?: string) => SessionState,
+  callSessions: CallSessions,
   server: McpServerLike,
   config: YavioConfig,
   transport: Transport,
@@ -139,31 +164,20 @@ function openCallContext(
   // Read once, by shape (v1 RequestHandlerExtra or v2 ctx — see extra.ts).
   const ex = readCallExtra(extra);
 
-  // The MCP session id (Mcp-Session-Id) is the most reliable correlation
-  // signal. Fall back to OpenAI's conversation-scoped session from _meta:
-  // OpenAI re-initializes MCP per tool call but sends a stable "openai/session".
-  const openaiSessionId = ex.meta?.["openai/session"];
-  const sessionKey =
-    ex.sessionId ?? (typeof openaiSessionId === "string" ? openaiSessionId : undefined);
-  const session = resolveSession(sessionKey);
-
   // Client identity: on the 2026-07-28 protocol era every request carries it
   // (v2 envelope); otherwise from the MCP initialize handshake, available by
   // the time the first tool call arrives on a long-lived server; otherwise —
   // a stateless host, whose instance serving tools/call never saw initialize
-  // — the first product token of the request's User-Agent (#142). Only
-  // fetched while still needed: for the once-per-session connection event
-  // and unresolved platforms. `get`, not `has`: a hit refreshes the mark's
-  // recency, so an active conversation is never aged out of the dedup by
-  // newer ones.
-  const connectionKey = dedupKey(config.apiKey, session.sessionId);
-  const connectionEmitted = emittedConnections.get(connectionKey) === true;
-  let clientInfo: { name?: string; version?: string } | undefined;
-  let clientInfoSource: ClientInfoSource | undefined;
-  if (session.platform === "unknown" || !connectionEmitted) {
-    clientInfo = ex.client;
-    if (clientInfo?.name) clientInfoSource = "envelope";
-    if (!clientInfo?.name) {
+  // — the first product token of the request's User-Agent (#142). Computed
+  // at most once per call and only while needed: for the Codex `threadId`
+  // key, unresolved platforms, a per-request session's dedup key and the
+  // connection event.
+  let identity: ClientIdentity | undefined;
+  const clientIdentity = (): ClientIdentity => {
+    if (identity) return identity;
+    let info = ex.client;
+    let source: ClientInfoSource | undefined = info?.name ? "envelope" : undefined;
+    if (!info?.name) {
       try {
         const fromInitialize = (
           server.server as {
@@ -171,59 +185,97 @@ function openCallContext(
           }
         )?.getClientVersion?.();
         if (fromInitialize?.name) {
-          clientInfo = fromInitialize;
-          clientInfoSource = "initialize";
+          info = fromInitialize;
+          source = "initialize";
         }
       } catch {
         // Keep whatever the envelope said.
       }
     }
-    if (!clientInfo?.name) {
+    if (!info?.name) {
       const fromUserAgent = clientFromUserAgent(headerValue(ex.requestHeaders, "user-agent"));
       if (fromUserAgent) {
-        clientInfo = fromUserAgent;
-        clientInfoSource = "user_agent";
+        info = fromUserAgent;
+        source = "user_agent";
       }
     }
-  }
+    identity = { info, source };
+    return identity;
+  };
+
+  // The conversation's key, in session-key.ts's order: Mcp-Session-Id,
+  // openai/session, vscode.conversationId, the Codex CLI's threadId, the
+  // integrator's sessionKey. Never throws for a failing sessionKey — this
+  // runs outside McpServer's own error handling.
+  const sessionKey = findSessionKey({
+    ex,
+    extra,
+    transportSessionId: callSessions.transportSessionId(),
+    clientName: () => clientIdentity().info?.name,
+    sessionKey: config.sessionKey,
+  });
+  const session = callSessions.resolve(sessionKey, ex.requestHeaders !== undefined);
 
   // Lazy platform detection — must run before the connection event is
-  // built so the event carries the resolved platform, not "unknown".
-  // HTTP transports also expose request headers (v1 extra.requestInfo, v2
+  // built so the event carries the resolved platform, not "unknown", and
+  // before a per-request session's dedup key, which names it. HTTP
+  // transports also expose request headers (v1 extra.requestInfo, v2
   // extra.http.req), which cover clients whose handshake identity is
   // unrecognised.
   if (session.platform === "unknown") {
     const httpHeaders = ex.requestHeaders;
     const userAgent = headerValue(httpHeaders, "user-agent");
     const origin = headerValue(httpHeaders, "origin");
-    if (clientInfo?.name || userAgent || origin) {
-      session.platform = detectPlatform({ clientName: clientInfo?.name, userAgent, origin });
+    const clientName = clientIdentity().info?.name;
+    if (clientName || userAgent || origin) {
+      session.platform = detectPlatform({ clientName, userAgent, origin });
     }
   }
 
-  // Emit deferred connection event on the first tool call for this session.
-  // Deferred from connect() so that OpenAI's per-tool-call reconnects don't
-  // spam a connection event for every tool call in the same conversation.
-  if (!connectionEmitted) {
+  // The wire protocol version the client sends on every Streamable HTTP
+  // request (allowlisted in `_requestInfo` as well). Only a date-shaped
+  // value is stored: a Streamable HTTP transport rejects anything else,
+  // a custom one may not, and the column is not a place for free text.
+  const protocolVersion = protocolVersionHeader(
+    headerValue(ex.requestHeaders, "mcp-protocol-version"),
+  );
+
+  // The connection event: once per session — deferred from connect() so
+  // that OpenAI's per-tool-call reconnects don't spam one per tool call in
+  // the same conversation. A `per_request` session is one call, so its
+  // connection event would be one per call; it is emitted once per process
+  // per client instead (#144, decision C), keyed by what the event says —
+  // with the identity computed before the check, which needs it. `get`, not
+  // `has`: a hit refreshes the mark's recency, so an active conversation is
+  // never aged out of the dedup by newer ones.
+  const connectionKey =
+    session.sessionSource === "per_request"
+      ? dedupKey(
+          config.apiKey,
+          perRequestConnectionKey(
+            session.platform,
+            clientIdentity().info,
+            protocolVersion,
+            config.intent.enabled,
+          ),
+        )
+      : dedupKey(config.apiKey, session.sessionId);
+  if (emittedConnections.get(connectionKey) !== true) {
     emittedConnections.set(connectionKey, true);
+    const { info, source } = clientIdentity();
     const connectionEvent = buildConnectionEvent(
       {
         traceId: generateTraceId(),
         sessionId: session.sessionId,
         platform: session.platform,
         sdkVersion,
+        sessionSource: session.sessionSource,
       },
       {
-        // The wire protocol version the client sends on every Streamable HTTP
-        // request (allowlisted in `_requestInfo` as well). Only a date-shaped
-        // value is stored: a Streamable HTTP transport rejects anything else,
-        // a custom one may not, and the column is not a place for free text.
-        protocolVersion: protocolVersionHeader(
-          headerValue(ex.requestHeaders, "mcp-protocol-version"),
-        ),
-        clientName: clientInfo?.name,
-        clientVersion: clientInfo?.version,
-        clientInfoSource: clientInfo?.name ? clientInfoSource : undefined,
+        protocolVersion,
+        clientName: info?.name,
+        clientVersion: info?.version,
+        clientInfoSource: info?.name ? source : undefined,
         intentEnabled: config.intent.enabled,
       },
     );
@@ -231,6 +283,29 @@ function openCallContext(
   }
 
   return { traceId: generateTraceId(), session };
+}
+
+/**
+ * The connection-event mark of key-less HTTP calls (#144): one per
+ * `(platform, client name, client version, protocol version,
+ * intent_enabled)` — everything the event records — under the project's API
+ * key (`dedupKey`). Cannot collide with a session's mark: session ids start
+ * with `ses_`.
+ */
+function perRequestConnectionKey(
+  platform: string,
+  client: ClientIdentity["info"],
+  protocolVersion: string | undefined,
+  intentEnabled: boolean,
+): string {
+  return [
+    "per_request",
+    platform,
+    client?.name ?? "",
+    client?.version ?? "",
+    protocolVersion ?? "",
+    intentEnabled ? "intent" : "",
+  ].join("\u0000");
 }
 
 /** The MCP protocol versions are dates (`2025-06-18`); anything else is not recorded (#142 review). */
@@ -253,7 +328,7 @@ function protocolVersionHeader(value: string | undefined): string | undefined {
 function wrapToolCallback(
   originalCb: (...cbArgs: unknown[]) => unknown,
   toolName: string,
-  resolveSession: (sessionKey?: string) => SessionState,
+  callSessions: CallSessions,
   server: McpServerLike,
   config: YavioConfig,
   capture: CaptureConfig,
@@ -276,7 +351,7 @@ function wrapToolCallback(
     try {
       context =
         frame?.context ??
-        openCallContext(extra, resolveSession, server, config, transport, sdkVersion);
+        openCallContext(extra, callSessions, server, config, transport, sdkVersion);
     } catch {
       // YAVIO-1100: instrumentation failed, the original call still runs.
       return originalCb(...cbArgs);
@@ -328,6 +403,7 @@ function wrapToolCallback(
           userId: session.userId ?? undefined,
           platform: session.platform,
           sdkVersion,
+          sessionSource: session.sessionSource,
         },
         {
           toolName,
@@ -362,6 +438,12 @@ function wrapToolCallback(
               endpoint: config.endpoint,
               traceId: store.traceId,
               sessionId: store.session.sessionId,
+              // The React SDK stamps it on the widget's events (#144), so a
+              // per-request session's widget rows are excluded like its
+              // server rows. A label, never a key.
+              ...(store.session.sessionSource
+                ? { sessionSource: store.session.sessionSource }
+                : {}),
             };
           }
         } catch {
@@ -386,6 +468,7 @@ function wrapToolCallback(
           userId: session.userId ?? undefined,
           platform: session.platform,
           sdkVersion,
+          sessionSource: session.sessionSource,
         },
         {
           toolName,
@@ -467,8 +550,8 @@ export interface ExistingProxy<T = object> {
  * The resolved options that shape what a proxy captures — everything but the
  * endpoint and key, which are compared on their own — as stable JSON (keys
  * sorted at every level), so two wraps with the same options agree whatever
- * the order they were written in. A function option (`intent.fallback`) is
- * reduced to its presence. `shutdownTimeoutMs` is not part of it: it shapes
+ * the order they were written in. A function option (`intent.fallback`,
+ * `sessionKey`) is reduced to its presence. `shutdownTimeoutMs` is not part of it: it shapes
  * the process-level drain, not what a proxy captures.
  */
 const fingerprints = new WeakMap<YavioConfig, string>();
@@ -496,6 +579,9 @@ export function configFingerprint(config: YavioConfig): string {
       tools: config.tools,
       serverOnly: config.serverOnly,
       intent: config.intent,
+      // Its presence (#144): a re-wrap that adds or drops it is a re-wrap
+      // with other options.
+      sessionKey: config.sessionKey,
     }),
   );
   fingerprints.set(config, fingerprint);
@@ -679,6 +765,7 @@ export function createProxy<T extends McpServerLike>(
         userId: context.session.userId ?? undefined,
         platform: context.session.platform,
         sdkVersion,
+        sessionSource: context.session.sessionSource,
       },
       {
         toolName,
@@ -732,7 +819,7 @@ export function createProxy<T extends McpServerLike>(
     try {
       frame = {
         toolName,
-        context: openCallContext(extra, resolveSession, server, config, transport, sdkVersion),
+        context: openCallContext(extra, callSessions, server, config, transport, sdkVersion),
         event: null,
       };
     } catch {
@@ -856,38 +943,49 @@ export function createProxy<T extends McpServerLike>(
   /**
    * Resolve the session for the current tool call.
    *
-   * If a session key is available (MCP session ID, OpenAI session, or transport
-   * session ID), derives a deterministic Yavio session ID from it so that any
-   * server instance processing the same key produces the same ID, and returns
-   * that conversation's own state. Without a key: the connection's session.
+   * With a key (session-key.ts: Mcp-Session-Id, OpenAI's session, VS Code's
+   * conversation, the Codex CLI's thread, the integrator's `sessionKey`),
+   * derives a deterministic Yavio session ID from it so that any server
+   * instance processing the same key produces the same ID, and returns that
+   * conversation's own state — a built-in key through `deriveSessionId()`,
+   * the integrator's through the keyed `deriveCustomSessionId()`. Without
+   * one: the connection's session, labelled `per_request` on an HTTP
+   * request (on a per-request host it lives for one request) and
+   * `connection` otherwise.
    */
-  const resolveSession = (sessionKey?: string): SessionState => {
-    const key =
-      sessionKey ??
-      (currentMcpTransport && typeof currentMcpTransport.sessionId === "string"
-        ? (currentMcpTransport.sessionId as string)
-        : undefined);
-    if (!key) {
-      activeSession = session;
-      return session;
-    }
+  const callSessions: CallSessions = {
+    transportSessionId: () =>
+      currentMcpTransport && typeof currentMcpTransport.sessionId === "string"
+        ? currentMcpTransport.sessionId
+        : undefined,
+    resolve: (key, http) => {
+      if (!key) {
+        session.sessionSource = http ? "per_request" : "connection";
+        activeSession = session;
+        return session;
+      }
 
-    const sessionId = deriveSessionId(key);
-    const known = sessions.get(sessionId); // a hit counts as use
-    if (known) {
-      activeSession = known;
-      return known;
-    }
-    const state: SessionState = {
-      sessionId,
-      userId: null,
-      userTraits: {},
-      platform: session.platform,
-      stepSequence: 0,
-    };
-    sessions.set(sessionId, state);
-    activeSession = state;
-    return state;
+      const sessionId =
+        key.source === "custom"
+          ? deriveCustomSessionId(config.apiKey, key.key)
+          : deriveSessionId(key.key);
+      const known = sessions.get(sessionId); // a hit counts as use
+      if (known) {
+        activeSession = known;
+        return known;
+      }
+      const state: SessionState = {
+        sessionId,
+        userId: null,
+        userTraits: {},
+        platform: session.platform,
+        stepSequence: 0,
+        sessionSource: key.source,
+      };
+      sessions.set(sessionId, state);
+      activeSession = state;
+      return state;
+    },
   };
 
   // `tool()` exists on MCP SDK v1 only; v2 (`@modelcontextprotocol/server`)
@@ -930,6 +1028,8 @@ export function createProxy<T extends McpServerLike>(
         sessionId: (activeSession ?? session).sessionId,
         sdkVersion,
         platform: (activeSession ?? session).platform,
+        // No session_source (#144 review round 1): ingest writes
+        // tool_discovery to tool_registry, which keeps no session fields.
       },
       { toolName, description: description?.slice(0, MAX_DISCOVERY_DESCRIPTION), inputSchema },
     );
@@ -974,7 +1074,7 @@ export function createProxy<T extends McpServerLike>(
           callback: wrapToolCallback(
             handler as (...cbArgs: unknown[]) => unknown,
             name,
-            resolveSession,
+            callSessions,
             server,
             config,
             resolveToolCapture(config, name),
@@ -1021,7 +1121,7 @@ export function createProxy<T extends McpServerLike>(
           args[cbIndex] = wrapToolCallback(
             originalCb,
             toolName,
-            resolveSession,
+            callSessions,
             server,
             config,
             resolveToolCapture(config, toolName),
@@ -1093,7 +1193,7 @@ export function createProxy<T extends McpServerLike>(
             args[cbIndex] = wrapToolCallback(
               originalCb,
               toolName,
-              resolveSession,
+              callSessions,
               server,
               config,
               resolveToolCapture(config, toolName),
@@ -1139,6 +1239,9 @@ export function createProxy<T extends McpServerLike>(
               clientName: undefined, // filled in after initialize
             }),
             stepSequence: 0,
+            // Derived from the transport's session: say so. A random one is
+            // labelled by the first request that falls back to it (#144).
+            sessionSource: sessionIdFromTransport ? "mcp_session_id" : undefined,
           };
           activeSession = null;
 

@@ -70,6 +70,9 @@ function buildCtx(store: RequestStore): EventContext {
     userId: store.session.userId ?? undefined,
     platform: store.session.platform,
     sdkVersion: store.sdkVersion,
+    // The call's session, so identify/step/track/conversion say how it was
+    // derived like the call's tool_call does (#144).
+    sessionSource: store.session.sessionSource,
   };
 }
 

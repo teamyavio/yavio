@@ -1,4 +1,5 @@
 import type { BaseEvent } from "@yavio/shared/events";
+import { widgetSessionSource } from "./extract.js";
 import type { WidgetConfig } from "./types.js";
 
 type Enqueue = (events: BaseEvent[]) => void;
@@ -17,6 +18,7 @@ function baseFields(
     event_type: eventType as BaseEvent["event_type"],
     trace_id: config.traceId,
     session_id: config.sessionId,
+    session_source: widgetSessionSource(config.sessionSource),
     timestamp: new Date().toISOString(),
     source: "widget",
     ...extra,

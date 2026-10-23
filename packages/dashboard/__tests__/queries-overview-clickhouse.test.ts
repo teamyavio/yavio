@@ -107,5 +107,47 @@ describe.skipIf(!url)("overview KPIs on a real ClickHouse (#142)", () => {
     const byLabel = Object.fromEntries(kpis.map((k) => [k.label, k.value]));
     expect(byLabel.Sessions).toBe(2);
     expect(byLabel.Invocations).toBe(3);
+    // Rows from an SDK before 0.5.4 (no session_source): no hint.
+    expect(kpis.find((k) => k.label === "Sessions")?.hint).toBeUndefined();
+  });
+
+  it("leaves per_request sessions out of Sessions and counts their calls in the hint (#144)", async () => {
+    // One client without a session key on a per-request host: three calls,
+    // three one-call sessions, one connection row for the process. One
+    // keyed conversation of two calls next to it.
+    const perRequestProject = `${project}-pr`;
+    const rows = [
+      {
+        event_type: "connection",
+        event_name: null,
+        session_id: "s-pr-1",
+        session_source: "per_request",
+        timestamp: day(-1, "09:00:00.000"),
+      },
+      { session_id: "s-pr-1", session_source: "per_request", timestamp: day(-1, "09:00:01.000") },
+      { session_id: "s-pr-2", session_source: "per_request", timestamp: day(-1, "09:00:02.000") },
+      { session_id: "s-pr-3", session_source: "per_request", timestamp: day(-1, "09:00:03.000") },
+      {
+        event_type: "connection",
+        event_name: null,
+        session_id: "s-keyed",
+        session_source: "custom",
+        timestamp: day(-1, "10:00:00.000"),
+      },
+      { session_id: "s-keyed", session_source: "custom", timestamp: day(-1, "10:00:01.000") },
+      { session_id: "s-keyed", session_source: "custom", timestamp: day(-1, "10:00:02.000") },
+    ];
+    await insert(rows.map((r) => ({ ...r, project_id: perRequestProject })));
+
+    const kpis = await q.queryOverviewKPIs({
+      workspaceId: ws,
+      projectId: perRequestProject,
+      from: day(-7, "00:00:00.000"),
+      to: day(1, "00:00:00.000"),
+    });
+    const sessions = kpis.find((k) => k.label === "Sessions");
+    expect(sessions?.value).toBe(1);
+    expect(sessions?.hint).toBe("3 calls from clients without a session key");
+    expect(kpis.find((k) => k.label === "Invocations")?.value).toBe(5);
   });
 });

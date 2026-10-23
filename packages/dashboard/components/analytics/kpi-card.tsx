@@ -12,6 +12,8 @@ interface KPICardProps {
   format: "number" | "percent" | "latency" | "currency";
   currency?: string;
   invertTrend?: boolean;
+  /** A short muted note under the trend row, e.g. what the value leaves out (#144). */
+  hint?: string;
 }
 
 function formatValue(value: number, format: KPICardProps["format"], currency?: string): string {
@@ -34,6 +36,7 @@ export function KPICard({
   format,
   currency,
   invertTrend,
+  hint,
 }: KPICardProps) {
   const formattedValue = formatValue(value, format, currency);
 
@@ -81,6 +84,7 @@ export function KPICard({
             </span>
           )}
         </div>
+        {hint && <p className="mt-1 text-xs leading-snug text-muted-foreground">{hint}</p>}
       </CardContent>
     </Card>
   );

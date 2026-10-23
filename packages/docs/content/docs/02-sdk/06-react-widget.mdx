@@ -51,7 +51,7 @@ The server-side `withYavio()` proxy automatically injects widget configuration i
 After each tool handler returns, the proxy:
 
 1. Mints a short-lived JWT via `POST /v1/widget-tokens`
-2. Injects `{ token, endpoint, traceId, sessionId }` into the result's `_meta.yavio` field
+2. Injects `{ token, endpoint, traceId, sessionId, sessionSource }` into the result's `_meta.yavio` field — `sessionSource` (SDK 0.5.4) is how the server derived the session, and the widget stamps it on its events so they count for their session the way the server's do
 
 The project API key never reaches the widget — only the short-lived JWT is forwarded.
 

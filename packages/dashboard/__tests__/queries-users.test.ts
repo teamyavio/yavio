@@ -149,6 +149,32 @@ describe.skipIf(!url)("user queries on a real ClickHouse (#89)", () => {
     expect(users.map((u) => u.userId).sort()).toEqual(["anna", "ben", "dora", "sub-cleo"]);
   });
 
+  it("totalSessions leaves per_request sessions out; the user and their events still count (#144)", async () => {
+    // Erik's client sends no session key to a per-request host: three calls,
+    // three one-call sessions. One keyed conversation besides, and one
+    // session from an SDK before 0.5.4 (no session_source).
+    const other = `${project}-pr`;
+    const rows = [
+      { session_id: "e-pr-1", session_source: "per_request", timestamp: day(-2, "08:00:00.000") },
+      { session_id: "e-pr-2", session_source: "per_request", timestamp: day(-2, "08:01:00.000") },
+      { session_id: "e-pr-3", session_source: "per_request", timestamp: day(-2, "08:02:00.000") },
+      { session_id: "e-keyed", session_source: "custom", timestamp: day(-2, "09:00:00.000") },
+      { session_id: "e-old", timestamp: day(-2, "10:00:00.000") },
+    ];
+    await insert(rows.map((r) => ({ ...r, user_id: "erik", project_id: other })));
+
+    const { users, total } = await q.queryUserList(
+      { workspaceId: ws, projectId: other, from: day(-60), to: day(1) },
+      1,
+      50,
+    );
+    expect(total).toBe(1);
+    expect(users[0]?.userId).toBe("erik");
+    expect(Number(users[0]?.totalSessions)).toBe(2);
+    expect(Number(users[0]?.totalEvents)).toBe(5);
+    expect(Number(users[0]?.totalToolCalls)).toBe(5);
+  });
+
   it("counts a user seen only 14 months ago and again today as new", async () => {
     const points = await q.queryNewVsReturning(
       ctx(day(-1, "00:00:00.000"), day(1, "00:00:00.000")),
@@ -418,6 +444,56 @@ describe.skipIf(!url)("user queries on a real ClickHouse (#89)", () => {
         "day",
       );
       expect(points.map((pt) => Number(pt.dau))).toEqual([0]);
+    });
+
+    it("never maps a per_request session: one caller's identify keys nobody else's calls (#144)", async () => {
+      // A long-lived MCP SDK v1 1.24/1.25 server that reuses one stateless
+      // transport puts every key-less caller into one per_request session.
+      const p = scoped("per-request");
+      await p.insert([
+        { ...identify("ann", "pr-shared", day(-2, "09:00:00.000")), session_source: "per_request" },
+        {
+          session_id: "pr-shared",
+          session_source: "per_request",
+          timestamp: day(-2, "09:01:00.000"),
+        },
+        {
+          session_id: "pr-shared",
+          session_source: "per_request",
+          timestamp: day(-2, "09:02:00.000"),
+        },
+        // A keyed session is mapped as before.
+        { ...identify("bea", "conv-bea", day(-2, "10:00:00.000")), session_source: "custom" },
+        { session_id: "conv-bea", session_source: "custom", timestamp: day(-2, "10:01:00.000") },
+      ]);
+      const { users, total } = await q.queryUserList(p.ctx(day(-60), day(1)), 1, 50);
+      expect(
+        users.map((u) => [u.userId, Number(u.totalToolCalls), Number(u.totalEvents)]).sort(),
+      ).toEqual([
+        // ann: her own identify row only, by its user_id.
+        ["ann", 0, 1],
+        ["bea", 1, 2],
+      ]);
+      expect(total).toBe(2);
+
+      // The invocation feed's lookup and get_schema's recipe follow the same rule.
+      const { querySessionUsers } = await import("@/lib/queries/session-users");
+      const bySession = await querySessionUsers({ workspaceId: ws, projectId: p.projectId }, [
+        "pr-shared",
+        "conv-bea",
+      ]);
+      expect(Object.fromEntries(bySession)).toEqual({ "conv-bea": "bea" });
+      const { USER_KEY_SQL } = await import("@/lib/mcp/schema-doc");
+      const { validateFreeQuery } = await import("@/lib/mcp/sql-guard");
+      const { queryAnalytics } = await import("@/lib/clickhouse/analytics-client");
+      const recipe = await queryAnalytics<{ person: string | null; tool_calls: string }>({
+        workspaceId: ws,
+        projectId: p.projectId,
+        query: validateFreeQuery(USER_KEY_SQL),
+      });
+      expect(
+        Object.fromEntries(recipe.map((r) => [String(r.person), Number(r.tool_calls)])),
+      ).toEqual({ bea: 1, null: 2 });
     });
 
     it("get_schema's run_query recipe passes the SQL guard and keys calls like the dashboard's windowed counts", async () => {

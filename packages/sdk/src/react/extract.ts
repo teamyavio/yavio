@@ -36,13 +36,36 @@ export function extractWidgetConfig(
     typeof candidate.traceId === "string" &&
     typeof candidate.sessionId === "string"
   ) {
+    const sessionSource = widgetSessionSource(candidate.sessionSource);
     return {
       token: candidate.token,
       endpoint: candidate.endpoint,
       traceId: candidate.traceId,
       sessionId: candidate.sessionId,
+      ...(sessionSource !== undefined ? { sessionSource } : {}),
     };
   }
 
   return null;
+}
+
+/**
+ * The longest `session_source` ingest's schema accepts
+ * (`MAX_SESSION_SOURCE_LENGTH` in @yavio/shared, not imported: the widget
+ * bundle stays free of the schema module; a test keeps the two equal).
+ */
+export const WIDGET_MAX_SESSION_SOURCE_LENGTH = 32;
+
+/**
+ * A `sessionSource` the widget may stamp (#144): a non-empty string within
+ * the schema's bound, else undefined — a longer value would get every widget
+ * event rejected. Which values are known is ingest's business (it NULLs the
+ * rest).
+ */
+export function widgetSessionSource(value: unknown): string | undefined {
+  return typeof value === "string" &&
+    value !== "" &&
+    value.length <= WIDGET_MAX_SESSION_SOURCE_LENGTH
+    ? value
+    : undefined;
 }

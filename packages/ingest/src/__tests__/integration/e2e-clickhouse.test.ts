@@ -204,6 +204,50 @@ describe("E2E: Ingest API → ClickHouse", () => {
     await batchWriter.shutdown();
   });
 
+  it("session_source: a known value as sent, NULL when unknown or not sent (#144, migration 0022)", async () => {
+    await buildApp();
+    const ids = [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+    const r = await app.inject({
+      method: "POST",
+      url: "/v1/events",
+      headers: { authorization: `Bearer ${TEST_KEY}` },
+      payload: {
+        events: [
+          makeEvent({
+            event_id: ids[0],
+            event_type: "tool_call",
+            event_name: "lookup",
+            session_source: "per_request",
+          }),
+          makeEvent({
+            event_id: ids[1],
+            event_type: "connection",
+            client_name: "codex-mcp-client",
+            session_source: "codex_thread",
+          }),
+          makeEvent({ event_id: ids[2], event_type: "track", session_source: "custom" }),
+          // A newer SDK's value this ingest does not know: NULL, the event kept.
+          makeEvent({ event_id: ids[3], event_type: "track", session_source: "future_source" }),
+          // An SDK before 0.5.4 sends no field at all.
+          makeEvent({ event_id: ids[4], event_type: "tool_call", event_name: "lookup" }),
+        ],
+      },
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().accepted).toBe(5);
+    await batchWriter.flush();
+
+    const sourceOf = async (id: string) =>
+      (await queryEvents(`event_id = '${id}'`))[0]?.session_source;
+    expect(await sourceOf(ids[0])).toBe("per_request");
+    expect(await sourceOf(ids[1])).toBe("codex_thread");
+    expect(await sourceOf(ids[2])).toBe("custom");
+    expect(await sourceOf(ids[3])).toBeNull();
+    expect(await sourceOf(ids[4])).toBeNull();
+
+    await batchWriter.shutdown();
+  });
+
   it("identify event preserves user_id and PII-strips user_traits", async () => {
     await buildApp();
     const eventId = randomUUID();
@@ -312,6 +356,8 @@ describe("E2E: Ingest API → ClickHouse", () => {
             device_pixel_ratio: 2.0,
             device_touch: 1,
             connection_type: "wifi",
+            // The server session's source, stamped by a 0.5.4 widget (#144).
+            session_source: "per_request",
           }),
         ],
       },
@@ -326,6 +372,7 @@ describe("E2E: Ingest API → ClickHouse", () => {
     const row = rows[0];
     expect(row.event_type).toBe("widget_render");
     expect(row.source).toBe("widget");
+    expect(row.session_source).toBe("per_request");
     expect(row.viewport_width).toBe(1920);
     expect(row.viewport_height).toBe(1080);
     expect(row.device_pixel_ratio).toBeCloseTo(2.0, 1);

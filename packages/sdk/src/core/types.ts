@@ -1,3 +1,8 @@
+import type { SessionSource } from "@yavio/shared/events";
+
+/** How the SDK derived a session id (#144); the list lives in @yavio/shared. */
+export type { SessionSource };
+
 /** Resolved SDK configuration after discovery. */
 export interface YavioConfig {
   apiKey: string;
@@ -29,10 +34,57 @@ export interface YavioConfig {
    * (#142 review round 3).
    */
   shutdownTimeoutMsSource: ShutdownTimeoutSource;
+  /**
+   * The integrator's session key for calls that carry no key the SDK knows
+   * (#144), when one was given and is a function. Code option only.
+   */
+  sessionKey?: SessionKeyFunction;
 }
 
 /** The configuration source `shutdownTimeoutMs` was read from. */
 export type ShutdownTimeoutSource = "option" | "env" | "file" | "default";
+
+/**
+ * What the host's auth middleware attached to the request (`req.auth`), as
+ * the MCP SDK passes it on: v1 `extra.authInfo`, v2 `ctx.http.authInfo`.
+ * The fields are the MCP SDK's `AuthInfo`; what `extra` holds is the
+ * integrator's own layout.
+ */
+export interface SessionKeyAuthInfo {
+  readonly token?: string;
+  /** The OAuth client — shared by every user of a client app: never a session key on its own. */
+  readonly clientId?: string;
+  readonly scopes?: readonly string[];
+  readonly expiresAt?: number;
+  readonly extra?: Readonly<Record<string, unknown>>;
+  readonly [key: string]: unknown;
+}
+
+/**
+ * What `sessionKey` receives for one tool call (#144) — the same shape on
+ * MCP SDK v1 and v2.
+ */
+export interface SessionKeyRequest {
+  /**
+   * The HTTP request's headers, names lower-cased, a repeated header's
+   * values joined with `", "`. `{}` off HTTP (stdio, in-memory).
+   */
+  readonly headers: Readonly<Record<string, string | undefined>>;
+  /** The request `_meta`, `{}` when the client sent none. */
+  readonly meta: Readonly<Record<string, unknown>>;
+  /** What the host's auth middleware set as `req.auth`; undefined without one. */
+  readonly authInfo: SessionKeyAuthInfo | undefined;
+  /** The handler context as the MCP SDK passed it (v1 `RequestHandlerExtra`, v2 `ctx`). */
+  readonly extra: unknown;
+}
+
+/**
+ * Returns the key of the conversation a call belongs to, or undefined (or
+ * `""`) when there is none. Synchronous; called on the hot path before the
+ * tool handler, only for calls that carry no session key the SDK knows.
+ * The SDK stores a keyed hash of the value, never the value itself.
+ */
+export type SessionKeyFunction = (request: SessionKeyRequest) => string | undefined;
 
 /**
  * Per-tool overrides of the capture flags. A key that is omitted inherits the
@@ -201,6 +253,32 @@ export interface WithYavioOptions {
    * 5 s, Cloud Run 10 s, Kubernetes and ECS 30 s).
    */
   shutdownTimeoutMs?: number;
+  /**
+   * The conversation a call belongs to, for clients that send no session key
+   * the SDK knows (#144) — on a per-request host (a new McpServer per
+   * request, stateless Streamable HTTP) every such call would otherwise be a
+   * session of its own (`session_source: "per_request"`, not counted as a
+   * session). Called only when the call carries none of, in this order,
+   * `Mcp-Session-Id`, `_meta["openai/session"]`, `_meta["vscode.conversationId"]`
+   * and the Codex CLI's `_meta.threadId`:
+   *
+   * ```ts
+   * sessionKey: ({ headers }) => headers["x-conversation-id"],
+   * ```
+   *
+   * Return a CONVERSATION id: funnels, paths, the step sequence and
+   * `identify()` work per session, and a session keeps its first identified
+   * user. Never return a per-user id on its own (an auth subject would chain
+   * all of that user's conversations into one endless session), the OAuth
+   * `clientId` (shared by every user of a client app), the bearer token, a
+   * constant, or a per-request id. Synchronous, at most 1 024 characters;
+   * `undefined` or `""` means no key. A throw, a non-string, a promise or a
+   * longer string counts as no key too, with one `YAVIO-1102` warning per
+   * process. The SDK stores `ses_` + an HMAC of the value keyed with the API
+   * key, never the value. Code option only (a function); anything else logs
+   * `YAVIO-1006` once and is ignored.
+   */
+  sessionKey?: SessionKeyFunction;
 }
 
 /**
@@ -277,4 +355,11 @@ export interface SessionState {
   userTraits: Record<string, unknown>;
   platform: string;
   stepSequence: number;
+  /**
+   * How `sessionId` was derived (#144), stamped on every event of the
+   * session as `session_source`. Set when a keyed session is created; the
+   * connection's own session is labelled by the first request that falls
+   * back to it (`per_request` over HTTP, `connection` otherwise).
+   */
+  sessionSource?: SessionSource;
 }

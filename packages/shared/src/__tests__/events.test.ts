@@ -9,8 +9,10 @@ import {
   IdentifyEvent,
   IngestBatch,
   IngestEvent,
+  MAX_SESSION_SOURCE_LENGTH,
   PromptUsageEvent,
   ResourceAccessEvent,
+  SESSION_SOURCES,
   SamplingCallEvent,
   StepEvent,
   ToolCallEvent,
@@ -121,6 +123,43 @@ describe("BaseEvent", () => {
 
   it("rejects invalid timestamp", () => {
     expect(() => BaseEvent.parse(base({ event_type: "track", timestamp: "not-a-date" }))).toThrow();
+  });
+
+  it("carries session_source on every event type as a short string, not an enum (#144)", () => {
+    for (const value of SESSION_SOURCES) {
+      for (const parse of [ToolCallEvent, ConnectionEvent, TrackEvent, ToolDiscoveryEvent]) {
+        const event_type = parse.shape.event_type.value;
+        const extra = event_type === "tool_discovery" ? { tool_name: "x" } : {};
+        const result = parse.parse(base({ event_type, session_source: value, ...extra }));
+        expect(result.session_source).toBe(value);
+      }
+    }
+    // A value this schema does not know yet (a newer SDK) still passes: ingest
+    // NULLs it, an enum would have rejected the whole event.
+    expect(
+      IngestEvent.parse(base({ event_type: "track", session_source: "future_source" }))
+        .session_source,
+    ).toBe("future_source");
+    expect(BaseEvent.parse(base({ event_type: "track" })).session_source).toBeUndefined();
+    expect(() =>
+      BaseEvent.parse(
+        base({ event_type: "track", session_source: "x".repeat(MAX_SESSION_SOURCE_LENGTH + 1) }),
+      ),
+    ).toThrow();
+    expect(() => BaseEvent.parse(base({ event_type: "track", session_source: 1 }))).toThrow();
+  });
+
+  it("lists every session source the SDK emits, each within the schema's bound", () => {
+    expect([...SESSION_SOURCES]).toEqual([
+      "mcp_session_id",
+      "openai_session",
+      "vscode_conversation",
+      "codex_thread",
+      "custom",
+      "connection",
+      "per_request",
+    ]);
+    expect(SESSION_SOURCES.every((s) => s.length <= MAX_SESSION_SOURCE_LENGTH)).toBe(true);
   });
 });
 
