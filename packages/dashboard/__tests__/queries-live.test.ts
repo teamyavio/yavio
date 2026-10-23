@@ -694,5 +694,22 @@ describe("live queries (#148)", () => {
       expect(call.query).not.toContain("event_type = {eventType:String}");
       expect(call.params.eventType).toBeUndefined();
     });
+
+    it("an empty eventType — `?eventType=` — is no filter: the same queries as an undefined one, the connection subquery and the jump included", async () => {
+      const queries = async (eventType: string | undefined) => {
+        mockQueryAnalytics.mockClear();
+        cappedPages({ ingestedAt: "2025-01-01 12:00:35.000", eventId: "n" }); // every page, then the jump
+        await pollLive(ctx, cursor, eventType);
+        return mockQueryAnalytics.mock.calls.map(([call]) => call);
+      };
+      const none = await queries(undefined);
+      expect(none).toHaveLength(LIVE_MAX_PAGES + 1);
+      expect(none[0].query).toContain("argMin(event_id, (ingested_at, event_id))");
+      // Before the fix "" passed the type filter's truthiness check as no
+      // filter but `connectionFilter` took it for a type other than
+      // `connection` and left the subquery out: every connection row of a
+      // session was shown.
+      expect(await queries("")).toEqual(none);
+    });
   });
 });

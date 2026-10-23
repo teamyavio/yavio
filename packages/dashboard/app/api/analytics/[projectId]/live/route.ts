@@ -21,7 +21,8 @@ export const GET = withAnalyticsAuth("viewer")(async (request, ctx) => {
   }
 
   const url = new URL(request.url);
-  const eventType = url.searchParams.get("eventType") ?? undefined;
+  // An empty `?eventType=` is no filter, like a missing one (#148 review round 10).
+  const eventType = url.searchParams.get("eventType") || undefined;
 
   connectionCounts.set(userId, currentCount + 1);
 

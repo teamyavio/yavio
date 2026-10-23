@@ -340,6 +340,11 @@ export async function pollLive(
   cursor: LiveCursor,
   eventType?: string,
 ): Promise<LivePoll> {
+  // `?eventType=` arrives as "": no filter, as with no parameter. Every
+  // query below takes the type from here; before #148 review round 10 the
+  // type filters read "" as none and `connectionFilter` as a type other
+  // than `connection`, leaving the one-connection-per-session subquery out.
+  const type = eventType || undefined;
   // The sessions whose connection row was shown — by earlier polls, while
   // the window still covers it, and by this one — with that row's block.
   const connections = new Map<string, { ingestedAt: string; ms: number }>(
@@ -365,7 +370,7 @@ export async function pollLive(
   let full = false;
 
   for (let page = 0; page < LIVE_MAX_PAGES; page++) {
-    const rows = await readPage(ctx, { start, lower, stamps }, eventType);
+    const rows = await readPage(ctx, { start, lower, stamps }, type);
     for (const row of rows) {
       last = { ingestedAt: row.ingestedAt, eventId: row.eventId };
       const before = read.get(row.eventId);
@@ -416,7 +421,7 @@ export async function pollLive(
     // window are never shown; the unread blocks inside the window come
     // with the next poll. Within one window the walk goes on next poll
     // instead: a burst stored at one stamp is walked out, not cut.
-    const newest = await latestCursor(ctx, eventType);
+    const newest = await latestCursor(ctx, type);
     if (ingestedAtMs(newest.ingestedAt) > ingestedAtMs(next.ingestedAt) + LIVE_OVERLAP_MS) {
       next = newest;
       resume = undefined;
