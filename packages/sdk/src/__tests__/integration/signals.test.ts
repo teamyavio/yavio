@@ -1467,6 +1467,7 @@ describe("loss accounting (#148)", () => {
       // Before the fix the cycle's line re-reported the 400's two events:
       // "Shutdown deadline of 4000 ms reached — 2 events not delivered".
       expect(lines1205()).toHaveLength(0);
+      expect(exitHooks()).toHaveLength(1);
       exitHooks()[0]?.call(process, 0);
       expect(lines1205()).toHaveLength(0);
       await b.shutdown();
@@ -1573,6 +1574,7 @@ describe("loss accounting (#148)", () => {
           // The late keys' tool_call batches were answered: nothing pending,
           // nothing left for the exit hook.
           await vi.waitFor(() => expect(ingest.responded).toBe(4));
+          expect(exitHooks()).toHaveLength(1);
           exitHooks()[0]?.call(process, 0);
           expect(lines1205()).toHaveLength(2);
         });
@@ -1606,6 +1608,7 @@ describe("loss accounting (#148)", () => {
           expect(lines1205()[0]).toContain("Shutdown deadline of 600 ms");
           expect(lines1205()[0]).toContain("2 events not delivered");
           expect(lines1205()[0]).not.toContain("shutdown() deadline");
+          expect(exitHooks()).toHaveLength(1);
           exitHooks()[0]?.call(process, 0);
           expect(lines1205()).toHaveLength(1); // nothing left unreported
         } finally {
@@ -1842,6 +1845,7 @@ describe("loss accounting (#148)", () => {
     expect(lines1205()).toHaveLength(3);
     expect(lines1205()[0]).toContain("2 events not delivered"); // connection + call
     expect(lines1205()[2]).toContain("1 events not delivered"); // the connection is once per key
+    expect(exitHooks()).toHaveLength(1);
     exitHooks()[0]?.call(process, 0);
     expect(lines1205()).toHaveLength(3);
   });
