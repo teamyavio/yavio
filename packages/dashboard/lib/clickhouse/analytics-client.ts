@@ -91,7 +91,33 @@ export async function queryAnalytics<T>(options: AnalyticsQueryOptions<T>): Prom
     // way to correct a bad column name instead of retrying forever.
     const detail = message.slice(0, 600);
 
-    if (message.includes("TIMEOUT") || message.includes("timeout")) {
+    // @clickhouse/client lifts the `Code: NNN` prefix of a server error into
+    // a `code` field and its `(TYPE_NAME)` suffix into `type`, so the message
+    // carries neither; network failures use non-numeric codes like
+    // ECONNREFUSED.
+    const { code: clientCode, type: clientType } = (err ?? {}) as {
+      code?: unknown;
+      type?: unknown;
+    };
+    const numericCode =
+      typeof clientCode === "number"
+        ? clientCode
+        : typeof clientCode === "string" && /^\d+$/.test(clientCode)
+          ? Number(clientCode)
+          : Number(/Code:\s*(\d+)/.exec(message)?.[1] ?? Number.NaN);
+    const fromServer = Number.isFinite(numericCode);
+
+    // A query cut by max_execution_time is 159 TIMEOUT_EXCEEDED with the text
+    // "Timeout exceeded: elapsed … ms, maximum: … ms" — matched on the code
+    // and type, never on the text (#157). The text match is for errors
+    // without a server code: the client's own request_timeout ("Timeout
+    // error." in @clickhouse/client). A server error that merely mentions a
+    // timeout (209 SOCKET_TIMEOUT, a column named `timeout`) is not one.
+    if (
+      numericCode === 159 ||
+      clientType === "TIMEOUT_EXCEEDED" ||
+      (!fromServer && /timeout/i.test(message))
+    ) {
       throw new AnalyticsQueryError(
         ErrorCode.DASHBOARD.ANALYTICS_QUERY_TIMEOUT,
         "Analytics query timed out. Please try a smaller date range.",
@@ -100,44 +126,46 @@ export async function queryAnalytics<T>(options: AnalyticsQueryOptions<T>): Prom
       );
     }
 
-    // Did ClickHouse parse the request and reject it (unknown column, bad
-    // function, budget overrun)? That is permanent — telling the caller to
-    // "try again later" sends a model into a retry loop on a query that can
-    // never succeed. @clickhouse/client lifts the `Code: NNN` prefix into a
-    // numeric `code` field, so the message alone does not always carry it;
-    // network failures use non-numeric codes like ECONNREFUSED.
-    const clientCode = (err as { code?: unknown })?.code;
-    const numericCode =
-      typeof clientCode === "number"
-        ? clientCode
-        : typeof clientCode === "string" && /^\d+$/.test(clientCode)
-          ? Number(clientCode)
-          : Number(/Code:\s*(\d+)/.exec(message)?.[1] ?? Number.NaN);
+    // 241 MEMORY_LIMIT_EXCEEDED: the query's own limit or the server's total.
+    // Either way the same query over the same range needs the same memory, so
+    // retry advice is wrong and narrowing is what works (#157). 422, not 400:
+    // the request is valid, it is too big to compute; not 5xx: nothing is
+    // down, and a retry is not the fix.
+    if (numericCode === 241 || clientType === "MEMORY_LIMIT_EXCEEDED") {
+      throw new AnalyticsQueryError(
+        ErrorCode.DASHBOARD.ANALYTICS_QUERY_MEMORY_EXCEEDED,
+        "This query needs more memory than the database allows. Narrow the date range or simplify the query.",
+        422,
+        detail,
+      );
+    }
 
     // Server-side codes that ARE worth retrying: overload and resource
     // pressure, not a malformed query. Misclassifying these would tell the
     // dashboard's own analytics routes that a transient spike is permanent.
+    // (159 and 241 are query limits, answered above.)
     const TRANSIENT_SERVER_CODES = new Set([
-      159, // TIMEOUT_EXCEEDED
       164, // READONLY
       201, // QUOTA_EXCEEDED
       202, // TOO_MANY_SIMULTANEOUS_QUERIES
       203, // NO_FREE_CONNECTION
       209, // SOCKET_TIMEOUT
       210, // NETWORK_ERROR
-      241, // MEMORY_LIMIT_EXCEEDED
       252, // TOO_MANY_PARTS
       373, // SESSION_IS_LOCKED
       425, // SYSTEM_ERROR
     ]);
 
-    const rejectedByServer =
-      Number.isFinite(numericCode) && !TRANSIENT_SERVER_CODES.has(numericCode);
+    // Did ClickHouse parse the request and reject it (unknown column, bad
+    // function, budget overrun)? That is permanent — telling the caller to
+    // "try again later" sends a model into a retry loop on a query that can
+    // never succeed.
+    const rejectedByServer = fromServer && !TRANSIENT_SERVER_CODES.has(numericCode);
 
     if (rejectedByServer) {
       throw new AnalyticsQueryError(
-        // Its own code: 3406 is catalogued as 503 "ClickHouse unreachable",
-        // which is the opposite condition, and reusing it would have made the
+        // Its own code: 3406 is catalogued as "ClickHouse unavailable", which
+        // is the opposite condition, and reusing it would have made the
         // dashboard's alerting unable to tell an outage from a bad query.
         ErrorCode.DASHBOARD.ANALYTICS_QUERY_REJECTED,
         "The database rejected this query. Retrying unchanged will fail the same way.",
