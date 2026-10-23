@@ -83,7 +83,7 @@ All SDK error codes are prefixed with `YAVIO-1` and logged to stderr.
 |------|-------------|
 | `YAVIO-1300` | Event validation failed |
 | `YAVIO-1301` | PII stripping encountered an error |
-| `YAVIO-1302` | `.identify()` called with conflicting user ID — second ID ignored |
+| `YAVIO-1302` | `.identify()` called with conflicting user ID — second ID ignored, no event sent. Checked in each server process, best effort: another instance of a stateless fleet does not see the first ID |
 | `YAVIO-1303` | `.conversion()` missing required `value` or `currency` |
 | `YAVIO-1304` | Event payload exceeds size limit |
 

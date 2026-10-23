@@ -147,7 +147,7 @@ Errors originating in the `@yavio/sdk` SDK (both server and widget entry points)
 |------|----------|---------|-------------|----------|
 | `YAVIO-1300` | warn | Event validation failed (dropped) | Event does not match expected schema. Dropped before buffering. | Fix the event payload. |
 | `YAVIO-1301` | warn | PII stripping failed (event dropped) | SDK-side PII regex threw an error. Event dropped as a safety measure. | Report the bug. Server-side PII stripping still applies to events that make it through. |
-| `YAVIO-1302` | warn | Identify userId conflict | `.identify()` called with a different `userId` than a previous call in the same session. Second call ignored. | A session can only be bound to one user. |
+| `YAVIO-1302` | warn | Identify userId conflict | `.identify()` called with a different `userId` than a previous call in the same session. Second call ignored, no `identify` event sent. Per process and best effort: the session state lives in the process's session store, so another instance of a stateless fleet, or the same process after the session was evicted, does not see the first `userId` and accepts another; the read side counts the session's events for its first identified user (#145). | A session can only be bound to one user. |
 | `YAVIO-1303` | warn | Conversion missing required fields | `.conversion()` called without `value` or `currency`. Event dropped. | Provide `value` (number) and `currency` (string). |
 | `YAVIO-1304` | warn | Event payload too large | Single event exceeds 50 KB. Dropped before buffering. | Reduce metadata size. |
 

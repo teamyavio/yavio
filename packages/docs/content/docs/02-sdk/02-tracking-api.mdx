@@ -70,9 +70,10 @@ yavio.identify(userId: string, traits?: Record<string, unknown>): void
 
 ### Behavior
 
-- The `userId` is set once per session. If you call `.identify()` again with a different ID, the second call is ignored and a `YAVIO-1302` warning is logged.
+- The `userId` is set once per session. If you call `.identify()` again with a different ID, the second call is ignored and a `YAVIO-1302` warning is logged. The check runs in each server process and is best effort: on a fleet of stateless instances, an instance that never saw the first ID accepts another one.
 - Traits are merged additively — calling `.identify("u1", { plan: "pro" })` then `.identify("u1", { company: "Acme" })` results in both traits being attached.
-- All subsequent events in the session include the `user_id` and traits.
+- An `identify` event is sent only when the user ID or the merged traits differ from the last one sent for the session (since SDK 0.5.4; before, every call sent one). Calling `.identify()` with the same ID and traits in every handler sends one event per session in each server process; a changed trait sends one more, with all the merged traits.
+- All subsequent events of the session on that server process include the `user_id`. The traits are carried by the `identify` event only.
 
 ```ts
 yavio.identify("user_42", {
@@ -85,7 +86,7 @@ See [User Identification](/docs/07-concepts/05-user-identification) for a deeper
 
 ## .step()
 
-Records a named step in a multi-step workflow. Steps are auto-numbered within a trace for funnel analysis.
+Records a named step in a multi-step workflow. Steps are numbered per session in each server process for funnel analysis.
 
 ```ts
 yavio.step(name: string, meta?: Record<string, unknown>): void
@@ -110,7 +111,7 @@ instrumented.tool("wizard", { step: z.string() }, async ({ step }) => {
 });
 ```
 
-Steps generate events with `event_type: "step"` and an auto-incrementing `step_sequence` within the trace. This enables funnel visualization in the dashboard.
+Steps generate events with `event_type: "step"` and a `step_sequence` that counts the session's steps in that server process, from 1. This enables funnel visualization in the dashboard.
 
 ## .track()
 

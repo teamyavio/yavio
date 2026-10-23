@@ -257,7 +257,8 @@ Import `yavio` and call methods inside tool handlers — context is propagated a
 ```typescript
 import { yavio } from "@yavio/sdk";
 
-// Associate events with a user
+// Associate events with a user: one identify event per session per process,
+// again only when a trait changes — safe to call in every handler
 yavio.identify("user-123", { plan: "pro" });
 
 // Record funnel steps (auto-incrementing sequence)

@@ -29,7 +29,7 @@ yavio.identify("user_42", {
 });
 ```
 
-From this point on, every event in the session includes `user_id: "user_42"` and the provided traits.
+From this point on, every event the session sends from this server process includes `user_id: "user_42"`. The traits travel on the `identify` event.
 
 ### When to call it
 
@@ -37,17 +37,17 @@ Call `.identify()` as early as possible — ideally in the first tool handler th
 
 - **Auth tool:** if your MCP server has a login or auth tool, call `.identify()` there
 - **First tool with user context:** if the AI platform passes a user ID in the tool arguments
-- **Every tool (idempotent):** calling `.identify()` with the same user ID is a no-op, so it's safe to call in every handler
+- **Every tool:** a repeat with the same user ID and traits sends nothing (since SDK 0.5.4), so it's safe to call in every handler — one `identify` event per session in each server process, and one more whenever a trait changes
 
 ## Identity rules
 
 ### Immutable user ID per session
 
-The `userId` is set once per session. If you call `.identify()` a second time with a **different** user ID, the call is ignored and a `YAVIO-1302` warning is logged.
+The `userId` is set once per session. If you call `.identify()` a second time with a **different** user ID, the call is ignored and a `YAVIO-1302` warning is logged. The check runs in each server process and is best effort: on a fleet of stateless instances, an instance that never saw the first ID accepts another one (the dashboard counts the session for its first identified user).
 
 ```ts
-yavio.identify("user_42");     // Sets user ID
-yavio.identify("user_42");     // No-op (same ID)
+yavio.identify("user_42");     // Sets user ID, sends an identify event
+yavio.identify("user_42");     // Sends nothing (same ID, same traits)
 yavio.identify("user_99");     // Ignored — YAVIO-1302 warning
 ```
 
@@ -73,6 +73,8 @@ yavio.identify("user_42", { plan: "pro" });
 // Session now has: { plan: "pro" }
 ```
 
+A call that changes a trait sends a new `identify` event with all the merged traits; a call that changes nothing sends none.
+
 ## User traits
 
 Traits are arbitrary key-value pairs attached to the user for segmentation and filtering. Common examples:
@@ -84,7 +86,7 @@ Traits are arbitrary key-value pairs attached to the user for segmentation and f
 | `role` | User role within their org |
 | `signupDate` | When the user first registered |
 
-Traits are included in `identify` events and used for cohort analysis in the dashboard.
+Traits are stored on `identify` events only: the session's other events carry the `user_id`, not the traits.
 
 <Callout type="warn">
   Avoid storing PII in traits. While the SDK strips known PII patterns (emails, phone numbers, etc.), it's best to use opaque identifiers.
