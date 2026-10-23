@@ -78,7 +78,7 @@ export function OverviewContent({ projectId }: { projectId: string }) {
       </PageHeader>
 
       {error ? (
-        <ErrorAlert message={error.message} retry={retry} />
+        <ErrorAlert error={error} retry={retry} />
       ) : !isLoading && !hasData ? (
         <EmptyState
           title="No analytics data yet"

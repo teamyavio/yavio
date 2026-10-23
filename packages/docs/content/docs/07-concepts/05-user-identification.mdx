@@ -93,10 +93,12 @@ Traits are included in `identify` events and used for cohort analysis in the das
 ## Retroactive stitching
 
 <Callout type="info">
-  Events emitted before `.identify()` keep no `user_id`. The dashboard's user metrics still count them for the right user when the platform sends a stable `subject_id` (ChatGPT does): a subject that was identified once is counted as that user, before and after. Writing the `user_id` back into stored events is planned for a future release.
+  Once a session is identified, all its events count for that user. The stored events are not rewritten: events emitted before `.identify()` keep no `user_id`, and on a fleet of stateless server instances only the instance that called `.identify()` stamps it. The dashboard stitches when it reads them.
 </Callout>
 
-In a future version, Yavio will support retroactive stitching — when `.identify()` is called, all prior events in the same session will be retroactively associated with the user ID. This enables accurate funnel analysis even when identity is established mid-session.
+- **Within the session:** every event of the session counts for the user of its first `.identify()`, the events before the call and the events of every other instance that served the conversation included. A later `.identify()` with another ID never re-attributes earlier events in the users list and a user's detail, and an event's own `user_id` is never overwritten. Counts over a date range (active users, Locations) only look at the `identify` events inside what they read (for active users, the range plus the 30 days before it): a conversation identified before that and again with another ID inside it counts for the later ID there.
+- **Across sessions:** when the platform sends a stable `subject_id` (ChatGPT does), a subject that was identified once is counted as that user in its other conversations too.
+- **Where:** the users list and detail, active users, retention, new vs returning, the Locations card, the invocation feed and a tool's recent invocations, and the anonymous statistics. The live feed shows each event's own `user_id`.
 
 ## Session lifecycle
 

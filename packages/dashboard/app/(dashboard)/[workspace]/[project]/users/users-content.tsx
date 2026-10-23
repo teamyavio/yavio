@@ -165,7 +165,7 @@ export function UsersContent({ projectId }: { projectId: string }) {
 
         <TabsContent value="list" className="mt-4">
           {listError ? (
-            <ErrorAlert message={listError.message} retry={listRetry} />
+            <ErrorAlert error={listError} retry={listRetry} />
           ) : !isLoading && (!listData || listData.users.length === 0) ? (
             <EmptyState
               title="No users yet"
@@ -188,7 +188,7 @@ export function UsersContent({ projectId }: { projectId: string }) {
 
         <TabsContent value="active" className="mt-4 space-y-4">
           {activeError ? (
-            <ErrorAlert message={activeError.message} retry={activeRetry} />
+            <ErrorAlert error={activeError} retry={activeRetry} />
           ) : (
             <>
               <ChartPanel title="DAU / WAU / MAU">

@@ -35,11 +35,11 @@ export function FunnelsContent({ projectId }: { projectId: string }) {
       </PageHeader>
 
       {error ? (
-        <ErrorAlert message={error.message} retry={retry} />
+        <ErrorAlert error={error} retry={retry} />
       ) : !isLoading && (!data || data.steps.length === 0) ? (
         <EmptyState
           title="No funnel data"
-          description="Funnel data will appear once step and conversion events are tracked with step_sequence values."
+          description="Funnel data will appear once your app records steps with yavio.step(). Each conversation counts once, its steps numbered in the order they happened."
         />
       ) : (
         <div className="space-y-2">
