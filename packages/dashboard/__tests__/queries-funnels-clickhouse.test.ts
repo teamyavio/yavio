@@ -254,31 +254,25 @@ describe.skipIf(!url)("funnels on a real ClickHouse (#145)", () => {
   });
 
   it("neither double-counts nor shifts positions for a step stored twice", async () => {
+    // Without stopping merges (review round 1: queries-live-clickhouse.test.ts
+    // toggles them too, and files run in parallel). The copy of "search" is
+    // a resend with another timestamp — another sort key, so the
+    // ReplacingMergeTree keeps both rows whatever it merges — and either
+    // copy sits between start and book. The exact copy of "start" may or may
+    // not be merged away by the query; the result holds either way.
     const projectId = `p-dup-${randomUUID().slice(0, 8)}`;
+    const start: Step = { session: "conv", seq: 1, name: "start", ms: 0, id: randomUUID() };
     const search: Step = { session: "conv", seq: 2, name: "search", ms: MIN, id: randomUUID() };
-    // events is a ReplacingMergeTree: merges stay off until the query, or a
-    // background merge would collapse the copies first.
-    await admin.command({ query: "SYSTEM STOP MERGES events" });
-    try {
-      await insertSteps(projectId, [
-        { session: "conv", seq: 1, name: "start", ms: 0 },
-        search,
-        { session: "conv", seq: 1, name: "book", ms: 2 * MIN },
-      ]);
-      // The same row again, past insert deduplication (an SDK retry of a
-      // batch whose first insert went through).
-      await insertSteps(projectId, [search], { insert_deduplicate: 0 });
-      const raw = await admin.query({
-        query: "SELECT count() AS n FROM events WHERE project_id = {p:String}",
-        query_params: { p: projectId },
-        format: "JSONEachRow",
-      });
-      expect(Number((await raw.json<{ n: string }>())[0].n)).toBe(4);
-      const steps = await q.queryFunnelProgression(range(projectId, -HOUR, HOUR));
-      expect(compact(steps)).toEqual(["1 start 1", "2 search 1", "3 book 1"]);
-    } finally {
-      await admin.command({ query: "SYSTEM START MERGES events" });
-    }
+    await insertSteps(projectId, [
+      start,
+      search,
+      { session: "conv", seq: 1, name: "book", ms: 2 * MIN },
+    ]);
+    // Again, past insert deduplication (an SDK retry of a batch whose first
+    // insert went through).
+    await insertSteps(projectId, [start, { ...search, ms: MIN + 500 }], { insert_deduplicate: 0 });
+    const steps = await q.queryFunnelProgression(range(projectId, -HOUR, HOUR));
+    expect(compact(steps)).toEqual(["1 start 1", "2 search 1", "3 book 1"]);
   });
 
   it("counts drop-offs by conversation, not by trace", async () => {
