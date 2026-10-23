@@ -366,6 +366,12 @@ All analytics routes require an authenticated session and are scoped to the spec
 | GET | `/api/analytics/[projectId]/paths` | Session | Path sequences: tool call sequences as Sankey/sunburst data. Query params: `startTool`, `endTool` (filter starting/ending points). |
 | GET | `/api/analytics/[projectId]/errors` | Session | Error metrics: error count by type, top erroring tools, error rate time-series, error details. Query params: `page`, `pageSize`, `sort`, `order`, `errorCategory` (filter). See [metrics.md — Error Metrics](metrics/metrics.md#error-metrics). |
 
+**Errors and client retries (#159).** A failed analytics route answers `{ error, code }` with the status listed in the [error catalog](../07_error-catalog.md). The dashboard reads these routes with SWR through `hooks/use-analytics-query.ts`, and one predicate (`isRetryableError` in `lib/analytics/request.ts`) decides both whether SWR retries a failure in the background and whether the error state offers "Try again":
+
+- **Not retried:** 400 (`YAVIO-3407` query rejected, invalid filters), 422 (`YAVIO-3408` query memory limit), 504 (`YAVIO-3405` query timed out, or a gateway timeout), any of those three codes whatever the status, and every other 4xx except 408 and 429 (signed out, no access, project not found). The same request fails the same way every time, and the timeout and memory errors cost ClickHouse the full work up to the limit on each attempt; the message says what to change instead (narrow the date range).
+- **Retried:** other 5xx (502 `YAVIO-3406` "try again later"), 408, 429, and requests that got no answer (network errors), with SWR's exponential backoff (5 s, doubling, jittered), at most 5 retries per failure.
+- Switching back to the tab does not refetch (`revalidateOnFocus: false`); the browser coming back online refetches once. The page header's refresh button and "Try again" always refetch.
+
 ### 7.9.7 Live Feed Route
 
 | Method | Path | Auth | Protocol | Description |
