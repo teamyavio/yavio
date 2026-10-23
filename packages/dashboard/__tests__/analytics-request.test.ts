@@ -3,6 +3,7 @@ import {
   MAX_BACKGROUND_RETRIES,
   fetchAnalytics,
   isRetryableError,
+  needsSignIn,
 } from "@/lib/analytics/request";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -104,5 +105,18 @@ describe("isRetryableError (#159)", () => {
 
   it("caps background retries at five", () => {
     expect(MAX_BACKGROUND_RETRIES).toBe(5);
+  });
+});
+
+describe("needsSignIn", () => {
+  it.each([
+    ["401 signed out (YAVIO-3000)", new AnalyticsRequestError("x", 401, "YAVIO-3000"), true],
+    ["401 without a code", new AnalyticsRequestError("x", 401), true],
+    ["YAVIO-3000 on another status", new AnalyticsRequestError("x", 403, "YAVIO-3000"), true],
+    ["403 not a member (YAVIO-3102)", new AnalyticsRequestError("x", 403, "YAVIO-3102"), false],
+    ["422 query memory limit", new AnalyticsRequestError("x", 422, "YAVIO-3408"), false],
+    ["fetch() rejected (offline)", new TypeError("Failed to fetch"), false],
+  ])("%s → sign in: %s", (_label, error, expected) => {
+    expect(needsSignIn(error)).toBe(expected);
   });
 });

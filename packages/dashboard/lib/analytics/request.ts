@@ -47,6 +47,18 @@ const DETERMINISTIC_CODES: ReadonlySet<string> = new Set([
   "YAVIO-3408", // ANALYTICS_QUERY_MEMORY_EXCEEDED (#157)
 ]);
 
+/**
+ * Whether the request failed because the session is gone (401, YAVIO-3000).
+ * The proxy only sends page loads without a session cookie to /login, so an
+ * expired session on an open page surfaces here instead.
+ */
+export function needsSignIn(error: unknown): boolean {
+  return (
+    error instanceof AnalyticsRequestError &&
+    (error.status === 401 || error.code === ErrorCode.DASHBOARD.SESSION_EXPIRED)
+  );
+}
+
 /** Background retries SWR makes for one failed request before it gives up (#159). */
 export const MAX_BACKGROUND_RETRIES = 5;
 

@@ -1,7 +1,12 @@
 import { ErrorAlert } from "@/components/analytics/error-alert";
 import { AnalyticsRequestError } from "@/lib/analytics/request";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/w1/p1/funnels",
+  useSearchParams: () => new URLSearchParams("from=2026-01-01&to=2026-10-01"),
+}));
 
 const retry = () => {};
 
@@ -54,6 +59,32 @@ describe("ErrorAlert (#159)", () => {
 
     expect(html).toContain(error.message);
     expect(html).toContain("Try again");
+  });
+
+  it.each([
+    ["with YAVIO-3000", new AnalyticsRequestError("Authentication required", 401, "YAVIO-3000")],
+    ["without a code", new AnalyticsRequestError("Request failed (HTTP 401)", 401)],
+  ])("links a 401 %s to the login page and back", (_label, error) => {
+    const html = renderToStaticMarkup(<ErrorAlert error={error} retry={retry} />);
+
+    expect(html).toContain(error.message);
+    expect(html).toContain("Sign in again");
+    // Back to the same page with the same filters once signed in.
+    const back = encodeURIComponent("/w1/p1/funnels?from=2026-01-01&to=2026-10-01");
+    expect(html).toContain(`href="/login?callbackUrl=${back}"`);
+    expect(html).not.toContain("Try again");
+  });
+
+  it("offers no sign-in link for other errors", () => {
+    const error = new AnalyticsRequestError(
+      "This query needs more memory than the database allows. Narrow the date range or simplify the query.",
+      422,
+      "YAVIO-3408",
+    );
+
+    expect(renderToStaticMarkup(<ErrorAlert error={error} retry={retry} />)).not.toContain(
+      "Sign in again",
+    );
   });
 
   it("offers no button without a retry handler", () => {
