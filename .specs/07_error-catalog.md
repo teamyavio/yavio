@@ -321,9 +321,10 @@ Errors from the `yavio-dashboard` Next.js application. These appear in API respo
 | `YAVIO-3402` | 400 | Invalid platform filter | `platform` value is not recognized. | Use `chatgpt`, `claude`, `cursor`, `vscode`, or omit for all. |
 | `YAVIO-3403` | 400 | Invalid pagination | `page` < 1, `pageSize` < 1 or > 100. | Fix pagination parameters. |
 | `YAVIO-3404` | 400 | Invalid sort parameter | Sort field is not a valid column for this endpoint. | Check the API documentation for valid sort fields. |
-| `YAVIO-3405` | 504 | Analytics query timeout | ClickHouse query exceeded timeout (30 seconds). | Narrow the time range or reduce query complexity. |
-| `YAVIO-3406` | 503 | ClickHouse unavailable | ClickHouse is unreachable from the dashboard. | Check ClickHouse health. Partial data may be rendered with an error message. |
+| `YAVIO-3405` | 504 | Analytics query timeout | The query ran out of time: ClickHouse cut it at the query's time limit (`max_execution_time`, code 159 `TIMEOUT_EXCEEDED`: 30 seconds for the MCP `run_query` tool, 25 seconds for funnels), or the dashboard's own 30-second request timeout to ClickHouse ran out. Recognized by the error code, not the message text (#157). | Narrow the time range or reduce query complexity. |
+| `YAVIO-3406` | 502 | ClickHouse unavailable | ClickHouse is unreachable from the dashboard, or failed the query with a transient server error (overload, too many simultaneous queries, network, the server's total or the user's memory limit, which depend on what else runs at the same time). | Retry later; check ClickHouse health. Partial data may be rendered with an error message. |
 | `YAVIO-3407` | 400 | Analytics query rejected | ClickHouse parsed the query and refused it (unknown column, bad function, budget exceeded). Permanent — the same query will fail again. | Fix the query. Raised by the MCP `run_query` tool for model-authored SQL; dashboard-authored queries hitting this indicate schema drift. |
+| `YAVIO-3408` | 422 | Analytics query memory limit exceeded | ClickHouse stopped the query at its own memory limit (code 241 `MEMORY_LIMIT_EXCEEDED` from the query's `max_memory_usage`, text "Query memory limit exceeded" or "Memory limit (for query) exceeded"). The same query over the same range needs the same memory, so a retry is not the fix (#157). A 241 from the server's total or the user's limit is load-dependent and stays `YAVIO-3406`. | Narrow the time range or simplify the query (fewer groups, fewer distinct values). |
 
 ### Live Feed (3500&ndash;3549)
 
