@@ -2666,6 +2666,33 @@ describe("one proxy, many conversations", () => {
     expect(steps.map((e) => e.step_sequence)).toEqual([1, 2, 1]);
   });
 
+  it("identify() in every handler sends one identify event per conversation state: none for a repeat, one again after the conversation was evicted and returns (#145)", async () => {
+    // Before 0.5.4 every call sent one: three identify rows for conv-0 here.
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    const yavio = createYavioContext();
+    proxy.tool("whoami", (ex) => {
+      const meta = (ex as { _meta?: Record<string, unknown> })._meta;
+      if (meta?.["openai/session"] === "conv-0") yavio.identify("anna", { plan: "pro" });
+      return { content: [{ type: "text", text: "ok" }] };
+    });
+    const handler = registeredTool(server, "whoami")?.handler;
+
+    await handler?.(extra("conv-0", "r0"));
+    await handler?.(extra("conv-0", "r0b")); // the same state: nothing new to send
+    for (let i = 1; i <= 1000; i += 1) await handler?.(extra(`conv-${i}`, `r${i}`));
+    await handler?.(extra("conv-0", "r0c")); // evicted: a fresh state sends once
+
+    const first = deriveSessionId("conv-0");
+    const events = transport.sent.flat() as Array<Record<string, unknown>>;
+    const identifies = events.filter((e) => e.event_type === "identify" && e.session_id === first);
+    expect(identifies).toHaveLength(2);
+    expect(identifies.map((e) => e.user_traits)).toEqual([{ plan: "pro" }, { plan: "pro" }]);
+    const calls = events.filter((e) => e.event_type === "tool_call" && e.session_id === first);
+    expect(calls.map((e) => e.user_id)).toEqual(["anna", "anna", "anna"]);
+  });
+
   it("keeps an active conversation's connection-event mark while newer ones age out", async () => {
     // The dedup map is bounded at 10,000. Keyless connects each mark a random
     // session id that nothing ever deletes; a conversation that stays active

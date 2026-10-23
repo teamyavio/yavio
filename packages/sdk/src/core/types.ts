@@ -273,6 +273,13 @@ export interface SessionState {
   sessionId: string;
   userId: string | null;
   userTraits: Record<string, unknown>;
+  /**
+   * The stable JSON of `[user_id, user_traits]` of the last `identify`
+   * event this state sent: a repeat with the same id and traits sends
+   * nothing (#145). Unset on a fresh state — a new conversation, one the
+   * LRU evicted, another process — which therefore sends once.
+   */
+  identified?: string;
   platform: string;
   stepSequence: number;
 }

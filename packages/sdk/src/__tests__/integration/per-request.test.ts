@@ -124,6 +124,51 @@ describe("per-request servers share one process-level state", () => {
     );
   });
 
+  it("two processes serving one conversation, identify() in every handler: one identify event per process with the same session_id, and the second process's call before its identify() carries no user_id (#145)", async () => {
+    const conversation = { "openai/session": "conv-fleet" };
+    const sessionId = deriveSessionId("conv-fleet");
+    // One instance of a stateless fleet: a client per process, a server per
+    // request, the tool identifies in every handler that knows the user.
+    const instance = () => {
+      const client = createYavio({ apiKey: "yav_fleet", endpoint, serverOnly: true });
+      const serve = async (name: string, handler: () => void) => {
+        const wrapped = client.wrap(new McpServer({ name: "fleet", version: "1.0" }));
+        wrapped.registerTool(name, { inputSchema: { q: z.string() } }, async () => {
+          handler();
+          return ok(name);
+        });
+        await callViaClient(wrapped, { name, arguments: { q: "x" }, _meta: conversation });
+      };
+      return { client, serve };
+    };
+
+    const a = instance();
+    await a.serve("login", () => yavio.identify("user-fleet", { plan: "pro" }));
+    await a.serve("search", () => yavio.identify("user-fleet", { plan: "pro" }));
+    await a.client.shutdown();
+
+    _resetGlobalState(); // a second process: nothing of A's state survives
+
+    const b = instance();
+    await b.serve("browse", () => {}); // B has not identified the user yet
+    await b.serve("search", () => yavio.identify("user-fleet", { plan: "pro" }));
+    await b.client.shutdown();
+
+    // Before 0.5.4: three identify rows, A's second call sent one too.
+    const identifies = ingest.ofType("identify");
+    expect(identifies).toHaveLength(2);
+    expect(identifies.every((e) => e.session_id === sessionId)).toBe(true);
+    expect(identifies.map((e) => e.user_traits)).toEqual([{ plan: "pro" }, { plan: "pro" }]);
+    const calls = toolCallEvents();
+    expect(calls.map((e) => [e.event_name, e.user_id])).toEqual([
+      ["login", "user-fleet"],
+      ["search", "user-fleet"],
+      ["browse", undefined],
+      ["search", "user-fleet"],
+    ]);
+    expect(calls.every((e) => e.session_id === sessionId)).toBe(true);
+  });
+
   it("keeps two API keys apart: two transports, no cross-delivery, each its own discovery and connection", async () => {
     const a = createYavio({ apiKey: "yav_a", endpoint, serverOnly: true });
     const b = createYavio({ apiKey: "yav_b", endpoint, serverOnly: true });
