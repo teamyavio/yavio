@@ -112,6 +112,7 @@ Next.js 16 (yavio-dashboard container, port 3000)
 | OAuth | GitHub, Google | Link to existing account or create new. Auto-create workspace on first login. |
 | Invite | Email link | Invited user clicks link → register or login → auto-join workspace with assigned role |
 | Forgot password | Email reset link | Time-limited token (1 hour). Invalidates on use. |
+| MCP connector authorization | OAuth 2.1 authorization code + PKCE (`/oauth/authorize`) | An invalid authorization request is shown on the dashboard's own error page with its error code and never redirected to the client, whose registered `redirect_uri` receives a response only after the signed-in user has allowed or denied access on the consent page. |
 
 ### 7.2.2 Roles & Permissions
 
@@ -181,6 +182,7 @@ Combined server + widget funnel. Answers: **"Where do users drop off?"**
 
 See [metrics/metrics.md — Funnel Metrics](metrics/metrics.md#funnel-metrics) for the full list of metrics surfaced in this view.
 
+- One conversation (session) is one attempt, its steps numbered in the order they happened, however many server instances served it (#145); the numbering looks back at most 30 days before the range start, and the funnel queries are capped at 25 s and 2 GiB
 - Filter by time range, platform, tool
 
 ### 7.5.4 Live Feed
@@ -192,6 +194,7 @@ Real-time event stream. Answers: **"What's happening right now?"**
 - Click to expand: full event details
 - Pause/resume stream
 - The SSE endpoint queries ClickHouse on a short poll interval (1–2 seconds) for new events matching the current project
+- The user column is the event's raw `user_id`, not stitched to the session's identified user (#145)
 
 ### 7.5.5 Errors
 
@@ -203,7 +206,7 @@ See [metrics/metrics.md — Error Metrics](metrics/metrics.md#error-metrics) for
 
 User-level analytics view. Answers: **"Who are my users and are they coming back?"**
 
-Requires `.identify()` to be called in the SDK. Sessions without `.identify()` appear as anonymous.
+Requires `.identify()` to be called in the SDK. Sessions without `.identify()` appear as anonymous. Once a session is identified, all its events count for that user — those before the call, and those of other server instances that served the conversation (#145, the session stitch in `keyedEvents()`).
 
 - **User list:** Table of identified users with key metrics (sessions, tool calls, conversions, revenue, first seen, last seen)
 - **Retention cohorts:** Matrix showing "Of users who first used the app in week N, what % returned in week N+1, N+2, etc." Configurable by day/week/month.
@@ -233,6 +236,7 @@ All user-level views (Users, Paths, retention, DAU/WAU/MAU) require `.identify()
 
 - **No `.identify()` calls in project:** Users view shows an empty state with instructions on how to add `.identify()` to the SDK integration.
 - **Partial adoption:** Sessions without `.identify()` are counted as anonymous. Metrics clearly distinguish between identified and anonymous sessions.
+- **Stateless fleets (#145):** the SDK stamps `user_id` only in the process that called `.identify()`. The read side counts every event of the session for its first identified user (an event's own `user_id` wins): the users list and detail, active users, retention, new vs returning, Locations, the invocation feed and a tool's recent invocations. The live feed shows the raw `user_id`.
 
 ## 7.7 Multi-Project Support
 
@@ -365,6 +369,12 @@ All analytics routes require an authenticated session and are scoped to the spec
 | GET | `/api/analytics/[projectId]/users/active` | Session | DAU / WAU / MAU time-series. Stickiness distribution. New vs returning breakdown. |
 | GET | `/api/analytics/[projectId]/paths` | Session | Path sequences: tool call sequences as Sankey/sunburst data. Query params: `startTool`, `endTool` (filter starting/ending points). |
 | GET | `/api/analytics/[projectId]/errors` | Session | Error metrics: error count by type, top erroring tools, error rate time-series, error details. Query params: `page`, `pageSize`, `sort`, `order`, `errorCategory` (filter). See [metrics.md — Error Metrics](metrics/metrics.md#error-metrics). |
+
+**Errors and client retries (#159).** A failed analytics route answers with an HTTP status, which is what the client acts on, and a `{ error, code }` body: a message for the user and a YAVIO code (see the [error catalog](../07_error-catalog.md)). The dashboard reads these routes with SWR through `hooks/use-analytics-query.ts`, and one predicate (`isRetryableError` in `lib/analytics/request.ts`) decides both whether SWR retries a failure in the background and whether the error state offers "Try again":
+
+- **Not retried:** 400 (`YAVIO-3407` query rejected, invalid filters), 422 (`YAVIO-3408` query memory limit, from #157), 504 (`YAVIO-3405` query timed out, or a gateway timeout without that body, which gets the same message), any of those three codes whatever the status, and every other 4xx except 408 and 429 (signed out, no access, project not found). A 401 or `YAVIO-3000` (session expired) offers "Sign in again" instead, back to the same page and filters after login. The same request fails the same way every time, and the timeout and memory errors cost ClickHouse the full work up to the limit on each attempt; the message says what to change instead (narrow the date range).
+- **Retried:** other 5xx (502 `YAVIO-3406` "try again later"), 408, 429, and requests that got no answer (network errors), with SWR's exponential backoff (retries after 10, 20, 40, 80 and 160 s, each jittered ×0.5–1.5), at most 5 retries per failure. After the last one the error stays until someone refreshes.
+- Switching back to the tab does not refetch (`revalidateOnFocus: false`); the browser coming back online refetches once if the tab is visible at that moment. The page header's refresh button and "Try again" always refetch.
 
 ### 7.9.7 Live Feed Route
 

@@ -3,7 +3,6 @@
 import { getServerSession } from "@/lib/auth/get-session";
 import { checkWorkspaceAccess } from "@/lib/auth/workspace-access";
 import {
-  RedirectAuthorizeError,
   RenderAuthorizeError,
   errorRedirect,
   successRedirect,
@@ -40,6 +39,8 @@ function authorizeParams(formData: FormData): Record<string, string | undefined>
 /**
  * Consent approval. Everything from the form is untrusted and re-validated
  * from scratch — the hidden fields are a transport, not a trust boundary.
+ * A submission that no longer validates is not the request the user saw, so
+ * it is shown on the authorize page rather than redirected to the client.
  */
 export async function approveConsent(formData: FormData): Promise<void> {
   const session = await getServerSession();
@@ -51,7 +52,6 @@ export async function approveConsent(formData: FormData): Promise<void> {
   try {
     request = await validateAuthorizeRequest(authorizeParams(formData));
   } catch (err) {
-    if (err instanceof RedirectAuthorizeError) redirect(err.redirectTo);
     if (err instanceof RenderAuthorizeError) {
       // Re-run the authorize page WITH the original parameters so it renders
       // the real reason. Redirecting to a bare /oauth/authorize?error=... put
@@ -99,7 +99,10 @@ export async function approveConsent(formData: FormData): Promise<void> {
   redirect(successRedirect(request, code));
 }
 
-/** Consent denial: report access_denied to the validated redirect target. */
+/**
+ * Consent denial: report access_denied to the validated redirect target. A
+ * submission that no longer validates goes back to the dashboard instead.
+ */
 export async function denyConsent(formData: FormData): Promise<void> {
   const session = await getServerSession();
   if (!session) {
@@ -117,7 +120,6 @@ export async function denyConsent(formData: FormData): Promise<void> {
       ),
     );
   } catch (err) {
-    if (err instanceof RedirectAuthorizeError) redirect(err.redirectTo);
     if (err instanceof RenderAuthorizeError) redirect("/");
     throw err;
   }

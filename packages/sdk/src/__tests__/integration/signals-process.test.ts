@@ -162,10 +162,12 @@ function parseBody(text: string): unknown {
 
 /**
  * A keep-alive client: the socket stays open after each response until the
- * server closes it — its `keepAliveTimeout`, 5 s by default and often 65 s
- * behind a load balancer. What a fetch-based client does for a few seconds
- * (undici's own idle timeout), and what an unbounded `http.close()` waited
- * for: 4.5 s with a 1.5 s call in flight, measured. Replaced per test.
+ * server closes it — its `keepAliveTimeout` plus a 1 s buffer (about 6 s by
+ * default on current Node; `keepAliveTimeoutBuffer` since 22.19 and 24.6),
+ * and often over a minute behind a load balancer. What a fetch-based client
+ * does for a few seconds (undici's own idle timeout), and what an unbounded
+ * `http.close()` waited for: 4.5 s with a 1.5 s call in flight, measured.
+ * Replaced per test.
  */
 let agent = new Agent({ keepAlive: true, maxSockets: 1 });
 

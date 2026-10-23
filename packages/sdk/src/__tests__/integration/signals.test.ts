@@ -1478,6 +1478,7 @@ describe("loss accounting (#148)", () => {
       // Before the fix the cycle's line re-reported the 400's two events:
       // "Shutdown deadline of 4000 ms reached — 2 events not delivered".
       expect(lines1205()).toHaveLength(0);
+      expect(exitHooks()).toHaveLength(1);
       exitHooks()[0]?.call(process, 0);
       expect(lines1205()).toHaveLength(0);
       await b.shutdown();
@@ -1584,6 +1585,7 @@ describe("loss accounting (#148)", () => {
           // The late keys' tool_call batches were answered: nothing pending,
           // nothing left for the exit hook.
           await vi.waitFor(() => expect(ingest.responded).toBe(4));
+          expect(exitHooks()).toHaveLength(1);
           exitHooks()[0]?.call(process, 0);
           expect(lines1205()).toHaveLength(2);
         });
@@ -1617,6 +1619,7 @@ describe("loss accounting (#148)", () => {
           expect(lines1205()[0]).toContain("Shutdown deadline of 600 ms");
           expect(lines1205()[0]).toContain("2 events not delivered");
           expect(lines1205()[0]).not.toContain("shutdown() deadline");
+          expect(exitHooks()).toHaveLength(1);
           exitHooks()[0]?.call(process, 0);
           expect(lines1205()).toHaveLength(1); // nothing left unreported
         } finally {
@@ -1701,6 +1704,7 @@ describe("loss accounting (#148)", () => {
         expect(lines1205()[0]).toContain("4 events not delivered");
         expect(lines.some((l) => l.includes("shutdown() deadline"))).toBe(false);
         // The app exits now: every event was in the cycle's line already.
+        expect(exitHooks()).toHaveLength(1);
         exitHooks()[0]?.call(process, 0);
         expect(lines1205()).toHaveLength(1);
       } finally {
@@ -1745,6 +1749,7 @@ describe("loss accounting (#148)", () => {
           // `process.exit(0)` right after the line, as an app whose own
           // wait the same deadline cut: the stops are still settling.
           expect(_trackedTransportCount()).toBe(2);
+          expect(exitHooks()).toHaveLength(1);
           exitHooks()[0]?.call(process, 0);
           expect(lines1205()).toHaveLength(1);
           expect(lines1205()[0]).toContain("Shutdown deadline of 1000 ms");
@@ -1755,6 +1760,75 @@ describe("loss accounting (#148)", () => {
         } finally {
           process.off("SIGTERM", app);
         }
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  }, 15_000);
+
+  it("a cycle handed back early with a stop in progress at the signal, next to an app listener: one cycle line with the four events — at the deadline, a shutdown() still waiting then — and nothing from the exit hook", async () => {
+    // The round-6 setup next to an app listener on both signals, and a
+    // SIGINT 500 ms after the SIGTERM: a different signal, so the cycle is
+    // handed back 1.5 s before its deadline, with nothing lost yet and,
+    // next to an app listener, nothing pre-counted. Its stops give up the
+    // four events at the deadline, after the hand-back. A's shutdown() is
+    // still waiting then, so the cycle's late report comes at the deadline,
+    // with the four its stops still hold pre-counted (#154; with no
+    // shutdown() waiting it would wait for the stops to settle) — not at
+    // the drain's race end: the cycle's timer, made first for the same
+    // duration, ends that race before the stops have counted what they give
+    // up. Fetches that ignore their abort make that order certain here —
+    // both stops hold their batch for ABORT_SETTLE_MS after the deadline —
+    // so a report at the race end finds nothing lost, and the four went to
+    // the exit hook's "Process exit with 4 events not delivered — await
+    // analytics.shutdown() …", a wrong hint for an app that did (#148
+    // review round 10, #152).
+    const realFetch = globalThis.fetch;
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation((input: string | URL | Request, init?: RequestInit) =>
+        realFetch(input, { ...init, signal: undefined }),
+      );
+    try {
+      await withoutOtherListeners("SIGTERM", async () => {
+        await withoutOtherListeners("SIGINT", async () => {
+          const app = vi.fn();
+          process.on("SIGTERM", app);
+          process.on("SIGINT", app);
+          try {
+            const { client: a, raw: rawA } = build("yav_152_early_a", {
+              shutdownTimeoutMs: 20_000,
+            });
+            await callTool(rawA, "get_price", { q: "a" });
+            const { raw: rawB } = build("yav_152_early_b", { shutdownTimeoutMs: 2_000 });
+            await callTool(rawB, "get_price", { q: "b" });
+            // A's last holder releases: its stop runs under A's own 20 s, its
+            // batch of two in flight; B's two are queued in the registry.
+            const closing = a.shutdown();
+            await vi.waitFor(() => expect(ingest.batches).toHaveLength(1));
+            process.emit("SIGTERM", "SIGTERM"); // D = 2 s; the drain sends B's two
+            await new Promise((r) => setTimeout(r, 500));
+            expect(ingest.batches).toHaveLength(2);
+            process.emit("SIGINT", "SIGINT"); // handed back, 1.5 s before the deadline
+            expect(app).toHaveBeenCalledTimes(2);
+            expect(process.listenerCount("SIGINT")).toBe(1); // the app's; no re-raise
+            expect(lines1205()).toHaveLength(0); // nothing lost yet, nothing pre-counted
+            // Both stops settle at the deadline + ABORT_SETTLE_MS.
+            await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0), { timeout: 4_000 });
+            await closing;
+            expect(lines1205()).toHaveLength(1);
+            expect(lines1205()[0]).toContain("Shutdown deadline of 2000 ms");
+            expect(lines1205()[0]).toContain("4 events not delivered");
+            expect(lines.some((l) => l.includes("shutdown() deadline"))).toBe(false);
+            // The app exits now: every event was in the cycle's line already.
+            expect(exitHooks()).toHaveLength(1);
+            exitHooks()[0]?.call(process, 0);
+            expect(lines1205()).toHaveLength(1);
+          } finally {
+            process.off("SIGTERM", app);
+            process.off("SIGINT", app);
+          }
+        });
       });
     } finally {
       fetchSpy.mockRestore();
@@ -2215,6 +2289,7 @@ describe("loss accounting (#148)", () => {
     expect(lines1205()).toHaveLength(3);
     expect(lines1205()[0]).toContain("2 events not delivered"); // connection + call
     expect(lines1205()[2]).toContain("1 events not delivered"); // the connection is once per key
+    expect(exitHooks()).toHaveLength(1);
     exitHooks()[0]?.call(process, 0);
     expect(lines1205()).toHaveLength(3);
   });

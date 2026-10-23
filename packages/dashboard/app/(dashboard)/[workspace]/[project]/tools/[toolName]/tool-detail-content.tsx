@@ -238,7 +238,7 @@ export function ToolDetailContent({
       )}
 
       {error ? (
-        <ErrorAlert message={error.message} retry={retry} />
+        <ErrorAlert error={error} retry={retry} />
       ) : !isLoading && !hasData ? (
         <EmptyState
           title="No data for this tool"

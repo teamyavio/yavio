@@ -1,4 +1,39 @@
 /**
+ * The dashboard's user key (keyedEvents() in lib/queries/users.ts, #89 and
+ * #145) as one run_query statement: tool calls per user over the last 30
+ * days, both maps bounded to the same window as the dashboard's windowed
+ * counts (review round 1: run_query stops at 50M rows read, and unbounded
+ * maps read 13 months). Exported so a test runs it through the SQL guard
+ * and against ClickHouse.
+ */
+export const USER_KEY_SQL = `WITH session_map AS (
+  SELECT session_id AS stitched_session,
+         argMin(assumeNotNull(user_id), (timestamp, event_id)) AS session_user_id
+  FROM events
+  WHERE event_type = 'identify' AND user_id IS NOT NULL AND user_id != ''
+    AND session_id != '' AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY stitched_session
+),
+subject_map AS (
+  SELECT assumeNotNull(subject_id) AS stitched_subject,
+         argMax(assumeNotNull(user_id), timestamp) AS mapped_user_id
+  FROM events
+  WHERE subject_id IS NOT NULL AND subject_id != ''
+    AND user_id IS NOT NULL AND user_id != '' AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY stitched_subject
+)
+SELECT coalesce(nullIf(e.user_id, ''), nullIf(m.session_user_id, ''),
+                nullIf(s.mapped_user_id, ''), nullIf(e.subject_id, '')) AS person,
+       count() AS tool_calls
+FROM events AS e
+LEFT JOIN session_map AS m ON m.stitched_session = e.session_id
+LEFT JOIN subject_map AS s ON s.stitched_subject = ifNull(e.subject_id, '')
+WHERE e.event_type = 'tool_call' AND e.timestamp >= now() - INTERVAL 30 DAY
+GROUP BY person
+ORDER BY tool_calls DESC
+LIMIT 100`;
+
+/**
  * Table/column reference returned by get_schema so the model can write
  * useful run_query SQL without guessing. Kept as a handwritten document —
  * it documents semantics, not just names.
@@ -51,8 +86,27 @@ handshake or the request's User-Agent; JSONExtractString(metadata,
 'client_info_source') says which ('envelope', 'initialize', 'user_agent').
 Widget: viewport_width/height, scroll_depth_pct, click_count, visible_duration_ms,
 field_name, nav_from, nav_to, device_touch, device_pixel_ratio, load_time_ms.
+Funnel steps: event_type 'step', event_name = the step, step_sequence (Nullable
+UInt32): the SDK's counter per session PER PROCESS, starting at 1 again on every
+server instance and every widget load. Never group by it: order a session's
+steps by (timestamp, step_sequence, event_id), as the dashboard's funnels do.
 
 Use JSONExtractString(intent_signals, 'intent') etc. for the JSON columns.
+
+## Who a user is
+identify() stamps user_id only on the events of the server process that called
+it, from that call on: on a fleet of instances, and before the call, events of
+the same conversation carry none. The dashboard counts one person per event as
+coalesce(the event's own user_id, the FIRST user_id an 'identify' event gave its
+session_id, the user_id last seen with its subject_id, subject_id) — never the
+session itself. Once a session is identified, all its events count for that
+user. The same key as one query (tool calls per person over the last 30 days;
+person NULL = calls without a known user; uniqExact(person) counts users):
+${USER_KEY_SQL}
+Keep both maps bounded to the query's window, as here and in the dashboard's
+windowed counts: run_query stops at 50M rows read, counting every scan, and
+unbounded maps read all 13 months. With bounded maps a session whose first
+identify falls before the window goes to a later id inside it, if it has one.
 
 ## tool_registry — registered tool definitions per project
 project_id, tool_name, description, input_schema (JSON), registered_at, updated_at
@@ -88,13 +142,22 @@ conversions, conversion_value
   counting connection rows (one per session per server process); a
   connection figure spanning them mixes the two. Use uniqExact(session_id)
   over events for sessions whenever the raw data is still there.
+- People (individuals, and the users tables below) are keyed as in "Who a
+  user is" from the stats runs after the ingest deploy that shipped #145
+  (date to be filled in at deploy time: YYYY-MM-DD; the same date as #142's
+  above when both ship in one deploy). Method break: the first run after
+  that deploy recomputes the previous month too; months before keep the
+  older key without the session map, so their individuals are higher where
+  sessions identify (the user plus the session, instead of one person), and
+  their users can be slightly lower (a day on which a user was seen only
+  through another instance's events of an identified conversation).
 - Average latency: sum(latency_sum) / sum(latency_count).
 
 ### stats_users_daily — day, dau, wau, mau (7/30 days ending that day)
 ### stats_users_periods — period ('week'|'month'|'quarter'|'year'), period_start,
 period_end, users (distinct users in that closed calendar period)
 ### stats_cohorts — cohort_month, activity_month, month_offset (0-12), users
-Users are counted by user_id, else the platform's subject_id, never by session.
+Users are counted by the key in "Who a user is", never by session.
 
 ## Rules for run_query
 - Single SELECT (or WITH ... SELECT) statement only, against the tables

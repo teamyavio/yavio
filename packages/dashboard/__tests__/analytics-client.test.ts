@@ -14,6 +14,12 @@ vi.stubEnv("CLICKHOUSE_URL", "http://default:pass@localhost:8123");
 // Dynamic import to pick up mocks
 const { queryAnalytics, AnalyticsQueryError } = await import("@/lib/clickhouse/analytics-client");
 
+// The real parser: on an HTTP error response @clickhouse/client hands the
+// server's body to parseError, which lifts `Code: NNN` into `code` and the
+// `(TYPE)` suffix into `type` — the message keeps neither.
+const { parseError } =
+  await vi.importActual<typeof import("@clickhouse/client")>("@clickhouse/client");
+
 describe("queryAnalytics", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -158,5 +164,185 @@ describe("error classification", () => {
 
     expect(err.status).toBe(504);
     expect(err.message).toContain("smaller date range");
+  });
+});
+
+describe("query limits (#157)", () => {
+  const run = () =>
+    queryAnalytics({
+      workspaceId: "w",
+      projectId: "p",
+      query: "SELECT count() FROM events",
+    }).catch((e) => e);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("reports a query cut by max_execution_time as the timeout, not a transient failure", async () => {
+    const cut = parseError(
+      "Code: 159. DB::Exception: Timeout exceeded: elapsed 30001.42 ms, maximum: 30000 ms. (TIMEOUT_EXCEEDED) (version 26.8.1.1 (official build))",
+    );
+    // The shape the bug hid behind: neither TIMEOUT nor timeout in the text.
+    expect(cut.message).not.toMatch(/TIMEOUT|timeout/);
+    mockQuery.mockRejectedValue(cut);
+
+    const err = await run();
+
+    expect(err).toBeInstanceOf(AnalyticsQueryError);
+    expect(err.status).toBe(504);
+    expect(err.code).toBe("YAVIO-3405");
+    expect(err.message).toContain("timed out");
+    expect(err.message).not.toContain("try again later");
+    expect(err.detail).toContain("Timeout exceeded: elapsed");
+  });
+
+  it("matches the timeout on the error type alone", async () => {
+    // No code and no "timeout" in the text: only the type can match it.
+    const cut = Object.assign(new Error("elapsed 30001.42 ms, maximum: 30000 ms."), {
+      type: "TIMEOUT_EXCEEDED",
+    });
+    expect(cut.message).not.toMatch(/timeout/i);
+    mockQuery.mockRejectedValue(cut);
+
+    const err = await run();
+
+    expect(err.status).toBe(504);
+    expect(err.code).toBe("YAVIO-3405");
+  });
+
+  it.each([
+    [
+      "26.8",
+      "Code: 241. DB::Exception: Query memory limit exceeded: would use 9.32 GiB (attempt to allocate chunk of 4.00 MiB), maximum: 9.31 GiB.: While executing AggregatingTransform. (MEMORY_LIMIT_EXCEEDED) (version 26.8.1.1 (official build))",
+    ],
+    [
+      "older releases",
+      "Code: 241. DB::Exception: Memory limit (for query) exceeded: would use 9.32 GiB (attempt to allocate chunk of 4194304 bytes), maximum: 9.31 GiB.: While executing AggregatingTransform. (MEMORY_LIMIT_EXCEEDED) (version 23.8.1.1 (official build))",
+    ],
+  ])(
+    "reports the query's own memory limit (%s wording) as its own permanent error, without retry advice",
+    async (_version, body) => {
+      mockQuery.mockRejectedValue(parseError(body));
+
+      const err = await run();
+
+      expect(err).toBeInstanceOf(AnalyticsQueryError);
+      expect(err.status).toBe(422);
+      expect(err.code).toBe("YAVIO-3408");
+      expect(err.message).toContain("more memory than the database allows");
+      expect(err.message).toContain("Narrow the date range");
+      expect(err.message).not.toMatch(/try again|retry/i);
+      expect(err.detail).toMatch(/memory limit .*exceeded: would use/i);
+
+      // What every analytics API route returns for it (err.toResponse()).
+      const res = err.toResponse();
+      expect(res.status).toBe(422);
+      expect(await res.json()).toEqual({ error: err.message, code: "YAVIO-3408" });
+    },
+  );
+
+  it("matches the query's memory limit on the error type alone", async () => {
+    // No code: without the type check this would be a plain 502.
+    mockQuery.mockRejectedValue(
+      Object.assign(
+        new Error(
+          "Query memory limit exceeded: would use 9.32 GiB (attempt to allocate chunk of 4.00 MiB), maximum: 9.31 GiB.",
+        ),
+        { type: "MEMORY_LIMIT_EXCEEDED" },
+      ),
+    );
+
+    const err = await run();
+
+    expect(err.status).toBe(422);
+    expect(err.code).toBe("YAVIO-3408");
+  });
+
+  it.each([
+    [
+      "the server's total, 26.8",
+      "Code: 241. DB::Exception: (total) memory limit exceeded: would use 447.49 MiB (attempt to allocate chunk of 4.00 MiB), current RSS: 1.01 GiB, maximum: 1.00 GiB. OvercommitTracker decision: Query was selected to stop by OvercommitTracker. Untracked memory across all threads: 2.31 MiB. (MEMORY_LIMIT_EXCEEDED) (version 26.8.1.1 (official build))",
+    ],
+    [
+      "the server's total, older releases",
+      "Code: 241. DB::Exception: Memory limit (total) exceeded: would use 3.60 GiB (attempt to allocate chunk of 4194304 bytes), maximum: 3.60 GiB. OvercommitTracker decision: Query was selected to stop by OvercommitTracker. (MEMORY_LIMIT_EXCEEDED) (version 23.8.1.1 (official build))",
+    ],
+    [
+      "the user's, 26.8",
+      "Code: 241. DB::Exception: User memory limit exceeded: would use 2.00 GiB (attempt to allocate chunk of 4.00 MiB), maximum: 2.00 GiB. (MEMORY_LIMIT_EXCEEDED) (version 26.8.1.1 (official build))",
+    ],
+    [
+      "the user's, older releases",
+      "Code: 241. DB::Exception: Memory limit (for user) exceeded: would use 2.00 GiB (attempt to allocate chunk of 4194304 bytes), maximum: 2.00 GiB. (MEMORY_LIMIT_EXCEEDED) (version 23.8.1.1 (official build))",
+    ],
+  ])("keeps a memory limit shared with other queries (%s) retryable", async (_source, body) => {
+    // Load-dependent: the same query passes alone and fails next to others.
+    mockQuery.mockRejectedValue(parseError(body));
+
+    const err = await run();
+
+    expect(err.status).toBe(502);
+    expect(err.code).toBe("YAVIO-3406");
+    expect(err.message).toContain("try again later");
+  });
+
+  it("hands the memory message to the model through the MCP tool boundary", async () => {
+    const { runTool } = await import("@/lib/mcp/errors");
+    mockQuery.mockRejectedValue(
+      parseError(
+        "Code: 241. DB::Exception: Query memory limit exceeded: would use 9.32 GiB (attempt to allocate chunk of 4.00 MiB), maximum: 9.31 GiB.: While executing AggregatingTransform. (MEMORY_LIMIT_EXCEEDED) (version 26.8.1.1 (official build))",
+      ),
+    );
+
+    const result = await runTool(async () => {
+      await queryAnalytics({ workspaceId: "w", projectId: "p", query: "SELECT 1" });
+      throw new Error("unreachable");
+    });
+
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text;
+    expect(text).toContain("YAVIO-3408");
+    expect(text).toContain("more memory than the database allows");
+    expect(text).toContain("Database says: Query memory limit exceeded");
+    expect(text).not.toContain("try again later");
+  });
+
+  it("reports the client's own request timeout as the timeout", async () => {
+    // Verbatim what @clickhouse/client 1.17 rejects with when request_timeout
+    // (30 s here) runs out: no server code, and a capital T.
+    mockQuery.mockRejectedValue(new Error("Timeout error."));
+
+    const err = await run();
+
+    expect(err.status).toBe(504);
+    expect(err.code).toBe("YAVIO-3405");
+  });
+
+  it("keeps a server socket timeout retryable — the text match is for client errors only", async () => {
+    mockQuery.mockRejectedValue(
+      parseError(
+        "Code: 209. DB::Exception: Timeout exceeded while reading from socket (peer: 10.0.0.2:9000, local: 10.0.0.1:41234, 300000 ms). (SOCKET_TIMEOUT) (version 26.8.1.1 (official build))",
+      ),
+    );
+
+    const err = await run();
+
+    expect(err.status).toBe(502);
+    expect(err.code).toBe("YAVIO-3406");
+    expect(err.message).toContain("try again later");
+  });
+
+  it("does not read a rejected query that merely names a timeout column as a timeout", async () => {
+    mockQuery.mockRejectedValue(
+      parseError(
+        "Code: 47. DB::Exception: Unknown expression identifier `timeout` in scope SELECT timeout FROM events. (UNKNOWN_IDENTIFIER) (version 26.8.1.1 (official build))",
+      ),
+    );
+
+    const err = await run();
+
+    expect(err.status).toBe(400);
+    expect(err.code).toBe("YAVIO-3407");
   });
 });

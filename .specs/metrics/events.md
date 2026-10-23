@@ -113,7 +113,7 @@ Funnel progression point. Called via `yavio.step()`.
 | Field | Type | Description |
 |-------|------|-------------|
 | event_name | TEXT | Step name |
-| step_sequence | INTEGER | Auto-incrementing counter per trace (0, 1, 2, ...). Enables deterministic ordering when multiple steps share the same millisecond timestamp. |
+| step_sequence | INTEGER | Counter per session per SDK process (1, 2, 3, ...): it starts at 1 again on every instance of a stateless fleet and after an LRU eviction. Funnels order a session's steps by timestamp and use it only to break a tie within one millisecond (#145). |
 | metadata | TEXT (JSON) | Custom properties (PII-stripped) |
 
 ### track
@@ -145,6 +145,8 @@ User identification event. Called via `yavio.identify()`.
 | user_id | TEXT | Developer-provided user identifier (not PII-stripped) |
 | user_traits | TEXT (JSON) | User properties (PII-stripped) |
 | metadata | TEXT (JSON) | Additional context |
+
+Read side (#145): the SDK stamps `user_id` only on the later events of the process that called `identify()`. The dashboard and the statistics job count every event of the session for the user of its **first** `identify` event (an event's own `user_id` wins), so the session's other instances and its events before the call count too. The `identify` rows are the only source of that mapping, and of traits.
 
 ---
 
@@ -279,7 +281,7 @@ Funnel progression point. Called via `useYavio().step()`.
 | Field | Type | Description |
 |-------|------|-------------|
 | event_name | TEXT | Step name |
-| step_sequence | INTEGER | Auto-incrementing counter per trace (continues from server-side sequence via traceId). Enables deterministic ordering across server and widget steps. |
+| step_sequence | INTEGER | Counter per widget load (1, 2, 3, ...); it does not continue from the server's sequence. Funnels place widget steps among the session's server steps by timestamp (the browser's clock) and use it only to break a tie within one millisecond (#145). |
 | metadata | TEXT (JSON) | Custom properties (PII-stripped) |
 
 ### track
