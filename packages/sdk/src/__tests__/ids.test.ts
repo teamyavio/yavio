@@ -1,5 +1,7 @@
+import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  deriveCustomSessionId,
   deriveSessionId,
   generateEventId,
   generateSessionId,
@@ -48,6 +50,28 @@ describe("ID generation", () => {
       const id = deriveSessionId("test-input");
       const suffix = id.slice(4); // strip ses_ prefix
       expect(suffix).toMatch(/^[A-Za-z0-9_-]+$/);
+    });
+  });
+
+  describe("deriveCustomSessionId (#144)", () => {
+    it("is ses_ + 21 base64url characters, stable for one API key and key", () => {
+      const id = deriveCustomSessionId("yav_project_a", "conv-1");
+      expect(id).toMatch(/^ses_[A-Za-z0-9_-]{21}$/);
+      expect(deriveCustomSessionId("yav_project_a", "conv-1")).toBe(id);
+    });
+
+    it("is the HMAC-SHA256 keyed with the API key over 'custom\\0' + key", () => {
+      const expected = `ses_${createHmac("sha256", "yav_project_a").update("custom\u0000conv-1").digest("base64url").slice(0, 21)}`;
+      expect(deriveCustomSessionId("yav_project_a", "conv-1")).toBe(expected);
+    });
+
+    it("differs per API key, per key, and from deriveSessionId() of the same text", () => {
+      const id = deriveCustomSessionId("yav_project_a", "max@example.com");
+      expect(deriveCustomSessionId("yav_project_b", "max@example.com")).not.toBe(id);
+      expect(deriveCustomSessionId("yav_project_a", "max@example.org")).not.toBe(id);
+      // An unkeyed hash of a guessable value is a pseudonym anyone can recompute.
+      expect(deriveSessionId("max@example.com")).not.toBe(id);
+      expect(deriveSessionId("custom\u0000max@example.com")).not.toBe(id);
     });
   });
 

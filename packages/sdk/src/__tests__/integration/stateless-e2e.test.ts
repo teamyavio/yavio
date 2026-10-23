@@ -3,7 +3,7 @@
  * MCP SDK v1 in stateless Streamable HTTP mode, a new McpServer per request
  * wrapped by one `createYavio()` client, 50 calls from one conversation.
  */
-import { createServer } from "node:http";
+import { type IncomingMessage, type ServerResponse, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -15,6 +15,7 @@ import { deriveSessionId } from "../../core/ids.js";
 import { createYavio } from "../../server/index.js";
 import { _resetGlobalState } from "../../server/proxy.js";
 import { type MockIngest, callTool, callViaClient, startMockIngest, v1Extra } from "./helpers.js";
+import { perRequestSessionSuite } from "./session-key-suite.js";
 
 describe("stateless Streamable HTTP, a new McpServer per request", () => {
   let ingest: MockIngest;
@@ -113,6 +114,13 @@ describe("stateless Streamable HTTP, a new McpServer per request", () => {
     expect(connections).toHaveLength(1);
     expect(connections[0]?.session_id).toBe(deriveSessionId("conv-e2e"));
     expect(discoveries.map((e) => e.tool_name).sort()).toEqual(["get_price", "ping"]);
+    // #144: the conversation's events say where their session came from; the
+    // listing, a request of its own before any call, stamps its own
+    // per-request session.
+    expect(new Set([...calls, ...connections].map((e) => e.session_source))).toEqual(
+      new Set(["openai_session"]),
+    );
+    expect(discoveries.every((e) => e.session_source === "per_request")).toBe(true);
     // Every instance sent through the one shared transport: batches of up to
     // 100 events, not one request per instance.
     expect(ingest.batches.length).toBeLessThan(10);
@@ -248,4 +256,33 @@ describe("client identity on the connection event (#142)", () => {
       });
     }
   });
+});
+
+// #144: sessionKey, the built-in client keys, per_request and its connection
+// collapse — the cases shared with the v2 file, on v1 stateless HTTP.
+perRequestSessionSuite({
+  name: "MCP SDK v1 stateless Streamable HTTP",
+  newServer: () => new McpServer({ name: "example", version: "1.0.0" }),
+  handler: (build, auth) => async (req: IncomingMessage, res: ServerResponse) => {
+    // What an auth middleware does: v1 passes req.auth on as extra.authInfo.
+    if (auth) Object.assign(req, { auth });
+    const server = build() as unknown as McpServer;
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
+    });
+    res.on("close", () => {
+      void transport.close();
+      void server.close();
+    });
+    await server.connect(transport);
+    await transport.handleRequest(req, res);
+  },
+  connect: async (url, info, headers) => {
+    const client = new Client(info);
+    await client.connect(
+      new StreamableHTTPClientTransport(url, headers ? { requestInit: { headers } } : undefined),
+    );
+    return client;
+  },
 });
