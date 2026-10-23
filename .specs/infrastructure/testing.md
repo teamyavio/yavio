@@ -78,6 +78,9 @@ Run against real Docker services using Testcontainers or a shared `docker-compos
 | Identify propagation | `yavio.identify(userId, traits)` → subsequent events | All events after identify carry `user_id`, `user_traits` populated |
 | Conversion tracking | `yavio.conversion("purchase", { value: 29.99, currency: "USD" })` | Event has `conversion_value=29.99`, `conversion_currency=USD` |
 | User metrics | Insert events over several batches and months, with and without `identify()` → run the user queries as `yavio_dashboard` | Exact totals, first/last seen, one person per stitched key (`__tests__/queries-users.test.ts`) |
+| Session stitch (#145) | Rows shaped like two SDK processes of one conversation (identify + call on A; a call without `user_id` on B, another day), calls before the identify, two ids in one session, a session id identified in another project, an empty session id → users list, detail, active users, Locations, `get_schema`'s SQL recipe through the SQL guard | B's call and the earlier calls count for the session's first user, a stamped `user_id` keeps its id, nothing maps across projects or without a session; windowed counts stitch from their window, the list and detail from all of it (#112) (`queries-users.test.ts`, `queries-locations.test.ts`) |
+| Per-row users (#145) | The same shapes → invocation feed and a tool's recent invocations on ClickHouse | Each row shows the session's first user when it has none of its own (`queries-invocations-clickhouse.test.ts`) |
+| Statistics key (#145) | The same shapes, two projects in one run → the statistics job as `yavio_rollup` | Tier 1 (`keyedEvents()`'s key from `events`) and tier 2 agree on DAU; one individual per identified session; both maps aliased so the prelude runs on ClickHouse 26.8 (`packages/ingest/src/__tests__/stats/job.integration.test.ts`) |
 
 ### Dashboard Query Accuracy
 
@@ -85,7 +88,7 @@ Run against real Docker services using Testcontainers or a shared `docker-compos
 |------|-------|-----------|
 | Overview metrics | Seed 100 events → `GET /api/analytics/:projectId/overview` | `totalEvents=100`, `uniqueSessions` and `uniqueUsers` match seed data |
 | Tool breakdown | Seed events for 3 tools → `GET /api/analytics/:projectId/tools` | Each tool appears with correct invocation count and avg latency |
-| Funnel query | Seed stepped session → `GET /api/analytics/:projectId/funnels` | Step completion rates match seed |
+| Funnel query | Seed stepped sessions on a real ClickHouse as `yavio_dashboard`: one process (incl. a session that straddles the range start and two steps in one millisecond), one session from two instances, a step stored twice, a session that went on elsewhere | One process gives exactly the old per-`step_sequence` result (asserted against the old SQL); two instances give positions 1–3 for one session; a duplicate neither double-counts nor shifts; drop-off by session (`__tests__/queries-funnels-clickhouse.test.ts`, #145) |
 | Time filtering | Seed events across 30 days → query with `from`/`to` | Only events within window returned |
 | Platform filtering | Seed events for chatgpt + claude → filter `?platform=chatgpt` | Only ChatGPT events returned |
 

@@ -181,6 +181,7 @@ Combined server + widget funnel. Answers: **"Where do users drop off?"**
 
 See [metrics/metrics.md — Funnel Metrics](metrics/metrics.md#funnel-metrics) for the full list of metrics surfaced in this view.
 
+- One conversation (session) is one attempt, its steps numbered in the order they happened, however many server instances served it (#145)
 - Filter by time range, platform, tool
 
 ### 7.5.4 Live Feed
@@ -192,6 +193,7 @@ Real-time event stream. Answers: **"What's happening right now?"**
 - Click to expand: full event details
 - Pause/resume stream
 - The SSE endpoint queries ClickHouse on a short poll interval (1–2 seconds) for new events matching the current project
+- The user column is the event's raw `user_id`, not stitched to the session's identified user (#145)
 
 ### 7.5.5 Errors
 
@@ -203,7 +205,7 @@ See [metrics/metrics.md — Error Metrics](metrics/metrics.md#error-metrics) for
 
 User-level analytics view. Answers: **"Who are my users and are they coming back?"**
 
-Requires `.identify()` to be called in the SDK. Sessions without `.identify()` appear as anonymous.
+Requires `.identify()` to be called in the SDK. Sessions without `.identify()` appear as anonymous. Once a session is identified, all its events count for that user — those before the call, and those of other server instances that served the conversation (#145, the session stitch in `keyedEvents()`).
 
 - **User list:** Table of identified users with key metrics (sessions, tool calls, conversions, revenue, first seen, last seen)
 - **Retention cohorts:** Matrix showing "Of users who first used the app in week N, what % returned in week N+1, N+2, etc." Configurable by day/week/month.
@@ -233,6 +235,7 @@ All user-level views (Users, Paths, retention, DAU/WAU/MAU) require `.identify()
 
 - **No `.identify()` calls in project:** Users view shows an empty state with instructions on how to add `.identify()` to the SDK integration.
 - **Partial adoption:** Sessions without `.identify()` are counted as anonymous. Metrics clearly distinguish between identified and anonymous sessions.
+- **Stateless fleets (#145):** the SDK stamps `user_id` only in the process that called `.identify()`. The read side counts every event of the session for its first identified user (an event's own `user_id` wins): the users list and detail, active users, retention, new vs returning, Locations, the invocation feed and a tool's recent invocations. The live feed shows the raw `user_id`.
 
 ## 7.7 Multi-Project Support
 

@@ -14,7 +14,7 @@ All metrics computed at query time from captured events. Nothing in this file is
 | Avg latency | `AVG(latency_ms) WHERE event_type = 'tool_call'` | Overview |
 | Invocations over time | `tool_call` events grouped by time bucket | Overview (line chart) |
 | Platform breakdown | `tool_call` events grouped by `platform` | Overview (pie chart) |
-| Locations | `tool_call` events grouped by `country_code`, and by `(country_code, region)` (#129). Users = the Users-page key (`keyedEvents()`, stitched within the range), counted per country and per region, never summed from regions. NULL country or region = Unknown; Unknown country listed last, one GROUPING SETS pass. Coverage = calls with a country / all calls — in practice only ChatGPT sends a location, and only with `capture.inputValues` on | Overview (table, countries expand to regions) |
+| Locations | `tool_call` events grouped by `country_code`, and by `(country_code, region)` (#129). Users = the Users-page key (`keyedEvents()`: own `user_id`, the session's first identified user (#145), the subject's user, `subject_id`; both maps stitched within the range), counted per country and per region, never summed from regions. NULL country or region = Unknown; Unknown country listed last, one GROUPING SETS pass. Coverage = calls with a country / all calls — in practice only ChatGPT sends a location, and only with `capture.inputValues` on | Overview (table, countries expand to regions) |
 | Top tools by invocation | `tool_call` events grouped by `event_name` ORDER BY count | Overview |
 | Total conversions | `COUNT(*) WHERE event_type = 'conversion'` | Overview |
 | Total revenue | `SUM(conversion_value) WHERE event_type = 'conversion'` | Overview |
@@ -47,9 +47,9 @@ All metrics computed at query time from captured events. Nothing in this file is
 
 | Metric | Computation | Dashboard View |
 |--------|-------------|----------------|
-| Step progression | `step` + `conversion` events ordered by timestamp within trace | Funnel View |
-| Drop-off rates | `COUNT(traces reaching step N+1) / COUNT(traces reaching step N)` | Funnel View |
-| Example traces | Full event timeline for individual `trace_id` | Funnel View |
+| Step progression | A session's `step` rows ranked by `(timestamp, step_sequence, event_id)` — `row_number()` over the session's steps before the range's end, deduplicated by `event_id` — then `uniqExact(session_id)` per (position, `event_name`) for the steps inside the range (#145). One conversation is one attempt however many SDK processes served it; `step_sequence` restarts per process and is only the tie-breaker. One process gives exactly the old per-`step_sequence` result. Conversions carry no `step_sequence` and stay out | Funnel View |
+| Drop-off rates | `COUNT(sessions reaching position N+1) / COUNT(sessions reaching position N)`; the drop-off list holds the sessions whose last position is N, each as the trace of its last step | Funnel View |
+| Example traces | Full event timeline for individual `trace_id`, ordered by `timestamp, step_sequence, event_id` | Funnel View |
 
 ## Error Metrics
 

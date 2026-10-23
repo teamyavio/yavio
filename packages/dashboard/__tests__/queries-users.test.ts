@@ -401,6 +401,38 @@ describe.skipIf(!url)("user queries on a real ClickHouse (#89)", () => {
       );
       expect(points.map((pt) => Number(pt.dau))).toEqual([0]);
     });
+
+    it("get_schema's run_query recipe passes the SQL guard and counts the same users", async () => {
+      const { USER_KEY_SQL } = await import("@/lib/mcp/schema-doc");
+      const { validateFreeQuery } = await import("@/lib/mcp/sql-guard");
+      const { queryAnalytics } = await import("@/lib/clickhouse/analytics-client");
+      const p = scoped("recipe");
+      await p.insert([
+        // A second instance, a call before identify, two ids in one session,
+        // a subject seen with a user, a subject never identified.
+        { session_id: "r1", timestamp: day(-3, "08:00:00.000") },
+        identify("ana", "r1", day(-3, "08:01:00.000")),
+        { session_id: "r1", timestamp: day(-2, "08:00:00.000") },
+        identify("bo", "r2", day(-2, "09:00:00.000")),
+        identify("cy", "r2", day(-2, "09:30:00.000")),
+        { session_id: "r2", timestamp: day(-2, "10:00:00.000") },
+        { user_id: "dee", subject_id: "sub-dee", session_id: "r3", timestamp: day(-2) },
+        { subject_id: "sub-dee", session_id: "r4", timestamp: day(-1) },
+        { subject_id: "sub-eli", session_id: "r5", timestamp: day(-1) },
+        { session_id: "r6", timestamp: day(-1) },
+        // Identified 40 days ago: inside the 30 days only through the map.
+        identify("fay", "r7", day(-40)),
+        { session_id: "r7", timestamp: day(-1) },
+      ]);
+      const [row] = await queryAnalytics<{ users: string }>({
+        workspaceId: ws,
+        projectId: p.projectId,
+        query: validateFreeQuery(USER_KEY_SQL),
+      });
+      const { total } = await q.queryUserList(p.ctx(day(-60), day(1)), 1, 50);
+      // ana, bo, cy, dee, sub-eli, fay.
+      expect([Number(row.users), total]).toEqual([6, 6]);
+    });
   });
 });
 
