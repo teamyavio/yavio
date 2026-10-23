@@ -114,13 +114,13 @@ describe("stateless Streamable HTTP, a new McpServer per request", () => {
     expect(connections).toHaveLength(1);
     expect(connections[0]?.session_id).toBe(deriveSessionId("conv-e2e"));
     expect(discoveries.map((e) => e.tool_name).sort()).toEqual(["get_price", "ping"]);
-    // #144: the conversation's events say where their session came from; the
-    // listing, a request of its own before any call, stamps its own
-    // per-request session.
+    // #144: the conversation's events say where their session came from.
+    // tool_discovery carries none: ingest writes it to tool_registry, which
+    // keeps no session fields (review round 1).
     expect(new Set([...calls, ...connections].map((e) => e.session_source))).toEqual(
       new Set(["openai_session"]),
     );
-    expect(discoveries.every((e) => e.session_source === "per_request")).toBe(true);
+    expect(discoveries.every((e) => e.session_source === undefined)).toBe(true);
     // Every instance sent through the one shared transport: batches of up to
     // 100 events, not one request per instance.
     expect(ingest.batches.length).toBeLessThan(10);

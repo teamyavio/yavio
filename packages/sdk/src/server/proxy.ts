@@ -887,13 +887,6 @@ export function createProxy<T extends McpServerLike>(
     try {
       const tools = (result as { tools?: unknown } | undefined)?.tools;
       if (Array.isArray(tools)) {
-        // Before any call the events stamp the connection's own session,
-        // which no call has labelled yet: label it by this request (#144) —
-        // on a per-request host the listing is a request of its own.
-        if (!activeSession && session.sessionSource === undefined) {
-          session.sessionSource =
-            readCallExtra(extra).requestHeaders !== undefined ? "per_request" : "connection";
-        }
         // One batch for the listing, not one send per tool.
         const events: ToolDiscoveryEvent[] = [];
         for (const tool of tools as Array<Record<string, unknown> | null>) {
@@ -1035,7 +1028,8 @@ export function createProxy<T extends McpServerLike>(
         sessionId: (activeSession ?? session).sessionId,
         sdkVersion,
         platform: (activeSession ?? session).platform,
-        sessionSource: (activeSession ?? session).sessionSource,
+        // No session_source (#144 review round 1): ingest writes
+        // tool_discovery to tool_registry, which keeps no session fields.
       },
       { toolName, description: description?.slice(0, MAX_DISCOVERY_DESCRIPTION), inputSchema },
     );

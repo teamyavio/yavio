@@ -3098,7 +3098,7 @@ describe("session keys and session_source (#144)", () => {
     ]);
   });
 
-  it("tool_discovery before any call stamps the connection's session, labelled by the tools/list request", async () => {
+  it("tool_discovery carries no session_source, and the listing labels no session: ingest keeps no session fields in tool_registry (#144 review round 1)", async () => {
     const server = new McpServer({ name: "test", version: "1.0" });
     const transport = createMockTransport();
     const proxy = createProxy(server, testConfig, transport, "0.0.1");
@@ -3108,13 +3108,17 @@ describe("session keys and session_source (#144)", () => {
     const client = new Client({ name: "c", version: "1.0" });
     await client.connect(clientTransport);
     await client.listTools();
+    await client.callTool({ name: "ping" });
     await client.close();
-    const discoveries = (transport.sent.flat() as Array<Record<string, unknown>>).filter(
-      (e) => e.event_type === "tool_discovery",
-    );
-    expect(discoveries.map((e) => [e.tool_name, e.session_source])).toEqual([
-      ["ping", "connection"],
-    ]);
+    const events = transport.sent.flat() as Array<Record<string, unknown>>;
+    const discoveries = events.filter((e) => e.event_type === "tool_discovery");
+    expect(discoveries.map((e) => e.tool_name)).toEqual(["ping"]);
+    expect(
+      discoveries.every((e) => !("session_source" in e) || e.session_source === undefined),
+    ).toBe(true);
+    // The call after the listing labels the connection's session itself.
+    const call = events.find((e) => e.event_type === "tool_call");
+    expect(call?.session_source).toBe("connection");
   });
 
   it("the re-wrap fingerprint changes with sessionKey: its presence, as for intent.fallback", () => {

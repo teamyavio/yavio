@@ -368,7 +368,7 @@ An **analytics session** represents one conversation between a client (AI platfo
 - What to return is a **conversation** id: a session keeps its first identified user (1302) and funnels, paths and the step sequence are per session, so a per-user key (an auth subject) would chain all of a user's conversations into one session. `authInfo.clientId` is the OAuth client, shared by every user of a client app; the bearer token, a constant and a per-request id are wrong for the obvious reasons (#144, #145).
 - The built-in keys apply on every transport: a VS Code stdio server moves from one session per client process (`connection`) to one per conversation.
 
-All events of a call (tool calls, identify, steps, track, conversions, the connection event) inherit its session and `session_source`; `tool_discovery` stamps the session of the most recent call, or the connection's session before any call, labelled by the `tools/list` request that lists it.
+All events of a call (tool calls, identify, steps, track, conversions, the connection event) inherit its session and `session_source`; `tool_discovery` stamps the session of the most recent call, or the connection's session before any call, and no `session_source`: ingest writes it to `tool_registry`, which keeps neither `session_id` nor `session_source` (review round 1 dropped a label the `tools/list` request used to put on the connection session).
 
 ### 3.7.2 Session Boundary Rules
 
