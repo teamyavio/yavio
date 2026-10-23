@@ -369,6 +369,12 @@ All analytics routes require an authenticated session and are scoped to the spec
 | GET | `/api/analytics/[projectId]/paths` | Session | Path sequences: tool call sequences as Sankey/sunburst data. Query params: `startTool`, `endTool` (filter starting/ending points). |
 | GET | `/api/analytics/[projectId]/errors` | Session | Error metrics: error count by type, top erroring tools, error rate time-series, error details. Query params: `page`, `pageSize`, `sort`, `order`, `errorCategory` (filter). See [metrics.md — Error Metrics](metrics/metrics.md#error-metrics). |
 
+**Errors and client retries (#159).** A failed analytics route answers with an HTTP status, which is what the client acts on, and a `{ error, code }` body: a message for the user and a YAVIO code (see the [error catalog](../07_error-catalog.md)). The dashboard reads these routes with SWR through `hooks/use-analytics-query.ts`, and one predicate (`isRetryableError` in `lib/analytics/request.ts`) decides both whether SWR retries a failure in the background and whether the error state offers "Try again":
+
+- **Not retried:** 400 (`YAVIO-3407` query rejected, invalid filters), 422 (`YAVIO-3408` query memory limit, from #157), 504 (`YAVIO-3405` query timed out, or a gateway timeout without that body, which gets the same message), any of those three codes whatever the status, and every other 4xx except 408 and 429 (signed out, no access, project not found). A 401 or `YAVIO-3000` (session expired) offers "Sign in again" instead, back to the same page and filters after login. The same request fails the same way every time, and the timeout and memory errors cost ClickHouse the full work up to the limit on each attempt; the message says what to change instead (narrow the date range).
+- **Retried:** other 5xx (502 `YAVIO-3406` "try again later"), 408, 429, and requests that got no answer (network errors), with SWR's exponential backoff (retries after 10, 20, 40, 80 and 160 s, each jittered ×0.5–1.5), at most 5 retries per failure. After the last one the error stays until someone refreshes.
+- Switching back to the tab does not refetch (`revalidateOnFocus: false`); the browser coming back online refetches once if the tab is visible at that moment. The page header's refresh button and "Try again" always refetch.
+
 ### 7.9.7 Live Feed Route
 
 | Method | Path | Auth | Protocol | Description |

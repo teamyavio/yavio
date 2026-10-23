@@ -35,7 +35,7 @@ export function FunnelsContent({ projectId }: { projectId: string }) {
       </PageHeader>
 
       {error ? (
-        <ErrorAlert message={error.message} retry={retry} />
+        <ErrorAlert error={error} retry={retry} />
       ) : !isLoading && (!data || data.steps.length === 0) ? (
         <EmptyState
           title="No funnel data"
