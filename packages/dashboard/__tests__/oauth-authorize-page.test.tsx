@@ -72,7 +72,7 @@ const INVALID_REQUESTS: Array<[string, Record<string, string | undefined>, strin
     { ...VALID, response_type: "token" },
     "unsupported_response_type",
   ],
-  ["no response_type", { ...VALID, response_type: undefined }, "unsupported_response_type"],
+  ["no response_type", { ...VALID, response_type: undefined }, "invalid_request"],
   ["no code_challenge", { ...VALID, code_challenge: undefined }, "invalid_request"],
   [
     "an unsupported code_challenge_method",

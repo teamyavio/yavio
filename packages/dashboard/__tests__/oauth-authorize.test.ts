@@ -91,7 +91,8 @@ describe("authorization request validation", () => {
   it("reports an invalid request on the page, never as a redirect to the client", async () => {
     const cases: Array<[Record<string, string | undefined>, string]> = [
       [{ ...VALID, response_type: "token" }, "unsupported_response_type"],
-      [{ ...VALID, response_type: undefined }, "unsupported_response_type"],
+      [{ ...VALID, response_type: undefined }, "invalid_request"],
+      [{ ...VALID, response_type: "" }, "invalid_request"],
       [{ ...VALID, code_challenge: undefined }, "invalid_request"],
       [{ ...VALID, code_challenge: "too-short" }, "invalid_request"],
       [{ ...VALID, code_challenge_method: "plain" }, "invalid_request"],

@@ -56,6 +56,9 @@ function ErrorCard({ message, code }: { message: string; code?: string }) {
       {code !== undefined && (
         <p className="mt-2 font-mono text-xs text-muted-foreground">Error: {code}</p>
       )}
+      <p className="mt-4 text-sm text-muted-foreground">
+        You can close this window and reconnect from the app.
+      </p>
     </AuthCard>
   );
 }

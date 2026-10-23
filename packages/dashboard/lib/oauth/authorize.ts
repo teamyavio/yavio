@@ -10,7 +10,7 @@ import { OAuthError } from "./errors";
  * seen the consent page and decided (see the consent actions).
  */
 
-/** Error shown on our own page, with its RFC 6749 error code. */
+/** Error shown on our own page, with its OAuth error code. */
 export class RenderAuthorizeError extends Error {
   constructor(
     public readonly error: string,
@@ -87,6 +87,11 @@ export async function validateAuthorizeRequest(
     );
   }
 
+  // RFC 6749 §4.1.2.1: a missing parameter is invalid_request, an
+  // unsupported value is unsupported_response_type.
+  if (!params.response_type) {
+    throw new RenderAuthorizeError("invalid_request", "Missing response_type.");
+  }
   if (params.response_type !== "code") {
     throw new RenderAuthorizeError(
       "unsupported_response_type",
