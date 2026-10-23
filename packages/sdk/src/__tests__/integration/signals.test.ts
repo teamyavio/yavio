@@ -1860,6 +1860,45 @@ describe("loss accounting (#148)", () => {
     });
   });
 
+  it("a second cycle starts afresh: an app whose shutdown() the first cycle's deadline cut, and which then exits without awaiting its next one, gets the hint to await it (#154 review round 2)", async () => {
+    // Before the fix the first cycle's mark outlived it: "Shutdown deadline
+    // of 300 ms reached — 1 more events not delivered (…)" for a second
+    // cycle whose deadline was never reached.
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client, raw } = build("yav_154_two_cycles", { shutdownTimeoutMs: 300 });
+      await callTool(raw, "get_price", { q: "first" });
+      let cycles = 0;
+      let firstReturned = false;
+      const app = vi.fn(async () => {
+        cycles++;
+        if (cycles === 1) {
+          await client.shutdown(); // cut at the 300 ms deadline; the process lives on
+          firstReturned = true;
+          return;
+        }
+        void client.shutdown(); // not awaited
+        exitHooks()[0]?.call(process, 0); // process.exit(0) at once
+      });
+      process.on("SIGTERM", app);
+      try {
+        process.emit("SIGTERM", "SIGTERM");
+        await vi.waitFor(() => expect(firstReturned).toBe(true), { timeout: 2_000 });
+        expect(lines1205()).toHaveLength(1); // the first cycle's line
+        // A request served later wraps again — the SDK's listeners come back.
+        const again = client.wrap(new McpServer({ name: "app", version: "1.0" }));
+        again.registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+        await callTool(again, "get_price", { q: "second" });
+        process.emit("SIGTERM", "SIGTERM");
+        expect(cycles).toBe(2);
+        expect(lines1205()).toHaveLength(2);
+        expect(lines1205()[1]).toContain("Process exit with");
+        expect(lines1205()[1]).toContain("await analytics.shutdown() before exiting");
+      } finally {
+        process.off("SIGTERM", app);
+      }
+    });
+  });
+
   it("several waits end at one cycle deadline — two apps' shutdown() timers and the cycle's — and the cycle prints one line (#154 review round 1)", async () => {
     // Each of the three runs onCycleDeadline at the same deadline; once per
     // cycle. (Without the guard a second call counts nothing either — what

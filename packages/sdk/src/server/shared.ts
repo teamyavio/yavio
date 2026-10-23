@@ -371,7 +371,7 @@ let releasedBy: SignalCycle | null = null;
  * The signal cycle at whose deadline the last `shutdown()` to return was
  * cut with its work unfinished — its own timer bounded by the cycle, or the
  * cycle's timer releasing every wait; cleared by one that returned with its
- * work done. Set, what the exit hook finds is what that deadline left
+ * work done or on its own timer, and when a new cycle starts. Set, what the exit hook finds is what that deadline left
  * after the cycle's line — a request served after the signal that sent
  * more than its batch in flight, a send in the deadline's last 100 ms —
  * and its line says so in the cycle's wording: the app did await
@@ -489,7 +489,9 @@ export async function awaitBounded(work: Promise<void>, ownMs: number): Promise<
   if (epoch !== resets) return;
   if (settled) returnedAtDeadline = null;
   else if (byCycle) returnedAtDeadline = byCycle;
-  else if (!ownTimer && releasedBy) returnedAtDeadline = releasedBy;
+  // Its own value cut it, not a cycle's deadline.
+  else if (ownTimer) returnedAtDeadline = null;
+  else if (releasedBy) returnedAtDeadline = releasedBy;
 }
 
 function releaseWaiters(): void {
@@ -853,6 +855,10 @@ function onSignal(signal: HandledSignal): void {
     epoch: resets,
   };
   signalInFlight = cycle;
+  // A new cycle starts afresh: what an earlier one's deadline cut is not
+  // what an exit in this one leaves behind (#154 review round 2).
+  returnedAtDeadline = null;
+  releasedBy = null;
   clearTimeout(cycleTimer);
   cycleTimer = setTimeout(() => {
     onCycleDeadline(cycle); // the cycle's line first, then the waiters (#154)
