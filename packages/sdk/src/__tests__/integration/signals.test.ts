@@ -1944,10 +1944,15 @@ describe("loss accounting (#148)", () => {
 
   it("several waits end at one cycle deadline — two apps' shutdown() timers and the cycle's — and the cycle prints one line (#154 review round 1)", async () => {
     // Each of the three runs onCycleDeadline at the same deadline; once per
-    // cycle. (Without the guard a second call counts nothing either — what
-    // the first line marked is reconciled, the post-signal fetches are
-    // flagged — so a mutant dropping it survives this test; it pins the
-    // outcome, the guard saves the recount.)
+    // cycle. Here a second call would count nothing — what the first line
+    // marked is reconciled, the post-signal fetches are flagged — so a
+    // mutant dropping the guard survives this test, which pins the outcome.
+    // The guard is not redundant: triggers at one deadline need not run in
+    // one tick (timers start from the loop's cached time), and a send in
+    // the deadline's last 100 ms cut between two of them, while a stop that
+    // ignores its abort is still settling, would without it be a second
+    // cycle line instead of the exit line (each event still counted once;
+    // #154 review round 2).
     await withoutOtherListeners("SIGTERM", async () => {
       const a = build("yav_154_two_a", { shutdownTimeoutMs: 800 });
       const b = build("yav_154_two_b", { shutdownTimeoutMs: 800 });
