@@ -1942,6 +1942,58 @@ describe("loss accounting (#148)", () => {
     }
   });
 
+  it("the same when the late fetch's budget timer runs before the cycle's: the app's wait settles at the cut and it exits before the cycle's timer — the budget cut is what says the deadline came (#154 review round 3)", async () => {
+    // The order the cycle's own timer cannot be relied on to precede: here
+    // forced by giving that timer (the first one of the cycle's duration
+    // set while the signal is handled) 300 ms more. The budget timer then
+    // aborts the late fetch at the deadline, the app's shutdown() settles
+    // and it exits with nothing else to tell it the deadline came. Without
+    // the budget cut's record the line is "Process exit with 1 events not
+    // delivered — await analytics.shutdown() …".
+    ingest.hangEvents = false; // healthy at the signal
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { client, raw } = build("yav_154_budget_first", { shutdownTimeoutMs: 1_000 });
+      await callTool(raw, "get_price", { q: "before" });
+      let atExit: string[] | undefined;
+      const app = vi.fn(async () => {
+        await new Promise((r) => setTimeout(r, 300)); // the drain delivers meanwhile
+        ingest.hangEvents = true;
+        await callTool(raw, "get_price", { q: "late" }); // its fetch's budget ends at the deadline
+        await client.shutdown(); // settles when the budget cuts that fetch
+        exitHooks()[0]?.call(process, 0); // process.exit(0) at once
+        atExit = lines1205();
+      });
+      process.on("SIGTERM", app);
+      const realSetTimeout = globalThis.setTimeout;
+      let delayed = false;
+      const timers = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+        fn: (...args: unknown[]) => void,
+        ms?: number,
+        ...rest: unknown[]
+      ) => {
+        if (!delayed && ms === 1_000) {
+          delayed = true; // the cycle's timer
+          return realSetTimeout(fn, 1_300, ...rest);
+        }
+        return realSetTimeout(fn, ms, ...rest);
+      }) as typeof setTimeout);
+      try {
+        process.emit("SIGTERM", "SIGTERM");
+        timers.mockRestore();
+        expect(delayed).toBe(true);
+        await vi.waitFor(() => expect(atExit).toBeDefined(), { timeout: 3_000 });
+        expect(atExit).toEqual([
+          `[YAVIO-1205] Shutdown deadline of 1000 ms reached — 1 events not delivered (in flight when the deadline cut it, sent in its last 100 ms or after it, or queued behind a request it cut). Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.`,
+        ]);
+        // The cycle's timer had not run when the app exited.
+        await new Promise((r) => setTimeout(r, 400));
+      } finally {
+        timers.mockRestore();
+        process.off("SIGTERM", app);
+      }
+    });
+  });
+
   it("several waits end at one cycle deadline — two apps' shutdown() timers and the cycle's — and the cycle prints one line (#154 review round 1)", async () => {
     // Each of the three runs onCycleDeadline at the same deadline; once per
     // cycle. Here a second call would count nothing — what the first line

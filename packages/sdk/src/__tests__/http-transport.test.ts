@@ -1132,6 +1132,41 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       expect(floor.pendingEvents()).toBe(1);
     });
 
+    it("budgetCutAt(): the time a fetch's budget aborted it is recorded and reported; a fetch the plain fetch timeout aborts records nothing (#154 review round 3, #151's rule)", async () => {
+      const { fetch: hanging } = abortableFetch();
+      const t0 = Date.now();
+      const reported: number[] = [];
+      const cut = new HttpTransport({
+        ...base,
+        immediate: true,
+        maxRetries: 0,
+        fetchBudgetMs: (now) => t0 + 300 - now,
+        onBudgetCut: (at) => reported.push(at),
+        fetch: hanging,
+      });
+      cut.send([fakeEvent()]);
+      await vi.advanceTimersByTimeAsync(299);
+      expect(cut.budgetCutAt()).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(cut.budgetCutAt()).toBe(t0 + 300);
+      expect(reported).toEqual([t0 + 300]);
+
+      const { fetch: hanging2 } = abortableFetch();
+      const timedOut = new HttpTransport({
+        ...base,
+        immediate: true,
+        maxRetries: 0,
+        fetchTimeoutMs: 300,
+        fetchBudgetMs: () => 10_000,
+        onBudgetCut: (at) => reported.push(at),
+        fetch: hanging2,
+      });
+      timedOut.send([fakeEvent()]);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(timedOut.budgetCutAt()).toBeUndefined();
+      expect(reported).toHaveLength(1);
+    });
+
     it("an unparsable Retry-After falls back to the backoff, never to an immediate retry", async () => {
       let calls = 0;
       const fetch = vi.fn().mockImplementation(() => {

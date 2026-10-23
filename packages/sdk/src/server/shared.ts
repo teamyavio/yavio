@@ -296,8 +296,6 @@ interface SignalCycle {
   printed: boolean;
   /** Set when one of the cycle's deadline timers ran (`onCycleDeadline`, the cycle's own timer). */
   deadlinePassed: boolean;
-  /** `lostTotal()` when the cycle started: more since means a deadline gave something up. */
-  lostAtStart: number;
   /** `resets` when the cycle started: a cycle from before a test reset reports nothing after it. */
   epoch: number;
 }
@@ -377,6 +375,12 @@ const deadlineWaiters = new Set<() => void>();
 let appWaits = 0;
 /** The latest signal cycle, running or ended; a new one replaces it. */
 let lastCycle: SignalCycle | null = null;
+/**
+ * The latest time a fetch's budget aborted it, on any transport
+ * (`onBudgetCut`): kept here, not read off the transports, so a transport
+ * that closed and left `transports` still counts (#154 review round 3).
+ */
+let lastBudgetCut: number | undefined;
 /**
  * The cycle in which the last `shutdown()` to return returned — null when
  * its own value cut it outside a cycle's bound. With no `shutdown()` in
@@ -494,12 +498,17 @@ export async function awaitBounded(work: Promise<void>, ownMs: number): Promise<
 
 /**
  * Whether the cycle's deadline has come: one of its deadline timers ran
- * (`deadlinePassed`), one of its stops was cut by its own, or a deadline
- * gave something up since it started — a post-signal fetch cut by its
- * budget, the timer that may run first of all (#154 review round 2).
+ * (`deadlinePassed`), one of its stops was cut by its own, or a fetch's
+ * budget ended at or after it (`lastBudgetCut`) — a post-signal fetch cut
+ * by its budget, the timer that may run first of all (#154 review rounds 2
+ * and 3; round 2's "a deadline gave something up since the cycle began"
+ * also fired on a retry wait refused before the deadline and on an earlier
+ * cycle's stops settling late).
  */
 const deadlineCame = (cycle: SignalCycle): boolean =>
-  cycle.deadlinePassed || stopsCut(cycle) || lostTotal() > cycle.lostAtStart;
+  cycle.deadlinePassed ||
+  stopsCut(cycle) ||
+  (lastBudgetCut !== undefined && lastBudgetCut >= cycle.deadlineAt);
 
 function releaseWaiters(): void {
   const waiters = [...deadlineWaiters];
@@ -866,7 +875,6 @@ function onSignal(signal: HandledSignal): void {
     lateReported: false,
     printed: false,
     deadlinePassed: false,
-    lostAtStart: lostTotal(),
     epoch: resets,
   };
   signalInFlight = cycle;
@@ -981,6 +989,9 @@ function newTransport(config: Key, sdkVersion: string): HttpTransport {
     shutdownTimeoutMs: config.shutdownTimeoutMs,
     immediate: draining,
     onShutdownLoss: (lost, deadlineMs) => reportCallLoss(transport, lost, deadlineMs),
+    onBudgetCut: (atMs) => {
+      lastBudgetCut = lastBudgetCut === undefined ? atMs : Math.max(lastBudgetCut, atMs);
+    },
     onClosed: () => {
       // Settled: nothing is pending, and nothing reaches it any more (the
       // registry unhooks a transport from its slot before stopping it), so
@@ -1309,6 +1320,7 @@ export function _resetSharedState(): void {
   appWaits = 0;
   lastCycle = null;
   returnedIn = null;
+  lastBudgetCut = undefined;
   holdDeadlines.length = 0;
   pinDeadlines.clear();
   releaseWaiters();

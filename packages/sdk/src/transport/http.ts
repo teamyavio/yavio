@@ -51,6 +51,14 @@ export interface HttpTransportOptions {
    * request does not keep one transport per request (#148 review round 1).
    */
   onClosed?: () => void;
+  /**
+   * Called when a fetch's budget (`fetchBudgetMs`), not the plain fetch
+   * timeout, aborts it, with the absolute time the budget ended — for a
+   * post-signal transport that is the signal cycle's deadline, or later (the
+   * 100 ms floor, D after it). How the registry knows a cycle's deadline
+   * came when this timer runs before the cycle's own (#154 review round 3).
+   */
+  onBudgetCut?: (atMs: number) => void;
 }
 
 const DEFAULT_FLUSH_INTERVAL_MS = 10_000;
@@ -242,12 +250,16 @@ export class HttpTransport implements Transport {
   private readonly fetchBudgetMs: ((now: number) => number) | undefined;
   private readonly onShutdownLoss: ((lost: number, deadlineMs: number) => void) | undefined;
   private readonly onClosed: (() => void) | undefined;
+  private readonly onBudgetCut: ((atMs: number) => void) | undefined;
+  /** When a fetch's budget last aborted it (`onBudgetCut`), absolute; undefined before that. */
+  private lastBudgetCut: number | undefined;
 
   constructor(options: HttpTransportOptions) {
     this.immediate = options.immediate === true;
     this.fetchBudgetMs = options.fetchBudgetMs;
     this.onShutdownLoss = options.onShutdownLoss;
     this.onClosed = options.onClosed;
+    this.onBudgetCut = options.onBudgetCut;
     this.endpoint = options.endpoint;
     this.apiKey = options.apiKey;
     this.sdkVersion = options.sdkVersion;
@@ -288,6 +300,11 @@ export class HttpTransport implements Transport {
   /** Every event ingest acknowledged so far. */
   deliveredEvents(): number {
     return this.delivered;
+  }
+
+  /** When a fetch's budget last aborted one of this transport's fetches, absolute; undefined if none did. */
+  budgetCutAt(): number | undefined {
+    return this.lastBudgetCut;
   }
 
   /** Whether a shutdown deadline cut this transport: its timer fired with the drain unfinished (#154). */
@@ -591,9 +608,18 @@ export class HttpTransport implements Transport {
         this.inflightController = controller;
         const timeoutMs =
           budgetMs === undefined ? this.fetchTimeoutMs : Math.min(this.fetchTimeoutMs, budgetMs);
-        this.inflightCutAt =
+        const cutAt =
           budgetMs !== undefined && budgetMs < this.fetchTimeoutMs ? now + budgetMs : undefined;
-        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        this.inflightCutAt = cutAt;
+        const timer = setTimeout(() => {
+          // The budget's timer, not the fetch timeout's (#151's rule): the
+          // deadline it carries has come (#154 review round 3).
+          if (cutAt !== undefined) {
+            this.lastBudgetCut = cutAt;
+            this.onBudgetCut?.(cutAt);
+          }
+          controller.abort();
+        }, timeoutMs);
         unref(timer);
         let response: Response;
         let partial: PartialBody | undefined;
