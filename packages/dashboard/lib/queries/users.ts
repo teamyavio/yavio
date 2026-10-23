@@ -18,36 +18,55 @@ interface QueryContext {
 }
 
 /**
- * Who a user is (#89), per event:
- *   coalesce(user_id, the user_id stitched to its subject_id, subject_id)
+ * Who a user is (#89, #145), per event:
+ *   coalesce(user_id, the first user_id identified in its session,
+ *            the user_id stitched to its subject_id, subject_id)
  *
- * - user_id: what the integrator passed to identify().
+ * - user_id: what the integrator passed to identify(). An event's own id is
+ *   never overwritten.
+ * - Session stitch (#145): identify() stamps user_id only on the events of
+ *   the SDK process that called it, from that call on. A stateless fleet
+ *   serves one conversation from several instances, so the others' events
+ *   — and every event before the identify — carry no user_id. Each
+ *   session_id is mapped to the FIRST user_id an identify row gave it
+ *   (argMin over (timestamp, event_id)): the SDK's one-user-per-session rule
+ *   (YAVIO-1302) and what a single process would have produced, so a later
+ *   identify never re-attributes history. Only identify rows are read — a
+ *   primary-key range, a few percent of the events. An event without a
+ *   session never maps to anyone.
  * - subject_id: the platform's stable pseudonymous per-user-per-app id
  *   (ChatGPT's openai/subject), so apps that never call identify() still have
  *   user metrics.
- * - Stitching: events before identify() carry only subject_id, events after
- *   it carry user_id. Each subject_id is mapped to the user_id last seen with
- *   it, so such a person counts once, not twice.
- * - Never session_id: a session is not a person. An empty user_id is not one
- *   either.
+ * - Subject stitch: events before identify() carry only subject_id, events
+ *   after it carry user_id. Each subject_id is mapped to the user_id last seen
+ *   with it, so such a person counts once, not twice. The session map comes
+ *   first: an identify in the same conversation is direct evidence, the
+ *   subject an inference across conversations.
+ * - Never session_id as the key: a session is not a person. An empty user_id
+ *   is not one either.
  *
  * All user metrics come straight from events, which holds the same 13 months
  * a per-user summary would; users_mv / sessions_mv merged wrongly and are
- * dropped (#89). "First seen" therefore means within that window.
+ * dropped (#89). "First seen" therefore means within that window. The map is
+ * computed per query, not stored: the identify rows carry it, so tenant
+ * erasure, the per-project retention delete and the TTL take it with them.
  *
  * #85's statistics job counts users with the same key, so tier 1 and tier 2
  * agree. Aliases never shadow a column a WHERE refers to: ClickHouse resolves
  * the alias first.
  *
- * A windowed COUNT stitches from the window it reads (#112): the mapping
- * only has to cover the subject_ids that appear there, and a person seen as
- * subject and as user_id within the window is still one person. Without
- * the bound, every users-page query aggregated the whole project's events
- * before its own time filter applied — several times per page view, and
- * growing with the 13 months now kept. Queries that name a person — the
- * all-time list, first seen, retention cohorts, and the detail of one user
- * — keep the full mapping, so the list and the detail agree on whose the
- * subject-only events are.
+ * A windowed COUNT stitches from the window it reads (#112), both maps: the
+ * mapping only has to cover the sessions and subject_ids that appear there,
+ * and a person seen as subject and as user_id within the window is still one
+ * person. Without the bound, every users-page query aggregated the whole
+ * project's events before its own time filter applied — several times per
+ * page view, and growing with the 13 months now kept. Queries that name a
+ * person — the all-time list, first seen, retention cohorts, and the detail
+ * of one user — keep the full mapping, so the list and the detail agree on
+ * whose the unstamped events are. "A later identify never re-attributes
+ * history" holds for that full mapping only: in a windowed count a session
+ * whose first identify falls before the window goes to the first id
+ * identified inside it, if there is one (#145 review round 1).
  */
 export interface TimeWindow {
   /** SQL expressions; the window is [from, to). */
@@ -69,6 +88,17 @@ export function keyedEvents({
   rows = "",
 }: { events?: TimeWindow; stitch?: TimeWindow; rows?: string } = {}): string {
   return `
+      session_map AS (
+        SELECT session_id AS stitched_session,
+               argMin(assumeNotNull(user_id), (timestamp, event_id)) AS session_user_id
+        FROM events
+        WHERE project_id = {projectId:String}
+          AND event_type = 'identify'
+          AND user_id IS NOT NULL AND user_id != ''
+          AND session_id != ''
+          ${bound("timestamp", stitch)}
+        GROUP BY stitched_session
+      ),
       stitch AS (
         SELECT assumeNotNull(subject_id) AS stitched_subject,
                argMax(assumeNotNull(user_id), timestamp) AS mapped_user_id
@@ -81,8 +111,10 @@ export function keyedEvents({
       ),
       keyed AS (
         SELECT e.*,
-               coalesce(nullIf(e.user_id, ''), nullIf(s.mapped_user_id, ''), nullIf(e.subject_id, '')) AS user_key
+               coalesce(nullIf(e.user_id, ''), nullIf(m.session_user_id, ''),
+                        nullIf(s.mapped_user_id, ''), nullIf(e.subject_id, '')) AS user_key
         FROM events AS e
+        LEFT JOIN session_map AS m ON m.stitched_session = e.session_id
         LEFT JOIN stitch AS s ON s.stitched_subject = ifNull(e.subject_id, '')
         WHERE e.project_id = {projectId:String} ${bound("e.timestamp", events)} ${rows}
       )`;
