@@ -7,10 +7,11 @@
  * over Streamable HTTP. Every one of those shows up here against the real
  * packages, not a fake.
  */
-import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
+import { type IncomingMessage, type ServerResponse, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
-import { toNodeHandler } from "@modelcontextprotocol/node";
+import { NodeStreamableHTTPServerTransport, toNodeHandler } from "@modelcontextprotocol/node";
 import { InMemoryTransport, McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import type {
   BaseEvent,
@@ -28,6 +29,7 @@ import { _resetGlobalState, createProxy } from "../../server/proxy.js";
 import { _sharedStateCount } from "../../server/shared.js";
 import type { Transport } from "../../transport/types.js";
 import { type MockIngest, registeredTool, startMockIngest } from "./helpers.js";
+import { type PerRequestStack, perRequestSessionSuite } from "./session-key-suite.js";
 
 function createMockTransport(): Transport & { sent: BaseEvent[][] } {
   const sent: BaseEvent[][] = [];
@@ -569,5 +571,112 @@ describe("MCP SDK v2 — 2026-07-28 era over Streamable HTTP, a new server per r
     expect(connection?.client_name).toBe("envelope-client");
     expect(connection?.client_version).toBe("9.1");
     expect(connection?.session_id).toBe(deriveSessionId("conv-envelope"));
+  });
+});
+
+// #144: the cases shared with the v1 file, on v2's per-request entry
+// (createMcpHandler + toNodeHandler) — the 2025 era through its stateless
+// legacy fallback, and the 2026-07-28 era, which has no Mcp-Session-Id at all.
+function v2Stack(name: string, negotiate: boolean): PerRequestStack {
+  return {
+    name,
+    newServer: () => new McpServer({ name: "stateless-v2", version: "1.0" }),
+    handler: (build, auth) => {
+      const nodeHandler = toNodeHandler(createMcpHandler(() => build() as unknown as McpServer));
+      return (req: IncomingMessage, res: ServerResponse) => {
+        // What an auth middleware does; toNodeHandler forwards req.auth.
+        if (auth) Object.assign(req, { auth });
+        void nodeHandler(req, res);
+      };
+    },
+    connect: async (url, info, headers) => {
+      const client = new Client(
+        info,
+        negotiate ? { versionNegotiation: { mode: "auto" } } : undefined,
+      );
+      await client.connect(
+        new StreamableHTTPClientTransport(url, headers ? { requestInit: { headers } } : undefined),
+      );
+      expect(client.getNegotiatedProtocolVersion() === "2026-07-28").toBe(negotiate);
+      return client;
+    },
+  };
+}
+perRequestSessionSuite(v2Stack("MCP SDK v2 createMcpHandler, 2025 era", false));
+perRequestSessionSuite(v2Stack("MCP SDK v2 createMcpHandler, 2026-07-28 era", true));
+
+describe("MCP SDK v2 — a long-lived server on a session-generating transport (#144)", () => {
+  let ingest: MockIngest;
+  let mcp: ReturnType<typeof createServer> | undefined;
+
+  beforeEach(async () => {
+    _resetGlobalState();
+    ingest = await startMockIngest();
+  });
+
+  afterEach(async () => {
+    await ingest.close();
+    if (mcp) {
+      mcp.closeAllConnections();
+      await new Promise<void>((resolve) => mcp?.close(() => resolve()));
+    }
+    mcp = undefined;
+    _resetGlobalState();
+  });
+
+  it("pins ctx.sessionId: an era-negotiating client lands on the 2025 era there, and Mcp-Session-Id is the session — sessionKey is not called", async () => {
+    const sessionKey = vi.fn(() => "never-used");
+    const yavio = createYavio({
+      apiKey: "yav_v2_sessionful",
+      endpoint: ingest.endpoint,
+      serverOnly: true,
+      sessionKey,
+    });
+    const seen = new Set<unknown>();
+    const server = new McpServer({ name: "sessionful-v2", version: "1.0" });
+    server.registerTool(
+      "get_price",
+      { description: "d", inputSchema: { sku: z.string() } },
+      async ({ sku }, ctx) => {
+        seen.add((ctx as { sessionId?: unknown }).sessionId);
+        return ok(`price of ${sku}`);
+      },
+    );
+    const wrapped = yavio.wrap(server);
+    const transport = new NodeStreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      enableJsonResponse: true,
+    });
+    await wrapped.connect(transport);
+    const httpServer = createServer((req, res) => {
+      void transport.handleRequest(req, res);
+    });
+    mcp = httpServer;
+    await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+    const url = new URL(`http://127.0.0.1:${(httpServer.address() as AddressInfo).port}/mcp`);
+
+    const client = new Client(
+      { name: "modern-client", version: "7.0" },
+      { versionNegotiation: { mode: "auto" } },
+    );
+    await client.connect(new StreamableHTTPClientTransport(url));
+    // A sessionful transport serves the 2025 handshake: the client falls back.
+    expect(client.getNegotiatedProtocolVersion()).toMatch(/^2025-/);
+    for (let i = 0; i < 5; i++) {
+      await client.callTool({ name: "get_price", arguments: { sku: `A${i}` } });
+    }
+    await client.close();
+    await yavio.shutdown();
+
+    expect(seen.size).toBe(1);
+    const [mcpSessionId] = [...seen];
+    expect(typeof mcpSessionId).toBe("string");
+    const calls = ingest.events.filter((e) => e.event_type === "tool_call");
+    expect(calls).toHaveLength(5);
+    expect(new Set(calls.map((e) => e.session_id))).toEqual(
+      new Set([deriveSessionId(mcpSessionId as string)]),
+    );
+    expect(new Set(calls.map((e) => e.session_source))).toEqual(new Set(["mcp_session_id"]));
+    expect(sessionKey).not.toHaveBeenCalled();
   });
 });

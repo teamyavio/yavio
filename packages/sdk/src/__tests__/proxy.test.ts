@@ -4,10 +4,15 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BaseEvent } from "@yavio/shared/events";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { deriveSessionId } from "../core/ids.js";
-import type { CaptureConfig, YavioConfig } from "../core/types.js";
+import { deriveCustomSessionId, deriveSessionId } from "../core/ids.js";
+import type { CaptureConfig, SessionKeyRequest, YavioConfig } from "../core/types.js";
 import { createYavioContext } from "../server/context.js";
-import { _resetGlobalState, createProxy, valueFreeRejection } from "../server/proxy.js";
+import {
+  _resetGlobalState,
+  configFingerprint,
+  createProxy,
+  valueFreeRejection,
+} from "../server/proxy.js";
 import { mintWidgetToken } from "../server/token.js";
 import type { Transport } from "../transport/types.js";
 import { registeredTool } from "./integration/helpers.js";
@@ -188,6 +193,34 @@ describe("createProxy — widget config injection", () => {
     expect(yavio.endpoint).toBe(testConfig.endpoint);
     expect(typeof yavio.traceId).toBe("string");
     expect(typeof yavio.sessionId).toBe("string");
+  });
+
+  it("hands the widget the session's source with its session id (#144)", async () => {
+    mockedMint.mockResolvedValue({ token: "jwt_w", expiresAt: "2026-01-01T00:00:00Z" });
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server,
+      { ...testConfig, sessionKey: ({ headers }) => headers["x-conversation-id"] },
+      transport,
+      "0.0.1",
+    );
+    proxy.tool("widget_tool", () => ({ content: [{ type: "text", text: "ok" }] }));
+    const handler = registeredTool(server, "widget_tool")?.handler;
+    const call = (headers: Record<string, string>) =>
+      handler?.({
+        signal: new AbortController().signal,
+        requestId: "req-w",
+        sendNotification: async () => {},
+        sendRequest: async () => ({}),
+        requestInfo: { headers },
+      }) as Promise<{ _meta: { yavio: Record<string, unknown> } }>;
+
+    const perRequest = (await call({ "user-agent": "cursor/1.7.0" }))._meta.yavio;
+    expect(perRequest.sessionSource).toBe("per_request");
+    const keyed = (await call({ "x-conversation-id": "conv-w" }))._meta.yavio;
+    expect(keyed.sessionSource).toBe("custom");
+    expect(keyed.sessionId).toBe(deriveCustomSessionId("yav_test", "conv-w"));
   });
 
   it("returns result unchanged when widget minting fails", async () => {
@@ -2790,5 +2823,339 @@ describe("valueFreeRejection (#123): what a rejected call may keep as error_mess
     expect(valueFreeRejection("Something else entirely", "book")).toBeUndefined();
     expect(valueFreeRejection(undefined, "book")).toBeUndefined();
     expect(valueFreeRejection("", "book")).toBeUndefined();
+  });
+});
+
+describe("session keys and session_source (#144)", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue(null);
+    _resetGlobalState();
+  });
+
+  /** A v1 handler context; `requestInfo` makes it an HTTP request. */
+  const call = (overrides: Record<string, unknown> = {}) => ({
+    signal: new AbortController().signal,
+    requestId: "req-144",
+    sendNotification: async () => {},
+    sendRequest: async () => ({}),
+    ...overrides,
+  });
+  const http = (headers: Record<string, string>, overrides: Record<string, unknown> = {}) =>
+    call({ requestInfo: { headers }, ...overrides });
+
+  function setup(config: YavioConfig = testConfig, callback?: () => unknown) {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, config, transport, "0.0.1");
+    proxy.tool(
+      "ping",
+      () =>
+        (callback?.() ?? { content: [{ type: "text", text: "pong" }] }) as {
+          content: Array<{ type: "text"; text: string }>;
+        },
+    );
+    const handler = registeredTool(server, "ping")?.handler;
+    if (!handler) throw new Error("ping is not registered");
+    const events = () => transport.sent.flat() as Array<Record<string, unknown>>;
+    const calls = () => events().filter((e) => e.event_type === "tool_call");
+    return { server, proxy, transport, handler, events, calls };
+  }
+
+  it("no key and no HTTP request (stdio, in-memory) → connection, on the call and its connection event", async () => {
+    const { handler, events } = setup();
+    await handler(call());
+    expect(events().map((e) => [e.event_type, e.session_source])).toEqual([
+      ["connection", "connection"],
+      ["tool_call", "connection"],
+    ]);
+  });
+
+  it("no key on an HTTP request → per_request", async () => {
+    const { handler, events } = setup();
+    await handler(http({ "user-agent": "cursor/1.7.0" }));
+    expect(events().map((e) => [e.event_type, e.session_source])).toEqual([
+      ["connection", "per_request"],
+      ["tool_call", "per_request"],
+    ]);
+  });
+
+  it("labels each key it derives the session from", async () => {
+    const { handler, calls } = setup({ ...testConfig, sessionKey: () => "custom-key" });
+    await handler(call({ sessionId: "mcp-1" }));
+    await handler(call({ _meta: { "openai/session": "conv-1" } }));
+    await handler(call({ _meta: { "vscode.conversationId": "vscode-1" } }));
+    await handler(call());
+    expect(calls().map((e) => e.session_source)).toEqual([
+      "mcp_session_id",
+      "openai_session",
+      "vscode_conversation",
+      "custom",
+    ]);
+    expect(calls().map((e) => [e.session_source, e.session_id])).toEqual([
+      ["mcp_session_id", deriveSessionId("mcp-1")],
+      ["openai_session", deriveSessionId("conv-1")],
+      ["vscode_conversation", deriveSessionId("vscode-1")],
+      ["custom", deriveCustomSessionId("yav_test", "custom-key")],
+    ]);
+  });
+
+  it("the connected transport's own session id is an Mcp-Session-Id too: sessionKey is not called", async () => {
+    const sessionKey = vi.fn(() => "custom-key");
+    const { proxy, handler, calls } = setup({ ...testConfig, sessionKey });
+    const mcpTransport = { start: vi.fn(), close: vi.fn(), send: vi.fn(), sessionId: "t-1" };
+    await proxy.connect(mcpTransport as never);
+    await handler(call());
+    expect(calls().map((e) => [e.session_source, e.session_id])).toEqual([
+      ["mcp_session_id", deriveSessionId("t-1")],
+    ]);
+    expect(sessionKey).not.toHaveBeenCalled();
+  });
+
+  it("takes the first key in order — openai/session, vscode.conversationId, the Codex threadId, sessionKey — and calls sessionKey only last", async () => {
+    const sessionKey = vi.fn(() => "custom-key");
+    const { server, handler, calls } = setup({ ...testConfig, sessionKey });
+    // The Codex CLI named by its initialize handshake (a long-lived server).
+    (server.server as unknown as Record<string, unknown>).getClientVersion = () => ({
+      name: "codex-mcp-client",
+      version: "0.164.0",
+    });
+    await handler(
+      call({ _meta: { "openai/session": "o", "vscode.conversationId": "v", threadId: "t" } }),
+    );
+    await handler(call({ _meta: { "vscode.conversationId": "v", threadId: "t" } }));
+    await handler(call({ _meta: { threadId: "t" } }));
+    expect(sessionKey).not.toHaveBeenCalled();
+    await handler(call({ _meta: { threadId: "" } }));
+    expect(calls().map((e) => e.session_source)).toEqual([
+      "openai_session",
+      "vscode_conversation",
+      "codex_thread",
+      "custom",
+    ]);
+    expect(sessionKey).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands sessionKey { headers, meta, authInfo, extra }: {} for headers and meta off HTTP", async () => {
+    const seen: SessionKeyRequest[] = [];
+    const { handler } = setup({
+      ...testConfig,
+      sessionKey: (request) => {
+        seen.push(request);
+        return undefined;
+      },
+    });
+    const stdio = call();
+    await handler(stdio);
+    const auth = { token: "t", clientId: "c", scopes: [], extra: { sub: "u" } };
+    await handler(
+      http({ "X-Conversation-Id": "conv-1" }, { _meta: { progressToken: 1 }, authInfo: auth }),
+    );
+    expect(seen[0]).toEqual({ headers: {}, meta: {}, authInfo: undefined, extra: stdio });
+    expect(seen[1]?.headers).toEqual({ "x-conversation-id": "conv-1" });
+    expect(seen[1]?.meta).toEqual({ progressToken: 1 });
+    expect(seen[1]?.authInfo).toBe(auth);
+  });
+
+  it("a sessionKey that throws never fails the call, on the callback path too: no key, one YAVIO-1102 line", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { handler, calls } = setup({
+        ...testConfig,
+        sessionKey: () => {
+          throw new Error("boom");
+        },
+      });
+      expect(await handler(http({ "user-agent": "node" }))).toEqual({
+        content: [{ type: "text", text: "pong" }],
+      });
+      expect(await handler(call())).toEqual({ content: [{ type: "text", text: "pong" }] });
+      expect(calls().map((e) => e.session_source)).toEqual(["per_request", "connection"]);
+      const lines = warn.mock.calls.filter((args) => String(args[0]).includes("YAVIO-1102"));
+      expect(lines).toHaveLength(1);
+      expect(String(lines[0]?.[0])).toContain("threw Error: boom");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a sessionKey that throws an error whose message cannot be read still leaves the call instrumented (#144 review round 1)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const hostile = new Error("unreadable");
+      Object.defineProperty(hostile, "message", {
+        get() {
+          throw new Error("no message for you");
+        },
+      });
+      const { handler, calls } = setup({
+        ...testConfig,
+        sessionKey: () => {
+          throw hostile;
+        },
+      });
+      expect(await handler(http({ "user-agent": "node" }))).toEqual({
+        content: [{ type: "text", text: "pong" }],
+      });
+      expect(calls().map((e) => e.session_source)).toEqual(["per_request"]);
+      const lines = warn.mock.calls.filter((args) => String(args[0]).includes("YAVIO-1102"));
+      expect(lines).toHaveLength(1);
+      expect(String(lines[0]?.[0])).toContain("threw a value that could not be described");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("undefined and an empty string from sessionKey are no key, silently: no YAVIO-1102 line (#144 review round 1)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const value of [undefined, ""]) {
+        const sessionKey = vi.fn(() => value);
+        const { handler, calls } = setup({ ...testConfig, sessionKey });
+        await handler(http({ "user-agent": "node" }));
+        await handler(call());
+        expect(sessionKey).toHaveBeenCalledTimes(2);
+        expect(calls().map((e) => e.session_source)).toEqual(["per_request", "connection"]);
+      }
+      expect(warn.mock.calls.filter((args) => String(args[0]).includes("YAVIO-1102"))).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("identify, step, track and conversion inside the call carry its session and session_source", async () => {
+    const yavio = createYavioContext();
+    const { handler, events } = setup(
+      { ...testConfig, sessionKey: ({ headers }) => headers["x-conversation-id"] },
+      () => {
+        yavio.identify("anna");
+        yavio.step("look");
+        yavio.track("viewed");
+        yavio.conversion("purchase", { value: 10, currency: "EUR" });
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    );
+    await handler(http({ "x-conversation-id": "conv-9" }));
+    expect(events().map((e) => [e.event_type, e.session_source])).toEqual([
+      ["connection", "custom"],
+      ["identify", "custom"],
+      ["step", "custom"],
+      ["track", "custom"],
+      ["conversion", "custom"],
+      ["tool_call", "custom"],
+    ]);
+    const expected = deriveCustomSessionId("yav_test", "conv-9");
+    expect(events().map((e) => [e.event_type, e.session_source, e.session_id])).toEqual([
+      ["connection", "custom", expected],
+      ["identify", "custom", expected],
+      ["step", "custom", expected],
+      ["track", "custom", expected],
+      ["conversion", "custom", expected],
+      ["tool_call", "custom", expected],
+    ]);
+  });
+
+  it("a per_request session's connection event: once per process per platform, client, protocol version and intent_enabled", async () => {
+    // A new proxy per request, as a per-request host builds them.
+    const transport = createMockTransport();
+    const once = async (headers: Record<string, string>, config: YavioConfig = testConfig) => {
+      const server = new McpServer({ name: "test", version: "1.0" });
+      const proxy = createProxy(server, config, transport, "0.0.1");
+      proxy.tool("ping", () => ({ content: [{ type: "text", text: "pong" }] }));
+      await registeredTool(server, "ping")?.handler(http(headers));
+    };
+    const cursor = { "user-agent": "cursor/1.7.0", "mcp-protocol-version": "2025-06-18" };
+    for (let i = 0; i < 5; i++) await once(cursor);
+    await once({ ...cursor, "user-agent": "cursor/1.8.0" });
+    await once({ ...cursor, "mcp-protocol-version": "2025-11-25" });
+    await once({ ...cursor, "user-agent": "claude-code/2.1.309" });
+    await once(cursor, { ...testConfig, intent: { ...testConfig.intent, enabled: true } });
+    await once(cursor, { ...testConfig, apiKey: "yav_other_project" });
+    for (let i = 0; i < 3; i++) await once(cursor);
+
+    const events = transport.sent.flat() as Array<Record<string, unknown>>;
+    const toolCalls = events.filter((e) => e.event_type === "tool_call");
+    expect(toolCalls).toHaveLength(13);
+    expect(new Set(toolCalls.map((e) => e.session_id)).size).toBe(13);
+    const connections = events.filter((e) => e.event_type === "connection");
+    expect(
+      connections.map((e) => [
+        e.platform,
+        e.client_name,
+        e.client_version,
+        e.protocol_version,
+        (e.metadata as { intent_enabled?: boolean }).intent_enabled,
+        e.session_source,
+      ]),
+    ).toEqual([
+      ["cursor", "cursor", "1.7.0", "2025-06-18", false, "per_request"],
+      ["cursor", "cursor", "1.8.0", "2025-06-18", false, "per_request"],
+      ["cursor", "cursor", "1.7.0", "2025-11-25", false, "per_request"],
+      ["claude-code", "claude-code", "2.1.309", "2025-06-18", false, "per_request"],
+      ["cursor", "cursor", "1.7.0", "2025-06-18", true, "per_request"],
+      ["cursor", "cursor", "1.7.0", "2025-06-18", false, "per_request"],
+    ]);
+  });
+
+  it("keyed sessions keep one connection event per session, as before", async () => {
+    const transport = createMockTransport();
+    for (let i = 0; i < 3; i++) {
+      const server = new McpServer({ name: "test", version: "1.0" });
+      const proxy = createProxy(
+        server,
+        { ...testConfig, sessionKey: ({ headers }) => headers["x-conversation-id"] },
+        transport,
+        "0.0.1",
+      );
+      proxy.tool("ping", () => ({ content: [{ type: "text", text: "pong" }] }));
+      for (const conversation of ["conv-a", "conv-b"]) {
+        await registeredTool(server, "ping")?.handler(
+          http({ "user-agent": "cursor/1.7.0", "x-conversation-id": conversation }),
+        );
+      }
+    }
+    const connections = (transport.sent.flat() as Array<Record<string, unknown>>).filter(
+      (e) => e.event_type === "connection",
+    );
+    // Two conversations, three instances each: one connection per conversation.
+    expect(connections).toHaveLength(2);
+    expect(connections.map((e) => e.session_id)).toEqual([
+      deriveCustomSessionId("yav_test", "conv-a"),
+      deriveCustomSessionId("yav_test", "conv-b"),
+    ]);
+  });
+
+  it("tool_discovery carries no session_source, and the listing labels no session: ingest keeps no session fields in tool_registry (#144 review round 1)", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("ping", () => ({ content: [{ type: "text", text: "pong" }] }));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await proxy.connect(serverTransport);
+    const client = new Client({ name: "c", version: "1.0" });
+    await client.connect(clientTransport);
+    await client.listTools();
+    await client.callTool({ name: "ping" });
+    await client.close();
+    const events = transport.sent.flat() as Array<Record<string, unknown>>;
+    const discoveries = events.filter((e) => e.event_type === "tool_discovery");
+    expect(discoveries.map((e) => e.tool_name)).toEqual(["ping"]);
+    expect(
+      discoveries.every((e) => !("session_source" in e) || e.session_source === undefined),
+    ).toBe(true);
+    // The call after the listing labels the connection's session itself.
+    const call = events.find((e) => e.event_type === "tool_call");
+    expect(call?.session_source).toBe("connection");
+  });
+
+  it("the re-wrap fingerprint changes with sessionKey: its presence, as for intent.fallback", () => {
+    const one = () => undefined;
+    const other = () => "x";
+    expect(configFingerprint({ ...testConfig, sessionKey: one })).not.toBe(
+      configFingerprint({ ...testConfig }),
+    );
+    expect(configFingerprint({ ...testConfig, sessionKey: one })).toBe(
+      configFingerprint({ ...testConfig, sessionKey: other }),
+    );
   });
 });

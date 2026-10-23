@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clientFromUserAgent } from "../server/extra.js";
+import { clientFromUserAgent, readCallExtra, sessionKeyHeaders } from "../server/extra.js";
 
 /**
  * The User-Agent fallback for the connection's client identity (#142): the
@@ -109,5 +109,50 @@ describe("clientFromUserAgent", () => {
       version: "1".repeat(32),
     });
     expect(clientFromUserAgent(`cursor/${"1".repeat(33)}`)).toBeUndefined();
+  });
+});
+
+describe("readCallExtra: authInfo (#144)", () => {
+  const auth = { token: "t", clientId: "client-1", scopes: [], extra: { sub: "user-1" } };
+
+  it("reads v1's extra.authInfo and v2's ctx.http.authInfo", () => {
+    expect(readCallExtra({ authInfo: auth }).authInfo).toBe(auth);
+    expect(readCallExtra({ http: { authInfo: auth, req: { headers: {} } } }).authInfo).toBe(auth);
+  });
+
+  it("leaves it unset without one, or when it is not an object", () => {
+    expect(readCallExtra({}).authInfo).toBeUndefined();
+    expect(readCallExtra({ authInfo: "bearer" }).authInfo).toBeUndefined();
+  });
+});
+
+describe("sessionKeyHeaders (#144): what sessionKey sees", () => {
+  it("lower-cases names and joins a repeated header's values", () => {
+    expect(
+      sessionKeyHeaders({
+        "X-Conversation-Id": "conv-1",
+        accept: ["application/json", "text/event-stream"],
+      }),
+    ).toEqual({ "x-conversation-id": "conv-1", accept: "application/json, text/event-stream" });
+  });
+
+  it("is {} without headers, and leaves out values that are not strings", () => {
+    expect(sessionKeyHeaders(undefined)).toEqual({});
+    expect(sessionKeyHeaders({ a: undefined, b: 1, c: ["x", 2], d: "ok" })).toEqual({ d: "ok" });
+  });
+
+  it("is a fresh record: the transport's own is never handed out", () => {
+    const headers = { "x-conversation-id": "conv-1" };
+    const copy = sessionKeyHeaders(headers);
+    copy["x-conversation-id"] = "changed";
+    expect(headers["x-conversation-id"]).toBe("conv-1");
+  });
+
+  it("keeps a header named __proto__ as an entry, not the record's prototype", () => {
+    const headers = JSON.parse('{"__proto__": "x", "a": "b"}') as Record<string, unknown>;
+    const out = sessionKeyHeaders(headers);
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(Object.hasOwn(out, "__proto__")).toBe(true);
+    expect(out.a).toBe("b");
   });
 });

@@ -281,6 +281,7 @@ describe("statistics job (#85)", { timeout: 30_000 }, () => {
          FROM events
          WHERE project_id = {p:String} AND event_type = 'identify'
            AND user_id IS NOT NULL AND user_id != '' AND session_id != ''
+           AND ifNull(session_source, '') != 'per_request'
          GROUP BY stitched_session),
        stitch AS (
          SELECT assumeNotNull(subject_id) AS stitched_subject,
@@ -313,6 +314,78 @@ describe("statistics job (#85)", { timeout: 30_000 }, () => {
       // individuals in stats_daily falls back to the session for nobody-cells:
       // anna, subB, erin, fred, gus, kai and the unidentified sessions s4 and s6.
       individuals: 8,
+    });
+  });
+
+  it("never maps a per_request session: one caller's identify keys nobody else's events, as on the dashboard (#144)", async () => {
+    // A long-lived MCP SDK v1 1.24/1.25 server that reuses one stateless
+    // transport puts every key-less caller into one per_request session:
+    // ann identifies on the 1st, two other callers' calls follow on the 2nd.
+    await insert([
+      event(project, "2026-10-01 09:00:00.000", {
+        event_type: "identify",
+        event_name: null,
+        user_id: "ann",
+        session_id: "pr-shared",
+        session_source: "per_request",
+      }),
+      event(project, "2026-10-02 09:00:00.000", {
+        session_id: "pr-shared",
+        session_source: "per_request",
+      }),
+      event(project, "2026-10-02 09:05:00.000", {
+        session_id: "pr-shared",
+        session_source: "per_request",
+      }),
+      // A keyed conversation is mapped as before.
+      event(project, "2026-10-01 10:00:00.000", {
+        event_type: "identify",
+        event_name: null,
+        user_id: "bea",
+        session_id: "conv-bea",
+        session_source: "custom",
+      }),
+      event(project, "2026-10-02 10:00:00.000", {
+        session_id: "conv-bea",
+        session_source: "custom",
+      }),
+    ]);
+    await job(new MemoryStore([project])).runIfDue(NOW);
+
+    const dau = await rows(
+      "SELECT dau FROM stats_users_daily WHERE project_id = {p:String} AND day = '2026-10-02'",
+      { p: project },
+    );
+    const calls = await rows(
+      `SELECT events, individuals FROM stats_daily WHERE project_id = {p:String} AND slice = 'total'
+       AND day = '2026-10-02' AND event_type = 'tool_call'`,
+      { p: project },
+    );
+    // The same pinned copy of the dashboard's key as above, per_request rule included.
+    const tier1 = await rows(
+      `WITH session_map AS (
+         SELECT session_id AS stitched_session,
+                argMin(assumeNotNull(user_id), (timestamp, event_id)) AS session_user_id
+         FROM events
+         WHERE project_id = {p:String} AND event_type = 'identify'
+           AND user_id IS NOT NULL AND user_id != '' AND session_id != ''
+           AND ifNull(session_source, '') != 'per_request'
+         GROUP BY stitched_session)
+       SELECT uniqExact(coalesce(nullIf(e.user_id, ''), nullIf(m.session_user_id, ''))) AS dau
+       FROM events AS e
+       LEFT JOIN session_map AS m ON m.stitched_session = e.session_id
+       WHERE e.project_id = {p:String} AND toDate(e.timestamp) = '2026-10-02'`,
+      { p: project },
+    );
+    expect({
+      dau: Number(dau[0].dau),
+      tier1: Number(tier1[0].dau),
+      calls: calls.map((r) => [Number(r.events), Number(r.individuals)]),
+    }).toEqual({
+      // bea only: the per_request calls are nobody's, not ann's.
+      dau: 1,
+      tier1: 1,
+      calls: [[3, 1]],
     });
   });
 
@@ -446,6 +519,140 @@ describe("statistics job (#85)", { timeout: 30_000 }, () => {
       ["client", "tool_call", 2, 1],
       ["total", "connection", 1, 1],
       ["total", "tool_call", 2, 1],
+    ]);
+  });
+
+  it("a per-request event without a user key is nobody: five calls of one name are 0 individuals and the name is not admitted (#144)", async () => {
+    // One person on a per-request host whose client sends no session key:
+    // a new per_request session for every call.
+    await insert(
+      Array.from({ length: 5 }, (_, i) =>
+        event(project, `2026-10-02 10:0${i}:00.000`, {
+          event_type: "track",
+          event_name: "note jane doe 1999",
+          session_id: `s-per-request-${i}`,
+          session_source: "per_request",
+        }),
+      ),
+    );
+    await job(new MemoryStore([project])).runIfDue(NOW);
+
+    const total = await rows(
+      "SELECT events, individuals FROM stats_daily WHERE project_id = {p:String} AND slice = 'total' AND event_type = 'track'",
+      { p: project },
+    );
+    expect(total.map((r) => [Number(r.events), Number(r.individuals)])).toEqual([[5, 0]]);
+    const names = await rows(
+      "SELECT DISTINCT event_name FROM stats_daily WHERE project_id = {p:String} AND slice = 'tool'",
+      { p: project },
+    );
+    expect(names.map((r) => r.event_name)).toEqual(["(other)"]);
+  });
+
+  it("a per-request session's widget rows are nobody too once the widget stamps the source; an older widget's count as before (#144 review round 1)", async () => {
+    // The review's probe: five one-call sessions on a per-request host, no
+    // user key, each with a widget that tracks a free-text name. `labelled`:
+    // a 0.5.4 widget, which stamps the server session's source; `older`: a
+    // widget before 0.5.4, which sends none.
+    const labelled = project;
+    const older = `${project}-old`;
+    const rowsFor = (p: string, widgetSource: string | undefined) =>
+      Array.from({ length: 5 }, (_, i) => [
+        event(p, `2026-10-02 10:0${i}:00.000`, {
+          session_id: `s-pr-widget-${i}`,
+          session_source: "per_request",
+        }),
+        event(p, `2026-10-02 10:0${i}:30.000`, {
+          event_type: "track",
+          event_name: "note jane doe 1999",
+          source: "widget",
+          session_id: `s-pr-widget-${i}`,
+          ...(widgetSource ? { session_source: widgetSource } : {}),
+        }),
+      ]).flat();
+    await insert([...rowsFor(labelled, "per_request"), ...rowsFor(older, undefined)]);
+    await job(new MemoryStore([labelled, older])).runIfDue(NOW);
+
+    const track = async (p: string) =>
+      (
+        await rows(
+          "SELECT events, individuals FROM stats_daily WHERE project_id = {p:String} AND slice = 'total' AND event_type = 'track'",
+          { p },
+        )
+      ).map((r) => [Number(r.events), Number(r.individuals)]);
+    const names = async (p: string) =>
+      (
+        await rows(
+          "SELECT DISTINCT event_name FROM stats_daily WHERE project_id = {p:String} AND slice = 'tool' ORDER BY event_name",
+          { p },
+        )
+      ).map((r) => r.event_name);
+
+    expect(await track(labelled)).toEqual([[5, 0]]);
+    expect(await names(labelled)).toEqual(["(other)"]);
+    // The widget rows of an SDK before 0.5.4 carry no source and count as
+    // before: five individuals, the name admitted (documented).
+    expect(await track(older)).toEqual([[5, 5]]);
+    expect(await names(older)).toEqual(["(other)", "note jane doe 1999"]);
+  });
+
+  it("per-request connection rows are no session cell; keyed and older (NULL) rows count as before (#144)", async () => {
+    await insert([
+      // A per-request host: one connection row per process per client, under
+      // the session of whichever call came first.
+      event(project, "2026-10-02 10:00:00.000", {
+        event_type: "connection",
+        event_name: null,
+        session_id: "s-pr-1",
+        session_source: "per_request",
+        platform: "cursor",
+        client_name: "cursor",
+      }),
+      event(project, "2026-10-02 10:00:01.000", {
+        session_id: "s-pr-1",
+        session_source: "per_request",
+      }),
+      event(project, "2026-10-02 10:00:02.000", {
+        session_id: "s-pr-2",
+        session_source: "per_request",
+      }),
+      // A keyed session, and one from an SDK before 0.5.4.
+      event(project, "2026-10-02 11:00:00.000", {
+        event_type: "connection",
+        event_name: null,
+        session_id: "s-keyed",
+        session_source: "custom",
+      }),
+      event(project, "2026-10-02 11:00:01.000", {
+        session_id: "s-keyed",
+        session_source: "custom",
+      }),
+      event(project, "2026-10-02 12:00:00.000", {
+        event_type: "connection",
+        event_name: null,
+        session_id: "s-old",
+      }),
+      event(project, "2026-10-02 12:00:01.000", { session_id: "s-old" }),
+    ]);
+    await job(new MemoryStore([project])).runIfDue(NOW);
+
+    const cells = await rows(
+      "SELECT slice, event_type, platform, events, individuals FROM stats_daily WHERE project_id = {p:String} AND slice IN ('total', 'client') ORDER BY slice, event_type, platform",
+      { p: project },
+    );
+    expect(
+      cells.map((r) => [
+        r.slice,
+        r.event_type,
+        r.platform,
+        Number(r.events),
+        Number(r.individuals),
+      ]),
+    ).toEqual([
+      ["client", "connection", "", 2, 2],
+      ["client", "tool_call", "", 4, 2],
+      ["total", "connection", "", 2, 2],
+      ["total", "tool_call", "", 4, 2],
     ]);
   });
 

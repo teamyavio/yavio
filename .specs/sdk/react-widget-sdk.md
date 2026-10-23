@@ -54,11 +54,14 @@ After each tool handler returns, the proxy mints a short-lived widget JWT via `P
       "token": "eyJhbGciOiJIUzI1NiJ9...",
       "endpoint": "https://ingest.yavio.ai/v1/events",
       "traceId": "tr_8f2a...",
-      "sessionId": "ses_abc..."
+      "sessionId": "ses_abc...",
+      "sessionSource": "custom"
     }
   }
 }
 ```
+
+`sessionSource` (#144, server SDK 0.5.4) is optional: the server session's `session_source` label, which `useYavio()` stamps as `session_source` on every event it sends, auto-captured ones included (a value over 32 characters is dropped, since the schema would reject the event). A server before 0.5.4 sends none, and the widget's events carry none.
 
 The project API key never reaches the widget. The JWT is trace-scoped and short-lived (see [Security Model](#45-security-model)). The `sessionId` ensures widget events share the same session as the server-side events that spawned them. The token is cached and reused across tool calls (see [Section 3.4.1](server-sdk.md#341-widget-token-minting)).
 

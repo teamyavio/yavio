@@ -17,6 +17,12 @@ export interface KPIResult {
   previousValue?: number;
   format: "number" | "percent" | "latency" | "currency";
   currency?: string;
+  /**
+   * A short note under the value on what it leaves out, e.g. the Sessions
+   * KPI's "N calls from clients without a session key" (#144). Unset when
+   * there is nothing to say.
+   */
+  hint?: string;
 }
 
 /** Breakdown by platform or category. */

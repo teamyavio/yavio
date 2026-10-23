@@ -42,6 +42,12 @@ export interface CallExtra {
   taskId?: string;
   /** Client identity from the v2 per-request envelope, when present. */
   client?: { name?: string; version?: string };
+  /**
+   * What the host's auth middleware attached as `req.auth`: v1
+   * `extra.authInfo`, v2 `ctx.http.authInfo` (#144). Read only to hand it to
+   * the integrator's `sessionKey`; never recorded.
+   */
+  authInfo?: Record<string, unknown>;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -88,6 +94,9 @@ export function readCallExtra(extra: unknown): CallExtra {
     const headers = headersToRecord(requestInfo?.headers ?? req?.headers);
     if (headers) out.requestHeaders = headers;
     if (typeof requestInfo?.url === "string") out.requestUrl = requestInfo.url;
+
+    const authInfo = extra.authInfo ?? http?.authInfo;
+    if (isRecord(authInfo)) out.authInfo = authInfo;
 
     const envelope = mcpReq && isRecord(mcpReq.envelope) ? mcpReq.envelope : undefined;
     const clientInfo = envelope?.[ENVELOPE_CLIENT_INFO_KEY];
@@ -175,4 +184,39 @@ export function headerValue(
   if (typeof value === "string") return value;
   if (Array.isArray(value) && typeof value[0] === "string") return value[0];
   return undefined;
+}
+
+/**
+ * The request's headers as the integrator's `sessionKey` sees them (#144):
+ * a fresh record — the transport's own is never handed out — with names
+ * lower-cased and a repeated header's values joined with `", "` (RFC 9110's
+ * combined form). Non-string values are left out. `{}` without headers
+ * (stdio, in-memory). Own properties only: a header named `__proto__` is an
+ * ordinary entry, not the record's prototype. Never throws.
+ */
+export function sessionKeyHeaders(
+  headers: Record<string, unknown> | undefined,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!headers) return out;
+  try {
+    for (const [name, value] of Object.entries(headers)) {
+      const text =
+        typeof value === "string"
+          ? value
+          : Array.isArray(value) && value.every((v) => typeof v === "string")
+            ? value.join(", ")
+            : undefined;
+      if (text === undefined) continue;
+      Object.defineProperty(out, name.toLowerCase(), {
+        value: text,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
+  } catch {
+    // A record of an unexpected shape yields what was read so far.
+  }
+  return out;
 }

@@ -9,6 +9,7 @@ vi.mock("@/lib/clickhouse/analytics-client", async (importOriginal) => ({
 
 import { AnalyticsQueryError } from "@/lib/clickhouse/analytics-client";
 import {
+  perRequestCallsHint,
   queryInvocationsTimeSeries,
   queryLocationBreakdown,
   queryLocationBreakdownOrNull,
@@ -55,6 +56,32 @@ describe("overview queries", () => {
       expect(kpis[0].value).toBe(1000);
       expect(kpis[0].previousValue).toBe(800);
       expect(kpis[2].format).toBe("percent");
+    });
+
+    it("Sessions leaves per_request sessions out and says how many calls had no session key (#144)", async () => {
+      mockQueryAnalytics.mockResolvedValue([{ sessions: 4, per_request_calls: "1234" }]);
+      const kpis = await queryOverviewKPIs(baseCtx);
+      const sessions = kpis.find((k) => k.label === "Sessions");
+      expect(sessions?.value).toBe(4);
+      expect(sessions?.hint).toBe("1,234 calls from clients without a session key");
+      // Only the Sessions KPI carries it.
+      expect(kpis.filter((k) => k.hint !== undefined)).toHaveLength(1);
+      const query = mockQueryAnalytics.mock.calls[0][0].query as string;
+      expect(query).toContain(
+        "uniqExactIf(session_id, ifNull(session_source, '') != 'per_request' AND timestamp >= {from",
+      );
+      expect(query).toContain(
+        "uniqExactIf(session_id, ifNull(session_source, '') != 'per_request' AND timestamp >= {prevFrom",
+      );
+    });
+
+    it("says nothing when every call had a session key, and is singular for one call", async () => {
+      expect(perRequestCallsHint(0)).toBeUndefined();
+      expect(perRequestCallsHint(Number.NaN)).toBeUndefined();
+      expect(perRequestCallsHint(1)).toBe("1 call from a client without a session key");
+      mockQueryAnalytics.mockResolvedValue([{ sessions: 4, per_request_calls: 0 }]);
+      const kpis = await queryOverviewKPIs(baseCtx);
+      expect(kpis.find((k) => k.label === "Sessions")?.hint).toBeUndefined();
     });
 
     it("injects project_id and time params", async () => {

@@ -9,7 +9,10 @@
  *   events of the SDK process that called it, from that call on, so another
  *   instance's events in the conversation, and the earlier ones, carry none.
  *   Same rule as the dashboard's keyedEvents(); same window and retention
- *   floor as `base`;
+ *   floor as `base`. Never a `per_request` session (#144): it is one call,
+ *   and a long-lived MCP SDK v1 1.24/1.25 server that reuses one stateless
+ *   transport puts every key-less caller into one such session, so one
+ *   caller's identify would key everybody's events;
  * - `stitch`: per project, each subject_id mapped to the user_id last seen
  *   together with it (#89), so a person counted before identify() and after it
  *   is one person — read from the same window as `base` (#112): the mapping
@@ -83,6 +86,7 @@ function prelude(from: string, to: string): string {
       AND event_type = 'identify'
       AND user_id IS NOT NULL AND user_id != ''
       AND session_id != ''
+      AND ifNull(session_source, '') != 'per_request'
       AND timestamp >= ${from} AND timestamp < ${to}
       AND ${COLLECTED} >= ${FLOOR("project_id")}
     GROUP BY session_project, stitched_session
@@ -127,6 +131,10 @@ const NEXT_MONTH = "toDateTime64({nextMonthStart:Date}, 3, 'UTC')";
  * is "this session connected", and every dashboard number already counts
  * sessions as uniqExact(session_id) (#142). Every cell groups by event_type
  * (or holds conversions only), so the two terms never mix inside a cell.
+ * A `per_request` session (#144) is one call, not a conversation, and its
+ * connection row is emitted once per process per client rather than once
+ * per session: such rows never reach a cell (see `cells` in
+ * statsDailyInsert), so a connection cell counts sessions only.
  */
 const MEASURES = `
     countIf(event_type != 'connection') + uniqExactIf(session_id, event_type = 'connection') AS events,
@@ -151,6 +159,17 @@ const MEASURES = `
  *   them at ingest; this also covers rows stored before that);
  * - language: the primary subtag of locale.
  * client_version and is_retry are not carried over.
+ *
+ * Who an individual is: the user key, else the session — except a
+ * `per_request` session (#144). On a per-request host a client that sends
+ * no session key has a new session per call, so five calls from one person
+ * would be five individuals: enough to admit a free-text event_name into a
+ * table kept forever. Such an event without a user key is nobody, and the
+ * per-request connection rows (one per process per client, not per session)
+ * are left out of the cells altogether. Widget rows follow the same rule:
+ * a 0.5.4 widget stamps its server session's source (#144 review round 1).
+ * A NULL session_source (an SDK before 0.5.4, server or widget) counts as
+ * before.
  */
 export function statsDailyInsert(stage: string): string {
   return `
@@ -170,9 +189,11 @@ WITH ${prelude(MONTH, NEXT_MONTH)},
       if(match(lower(splitByChar('-', ifNull(locale, ''))[1]), '^[a-z]{2,3}$'),
          lower(splitByChar('-', ifNull(locale, ''))[1]), '') AS language_v,
       if(match(ifNull(conversion_currency, ''), '^[A-Z]{3}$'), assumeNotNull(conversion_currency), '') AS currency_v,
-      coalesce(user_key, nullIf(session_id, '')) AS individual,
+      coalesce(user_key,
+               if(ifNull(session_source, '') = 'per_request', NULL, nullIf(session_id, ''))) AS individual,
       session_id, latency_ms, conversion_value
     FROM keyed
+    WHERE NOT (event_type = 'connection' AND ifNull(session_source, '') = 'per_request')
   ),
   registered AS (
     SELECT DISTINCT project_id, tool_name FROM tool_registry

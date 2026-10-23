@@ -11,7 +11,7 @@ import type {
   TimeSeriesPoint,
   ToolRanking,
 } from "./types";
-import { type TimeWindow, keyedEvents } from "./users";
+import { COUNTED_SESSION, type TimeWindow, keyedEvents } from "./users";
 
 interface QueryContext {
   workspaceId: string;
@@ -31,6 +31,18 @@ function platformParams(platform?: string[]): Record<string, unknown> {
   return { platforms: platform };
 }
 
+/**
+ * The Sessions KPI's note on what it leaves out (#144): the calls whose
+ * session was one request (`per_request`, see COUNTED_SESSION), or undefined
+ * when there were none.
+ */
+export function perRequestCallsHint(calls: number): string | undefined {
+  if (!(calls > 0)) return undefined;
+  return calls === 1
+    ? "1 call from a client without a session key"
+    : `${calls.toLocaleString("en-US")} calls from clients without a session key`;
+}
+
 export async function queryOverviewKPIs(ctx: QueryContext): Promise<KPIResult[]> {
   const pf = platformFilter(ctx.platform);
   const periodMs = new Date(ctx.to).getTime() - new Date(ctx.from).getTime();
@@ -43,8 +55,9 @@ export async function queryOverviewKPIs(ctx: QueryContext): Promise<KPIResult[]>
     SELECT
       countIf(event_type = 'tool_call' AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}) AS invocations,
       countIf(event_type = 'tool_call' AND timestamp >= {prevFrom:DateTime64(3)} AND timestamp < {from:DateTime64(3)}) AS prev_invocations,
-      uniqExactIf(session_id, timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}) AS sessions,
-      uniqExactIf(session_id, timestamp >= {prevFrom:DateTime64(3)} AND timestamp < {from:DateTime64(3)}) AS prev_sessions,
+      uniqExactIf(session_id, ${COUNTED_SESSION} AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}) AS sessions,
+      uniqExactIf(session_id, ${COUNTED_SESSION} AND timestamp >= {prevFrom:DateTime64(3)} AND timestamp < {from:DateTime64(3)}) AS prev_sessions,
+      countIf(event_type = 'tool_call' AND session_source = 'per_request' AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}) AS per_request_calls,
       countIf(event_type = 'tool_call' AND status = 'error' AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}) /
         greatest(countIf(event_type = 'tool_call' AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}), 1) AS error_rate,
       countIf(event_type = 'tool_call' AND status = 'error' AND timestamp >= {prevFrom:DateTime64(3)} AND timestamp < {from:DateTime64(3)}) /
@@ -94,6 +107,7 @@ export async function queryOverviewKPIs(ctx: QueryContext): Promise<KPIResult[]>
       value: num(r.sessions) ?? 0,
       previousValue: num(r.prev_sessions),
       format: "number",
+      hint: perRequestCallsHint(num(r.per_request_calls) ?? 0),
     },
     {
       label: "Error Rate",

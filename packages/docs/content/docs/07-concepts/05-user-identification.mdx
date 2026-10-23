@@ -9,7 +9,7 @@ Yavio tracks user journeys through a combination of anonymous sessions and expli
 
 ## Anonymous sessions
 
-Every MCP connection creates a new session with a unique `session_id` (format: `ses_<nanoid>`). Events are tracked against this session immediately, even before you know who the user is.
+Every conversation gets a session with a `session_id` (format: `ses_` + 21 characters). It is derived from the conversation key the call carries — `Mcp-Session-Id`, ChatGPT's `openai/session`, VS Code's conversation id, the Codex CLI's thread id, or your own [`sessionKey`](/docs/02-sdk/03-configuration#session-key) — so the same conversation has the same `session_id` on every server instance. Without any key it is the connection's own session: one client process on stdio, and on a server that builds a new `McpServer` per request a single call (`session_source: per_request`, not counted as a session). Events are tracked against this session immediately, even before you know who the user is.
 
 "Anonymous" here means *not identified yet*. A `session_id` is still a pseudonymous identifier, so it is personal data under the GDPR and kept only with the raw events: see [Data retention](/docs/07-concepts/06-data-retention).
 
@@ -51,7 +51,9 @@ yavio.identify("user_42");     // Sends nothing (same ID, same traits)
 yavio.identify("user_99");     // Ignored — YAVIO-1302 warning
 ```
 
-This prevents accidental identity conflicts in multi-tool sessions.
+This prevents accidental identity conflicts in multi-tool sessions. It is also why a [`sessionKey`](/docs/02-sdk/03-configuration#session-key) must return a conversation id: a key per user would make all of that user's conversations one session.
+
+On a per-request server, `.identify()` carries over to the next call only when the calls share a session key: in a `per_request` session it applies to that one call.
 
 ### Additive traits
 
@@ -99,13 +101,14 @@ Traits are stored on `identify` events only: the session's other events carry th
 </Callout>
 
 - **Within the session:** every event of the session counts for the user of its first `.identify()`, the events before the call and the events of every other instance that served the conversation included. A later `.identify()` with another ID never re-attributes earlier events in the users list and a user's detail, and an event's own `user_id` is never overwritten. Counts over a date range (active users, Locations) only look at the `identify` events inside what they read (for active users, the range plus the 30 days before it): a conversation identified before that and again with another ID inside it counts for the later ID there.
+- **Not a per-request session:** a session with `session_source: per_request` (a client without a session key on a server that builds a new `McpServer` per request) is one call and is never stitched. A long-lived server that reuses one stateless transport puts every key-less caller into one such session, so one caller's `.identify()` must not count everybody else's calls for that user.
 - **Across sessions:** when the platform sends a stable `subject_id` (ChatGPT does), a subject that was identified once is counted as that user in its other conversations too.
 - **Where:** the users list and detail, active users, retention, new vs returning, the Locations card, the invocation feed and a tool's recent invocations, and the anonymous statistics. The live feed shows each event's own `user_id`.
 
 ## Session lifecycle
 
-1. **Client connects** → new session created (`ses_...`)
+1. **First call of a conversation** → session created (`ses_...`), from the conversation's key or the connection
 2. **Tool calls** → events tracked against the anonymous session
 3. **`.identify()` called** → user ID and traits attached to the session
-4. **Subsequent events** → include `user_id` and traits automatically
-5. **Client disconnects** → session ends, remaining events flushed
+4. **Subsequent events** → include `user_id` automatically (the traits stay on the `identify` event), in the same process (the state is per server process; a session evicted from a busy process's session store starts over)
+5. **Client disconnects** → no event; remaining events are flushed on shutdown

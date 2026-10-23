@@ -46,6 +46,49 @@ export const EventType = z.enum([
 export type EventType = z.infer<typeof EventType>;
 
 // ---------------------------------------------------------------------------
+// Session source (#144)
+// ---------------------------------------------------------------------------
+
+/**
+ * How the server SDK derived an event's `session_id` (#144), in the SDK's
+ * order of precedence:
+ *
+ * - `mcp_session_id`: the transport's session (`Mcp-Session-Id`);
+ * - `openai_session`: ChatGPT's `_meta["openai/session"]`;
+ * - `vscode_conversation`: VS Code's `_meta["vscode.conversationId"]`;
+ * - `codex_thread`: `_meta.threadId` from the Codex CLI (`codex-mcp-client`);
+ * - `custom`: the integrator's `sessionKey` option;
+ * - `connection`: no key, a non-HTTP transport (stdio): the connection's own session;
+ * - `per_request`: no key on an HTTP request. On a per-request host every
+ *   request has a session of its own, so such a "session" is one call, not
+ *   a conversation: the read side does not count it as a session.
+ *
+ * Widget events carry their server session's source too: the server puts it
+ * into the injected config (`_meta.yavio.sessionSource`) and the React SDK
+ * stamps it on every event it sends.
+ *
+ * NULL in storage: an SDK before 0.5.4, on the server or in the widget.
+ *
+ * The schema takes any short string (`BaseEvent.session_source`), not this
+ * enum: an enum would make an older ingest reject every event of a newer SDK
+ * once a value is added. Ingest keeps the values listed here and sets any
+ * other to NULL (event-normalizer.ts).
+ */
+export const SESSION_SOURCES = [
+  "mcp_session_id",
+  "openai_session",
+  "vscode_conversation",
+  "codex_thread",
+  "custom",
+  "connection",
+  "per_request",
+] as const;
+export type SessionSource = (typeof SESSION_SOURCES)[number];
+
+/** The longest `session_source` the schema accepts. */
+export const MAX_SESSION_SOURCE_LENGTH = 32;
+
+// ---------------------------------------------------------------------------
 // Base event (fields present on every event)
 // ---------------------------------------------------------------------------
 
@@ -62,6 +105,10 @@ export const BaseEvent = z.object({
   user_id: z.string().optional(),
   platform: z.string().optional(),
   sdk_version: z.string().optional(),
+  // How the server SDK derived session_id (#144): one of SESSION_SOURCES.
+  // A bounded string, not an enum, so an older ingest keeps accepting a
+  // newer SDK's events; ingest NULLs a value it does not know.
+  session_source: z.string().max(MAX_SESSION_SOURCE_LENGTH).optional(),
 });
 export type BaseEvent = z.infer<typeof BaseEvent>;
 

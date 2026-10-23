@@ -4,6 +4,7 @@ import { ErrorCode } from "@yavio/shared/error-codes";
 import type {
   CaptureConfig,
   IntentConfig,
+  SessionKeyFunction,
   ShutdownTimeoutSource,
   ToolCaptureOverride,
   WithYavioOptions,
@@ -260,6 +261,26 @@ export function shutdownTimeoutFromEnv(): number | undefined {
 }
 
 /**
+ * `sessionKey` (#144): a function, from the code options only — there is no
+ * env-var or `.yaviorc.json` form (a function cannot be written there), and
+ * a `sessionKey` in the file is not read. Anything but a function — a header
+ * name passed instead of a callback, `null` — logs `YAVIO-1006` once per
+ * process and is ignored: every call then falls back as if no option were
+ * set. The value itself is not printed, only its type.
+ */
+function resolveSessionKeyOption(value: unknown): SessionKeyFunction | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "function") return value as SessionKeyFunction;
+  if (!warnedInvalidFlags.has("sessionKey")) {
+    warnedInvalidFlags.add("sessionKey");
+    console.warn(
+      `[${ErrorCode.SDK.INVALID_CAPTURE_OPTION}] sessionKey must be a function (request) => string | undefined, got ${value === null ? "null" : typeof value} — ignored, calls without a session key the SDK knows are recorded without one. Shown once per process.`,
+    );
+  }
+  return undefined;
+}
+
+/**
  * Parse an env var as a boolean. Accepts "1"/"true"/"yes"/"on" (and their
  * negatives), case-insensitive. An empty or unrecognised value yields
  * undefined so the next configuration source still applies — an env var set
@@ -353,6 +374,8 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
     ["file", fileConfig?.shutdownTimeoutMs],
   ]);
 
+  const sessionKey = resolveSessionKeyOption(options?.sessionKey);
+
   return {
     apiKey,
     endpoint,
@@ -362,6 +385,7 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
     tools,
     shutdownTimeoutMs,
     shutdownTimeoutMsSource,
+    ...(sessionKey ? { sessionKey } : {}),
   };
 }
 

@@ -13,7 +13,22 @@ npm install @yavio/sdk
 
 The SDK works with either MCP SDK generation as an optional peer dependency: `@modelcontextprotocol/sdk` >= 1.24.0, or `@modelcontextprotocol/server` 2.x.
 
-Hosts that build a new `McpServer` per request (stateless Streamable HTTP, `createMcpHandler`, `mcp-handler`, Skybridge 2) create the client once with `const analytics = createYavio(options)` and call `analytics.wrap(server)` per request; see the package README's "Stateless / per-request servers" section. One difference to `withYavio()`: `wrap()` instruments every tool on the server, including those registered before the wrap, while `withYavio()` tracks only the tools registered through the proxy it returns. Wrapping the same server twice, with either entry point, returns the existing proxy: the first wrap wins and later options are ignored — any differing option (key, endpoint, `capture`, `tools`, `serverOnly`, intent) logs `YAVIO-1108` once.
+Hosts that build a new `McpServer` per request (stateless Streamable HTTP, `createMcpHandler`, `mcp-handler`, Skybridge 2) create the client once with `const analytics = createYavio(options)` and call `analytics.wrap(server)` per request; see the package README's "Stateless / per-request servers" section. One difference to `withYavio()`: `wrap()` instruments every tool on the server, including those registered before the wrap, while `withYavio()` tracks only the tools registered through the proxy it returns. Wrapping the same server twice, with either entry point, returns the existing proxy: the first wrap wins and later options are ignored — any differing option (key, endpoint, `capture`, `tools`, `serverOnly`, intent, a `sessionKey` added or dropped) logs `YAVIO-1108` once.
+
+### Sessions on per-request servers
+
+A per-request server has no session of its own: a stateless transport never issues `Mcp-Session-Id`, and the 2026-07-28 protocol era drops it. The SDK takes a call's session from the first key it finds, and every event records which in `session_source`:
+
+| Order | Key | `session_source` |
+|---|---|---|
+| 1 | `Mcp-Session-Id` (a sessionful transport) | `mcp_session_id` |
+| 2 | ChatGPT's `_meta["openai/session"]` | `openai_session` |
+| 3 | VS Code / Copilot Chat's `_meta["vscode.conversationId"]`, from any client | `vscode_conversation` |
+| 4 | The Codex CLI's `_meta.threadId`, only from `codex-mcp-client` (envelope, `initialize` or User-Agent) | `codex_thread` |
+| 5 | Your [`sessionKey`](/docs/02-sdk/03-configuration#session-key) option | `custom` |
+| — | None: the connection's own session — one request over HTTP, one client process on stdio | `per_request` / `connection` |
+
+Keys 3 and 4 apply on stdio too: a VS Code stdio server gets one session per conversation since 0.5.4 instead of one per client process — more sessions, and `identify()` no longer carries across its conversations. Claude Code, claude.ai connectors, Cursor and Zed send no conversation key; if your host knows the conversation, return its id from `sessionKey` — a conversation id, never a per-user id on its own (see [Configuration](/docs/02-sdk/03-configuration#session-key)). A key-less HTTP call (`per_request`) is not counted as a session on the dashboard — the Sessions KPI says how many such calls there were — and its `connection` event is emitted once per process per client instead of once per call.
 
 ## Wrapping your server
 
@@ -49,6 +64,7 @@ const instrumented = withYavio(server, {
 | `capture.rejectedInputValues` | `boolean` | `false` | Store the argument values of calls rejected before the handler runs (by default only their names and types) |
 | `tools` | `Record<string, ToolCaptureOverride>` | — | Per-tool overrides of the capture flags (`inputValues`, `outputValues`, `rejectedInputValues`, `intent`) |
 | `shutdownTimeoutMs` | `number` | `4000` | Deadline for delivering queued events on shutdown, an integer in [100, 2147483647] milliseconds (anything else logs `YAVIO-1006` once and uses the default). Outside a signal it bounds this client's `shutdown()` from its call. On `SIGTERM`/`SIGINT` the SDK fixes one deadline for the whole process at signal + D, where D is the smallest value set explicitly (option, `YAVIO_SHUTDOWN_TIMEOUT_MS` or `.yaviorc.json`) by any `createYavio()` client, `withYavio()` call or `shutdown()` still running when the signal arrives, else 4 s — participants that set none do not lower it, and the env var counts even when no client is live. The SDK's own drain and every `shutdown()` at or after the signal resolve by that deadline, however long your handler's close took before it; what is still undelivered is dropped and counted in one `YAVIO-1205` line (one more when the signal was handed back before the transport stops had settled: at the deadline when a `shutdown()` is still waiting then, otherwise once they have settled). Rule of thumb: your close cap + 1 s, both inside the platform's grace period (Fly.io 5 s, Cloud Run 10 s, Kubernetes and ECS 30 s) |
+| `sessionKey` | `(request) => string \| undefined` | — | The conversation of a call that carries no session key the SDK knows (above). Gets `{ headers, meta, authInfo, extra }`; synchronous; at most 1 024 characters; stored as a keyed hash. A throw, a promise or a non-string counts as no key with one `YAVIO-1102` warning; a non-function logs `YAVIO-1006`. Code only. See [Configuration](/docs/02-sdk/03-configuration#session-key) |
 
 See [Configuration](/docs/02-sdk/03-configuration) for the full precedence chain.
 
@@ -75,13 +91,13 @@ Every `server.tool()` and `server.registerTool()` invocation is tracked with:
 
 ### Connections
 
-When a client connects to your MCP server:
+With the first tool call of a session (not on connect; there is no disconnect event):
 
 - **Event type:** `connection`
-- **Session ID** derived from the transport
+- **Session ID** from the call's session key, else the connection's own (see [Sessions on per-request servers](#sessions-on-per-request-servers)), with its `session_source`
 - **Platform** detected from client signals
 - **Client name and version** from the protocol envelope (MCP 2026-07-28), else the `initialize` handshake, else the first product token of the request's `User-Agent`: `name/version` with a digit in the version, or a bare `name` when that is the whole User-Agent, and only when the name is a known MCP client: a vendor the platform matcher recognises (`openai-mcp`, `Claude-User`, `claude-code`, `cursor`, …) or an allowlisted token (`mcp-inspector`, `mcp-remote`). So a stateless host, whose instance never saw `initialize`, still records `openai-mcp` / `1.0.0`, or `Claude-User` with no version, while a runtime token such as `node`, a library or server-framework token such as `Python/3.12 aiohttp/3.9.5` or `Nitro/2.9.0`, a client the SDK does not know yet, a bare first word of a longer string such as the `Visual` of `Visual Studio Code/1.95`, or a version without a digit such as `OpenAI/Python 1.40.0` names no client and the connection stays without one; `metadata.client_info_source` says which. `protocol_version` is the request's `mcp-protocol-version` header when it has the protocol's date shape (`2025-06-18`)
-- Emitted at least once per session **per process**: a conversation served by several instances has one connection event per instance. Sessions are counted as distinct `session_id`s, never as connection events
+- Emitted at least once per session **per process**: a conversation served by several instances has one connection event per instance. A key-less HTTP call (`per_request`) emits one per process per client (platform, client name and version, protocol version), not one per call. Sessions are counted as distinct `session_id`s, never as connection events
 
 ## No-op mode
 
