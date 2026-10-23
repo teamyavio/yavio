@@ -265,8 +265,9 @@ describe("statistics job (#85)", { timeout: 30_000 }, () => {
       "SELECT dau FROM stats_users_daily WHERE project_id = {p:String} AND day = '2026-10-02'",
       { p: project },
     );
-    // Tier 1 (the dashboard's keyedEvents() key, straight from events) must
-    // agree with tier 2.
+    // Tier 1: a pinned copy of the dashboard's key (keyedEvents() in
+    // packages/dashboard/lib/queries/users.ts; this package cannot import it),
+    // straight from events, must agree with tier 2. Keep it in step by hand.
     const tier1 = await rows(
       `WITH session_map AS (
          SELECT session_id AS stitched_session,
