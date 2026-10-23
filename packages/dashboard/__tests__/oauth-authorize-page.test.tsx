@@ -169,6 +169,19 @@ describe("authorization page and consent actions", () => {
     },
   );
 
+  it("links a user without a workspace to workspace setup", async () => {
+    mocks.memberships = [];
+    let html = "";
+    expect(
+      await redirectTarget(async () => {
+        html = await renderPage(VALID);
+      }),
+    ).toBeNull();
+    expect(html).toContain("Connection request stopped");
+    expect(html).toMatch(/<a [^>]*href="\/setup"[^>]*>Create a workspace in the dashboard<\/a>/);
+    expect(html).not.toContain("Allow access");
+  });
+
   it("renders an error page for a redirect_uri that is not registered", async () => {
     let html = "";
     expect(
@@ -202,6 +215,7 @@ describe("authorization page and consent actions", () => {
     const url = new URL(target as string);
     expect(url.origin + url.pathname).toBe(CLIENT_CALLBACK);
     expect(url.searchParams.get("error")).toBe("access_denied");
+    expect(url.searchParams.get("state")).toBe("opaque-state-123");
     expect(url.searchParams.get("iss")).toBe("https://dashboard.test");
     expect(mocks.createAuthorizationCode).not.toHaveBeenCalled();
   });

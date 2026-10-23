@@ -11,7 +11,9 @@ import { clientIp } from "@/lib/security/client-ip";
 import { workspaceMembers, workspaces } from "@yavio/db/schema";
 import { eq } from "drizzle-orm";
 import { headers } from "next/headers";
+import Link from "next/link";
 import { redirect } from "next/navigation";
+import type { ReactNode } from "react";
 import { approveConsent, denyConsent } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -46,7 +48,16 @@ function authorizeValues(params: SearchParams): Record<string, string | undefine
   return result;
 }
 
-function ErrorCard({ message, code }: { message: string; code?: string }) {
+function ErrorCard({
+  message,
+  code,
+  hint = "You can close this window and reconnect from the app.",
+}: {
+  message: string;
+  code?: string;
+  /** What the user can do next; the default suits every request error. */
+  hint?: ReactNode;
+}) {
   return (
     <AuthCard
       title="Connection request stopped"
@@ -56,9 +67,7 @@ function ErrorCard({ message, code }: { message: string; code?: string }) {
       {code !== undefined && (
         <p className="mt-2 font-mono text-xs text-muted-foreground">Error: {code}</p>
       )}
-      <p className="mt-4 text-sm text-muted-foreground">
-        You can close this window and reconnect from the app.
-      </p>
+      <p className="mt-4 text-sm text-muted-foreground">{hint}</p>
     </AuthCard>
   );
 }
@@ -107,7 +116,17 @@ export default async function AuthorizePage({
 
   if (memberships.length === 0) {
     return (
-      <ErrorCard message="Your account is not a member of any workspace, so there is nothing to share. Create a workspace first." />
+      <ErrorCard
+        message="Your account is not a member of any workspace, so there is nothing to share."
+        hint={
+          <>
+            <Link href="/setup" className="font-medium text-foreground hover:underline">
+              Create a workspace in the dashboard
+            </Link>
+            , then reconnect from the app.
+          </>
+        }
+      />
     );
   }
 
