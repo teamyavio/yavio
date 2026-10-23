@@ -35,7 +35,8 @@ describe("queryInvocationFeed", () => {
           latencyMs: 120,
           errorCategory: null,
           errorMessage: null,
-          userId: null,
+          ownUserId: null,
+          subjectId: null,
           sessionId: "ses_1",
           traceId: "tr_1",
           countryCode: "DE",
@@ -45,11 +46,20 @@ describe("queryInvocationFeed", () => {
         },
       ])
       // ClickHouse serialises count()/UInt64 as a JSON string
-      .mockResolvedValueOnce([{ total: "42" }]);
+      .mockResolvedValueOnce([{ total: "42" }])
+      // #145: the page's session lookup, after the page
+      .mockResolvedValueOnce([{ sessionId: "ses_1", userId: "user_9" }]);
 
     const result = await queryInvocationFeed(baseCtx, 1, 25);
     expect(result.invocations).toHaveLength(1);
+    expect(result.invocations[0].userId).toBe("user_9");
+    expect(result.invocations[0]).not.toHaveProperty("ownUserId");
+    expect(result.invocations[0]).not.toHaveProperty("subjectId");
     expect(result.total).toBe(42);
+    const lookup = mockQueryAnalytics.mock.calls[2][0];
+    expect(lookup.query).toContain("event_type = 'identify'");
+    expect(lookup.query).toContain("argMin(assumeNotNull(user_id), (timestamp, event_id))");
+    expect(lookup.params.sessionIds).toEqual(["ses_1"]);
 
     const feed = mockQueryAnalytics.mock.calls[0][0];
     expect(feed.query).toContain("event_type = 'tool_call'");
@@ -61,6 +71,34 @@ describe("queryInvocationFeed", () => {
     expect(feed.params).toMatchObject({ projectId: "proj_1", limit: 25, offset: 0 });
     const count = mockQueryAnalytics.mock.calls[1][0];
     expect(count.query).toContain("count(DISTINCT event_id)");
+  });
+
+  it("looks up only the sessions of rows without their own user_id (#145)", async () => {
+    mockQueryAnalytics
+      .mockResolvedValueOnce([
+        { eventId: "e1", ownUserId: "ann", subjectId: "sub-1", sessionId: "s1" },
+        { eventId: "e2", ownUserId: null, subjectId: "sub-2", sessionId: "s2" },
+        { eventId: "e3", ownUserId: null, subjectId: null, sessionId: "" },
+      ])
+      .mockResolvedValueOnce([{ total: 3 }])
+      .mockResolvedValueOnce([]);
+
+    const { invocations } = await queryInvocationFeed(baseCtx, 1, 25);
+    expect(mockQueryAnalytics.mock.calls[2][0].params.sessionIds).toEqual(["s2"]);
+    // Nothing identified in s2: the subject, as before.
+    expect(invocations.map((r) => r.userId)).toEqual(["ann", "sub-2", null]);
+  });
+
+  it("makes no lookup when every row has its own user_id", async () => {
+    mockQueryAnalytics
+      .mockResolvedValueOnce([
+        { eventId: "e1", ownUserId: "ann", subjectId: null, sessionId: "s1" },
+      ])
+      .mockResolvedValueOnce([{ total: 1 }]);
+
+    const { invocations } = await queryInvocationFeed(baseCtx, 1, 25);
+    expect(invocations[0].userId).toBe("ann");
+    expect(mockQueryAnalytics).toHaveBeenCalledTimes(2);
   });
 
   it("applies pagination offset and the platform filter to both queries", async () => {

@@ -245,6 +245,24 @@ describe("tool detail queries", () => {
       expect(mockQueryAnalytics).toHaveBeenCalledTimes(2);
     });
 
+    it("gives a row without its own user_id the first user identified in its session (#145)", async () => {
+      mockQueryAnalytics
+        .mockResolvedValueOnce([
+          { eventId: "ev_1", traceId: "", sessionId: "ses_1", userId: "ann" },
+          { eventId: "ev_2", traceId: "", sessionId: "ses_2", userId: null },
+          { eventId: "ev_3", traceId: "", sessionId: "ses_3", userId: null },
+        ])
+        .mockResolvedValueOnce([{ sessionId: "ses_2", userId: "bob" }])
+        .mockResolvedValueOnce([{ total: 3 }]);
+
+      const result = await queryToolRecentInvocations(baseCtx, "search", 1, 25);
+      const lookup = mockQueryAnalytics.mock.calls[1][0];
+      expect(lookup.query).toContain("event_type = 'identify'");
+      expect(lookup.params.sessionIds).toEqual(["ses_2", "ses_3"]);
+      expect(result.invocations.map((r) => r.userId)).toEqual(["ann", "bob", null]);
+      expect(result.total).toBe(3);
+    });
+
     it("applies pagination offset", async () => {
       mockQueryAnalytics.mockResolvedValueOnce([]).mockResolvedValueOnce([{ total: 0 }]);
 

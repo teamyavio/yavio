@@ -47,12 +47,12 @@ Per-tool deep-dive analytics:
 
 ## Funnel Metrics (Coming Soon)
 
-Funnels stitch `step` and `conversion` events within a trace to visualize user journeys:
+Funnels follow a conversation's `step` events in the order they happened. One conversation (session) is one attempt, however many server instances served it:
 
 | Metric | Description |
 |--------|-------------|
-| Step progression | Ordered sequence of steps and conversions within a trace |
-| Drop-off rates | Percentage of traces that don't progress from step N to step N+1 |
+| Step progression | A conversation's steps, numbered by time; `step_sequence` only breaks a tie within one millisecond. Steps up to 30 days before the selected range count for the numbering; a conversation that began earlier is numbered from its first step within those 30 days |
+| Drop-off rates | Percentage of conversations that don't progress from step N to step N+1 |
 | Example traces | Full event timeline for individual traces |
 
 ## Timing Metrics
@@ -70,8 +70,9 @@ A session is the set of events sharing one `session_id`. Sessions are computed f
 ## Users
 
 Users are counted with one key per person:
-- the `user_id` from `.identify()`;
-- otherwise the `user_id` that the same `subject_id` was identified with, so events before `.identify()` count for the right user;
+- the `user_id` from `.identify()` on the event itself;
+- otherwise the user of the first `.identify()` in the same session, so the session's events before the call, and those of other server instances that served the conversation, count for that user;
+- otherwise the `user_id` that the same `subject_id` was identified with, so the person's other conversations count for the right user;
 - otherwise the `subject_id` itself.
 
 A session is never counted as a user.
