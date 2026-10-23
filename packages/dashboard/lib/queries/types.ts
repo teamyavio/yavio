@@ -88,7 +88,11 @@ export interface ErrorListItem {
   platform: string;
 }
 
-/** User list row, computed from events (#89). userId is the user key: user_id, else subject_id. */
+/**
+ * User list row, computed from events (#89). userId is the user key: the
+ * event's own user_id, else the session's first identified user_id (#145),
+ * else the user_id stitched to its subject_id, else subject_id.
+ */
 export interface UserListItem {
   userId: string;
   firstSeen: string;
@@ -228,7 +232,10 @@ export interface InvocationFeedItem {
   latencyMs: number | null;
   errorCategory: string | null;
   errorMessage: string | null;
-  /** user_id, else the platform's subject_id; null when the event has neither. */
+  /**
+   * user_id, else the first user identified in its session (#145), else the
+   * platform's subject_id; null when there is none.
+   */
   userId: string | null;
   sessionId: string;
   traceId: string;
@@ -272,6 +279,7 @@ export interface ToolInvocation {
   timestamp: string;
   traceId: string;
   sessionId: string;
+  /** user_id, else the first user identified in its session (#145). */
   userId: string | null;
   status: string;
   latencyMs: number | null;

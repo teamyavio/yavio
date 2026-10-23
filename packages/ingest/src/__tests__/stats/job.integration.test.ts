@@ -71,7 +71,10 @@ function job(store: StatsJobStore) {
   return new StatsJob({ clickhouse: rollup, store, logger: silent });
 }
 
-describe("statistics job (#85)", () => {
+// A run is one statement per table and month; a backfill of four months is
+// 16 of them, each ~0.1–0.3 s on an almost empty ClickHouse — near vitest's
+// default 5 s once the session map (#145) joined the prelude.
+describe("statistics job (#85)", { timeout: 30_000 }, () => {
   beforeAll(async () => {
     await runMigrations();
     await getClient().command({
@@ -210,7 +213,15 @@ describe("statistics job (#85)", () => {
     expect(await job(store).runIfDue(NOW)).toBeNull();
   });
 
-  it("counts users by one key: stitched user_id, else subject_id, never an empty user_id", async () => {
+  it("counts users by one key: own user_id, the session's first identified user, the subject's, else subject_id (#89, #145)", async () => {
+    const other = `p-${randomUUID().slice(0, 8)}`;
+    const identify = (p: string, ts: string, user: string, session: string) =>
+      event(p, ts, {
+        event_type: "identify",
+        event_name: null,
+        user_id: user,
+        session_id: session,
+      });
     await insert([
       // One person before and after identify(): counted once.
       event(project, "2026-10-02 09:00:00.000", { subject_id: "subA", session_id: "s1" }),
@@ -224,34 +235,85 @@ describe("statistics job (#85)", () => {
       event(project, "2026-10-02 10:00:00.000", { subject_id: "subB", session_id: "s3" }),
       // Empty user_id and no subject: not a person.
       event(project, "2026-10-02 11:00:00.000", { user_id: "", session_id: "s4" }),
+      // #145, no subject (not ChatGPT): erin identified on one instance the
+      // evening before; the conversation went on on another instance, which
+      // stamps no user_id. erin is active on the 2nd.
+      identify(project, "2026-10-01 23:00:00.000", "erin", "s5"),
+      event(project, "2026-10-01 23:00:00.001", { user_id: "erin", session_id: "s5" }),
+      event(project, "2026-10-02 08:00:00.000", { session_id: "s5" }),
+      // fred: both instances on the 2nd — one individual, not fred plus s7.
+      identify(project, "2026-10-02 12:00:00.000", "fred", "s7"),
+      event(project, "2026-10-02 12:00:00.001", { user_id: "fred", session_id: "s7" }),
+      event(project, "2026-10-02 12:05:00.000", { session_id: "s7" }),
+      // The same session id identified in another project of the run: never
+      // mapped here.
+      identify(other, "2026-10-02 07:00:00.000", "dina", "s6"),
+      event(project, "2026-10-02 07:30:00.000", { session_id: "s6" }),
+      // No session: the identify counts for jon by its own user_id, the call
+      // for nobody.
+      identify(project, "2026-10-02 13:00:00.000", "jon", ""),
+      event(project, "2026-10-02 13:01:00.000", { session_id: "" }),
+      // Two instances accepted different ids for s8: its unstamped call is
+      // gus's, the first — gus is active on the 2nd through it alone.
+      identify(project, "2026-10-01 22:00:00.000", "gus", "s8"),
+      identify(project, "2026-10-02 14:30:00.000", "hal", "s8"),
+      event(project, "2026-10-02 15:00:00.000", { session_id: "s8" }),
+      // An identify with an empty id first (the SDK accepts it), then kai on
+      // the same session state: s9's call on the 2nd is kai's, and kai is
+      // active that day through it alone (review round 2).
+      identify(project, "2026-09-30 10:00:00.000", "", "s9"),
+      identify(project, "2026-10-01 10:00:00.000", "kai", "s9"),
+      event(project, "2026-10-02 16:00:00.000", { session_id: "s9" }),
     ]);
-    await job(new MemoryStore([project])).runIfDue(NOW);
+    await job(new MemoryStore([project, other])).runIfDue(NOW);
 
     const stats = await rows(
       "SELECT dau FROM stats_users_daily WHERE project_id = {p:String} AND day = '2026-10-02'",
       { p: project },
     );
-    // Tier 1 (#89's key, straight from events) must agree with tier 2.
+    // Tier 1: a pinned copy of the dashboard's key (keyedEvents() in
+    // packages/dashboard/lib/queries/users.ts; this package cannot import it),
+    // straight from events, must agree with tier 2. Keep it in step by hand.
     const tier1 = await rows(
-      `WITH stitch AS (
-         SELECT subject_id, argMax(user_id, timestamp) AS uid FROM events
-         WHERE project_id = {p:String} AND subject_id != '' AND user_id != ''
-         GROUP BY subject_id)
-       SELECT uniqExact(coalesce(nullIf(e.user_id, ''), nullIf(s.uid, ''), nullIf(e.subject_id, ''))) AS dau
-       FROM events AS e LEFT JOIN stitch AS s ON s.subject_id = ifNull(e.subject_id, '')
+      `WITH session_map AS (
+         SELECT session_id AS stitched_session,
+                argMin(assumeNotNull(user_id), (timestamp, event_id)) AS session_user_id
+         FROM events
+         WHERE project_id = {p:String} AND event_type = 'identify'
+           AND user_id IS NOT NULL AND user_id != '' AND session_id != ''
+         GROUP BY stitched_session),
+       stitch AS (
+         SELECT assumeNotNull(subject_id) AS stitched_subject,
+                argMax(assumeNotNull(user_id), timestamp) AS mapped_user_id
+         FROM events
+         WHERE project_id = {p:String} AND subject_id IS NOT NULL AND subject_id != ''
+           AND user_id IS NOT NULL AND user_id != ''
+         GROUP BY stitched_subject)
+       SELECT uniqExact(coalesce(nullIf(e.user_id, ''), nullIf(m.session_user_id, ''),
+                                 nullIf(s.mapped_user_id, ''), nullIf(e.subject_id, ''))) AS dau
+       FROM events AS e
+       LEFT JOIN session_map AS m ON m.stitched_session = e.session_id
+       LEFT JOIN stitch AS s ON s.stitched_subject = ifNull(e.subject_id, '')
        WHERE e.project_id = {p:String} AND toDate(e.timestamp) = '2026-10-02'`,
       { p: project },
     );
-    expect(Number(stats[0].dau)).toBe(2);
-    expect(Number(tier1[0].dau)).toBe(2);
-
-    // individuals in stats_daily falls back to the session for nobody-cells:
-    // anna, subB and the unidentified session s4.
     const total = await rows(
-      "SELECT individuals FROM stats_daily WHERE project_id = {p:String} AND slice = 'total'",
+      `SELECT individuals FROM stats_daily WHERE project_id = {p:String} AND slice = 'total'
+       AND day = '2026-10-02' AND event_type = 'tool_call'`,
       { p: project },
     );
-    expect(Number(total[0].individuals)).toBe(3);
+    expect({
+      dau: Number(stats[0].dau),
+      tier1: Number(tier1[0].dau),
+      individuals: Number(total[0].individuals),
+    }).toEqual({
+      // anna, subB, erin, fred, jon, gus, hal, kai.
+      dau: 8,
+      tier1: 8,
+      // individuals in stats_daily falls back to the session for nobody-cells:
+      // anna, subB, erin, fred, gus, kai and the unidentified sessions s4 and s6.
+      individuals: 8,
+    });
   });
 
   it("writes no period or cohort that begins before the first stored event", async () => {

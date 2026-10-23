@@ -3,6 +3,7 @@ import { granularityToFunction } from "@/lib/analytics/format";
 import type { Granularity } from "@/lib/analytics/validation";
 import { queryAnalytics } from "@/lib/clickhouse/analytics-client";
 import { HAS_INTENT_SQL } from "./intents";
+import { querySessionUsers } from "./session-users";
 import type {
   CustomEventEntry,
   ErrorCategoryCount,
@@ -302,12 +303,22 @@ export async function queryToolRecentInvocations(
     },
   });
 
-  const customEventsByTrace = await queryCustomEventsByTrace(
-    ctx,
-    rows.map((r) => r.traceId),
-  );
+  // Both lookups depend only on the page. A row without its own user_id
+  // takes the first user identified in its session (#145): another instance
+  // of a stateless fleet, or the same one before identify(), stamps none.
+  const [customEventsByTrace, sessionUsers] = await Promise.all([
+    queryCustomEventsByTrace(
+      ctx,
+      rows.map((r) => r.traceId),
+    ),
+    querySessionUsers(
+      ctx,
+      rows.filter((r) => !r.userId).map((r) => r.sessionId),
+    ),
+  ]);
   const invocations: ToolInvocation[] = rows.map((r) => ({
     ...r,
+    userId: r.userId || (sessionUsers.get(r.sessionId) ?? r.userId),
     customEvents: customEventsByTrace.get(r.traceId) ?? [],
   }));
 

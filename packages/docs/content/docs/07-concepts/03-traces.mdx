@@ -3,7 +3,7 @@ title: Traces
 description: Cross-layer correlation with trace IDs and combined funnels
 ---
 
-The **trace ID** is the correlation key that stitches server-side and widget-side events into a single end-to-end funnel. This cross-layer visibility is what makes Yavio unique — you can follow a user's journey from the initial tool call on the server through to the final conversion in the widget UI.
+The **trace ID** is the correlation key that stitches server-side and widget-side events into a single end-to-end journey. This cross-layer visibility is what makes Yavio unique — you can follow a user's journey from the initial tool call on the server through to the final conversion in the widget UI.
 
 ## Trace Lifecycle
 
@@ -17,7 +17,7 @@ Here's what happens when a user interacts with your MCP app:
 6. The proxy injects `window.__YAVIO__` with the trace ID, session ID, widget JWT, and endpoint
 7. The widget renders and initializes `useYavio()`, which reads the injected config
 8. Widget events are sent directly to the ingestion API with the same trace ID
-9. All events with the same trace ID form one combined funnel in the dashboard
+9. In the dashboard, the trace ID ties the tool call to the widget it rendered; a funnel follows the whole conversation (the session ID), across its traces
 
 ## Combined Funnel Example
 
@@ -53,15 +53,15 @@ Both server and widget events share the same `session_id`. The `trace_id` provid
 
 ## Step Sequencing
 
-When you call `yavio.step()` or `useYavio().step()`, each step receives an auto-incrementing `step_sequence` number. On the server, the sequence starts at 0 and increments with each step call within the trace. On the widget, the sequence continues from where the server left off (the starting value is passed via the trace ID context).
+When you call `yavio.step()` or `useYavio().step()`, the step gets a `step_sequence` number. On the server it is a counter per session in each server process, starting at 1: it starts again on every instance of a stateless fleet that serves the conversation, and after the SDK's session cache evicts it. The widget keeps its own counter per widget load, starting at 1; it does not continue from the server.
 
-This enables deterministic ordering even when multiple steps share the same millisecond timestamp, and ensures the combined funnel view displays steps in the correct order across server and widget boundaries.
+The dashboard's funnels therefore number a conversation's steps by time: steps are ordered by their timestamp, and `step_sequence` only breaks a tie between steps in the same millisecond. One conversation is one attempt however many instances served it; widget steps are placed among the server's by the browser's clock.
 
 ## Funnel Analytics (Coming Soon)
 
-The dashboard's funnel view will use trace IDs to:
+The dashboard's funnel view will use sessions and trace IDs to:
 
-- **Visualize step progression** — see how users move through your defined funnel steps
+- **Visualize step progression** — see how conversations move through your defined funnel steps
 - **Calculate drop-off rates** — identify where users abandon the journey
 - **Inspect individual traces** — drill into a specific trace to see every event that occurred
 - **Compare funnels across platforms** — see if ChatGPT users convert differently than Claude users

@@ -327,10 +327,12 @@ export interface YavioClient {
    * deadline (signal + D, see `shutdownTimeoutMs`), by that deadline: a call
    * running at or after the signal resolves by then, one with no time left
    * at once, and one after the hand-back waits at most D (#148). What the
-   * deadline gives up is counted in one `YAVIO-1205` line. The transport
-   * stops only when no other client with the same configuration holds it
-   * and no `withYavio()` call pinned it; a later wrap by this client holds
-   * it again, or starts a fresh one.
+   * deadline gives up is counted in one `YAVIO-1205` line (one more with
+   * the rest once the transport stops have settled, when the signal was
+   * handed back before they had). The transport stops only when no other
+   * client with the same configuration holds it and no `withYavio()` call
+   * pinned it; a later wrap by this client holds it again, or starts a
+   * fresh one.
    */
   shutdown(): Promise<void>;
 }
