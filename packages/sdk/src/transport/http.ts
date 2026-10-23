@@ -20,9 +20,10 @@ export interface HttpTransportOptions {
    * after the process began shutting down, when no timer will fire and no
    * shutdown will drain it (see shared.ts). Still batched by the buffer cap.
    * Such a transport lives within the process budget — each fetch is cut
-   * to `fetchBudgetMs()` — so a fetch of its that is aborted on its last
-   * attempt is the deadline's loss, not a delivery failure (#148 review
-   * round 2).
+   * to `fetchBudgetMs()` — so a fetch of its that the budget cuts on its
+   * last attempt is the deadline's loss, not a delivery failure (#148
+   * review round 2); one that runs into the fetch timeout first is a
+   * delivery failure (#151).
    */
   immediate?: boolean;
   /**
@@ -546,9 +547,11 @@ export class HttpTransport implements Transport {
       // `AbortSignal.any`, which needs Node 20.3 while `engines` is
       // `>=20.0.0`.
       const controller = new AbortController();
+      // Read before the try: the catch needs it to tell a cut by the budget
+      // from the plain fetch timeout (#151).
+      const budgetMs = this.fetchBudgetMs?.();
       try {
         this.inflightController = controller;
-        const budgetMs = this.fetchBudgetMs?.();
         const timeoutMs =
           budgetMs === undefined ? this.fetchTimeoutMs : Math.min(this.fetchTimeoutMs, budgetMs);
         const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -682,9 +685,15 @@ export class HttpTransport implements Transport {
         // is one a post-signal transport's budget cut on its one attempt
         // (that budget is what is left of the process deadline): counted in
         // the YAVIO-1205 line, not reported as a delivery failure as well
-        // (#148 review round 7). A refused or failed connection, or the
-        // fetch timeout, is not.
-        const cut = controller.signal.aborted && (this.deadlineReached || this.immediate);
+        // (#148 review round 7). The budget cut it only if it set the timer,
+        // below the fetch timeout. A refused or failed connection is not a
+        // cut, nor is a fetch that ran into the plain fetch timeout with
+        // more budget left — an explicit `shutdownTimeoutMs` above 30 s:
+        // before #151 any abort on a post-signal transport counted as one.
+        const cut =
+          controller.signal.aborted &&
+          (this.deadlineReached ||
+            (this.immediate && budgetMs !== undefined && budgetMs < this.fetchTimeoutMs));
         if (!cut) {
           console.error(
             `[${ErrorCode.SDK.FLUSH_FAILED_MAX_RETRIES}] Giving up after ${attempt + 1} attempts`,

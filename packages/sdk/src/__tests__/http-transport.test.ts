@@ -1029,14 +1029,15 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
 
     it("a post-signal transport: a fetch its budget cuts on its one attempt is a deadline loss, a refused connection a delivery failure", async () => {
       // `newTransport` after a signal: immediate, one attempt, a fetch
-      // timeout of min(30 s, D). The exit hook reports the first; the
-      // second has its YAVIO-1201 line.
+      // timeout of min(30 s, budget). The exit hook reports the first; the
+      // second has its YAVIO-1201 line. The budget, not `fetchTimeoutMs`,
+      // sets the 300 ms here: only its cut is the deadline's (#151).
       const { fetch: hanging } = abortableFetch();
       const cut = new HttpTransport({
         ...base,
         immediate: true,
         maxRetries: 0,
-        fetchTimeoutMs: 300,
+        fetchBudgetMs: () => 300,
         fetch: hanging,
       });
       cut.send([fakeEvent()]);
@@ -1054,13 +1055,39 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
         ...base,
         immediate: true,
         maxRetries: 0,
-        fetchTimeoutMs: 300,
+        fetchBudgetMs: () => 300,
         fetch: vi.fn().mockRejectedValue(new Error("ECONNREFUSED")),
       });
       refused.send([fakeEvent()]);
       await vi.advanceTimersByTimeAsync(0);
       expect(refused.deadlineLostEvents()).toBe(0);
       expect(refused.lostEvents()).toBe(1);
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("YAVIO-1201"));
+    });
+
+    it("a post-signal transport: a fetch that runs into the fetch timeout with more budget left is a delivery failure with its 1201 line, not a deadline loss (#151)", async () => {
+      // An explicit `shutdownTimeoutMs` above 30 s leaves a budget above the
+      // fetch timeout, so the plain fetch timeout aborts the fetch, not the
+      // budget. Before the fix any abort on a post-signal transport was
+      // counted as the deadline's loss and had no 1201 line.
+      const { fetch: hanging, aborted } = abortableFetch();
+      const transport = new HttpTransport({
+        ...base,
+        immediate: true,
+        maxRetries: 0,
+        fetchTimeoutMs: 300,
+        fetchBudgetMs: () => 10_000,
+        fetch: hanging,
+      });
+      transport.send([fakeEvent()]);
+      await vi.advanceTimersByTimeAsync(299);
+      expect(aborted()).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(aborted()).toBe(1); // the 300 ms fetch timeout, well before the 10 s budget
+      expect(transport.deadlineLostEvents()).toBe(0);
+      expect(transport.lostEvents()).toBe(1);
+      expect(transport.pendingEvents()).toBe(0);
       expect(error).toHaveBeenCalledTimes(1);
       expect(error).toHaveBeenCalledWith(expect.stringContaining("YAVIO-1201"));
     });
