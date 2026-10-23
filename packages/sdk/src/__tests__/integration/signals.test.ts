@@ -1673,6 +1673,10 @@ describe("loss accounting (#148)", () => {
     // the four events were the exit hook's ("Process exit with 4 events
     // not delivered — await analytics.shutdown() …") or, split by the timer
     // order, half the cycle's and half the exit hook's (#148 review round 9).
+    // Since #154 the line comes from `onCycleDeadline`, whichever of the
+    // deadline's timers runs first, before the drain's end: the round-10
+    // pre-count at "drain-end" finds the stops settled and stays as a
+    // safety net for a drain whose wait something else ends early.
     await withoutOtherListeners("SIGTERM", async () => {
       const app = vi.fn();
       process.on("SIGTERM", app);
@@ -1850,6 +1854,45 @@ describe("loss accounting (#148)", () => {
         expect(lines1205()[0]).toContain(
           "Process exit with 2 events not delivered — await analytics.shutdown() before exiting",
         );
+      } finally {
+        process.off("SIGTERM", app);
+      }
+    });
+  });
+
+  it("several waits end at one cycle deadline — two apps' shutdown() timers and the cycle's — and the cycle prints one line (#154 review round 1)", async () => {
+    // Each of the three runs onCycleDeadline at the same deadline; once per
+    // cycle. (Without the guard a second call counts nothing either — what
+    // the first line marked is reconciled, the post-signal fetches are
+    // flagged — so a mutant dropping it survives this test; it pins the
+    // outcome, the guard saves the recount.)
+    await withoutOtherListeners("SIGTERM", async () => {
+      const a = build("yav_154_two_a", { shutdownTimeoutMs: 800 });
+      const b = build("yav_154_two_b", { shutdownTimeoutMs: 800 });
+      await callTool(a.raw, "get_price", { q: "a" });
+      await callTool(b.raw, "get_price", { q: "b" });
+      const returned: string[][] = [];
+      const app = vi.fn(async () => {
+        await Promise.all(
+          [a.client, b.client].map((client) =>
+            client.shutdown().then(() => {
+              returned.push(lines1205());
+            }),
+          ),
+        );
+      });
+      process.on("SIGTERM", app);
+      try {
+        process.emit("SIGTERM", "SIGTERM");
+        await vi.waitFor(() => expect(returned).toHaveLength(2), { timeout: 3_000 });
+        expect(returned.map((l) => l.length)).toEqual([1, 1]);
+        expect(lines1205()[0]).toContain("Shutdown deadline of 800 ms reached — 4 events");
+        await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0), { timeout: 2_000 });
+        await new Promise((r) => setTimeout(r, 50));
+        expect(lines1205()).toHaveLength(1);
+        expect(exitHooks()).toHaveLength(1);
+        exitHooks()[0]?.call(process, 0);
+        expect(lines1205()).toHaveLength(1);
       } finally {
         process.off("SIGTERM", app);
       }

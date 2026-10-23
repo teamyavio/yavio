@@ -704,6 +704,13 @@ function reportCycleLoss(
     n += precountStops(cycle);
   } else {
     if (cycle.sole) cycle.marks = markPending();
+    // At "deadline", what the cycle's stops still hold. At "drain-end" they
+    // have settled since #154 — every wait that ends at the deadline ends
+    // the cycle first (`onCycleDeadline`), so a drain ending with stops
+    // pending finds the cycle over — and this marks nothing there; it is
+    // kept so that a drain whose wait anything else ends early (round 10's
+    // case) still pre-counts them rather than leaving them to the exit hook
+    // (#154 review round 1: a mutant dropping "drain-end" here survives).
     else if (at !== "hand-back") cycle.marks = markPending(cycle.stops);
     if (cycle.marks.length > 0) preCounted = cycle.marks;
     for (const mark of cycle.marks) n += mark.pending;
