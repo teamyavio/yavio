@@ -1784,6 +1784,118 @@ describe("loss accounting (#148)", () => {
     });
   });
 
+  describe("one late line per cycle, whichever deadline timer runs first (#154, CI)", () => {
+    // D = 600 ms from B's explicit value; B's fetch ignores its abort, so its
+    // stop settles at the deadline + ABORT_SETTLE_MS. A second signal hands
+    // the cycle back at once. X sends before the deadline's last 100 ms (the
+    // deadline cuts its fetch); Y sends within them, so the 100 ms floor
+    // cuts its fetch after the deadline, before B settles. Connection
+    // batches hang; the tool_call batch behind each is answered at once.
+    let fetchSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      const realFetch = globalThis.fetch;
+      fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+          const headers = init?.headers as Record<string, string> | undefined;
+          if (headers?.Authorization === "Bearer yav_154_once_b") {
+            return realFetch(input, { ...init, signal: undefined });
+          }
+          return realFetch(input, init);
+        });
+      ingest.hangEvents = false;
+      ingest.respondAfterMs = (batch) =>
+        batch.events.some((e) => e.event_type === "connection") ? 60_000 : 0;
+    });
+    afterEach(() => fetchSpy.mockRestore());
+
+    const sentAt = (key: string) =>
+      ingest.batches.find((batch) => batch.authorization === `Bearer ${key}`)?.receivedAt ?? 0;
+    const cycleLines = () => lines1205().filter((l) => l.includes("Shutdown deadline"));
+
+    /** X right away, Y at t0 + 530 ms; both sends checked against the deadline's last 100 ms. */
+    async function lateSends(t0: number): Promise<void> {
+      const { raw: x } = build("yav_154_once_x");
+      await callTool(x, "get_price", { q: "x" });
+      await new Promise((r) => setTimeout(r, Math.max(0, t0 + 530 - Date.now())));
+      const { raw: y } = build("yav_154_once_y");
+      await callTool(y, "get_price", { q: "y" });
+      await vi.waitFor(() => expect(sentAt("yav_154_once_y")).toBeGreaterThan(0));
+      expect(sentAt("yav_154_once_x")).toBeGreaterThan(0);
+      expect(sentAt("yav_154_once_x")).toBeLessThan(t0 + 500);
+      expect(sentAt("yav_154_once_y")).toBeGreaterThan(t0 + 510);
+      expect(sentAt("yav_154_once_y")).toBeLessThan(t0 + 600);
+    }
+
+    it("no shutdown() waiting: nothing is released at the deadline, so the late report waits for the stops — one line with what the deadline and the floor cut", async () => {
+      // Before the fix the cycle's timer printed a late line at the deadline
+      // whether or not anything was waiting on it — X's one event — and the
+      // stops' settling printed a second with Y's: three lines in all, and
+      // in CI, where the test then reached the exit hook within the tool
+      // call responses, one more from the exit hook.
+      _setSignalReraise(() => {});
+      await withoutOtherListeners("SIGTERM", async () => {
+        await withoutOtherListeners("SIGINT", async () => {
+          const { raw: b } = build("yav_154_once_b", { shutdownTimeoutMs: 600 });
+          await callTool(b, "get_price", { q: "b" });
+          const t0 = Date.now();
+          process.emit("SIGTERM", "SIGTERM"); // the drain sends B's two
+          await vi.waitFor(() => expect(ingest.batches).toHaveLength(1));
+          process.emit("SIGINT", "SIGINT"); // handed back at once, B's two pre-counted
+          expect(lines1205()).toHaveLength(1);
+          expect(lines1205()[0]).toContain("2 events not delivered");
+          await lateSends(t0);
+          await vi.waitFor(() => expect(_trackedTransportCount()).toBe(2), { timeout: 2_000 }); // B settled
+          await new Promise((r) => setTimeout(r, 100));
+          expect(lines1205(), lines1205().join("\n")).toHaveLength(2);
+          expect(lines1205()[1]).toContain("Shutdown deadline of 600 ms");
+          expect(lines1205()[1]).toContain("2 events not delivered"); // X and Y
+        });
+      });
+    });
+
+    it("an app's shutdown() waiting: the late line comes at the deadline, before it returns, and stays the cycle's only one — Y, lost after it, is the exit hook's", async () => {
+      // Before the fix the stops' settling printed a second late line with
+      // Y's event after the one at the deadline.
+      await withoutOtherListeners("SIGTERM", async () => {
+        await withoutOtherListeners("SIGINT", async () => {
+          const { client, raw: b } = build("yav_154_once_b", { shutdownTimeoutMs: 600 });
+          await callTool(b, "get_price", { q: "b" });
+          let closing: Promise<void> | undefined;
+          let atReturn: string[] | undefined;
+          const app = vi.fn(() => {
+            closing ??= client.shutdown().then(() => {
+              atReturn = cycleLines();
+            });
+          });
+          process.on("SIGTERM", app);
+          process.on("SIGINT", app);
+          try {
+            const t0 = Date.now();
+            process.emit("SIGTERM", "SIGTERM"); // the app's shutdown() waits for the drain
+            await vi.waitFor(() => expect(ingest.batches).toHaveLength(1));
+            process.emit("SIGINT", "SIGINT"); // handed back at once, nothing pre-counted
+            expect(lines1205()).toHaveLength(0);
+            await lateSends(t0);
+            await closing;
+            expect(atReturn).toHaveLength(1);
+            expect(atReturn?.[0]).toContain("Shutdown deadline of 600 ms reached — 3 events"); // B's two and X
+            await vi.waitFor(() => expect(_trackedTransportCount()).toBe(2), { timeout: 2_000 }); // B settled
+            await new Promise((r) => setTimeout(r, 100));
+            expect(cycleLines(), lines1205().join("\n")).toHaveLength(1);
+            expect(exitHooks()).toHaveLength(1);
+            exitHooks()[0]?.call(process, 0);
+            expect(lines1205()).toHaveLength(2);
+            expect(lines1205()[1]).toContain("Process exit with 1 events not delivered"); // Y
+          } finally {
+            process.off("SIGTERM", app);
+            process.off("SIGINT", app);
+          }
+        });
+      });
+    });
+  });
+
   it("a client created and shut down per request leaves no transport behind, and its losses stay counted", async () => {
     // A stateless host that follows the README per request: before the fix
     // every transport stayed in the registry's set for the process lifetime.

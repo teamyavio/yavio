@@ -280,6 +280,14 @@ interface SignalCycle {
    * deadline cuts (`precountLate`, #154). Once per cycle.
    */
   deadlineCounted: boolean;
+  /**
+   * Set once the cycle printed its late line — at its deadline
+   * (`late-deadline`) or once its stops settled (`drain-settled`): a cycle
+   * prints one line when it ends and at most one more after that (#154 CI
+   * fix: a line at the deadline and another when the stops settled were
+   * two).
+   */
+  lateReported: boolean;
   /** `resets` when the cycle started: a cycle from before a test reset reports nothing after it. */
   epoch: number;
 }
@@ -349,6 +357,14 @@ let lastDeadlineAt: number | undefined;
 const inProgressDeadlines: number[] = [];
 /** Resolvers of the `shutdown()` awaits to cut at the next cycle's deadline. */
 const deadlineWaiters = new Set<() => void>();
+/**
+ * `shutdown()` waits in progress (`awaitBounded`). A cycle handed back
+ * early reports at its deadline only when one of them is about to return
+ * there — the app it releases may exit right away; with none, its late
+ * report waits for its stops as before #154 and holds everything they and
+ * the deadline cut (#154 CI fix).
+ */
+let appWaits = 0;
 
 /**
  * D for a signal arriving now: the smallest `shutdownTimeoutMs` set
@@ -426,13 +442,18 @@ export async function awaitBounded(work: Promise<void>, ownMs: number): Promise<
   // caller goes on — a timer made after the cycle's can run before it (#154).
   const atDeadline =
     cycle && remaining !== undefined && remaining <= ownMs
-      ? () => onCycleDeadline(cycle)
+      ? () => onCycleDeadline(cycle, true)
       : undefined;
   if (ms <= 0) {
     atDeadline?.();
     return;
   }
-  await raceDeadline(work, ms, { waiters: deadlineWaiters, onTimeout: atDeadline });
+  appWaits++;
+  try {
+    await raceDeadline(work, ms, { waiters: deadlineWaiters, onTimeout: atDeadline });
+  } finally {
+    appWaits--;
+  }
 }
 
 function releaseWaiters(): void {
@@ -610,6 +631,16 @@ function reportCycleLoss(
   cycle: SignalCycle,
   at: "hand-back" | "drain-end" | "deadline" | "late-deadline" | "drain-settled",
 ): void {
+  if (at === "drain-settled" && cycle.lateReported) {
+    // The late line came at the deadline, and a cycle prints one (#154 CI
+    // fix). What the stops gave up since was in it (`precountStops` marked
+    // it); anything else lost since — a send in the deadline's last 100 ms,
+    // whose floor outlives the deadline — stays unreported for the exit
+    // hook, as on any cycle that ends at its deadline.
+    reportedLost += lostOfMarked(cycle.marks);
+    if (preCounted === cycle.marks) preCounted = [];
+    return;
+  }
   const total = lostTotal();
   let n = total - reportedLost;
   reportedLost = total;
@@ -635,6 +666,7 @@ function reportCycleLoss(
     for (const mark of cycle.marks) n += mark.pending;
   }
   if (n <= 0) return;
+  if (at === "late-deadline" || at === "drain-settled") cycle.lateReported = true;
   const line = `[YAVIO-1205] Shutdown deadline of ${cycle.budgetMs} ms reached — ${n} events not delivered (queued, in flight or refused after the deadline). ${RAISE_HINT}`;
   if (at !== "drain-settled" && at !== "late-deadline" && cycle.sole) writeStderrLine(line);
   else console.warn(line);
@@ -767,6 +799,7 @@ function onSignal(signal: HandledSignal): void {
     stopsSettled: Promise.resolve(),
     stopsRunning: false,
     deadlineCounted: false,
+    lateReported: false,
     epoch: resets,
   };
   signalInFlight = cycle;
@@ -824,14 +857,18 @@ function finishSignal(cycle: SignalCycle, at: "hand-back" | "drain-end" | "deadl
  * before the stops' deadline timers for the same duration, usually runs
  * before them — and the exit hook's "Process exit … await
  * analytics.shutdown()" line counted every event, with a hint for an app
- * that did. Still in flight, the cycle ends here; handed back early (a
+ * that did. Still in flight, the cycle ends here. Handed back early (a
  * second signal) with its stops still running, its late report comes now
- * rather than when they settle. Once per cycle.
+ * rather than when they settle — but only when a `shutdown()` wait returns
+ * at this deadline (`releases`: an app's own timer, or one waiting on the
+ * cycle's): with none, nothing is released here, and the late report waits
+ * for the stops and holds what the deadline and the 100 ms floor cut by
+ * then, in one line (#154 CI fix). Once per cycle.
  */
-function onCycleDeadline(cycle: SignalCycle): void {
+function onCycleDeadline(cycle: SignalCycle, releases = appWaits > 0): void {
   if (cycle.epoch !== resets || cycle.deadlineCounted) return;
   if (signalInFlight === cycle) finishSignal(cycle, "deadline");
-  else if (cycle.stopsRunning) reportCycleLoss(cycle, "late-deadline");
+  else if (cycle.stopsRunning && releases) reportCycleLoss(cycle, "late-deadline");
 }
 
 /** Whether one of the cycle's stops was cut by its own deadline timer: the deadline has come. */
@@ -1192,6 +1229,7 @@ export function _resetSharedState(): void {
   lastBudgetMs = undefined;
   lastDeadlineAt = undefined;
   inProgressDeadlines.length = 0;
+  appWaits = 0;
   holdDeadlines.length = 0;
   pinDeadlines.clear();
   releaseWaiters();
