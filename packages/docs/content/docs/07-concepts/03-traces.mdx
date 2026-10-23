@@ -38,7 +38,7 @@ A single trace might contain events from both server and widget:
 Sessions and traces have a one-to-many relationship. A single conversation (session) typically holds multiple tool invocations, each with its own trace:
 
 ```
-Session (ses_xxx) ← one MCP connection
+Session (ses_xxx) ← one conversation
   ├── Trace 1 (tr_aaa) ← tool_call "search_rooms"
   │   ├── step: "rooms_found"              (server)
   │   ├── widget_render                    (widget)

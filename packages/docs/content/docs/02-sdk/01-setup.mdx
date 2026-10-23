@@ -91,7 +91,7 @@ Every `server.tool()` and `server.registerTool()` invocation is tracked with:
 
 ### Connections
 
-When a client connects to your MCP server:
+With the first tool call of a session (not on connect; there is no disconnect event):
 
 - **Event type:** `connection`
 - **Session ID** from the call's session key, else the connection's own (see [Sessions on per-request servers](#sessions-on-per-request-servers)), with its `session_source`

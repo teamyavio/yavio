@@ -64,7 +64,7 @@ Fires on every tool invocation. This is the core event that powers most analytic
 
 ### connection
 
-Fires on transport connect and disconnect. Captures `protocol_version`, `client_name`, `client_version`, and `connection_duration_ms`. Emitted at least once per session per server process; for key-less HTTP calls (`session_source: per_request`) once per process per client (platform, client name and version, protocol version) instead of once per call.
+Sent with a session's first tool call, not on connect, and there is no disconnect event. Captures `protocol_version`, `client_name` and `client_version` (`connection_duration_ms` is reserved and never set). Emitted at least once per session per server process; for key-less HTTP calls (`session_source: per_request`) once per process per client (platform, client name and version, protocol version) instead of once per call.
 
 ### resource_access
 
