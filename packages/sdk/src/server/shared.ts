@@ -624,8 +624,10 @@ export function armExitHook(): void {
  * or a wait it bounds, ran before the drain's end) the line counts what
  * it counts at the drain's end, plus the post-signal fetches that deadline
  * cuts (`precountLate`); a cycle handed back before its deadline with its
- * stops still running reports then (`late-deadline`), not once they have
- * settled — the app it released exits right after (#154).
+ * stops still running reports then (`late-deadline`) when a `shutdown()`
+ * wait returns at that deadline — the app it released may exit right
+ * after (#154) — and otherwise once they have settled. One late line per
+ * cycle (`lateReported`).
  */
 function reportCycleLoss(
   cycle: SignalCycle,
