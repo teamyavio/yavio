@@ -241,7 +241,7 @@ let signalDrain: Promise<void> | null = null;
 
 function noteDraining(): void {
   logOnce("draining", () =>
-    console.info(
+    console.error(
       "[yavio] Shutdown signal received — events from requests served from now on are sent at once, best effort.",
     ),
   );
@@ -1430,7 +1430,9 @@ export function _trackedTransportCount(): number {
 /**
  * Messages that are worth exactly one line per process: the mode a wrap
  * runs in does not change between requests, and a stateless host wraps on
- * every request.
+ * every request. Every SDK line goes to stderr (`console.warn`,
+ * `console.error`, `writeStderrLine`), the informational ones included:
+ * on a stdio server stdout is the JSON-RPC wire (#174).
  */
 const loggedOnce = new Set<string>();
 
