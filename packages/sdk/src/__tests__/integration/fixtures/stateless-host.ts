@@ -16,8 +16,10 @@
  * alive but stdin — a stdio server's shape: the listening socket is
  * unref'd, so once the test ends stdin only the SDK can hold the loop, #164)
  * | "idle" (no SIGTERM/SIGINT handler; SIGUSR2 closes the server and nothing
- * else — no drain, no `shutdown()`: whatever the SDK still has queued must
- * not keep the process alive, #164) | "pinned-cli" (a CLI or cron shape: a
+ * else — no signal, no `shutdown()`: the loop empties, and the SDK's
+ * natural-exit drain delivers what is still queued within 1.5 s, or gives
+ * it up there with one line, #167 — nothing of the SDK's keeps the process
+ * alive past that, #164) | "pinned-cli" (a CLI or cron shape: a
  * `withYavio()` pin on the same key, and SIGUSR2 closes the server and
  * awaits `analytics.shutdown()` — no signal the SDK handles; the pin keeps
  * the transport, so the shutdown drains it, and that drain must hold the
