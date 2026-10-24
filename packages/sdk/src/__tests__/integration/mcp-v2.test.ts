@@ -12,7 +12,14 @@ import { type IncomingMessage, type ServerResponse, createServer } from "node:ht
 import type { AddressInfo } from "node:net";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { NodeStreamableHTTPServerTransport, toNodeHandler } from "@modelcontextprotocol/node";
-import { InMemoryTransport, McpServer, createMcpHandler } from "@modelcontextprotocol/server";
+import {
+  InMemoryTransport,
+  McpServer,
+  UrlElicitationRequiredError,
+  acceptedContent,
+  createMcpHandler,
+  inputRequired,
+} from "@modelcontextprotocol/server";
 import type {
   BaseEvent,
   ConnectionEvent,
@@ -678,5 +685,438 @@ describe("MCP SDK v2 — a long-lived server on a session-generating transport (
     );
     expect(new Set(calls.map((e) => e.session_source))).toEqual(new Set(["mcp_session_id"]));
     expect(sessionKey).not.toHaveBeenCalled();
+  });
+});
+
+// #168: a tool that asks for input. On 2026-07-28 every round is its own
+// tools/call request (multi-round-trip requests); on the 2025 era v2's legacy
+// shim (on by default) fulfils the input request over a server-to-client
+// request and re-enters the handler inside the same tools/call. Either way it
+// is one call: one tool_call event, from the round whose result is final.
+describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)", () => {
+  let ingest: MockIngest;
+  let mcp: ReturnType<typeof createServer> | undefined;
+
+  beforeEach(async () => {
+    _resetGlobalState();
+    ingest = await startMockIngest();
+  });
+
+  afterEach(async () => {
+    await ingest.close();
+    if (mcp) {
+      mcp.closeAllConnections();
+      await new Promise<void>((resolve) => mcp?.close(() => resolve()));
+    }
+    mcp = undefined;
+    _resetGlobalState();
+  });
+
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const THINK_MS = 200;
+  const confirmSchema = z.object({ confirm: z.boolean() });
+  const regionSchema = z.object({ region: z.string() });
+
+  interface DeployOptions {
+    twoRounds?: boolean;
+    stateOnly?: boolean;
+    badOutput?: boolean;
+    throwFinal?: boolean;
+    urlAfterConfirm?: boolean;
+  }
+
+  /**
+   * As in v2's own `inputRequired` docs: round 1 works 40 ms and asks for a
+   * confirmation; with `twoRounds` a confirmation then works 30 ms and asks
+   * for a region (requestState "s2"); the final round works 20 ms. A decline
+   * ends with "cancelled by user". `stateOnly`: round 1 returns a
+   * requestState-only result (load shedding). `badOutput`: the final result
+   * violates the declared outputSchema. `throwFinal`: the final round throws.
+   * `urlAfterConfirm`: a confirmation is answered with a URL elicitation
+   * (`-32042`, 2025 era).
+   */
+  function registerDeploy(server: McpServer, opts: DeployOptions = {}, runs = { n: 0 }) {
+    const final = async (text: string) => {
+      await sleep(20);
+      if (opts.throwFinal) throw new Error("deploy backend down");
+      return opts.badOutput
+        ? { content: [{ type: "text" as const, text }], structuredContent: { deployed: "no" } }
+        : ok(text);
+    };
+    server.registerTool(
+      "deploy",
+      {
+        inputSchema: z.object({ env: z.string() }),
+        ...(opts.badOutput ? { outputSchema: z.object({ deployed: z.boolean() }) } : {}),
+      },
+      async ({ env }, ctx) => {
+        runs.n++;
+        const responses = ctx.mcpReq.inputResponses;
+        const state = ctx.mcpReq.requestState();
+        if (opts.stateOnly) {
+          if (state === "busy") return final(`deployed to ${env}`);
+          await sleep(40);
+          return inputRequired({ requestState: "busy" });
+        }
+        if (state === "s2") {
+          const answer = acceptedContent(responses, "region", regionSchema);
+          return final(answer ? `deployed to ${env} in ${answer.region}` : "cancelled by user");
+        }
+        if (!responses) {
+          await sleep(40);
+          return inputRequired({
+            inputRequests: {
+              confirm: inputRequired.elicit({
+                message: `Deploy to ${env}?`,
+                requestedSchema: confirmSchema,
+              }),
+            },
+          });
+        }
+        if (acceptedContent(responses, "confirm", confirmSchema)?.confirm !== true) {
+          await sleep(20);
+          return ok("cancelled by user");
+        }
+        if (opts.urlAfterConfirm) {
+          throw new UrlElicitationRequiredError([
+            {
+              mode: "url",
+              message: "Approve the deployment",
+              url: "https://approve.example.com/deploy",
+              elicitationId: "approve-1",
+            },
+          ]);
+        }
+        if (opts.twoRounds) {
+          await sleep(30);
+          return inputRequired({
+            inputRequests: {
+              region: inputRequired.elicit({
+                message: "Which region?",
+                requestedSchema: regionSchema,
+              }),
+            },
+            requestState: "s2",
+          });
+        }
+        return final(`deployed to ${env}`);
+      },
+    );
+    return runs;
+  }
+
+  /** A client that answers elicitations after THINK_MS: accepts, or declines. */
+  function elicitingClient(
+    opts: { action?: "accept" | "decline"; modern?: boolean; elicitation?: boolean } = {},
+  ) {
+    const { action = "accept", modern = true, elicitation = true } = opts;
+    const client = new Client(
+      { name: "mrtr-client", version: "1.0" },
+      {
+        ...(elicitation ? { capabilities: { elicitation: { form: {} } } } : {}),
+        ...(modern ? { versionNegotiation: { mode: "auto" as const } } : {}),
+      },
+    );
+    if (elicitation) {
+      client.setRequestHandler("elicitation/create", async (request) => {
+        await sleep(THINK_MS);
+        if (action !== "accept") return { action };
+        const fields = Object.keys(
+          (request.params as { requestedSchema?: { properties?: object } }).requestedSchema
+            ?.properties ?? {},
+        );
+        return {
+          action: "accept" as const,
+          content: (fields.includes("region") ? { region: "eu" } : { confirm: true }) as Record<
+            string,
+            string | boolean
+          >,
+        };
+      });
+    }
+    return client;
+  }
+
+  /** A per-request HTTP host: 2026-07-28 for a negotiating client. */
+  async function perRequestHost(
+    opts: DeployOptions,
+    serverOnly: boolean,
+  ): Promise<{ url: URL; runs: { n: number }; yavio: ReturnType<typeof createYavio> }> {
+    const yavio = createYavio({ apiKey: "yav_mrtr", endpoint: ingest.endpoint, serverOnly });
+    const runs = { n: 0 };
+    const nodeHandler = toNodeHandler(
+      createMcpHandler(() => {
+        const server = new McpServer({ name: "mrtr", version: "1.0" });
+        registerDeploy(server, opts, runs);
+        return yavio.wrap(server);
+      }),
+    );
+    const httpServer = createServer((req, res) => {
+      void nodeHandler(req, res);
+    });
+    mcp = httpServer;
+    await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+    const url = new URL(`http://127.0.0.1:${(httpServer.address() as AddressInfo).port}/mcp`);
+    return { url, runs, yavio };
+  }
+
+  /** One call against a per-request host; `bodies` holds every HTTP response body. */
+  async function modernCall(
+    opts: DeployOptions = {},
+    clientOpts: Parameters<typeof elicitingClient>[0] = {},
+    serverOnly = true,
+  ) {
+    const { url, runs, yavio } = await perRequestHost(opts, serverOnly);
+    const bodies: string[] = [];
+    const tap: typeof fetch = async (input, init) => {
+      const res = await fetch(input, init);
+      bodies.push(await res.clone().text());
+      return res;
+    };
+    const client = elicitingClient(clientOpts);
+    await client.connect(new StreamableHTTPClientTransport(url, { fetch: tap }));
+    const era = client.getNegotiatedProtocolVersion();
+    const started = performance.now();
+    const result = await client
+      .callTool({
+        name: "deploy",
+        arguments: { env: "prod" },
+        _meta: { "openai/session": "conv-mrtr" },
+      })
+      .catch((error: unknown) => error);
+    const wallMs = performance.now() - started;
+    await client.close();
+    await yavio.shutdown();
+    return {
+      result,
+      era,
+      runs: runs.n,
+      wallMs,
+      bodies,
+      calls: ingest.ofType("tool_call") as unknown as ToolCallEvent[],
+    };
+  }
+
+  /** One call over InMemoryTransport (2025 era, the shim); `results` holds the tool results the server sent. */
+  async function shimCall(
+    opts: DeployOptions = {},
+    clientOpts: Parameters<typeof elicitingClient>[0] = {},
+    serverOnly = true,
+  ) {
+    const yavio = createYavio({ apiKey: "yav_mrtr_shim", endpoint: ingest.endpoint, serverOnly });
+    const server = new McpServer({ name: "mrtr", version: "1.0" });
+    const runs = registerDeploy(server, opts);
+    const wrapped = yavio.wrap(server);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const sent: Array<{ result?: Record<string, unknown> }> = [];
+    const send = serverTransport.send.bind(serverTransport);
+    serverTransport.send = (message, options) => {
+      sent.push(message as { result?: Record<string, unknown> });
+      return send(message, options);
+    };
+    await wrapped.connect(serverTransport);
+    const client = elicitingClient({ modern: false, ...clientOpts });
+    await client.connect(clientTransport);
+    const era = client.getNegotiatedProtocolVersion();
+    const started = performance.now();
+    const result = await client
+      .callTool({ name: "deploy", arguments: { env: "prod" } })
+      .catch((error: unknown) => error);
+    const wallMs = performance.now() - started;
+    await client.close();
+    await yavio.shutdown();
+    const results = sent.filter((m) => m.result && "content" in m.result).map((m) => m.result);
+    return {
+      result,
+      era,
+      runs: runs.n,
+      wallMs,
+      results,
+      calls: ingest.ofType("tool_call") as unknown as ToolCallEvent[],
+    };
+  }
+
+  const text = (result: unknown) =>
+    (result as { content?: Array<{ text?: string }> }).content?.[0]?.text;
+  const outputText = (event: ToolCallEvent | undefined) =>
+    (event?.output_content as { content?: Array<{ text?: string }> } | undefined)?.content?.[0]
+      ?.text;
+
+  describe("2026-07-28, a per-request host", () => {
+    it("an accepted confirmation: one event, from the final round, marked as a retry; the think time is in no latency", async () => {
+      const call = await modernCall();
+      expect(call.era).toBe("2026-07-28");
+      expect(call.runs).toBe(2);
+      expect(text(call.result)).toBe("deployed to prod");
+      expect(call.calls).toHaveLength(1);
+      const [event] = call.calls;
+      expect(event?.status).toBe("success");
+      expect(outputText(event)).toBe("deployed to prod");
+      expect(event?.metadata).toEqual({ input_retry: true });
+      // The final request's handler time only: the first round was another
+      // request, and the user's answer came between them.
+      expect(event?.latency_ms).toBeLessThan(call.wallMs - THINK_MS);
+    });
+
+    it("a declined confirmation: one event, with the status the tool's final result gives", async () => {
+      const call = await modernCall({}, { action: "decline" });
+      expect(text(call.result)).toBe("cancelled by user");
+      expect(call.calls).toHaveLength(1);
+      expect(call.calls[0]?.status).toBe("success");
+      expect(outputText(call.calls[0])).toBe("cancelled by user");
+      expect(call.calls[0]?.metadata).toEqual({ input_retry: true });
+    });
+
+    it("two input rounds (three requests): one event", async () => {
+      const call = await modernCall({ twoRounds: true });
+      expect(call.runs).toBe(3);
+      expect(text(call.result)).toBe("deployed to prod in eu");
+      expect(call.calls).toHaveLength(1);
+      expect(outputText(call.calls[0])).toBe("deployed to prod in eu");
+      expect(call.calls[0]?.metadata).toEqual({ input_retry: true });
+    });
+
+    it("a requestState-only interim result: one event", async () => {
+      const call = await modernCall({ stateOnly: true });
+      expect(call.runs).toBe(2);
+      expect(call.calls).toHaveLength(1);
+      expect(call.calls[0]?.metadata).toEqual({ input_retry: true });
+    });
+
+    it("a failure of the final round lands on the one event: a throw is unknown, an output-schema failure server", async () => {
+      const thrown = await modernCall({ throwFinal: true });
+      expect(thrown.calls).toHaveLength(1);
+      expect(thrown.calls[0]?.error_category).toBe("unknown");
+      expect(thrown.calls[0]?.metadata).toEqual({ input_retry: true });
+      _resetGlobalState();
+      ingest.events.length = 0;
+      const invalid = await modernCall({ badOutput: true });
+      expect(invalid.calls).toHaveLength(1);
+      expect(invalid.calls[0]?.status).toBe("error");
+      expect(invalid.calls[0]?.error_category).toBe("server");
+      expect(outputText(invalid.calls[0])).toBe("deployed to prod");
+    });
+
+    it("v2 refusing the input request (the client declared no elicitation) is still one server error", async () => {
+      const call = await modernCall({}, { elicitation: false });
+      expect(call.result).toBeInstanceOf(Error);
+      expect(call.calls).toHaveLength(1);
+      expect(call.calls[0]?.status).toBe("error");
+      expect(call.calls[0]?.error_category).toBe("server");
+      expect(call.calls[0]?.metadata).toEqual({ input_rounds: 1 });
+    });
+
+    it("serverOnly false: the interim result goes out without _meta.yavio, the final one carries it for the event's trace", async () => {
+      const call = await modernCall({}, {}, false);
+      expect(call.calls).toHaveLength(1);
+      const interim = call.bodies.filter((body) => body.includes("input_required"));
+      expect(interim).toHaveLength(1);
+      expect(interim[0]).not.toContain('"yavio"');
+      expect(
+        (call.result as { _meta?: { yavio?: { traceId?: string } } })._meta?.yavio?.traceId,
+      ).toBe(call.calls[0]?.trace_id);
+    });
+
+    it("a 2025-era client against a per-request host: the shim has no channel, one server error as before", async () => {
+      const call = await modernCall({}, { modern: false });
+      expect(call.era).toMatch(/^2025-/);
+      expect((call.result as { isError?: boolean }).isError).toBe(true);
+      expect(call.calls).toHaveLength(1);
+      expect(call.calls[0]?.error_category).toBe("server");
+      expect(call.calls[0]?.metadata).toEqual({ input_rounds: 1 });
+    });
+  });
+
+  describe("2025 era, v2's legacy shim on a long-lived connection", () => {
+    it("an accepted confirmation: one event with the final output, every round's handler time and none of the think time", async () => {
+      const call = await shimCall();
+      expect(call.era).toMatch(/^2025-/);
+      expect(call.runs).toBe(2);
+      expect(text(call.result)).toBe("deployed to prod");
+      expect(call.calls).toHaveLength(1);
+      const [event] = call.calls;
+      expect(event?.status).toBe("success");
+      expect(outputText(event)).toBe("deployed to prod");
+      expect(event?.metadata).toEqual({ input_rounds: 1 });
+      // 40 ms + 20 ms of handler time, not the 20 ms of the last round.
+      expect(event?.latency_ms).toBeGreaterThanOrEqual(55);
+      expect(event?.latency_ms).toBeLessThan(call.wallMs - THINK_MS);
+    });
+
+    it("two input rounds: one event, input_rounds 2", async () => {
+      const call = await shimCall({ twoRounds: true });
+      expect(call.runs).toBe(3);
+      expect(call.calls).toHaveLength(1);
+      expect(outputText(call.calls[0])).toBe("deployed to prod in eu");
+      expect(call.calls[0]?.metadata).toEqual({ input_rounds: 2 });
+    });
+
+    it("a declined confirmation: one event, status from the final result", async () => {
+      const call = await shimCall({}, { action: "decline" });
+      expect(call.calls).toHaveLength(1);
+      expect(call.calls[0]?.status).toBe("success");
+      expect(outputText(call.calls[0])).toBe("cancelled by user");
+    });
+
+    it("the final round's output-schema failure lands on the one event, not on an interim one", async () => {
+      const call = await shimCall({ badOutput: true });
+      expect((call.result as { isError?: boolean }).isError).toBe(true);
+      expect(call.calls).toHaveLength(1);
+      expect(call.calls[0]?.status).toBe("error");
+      expect(call.calls[0]?.error_category).toBe("server");
+      expect(outputText(call.calls[0])).toBe("deployed to prod");
+    });
+
+    it("a throw in the final round is one error, not two", async () => {
+      const call = await shimCall({ throwFinal: true });
+      expect(call.calls).toHaveLength(1);
+      expect(call.calls[0]?.error_category).toBe("unknown");
+      expect(call.calls[0]?.metadata).toEqual({ input_rounds: 1 });
+    });
+
+    it("the shim refusing (the client declared no elicitation) is one server error", async () => {
+      const call = await shimCall({}, { elicitation: false });
+      expect(call.calls).toHaveLength(1);
+      expect(call.calls[0]?.error_category).toBe("server");
+      expect(call.calls[0]?.metadata).toEqual({ input_rounds: 1 });
+    });
+
+    it("a URL elicitation after an interim round leaves no event: the client retries the call after the URL flow", async () => {
+      const call = await shimCall({ urlAfterConfirm: true });
+      expect(call.runs).toBe(2);
+      expect((call.result as { code?: unknown }).code).toBe(-32042);
+      expect(call.calls).toHaveLength(0);
+    });
+
+    it("serverOnly false: the one result on the wire carries _meta.yavio for the event's trace", async () => {
+      const call = await shimCall({}, {}, false);
+      expect(call.calls).toHaveLength(1);
+      expect(call.results).toHaveLength(1);
+      expect((call.results[0]?._meta as { yavio?: { traceId?: string } }).yavio?.traceId).toBe(
+        call.calls[0]?.trace_id,
+      );
+    });
+  });
+
+  it("an interim result reaches the client byte-identical, also without serverOnly (direct handler call)", async () => {
+    // No frame (the handler is called directly): the callback wrapper alone
+    // must leave an InputRequiredResult as the handler built it.
+    const server = new McpServer({ name: "direct", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(
+      server,
+      makeConfig({ serverOnly: false, endpoint: ingest.endpoint }),
+      transport,
+      "0.5.5",
+    );
+    const interim = inputRequired({ requestState: "opaque" });
+    const before = JSON.stringify(interim);
+    proxy.registerTool("deploy", { inputSchema: { env: z.string() } }, async () => interim);
+    const handler = registeredTool(server, "deploy")?.handler;
+    if (!handler) throw new Error("deploy is not registered");
+    const returned = await handler({ env: "prod" }, { mcpReq: { id: 1, method: "tools/call" } });
+    expect(returned).toBe(interim);
+    expect(JSON.stringify(returned)).toBe(before);
+    expect(toolCalls(transport.sent)).toHaveLength(0);
   });
 });

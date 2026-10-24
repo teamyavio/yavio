@@ -3159,3 +3159,62 @@ describe("session keys and session_source (#144)", () => {
     );
   });
 });
+
+describe("multi-round-trip results (#168)", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue({ token: "jwt_mrtr", expiresAt: "2026-01-01T00:00:00Z" });
+    _resetGlobalState();
+  });
+
+  const v1Ctx = () => ({
+    signal: new AbortController().signal,
+    requestId: "req-mrtr",
+    sendNotification: async () => {},
+    sendRequest: async () => ({}),
+  });
+
+  it("v1 has no input_required: a v1 tool returning that shape is one ordinary call, as before", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool(
+      "v1_tool",
+      { q: z.string() },
+      () => ({ resultType: "input_required", requestState: "s" }) as never,
+    );
+    const returned = (await registeredTool(server, "v1_tool")?.handler(
+      { q: "x" },
+      v1Ctx(),
+    )) as Record<string, unknown>;
+    const calls = transport.sent.flat().filter((e) => e.event_type === "tool_call");
+    expect(calls).toHaveLength(1);
+    expect((calls[0] as { status?: unknown } | undefined)?.status).toBe("success");
+    expect(calls[0]?.metadata).toBeUndefined();
+    expect(returned._meta).toHaveProperty("yavio");
+  });
+
+  it("a v2 retry context (inputResponses lifted into ctx.mcpReq) marks the final round's event", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("retry_tool", { q: z.string() }, () => ({
+      content: [{ type: "text", text: "done" }],
+    }));
+    // Called directly (no frame): the callback reads its own context.
+    await registeredTool(server, "retry_tool")?.handler(
+      { q: "x" },
+      {
+        mcpReq: {
+          id: 2,
+          method: "tools/call",
+          inputResponses: { confirm: { action: "accept" } },
+          requestState: () => undefined,
+        },
+      },
+    );
+    const calls = transport.sent.flat().filter((e) => e.event_type === "tool_call");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.metadata).toEqual({ input_retry: true });
+  });
+});
