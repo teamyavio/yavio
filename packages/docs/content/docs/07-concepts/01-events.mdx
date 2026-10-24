@@ -42,14 +42,15 @@ These events are captured automatically by the `withYavio()` proxy without any c
 
 ### tool_call
 
-Fires on every tool invocation. This is the core event that powers most analytics.
+Fires on every tool invocation. This is the core event that powers most analytics. A tool that asks the user for input over several rounds (MCP SDK v2 `inputRequired()`) is still one call: SDK 0.5.5 and later send one event, from the round whose result is final.
 
 | Field | Description |
 |-------|-------------|
 | `event_name` | Tool name |
-| `latency_ms` | Handler execution time in milliseconds. Absent when the handler never ran (see `validation`) |
+| `latency_ms` | Handler execution time in milliseconds. Absent when the handler never ran (see `validation`). For a tool that asked for input: the handler time of the rounds inside the request, never the time the user took to answer (every round on MCP SDK v2's 2025-era shim, the final request only on MCP 2026-07-28) |
+| `metadata` | Unset on an ordinary call. For a tool that asked for input (SDK 0.5.5 and later): `input_rounds`, how many rounds asked for input inside the request, and `input_retry: true` when the request is the client's MCP 2026-07-28 retry. A 2026-07-28 call whose client never retries leaves no `tool_call` |
 | `status` | `success` or `error`. A call is an error when the handler throws, returns a result with `isError: true`, or when the MCP SDK rejects the call before or after the handler (SDK 0.4.0 and later; earlier SDKs only count throws) |
-| `error_category` | `tool_error` — the handler returned `isError: true`; `unknown` — the handler threw; `validation` — the call failed before the handler ran (unknown or disabled tool, arguments the schema rejected; by default such an event has the declared argument names and types and a value-free reason, but no values, see `capture.rejectedInputValues`); `server` — the result failed the tool's own `outputSchema`. The client sees the same shape in every case, so the distinction is server-side only. Reserved: `auth`, `timeout`, `rate_limit` |
+| `error_category` | `tool_error` — the handler returned `isError: true`; `unknown` — the handler threw; `validation` — the call failed before the handler ran (unknown or disabled tool, arguments the schema rejected; by default such an event has the declared argument names and types and a value-free reason, but no values, see `capture.rejectedInputValues`); `server` — the result failed the tool's own `outputSchema`, or the tool asked for input that the MCP SDK could not get or refused. The client sees the same shape in every case, so the distinction is server-side only. Reserved: `auth`, `timeout`, `rate_limit` |
 | `error_message` | The exception message, or the first text item of an `isError` result. PII-stripped, at most 500 characters. The result text is output, so it is only stored while `capture.outputValues` is on. For a `validation` event it is McpServer's text only with `capture.rejectedInputValues` on (that text can echo the rejected value); by default it is a value-free reason: McpServer's text when it names only the tool (unknown or disabled tool), otherwise a fixed "Input validation error" text |
 | `is_retry` | Reserved. Not set by the SDK today — always `0` |
 | `input_keys` | Parameter key names (JSON) |

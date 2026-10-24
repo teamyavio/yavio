@@ -244,7 +244,7 @@ A value that is not an `McpServer` (no `registerTool()` / `connect()`) comes bac
 
 ## Captured data
 
-Every call to a tool registered through the wrapped server produces one `tool_call` event with the tool name, latency, status and — subject to the `capture` flags — the inputs and the output.
+Every call to a tool registered through the wrapped server produces one `tool_call` event with the tool name, latency, status and — subject to the `capture` flags — the inputs and the output. That holds when the tool asks the user for input over several rounds too: the event comes from the round whose result is final (see [Tools that ask for input](#tools-that-ask-for-input)).
 
 Every event the SDK sends to `events` — `tool_call`, `connection`, `identify`, `step`, `track`, `conversion` — also carries `session_source`, how its `session_id` was derived: `mcp_session_id`, `openai_session`, `vscode_conversation`, `codex_thread`, `custom` (your `sessionKey`), `connection` (no key, not HTTP) or `per_request` (no key on an HTTP request) — see [Sessions](#stateless--per-request-servers). It names a source, never a key, and is recorded whatever the `capture` flags. The React widget stamps its server session's source on its own events too (from `_meta.yavio.sessionSource`). `tool_discovery` carries none: ingest writes it to the tool registry, which keeps no session fields. Events from SDKs before 0.5.4, server or widget, have none.
 
@@ -258,7 +258,7 @@ A call is an error when the handler **throws** or when it **returns a result wit
 | `error` | `tool_error` | The handler returned a result with `isError: true` (an expired reference, an invalid postal code, a missing field) |
 | `error` | `unknown` | The handler threw |
 | `error` | `validation` | The call failed **before** the handler ran: unknown or disabled tool, or arguments the tool's schema rejected. No `latency_ms` (nothing executed). By default the event has the names and types (`input_keys`, `input_types`) of the parameters the tool's schema declares, the `_`-prefixed request context in `input_values`, the client metadata and a value-free reason in `error_message` (McpServer's text as-is when it names only the tool — unknown, disabled — otherwise a fixed "Input validation error" reason), but **no argument values**, no key the model invented and no `output_content`. `rejectedInputValues: true` stores the raw arguments and McpServer's error text, to see what the model sent |
-| `error` | `server` | The handler returned, but its result failed the tool's own `outputSchema` — or the MCP SDK's validation of the result on the wire |
+| `error` | `server` | The handler returned, but its result failed the tool's own `outputSchema` — or the MCP SDK's validation of the result on the wire. Also a call whose handler asked for input that the MCP SDK could not get or refused: v2's 2025-era shim with no channel to the client, a capability the client did not declare, a failed or timed-out answer; on MCP 2026-07-28 an input request the client's declared capabilities do not cover (see [Tools that ask for input](#tools-that-ask-for-input)) |
 
 Only the literal boolean `true` counts as `isError`. On v1 the client sees the same shape in all four error cases (the MCP SDK converts throws and pre-handler failures into `isError` results), so the distinction is server-side only. On v2 an unknown or disabled tool is a thrown JSON-RPC error instead of an `isError` result; it is still counted as `validation`.
 
@@ -267,6 +267,27 @@ Every `tools/call` request the wrapped server receives is counted, including the
 `error_message` is the exception's message, or for an `isError` result the first `text` content item. Both are PII-stripped and clamped to 500 characters. The result text is output, so it is stored only while `outputValues` is on. A thrown message is developer-written, but messages routinely interpolate the arguments (`IBAN ${iban} rejected`) and the PII stripper does not recognise IBANs or customer numbers, so it is stored only while `inputValues` is on. `status` and `error_category` are recorded regardless.
 
 Before 0.4.0 only a throw counted, so **error rates rise on upgrade** — a correction of an under-count, not a regression.
+
+### Tools that ask for input
+
+A tool on MCP SDK v2 can ask the user for input (an elicitation, a sampling call, the client's roots) by returning `inputRequired(...)`, a result with `resultType: "input_required"`. The handler then runs once per round: on MCP 2026-07-28 the client answers and retries the call as a new request, on the 2025 era v2's legacy shim (on by default) asks the client itself and runs the handler again inside the same request. Either way it is **one** `tool_call` event, from the round whose result is final: that round's output and status, and a failure after it (a failed `outputSchema`) lands on that event. A round that asked for input sends no event, and its result goes to the client exactly as the handler built it — no `_meta.yavio`, also without `serverOnly`. Since 0.5.5; before, every round was an event of its own.
+
+`metadata` marks such a call (an ordinary call has none of these keys):
+
+| Key | Meaning |
+|-----|---------|
+| `input_rounds` | How many times the handler returned `input_required` inside this request before the result that went out. Exact on the 2025 shim, where every round runs inside one request. `1` also when v2 refuses a 2026-07-28 round's input request |
+| `input_retry` | `true`: the request is the client's 2026-07-28 retry. The earlier rounds were separate requests, possibly on another server instance, and are in no event |
+
+An MCP SDK v2 tool call asked for input when `input_rounds > 0` or `input_retry` is true. `latency_ms` is the handler time of the rounds inside the request, never the time the user took to answer: on the 2025 shim every round's (a 40 ms round that asks plus a 20 ms final round is 60 ms), on 2026-07-28 the final request's only.
+
+What the SDK cannot see:
+
+- **A 2026-07-28 call whose client never retries** leaves no `tool_call`: the server cannot tell an abandoned call from one not retried yet. The session's `connection` event still exists.
+- **The earlier rounds of a 2026-07-28 call:** their number and handler time are in no event, and a `yavio.track()` / `step()` / `conversion()` inside one carries that request's `trace_id`, which no `tool_call` has. On the 2025 shim every round shares the call's trace.
+- **A decline:** the tool's own final result decides the `status`, as for any call.
+
+If v2 cannot get the input — the shim has no channel to the client (a per-request host serving a 2025-era client), the client did not declare the capability, the answer failed or timed out, too many rounds; on 2026-07-28 an input request the request's declared capabilities do not cover — the call is one `error` / `server` event, with the handler time of the rounds that ran. A URL elicitation thrown in a later shim round sends nothing, as a URL elicitation always does: the client retries the call after the URL flow, and that call is recorded.
 
 ### Inputs
 
