@@ -59,9 +59,11 @@ export type EventType = z.infer<typeof EventType>;
  * - `codex_thread`: `_meta.threadId` from the Codex CLI (`codex-mcp-client`);
  * - `custom`: the integrator's `sessionKey` option;
  * - `connection`: no key, a non-HTTP transport (stdio): the connection's own session;
- * - `per_request`: no key on an HTTP request. On a per-request host every
- *   request has a session of its own, so such a "session" is one call, not
- *   a conversation: the read side does not count it as a session.
+ * - `per_request`: no key on an HTTP request. Every such call has a session
+ *   of its own, on every host since SDK 0.5.5 (#169; before it, a long-lived
+ *   server reusing one stateless transport put all its key-less calls on one),
+ *   so such a "session" is one call, not a conversation: the read side does
+ *   not count it as a session.
  *
  * Widget events carry their server session's source too: the server puts it
  * into the injected config (`_meta.yavio.sessionSource`) and the React SDK

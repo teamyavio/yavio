@@ -19,7 +19,7 @@ import { detectPlatform } from "../core/platform.js";
 import { stable } from "../core/stable.js";
 import type { CaptureConfig, McpServerLike, SessionState, YavioConfig } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
-import { type RequestStore, runInContext } from "./context.js";
+import { type RequestStore, getStore, runInContext } from "./context.js";
 import { clientFromUserAgent, headerValue, readCallExtra } from "./extra.js";
 import {
   type IntentContext,
@@ -133,9 +133,9 @@ interface CallSessions {
   /** The connected MCP transport's own session id (Mcp-Session-Id), when it has one. */
   transportSessionId(): string | undefined;
   /**
-   * The conversation's session for a key, or — without one — the
-   * connection's own, labelled `per_request` on an HTTP request and
-   * `connection` otherwise.
+   * The conversation's session for a key, or — without one — a session of
+   * its own for the call on an HTTP request (`per_request`, #169) and the
+   * connection's own otherwise (`connection`).
    */
   resolve(key: SessionKey | undefined, http: boolean): SessionState;
 }
@@ -928,6 +928,11 @@ export function createProxy<T extends McpServerLike>(
    * calls. Reset on connect, like the connection session.
    */
   let activeSession: SessionState | null = null;
+  /**
+   * The sessions this proxy made for key-less HTTP calls (#169). Held
+   * weakly: nothing keeps one after its call but `activeSession`.
+   */
+  const perCallSessions = new WeakSet<SessionState>();
 
   /**
    * Resolve the session for the current tool call.
@@ -938,9 +943,14 @@ export function createProxy<T extends McpServerLike>(
    * instance processing the same key produces the same ID, and returns that
    * conversation's own state — a built-in key through `deriveSessionId()`,
    * the integrator's through the keyed `deriveCustomSessionId()`. Without
-   * one: the connection's session, labelled `per_request` on an HTTP
-   * request (on a per-request host it lives for one request) and
-   * `connection` otherwise.
+   * one, on an HTTP request: a session of its own for this one call,
+   * `per_request` (#169) — never stored, so nothing outlives the call. On a
+   * per-request host that is what the connection's session was anyway; on a
+   * long-lived server that reuses one stateless transport (MCP SDK v1
+   * 1.24/1.25 allow it) the connection's session served every caller, and
+   * the first identified user, its traits, its platform and the step
+   * sequence landed on all of them. Off HTTP (stdio, in-memory) the
+   * connection is one client: its session, `connection`.
    */
   const callSessions: CallSessions = {
     transportSessionId: () =>
@@ -948,8 +958,28 @@ export function createProxy<T extends McpServerLike>(
         ? currentMcpTransport.sessionId
         : undefined,
     resolve: (key, http) => {
+      if (!key && http) {
+        // A wrapped handler invoked directly from inside such a call (the
+        // same request) joins it, as it did when both used the connection's.
+        const enclosing = getStore()?.session;
+        if (enclosing && perCallSessions.has(enclosing)) {
+          activeSession = enclosing;
+          return enclosing;
+        }
+        const call: SessionState = {
+          sessionId: generateSessionId(),
+          userId: null,
+          userTraits: {},
+          platform: session.platform,
+          stepSequence: 0,
+          sessionSource: "per_request",
+        };
+        perCallSessions.add(call);
+        activeSession = call;
+        return call;
+      }
       if (!key) {
-        session.sessionSource = http ? "per_request" : "connection";
+        session.sessionSource = "connection";
         activeSession = session;
         return session;
       }
@@ -1229,7 +1259,8 @@ export function createProxy<T extends McpServerLike>(
             }),
             stepSequence: 0,
             // Derived from the transport's session: say so. A random one is
-            // labelled by the first request that falls back to it (#144).
+            // labelled by the first key-less call off HTTP (#144; a key-less
+            // HTTP call gets a session of its own, #169).
             sessionSource: sessionIdFromTransport ? "mcp_session_id" : undefined,
           };
           activeSession = null;
