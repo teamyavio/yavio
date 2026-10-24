@@ -26,7 +26,7 @@ A per-request server has no session of its own: a stateless transport never issu
 | 3 | VS Code / Copilot Chat's `_meta["vscode.conversationId"]`, from any client | `vscode_conversation` |
 | 4 | The Codex CLI's `_meta.threadId`, only from `codex-mcp-client` (envelope, `initialize` or User-Agent) | `codex_thread` |
 | 5 | Your [`sessionKey`](/docs/02-sdk/03-configuration#session-key) option | `custom` |
-| — | None: the connection's own session — one request over HTTP, one client process on stdio | `per_request` / `connection` |
+| — | None: over HTTP a session of its own for that one call, on every host; on stdio the client process's | `per_request` / `connection` |
 
 Keys 3 and 4 apply on stdio too: a VS Code stdio server gets one session per conversation since 0.5.4 instead of one per client process — more sessions, and `identify()` no longer carries across its conversations. Claude Code, claude.ai connectors, Cursor and Zed send no conversation key; if your host knows the conversation, return its id from `sessionKey` — a conversation id, never a per-user id on its own (see [Configuration](/docs/02-sdk/03-configuration#session-key)). A key-less HTTP call (`per_request`) is not counted as a session on the dashboard — the Sessions KPI says how many such calls there were — and its `connection` event is emitted once per process per client instead of once per call.
 
