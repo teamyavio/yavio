@@ -380,10 +380,28 @@ function wrapToolCallback(
       ? null
       : mintCallToken(config, store.traceId, store.session.sessionId).catch(() => null);
 
+    // A multi-round-trip call (#168): the rounds v2's 2025-era shim already
+    // ran inside this tools/call, and their handler time, so that the call's
+    // one event covers all of them; and whether the request is a 2026-07-28
+    // client retry. With a frame that is decided on the context the protocol
+    // layer received: the shim's re-entry context carries inputResponses too.
+    const priorRounds = frame?.inputRounds ?? 0;
+    const priorMs = frame?.inputMs ?? 0;
+    const inputRetry = frame ? frame.inputRetry : readCallExtra(extra).inputRetry === true;
+
     const startTime = performance.now();
     try {
       const result = await runInContext(store, () => originalCb(...cbArgs));
-      const latencyMs = Math.round(performance.now() - startTime);
+      const roundMs = performance.now() - startTime;
+      // The handler time of every round in this request, never the client's
+      // think time between them.
+      const latencyMs = Math.round(priorMs + roundMs);
+      // An interim round: the handler asked for input. On 2026-07-28 the
+      // result goes to the client, which retries as a new request; on the
+      // 2025 era v2's shim fulfils it and re-enters the handler. Either way
+      // the call is not done: no event, no widget token, and the result
+      // passes through untouched (#168).
+      const interim = isInputRequiredResult(result, extra);
 
       // A result with `isError: true` is an error — that flag is how MCP
       // reports tool failures in-band (the model sees them; a throw would
@@ -422,8 +440,19 @@ function wrapToolCallback(
           intentSignals: getCapturedIntent() ?? undefined,
           intentContext: intentContextFor(config),
           clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
+          metadata: inputMetadata(priorRounds + (interim ? 1 : 0), inputRetry),
         },
       );
+      if (interim) {
+        // Kept on the frame for a request that fails before a final round
+        // (see finalizeCallEvent); the mint started above is dropped unused.
+        if (frame) {
+          frame.inputRounds = priorRounds + 1;
+          frame.inputMs = priorMs + roundMs;
+          frame.interim = toolCallEvent;
+        }
+        return result;
+      }
       emit(toolCallEvent);
 
       if (mint && result && typeof result === "object") {
@@ -459,7 +488,7 @@ function wrapToolCallback(
       // it either.
       if (isUrlElicitationRequired(error)) throw error;
 
-      const latencyMs = Math.round(performance.now() - startTime);
+      const latencyMs = Math.round(priorMs + performance.now() - startTime);
 
       const captureInputOnError = capture.inputValues && cbArgs[0] !== extra;
       const toolCallEvent = buildToolCallEvent(
@@ -492,12 +521,48 @@ function wrapToolCallback(
           intentSignals: getCapturedIntent() ?? undefined,
           intentContext: intentContextFor(config),
           clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
+          metadata: inputMetadata(priorRounds, inputRetry),
         },
       );
       emit(toolCallEvent);
 
       throw error;
     }
+  };
+}
+
+/**
+ * An interim result of a multi-round-trip call (#168, MCP 2026-07-28
+ * `InputRequiredResult`): MCP SDK v2's own predicate, `isInputRequiredResult`
+ * (the same expression from 2.0.0 to 2.4.0), a plain object whose
+ * `resultType` is `"input_required"`, on a v2 context (`ctx.mcpReq`). Not
+ * imported: the SDK has no runtime import of either MCP package. v1 has no
+ * such results: a v1 tool returning that shape is sent to its client as an
+ * ordinary result and counted as one call.
+ */
+function isInputRequiredResult(result: unknown, extra: unknown): boolean {
+  return (
+    typeof result === "object" &&
+    result !== null &&
+    !Array.isArray(result) &&
+    (result as { resultType?: unknown }).resultType === "input_required" &&
+    readCallExtra(extra).v2 === true
+  );
+}
+
+/**
+ * The multi-round-trip markers of a tool_call's `metadata` (#168), or
+ * undefined for an ordinary call. `input_rounds`: how many times the handler
+ * returned `input_required` inside this request before the result that went
+ * out (v2's 2025-era shim, exact). `input_retry`: the request is a
+ * 2026-07-28 client retry; the earlier rounds were separate requests,
+ * possibly on another instance, and are in no event.
+ */
+function inputMetadata(rounds: number, retry: boolean): Record<string, unknown> | undefined {
+  if (rounds === 0 && !retry) return undefined;
+  return {
+    ...(rounds > 0 ? { input_rounds: rounds } : {}),
+    ...(retry ? { input_retry: true } : {}),
   };
 }
 
@@ -715,12 +780,24 @@ export function createProxy<T extends McpServerLike>(
     result: unknown,
   ): ToolCallEvent | null => {
     const { toolName, context } = frame;
+    // The interim result of a 2026-07-28 multi-round-trip call: the client
+    // retries as a new request, whose final round sends the event (#168).
+    if (isInputRequiredResult(result, extra)) return null;
     const resultError = toolResultError(result);
 
     if (frame.event) {
       return resultError
         ? postHandlerFailure(frame.event, toolName, resultError.message)
         : frame.event;
+    }
+
+    // The handler asked for input and the request ended before a final
+    // round: v2's 2025-era shim could not get the input (no channel to the
+    // client, a capability the client did not declare, a failed or timed-out
+    // leg, too many rounds) and answered with an isError result. The handler
+    // ran, so this is the interim round's event, corrected (#168).
+    if (frame.interim && resultError) {
+      return postHandlerFailure(frame.interim, toolName, resultError.message);
     }
 
     // The callback never ran. Only a failure is worth an event. (Registered
@@ -810,6 +887,10 @@ export function createProxy<T extends McpServerLike>(
         toolName,
         context: openCallContext(extra, callSessions, server, config, transport, sdkVersion),
         event: null,
+        inputRounds: 0,
+        inputMs: 0,
+        interim: null,
+        inputRetry: readCallExtra(extra).inputRetry === true,
       };
     } catch {
       return handler(request, extra);
@@ -834,6 +915,14 @@ export function createProxy<T extends McpServerLike>(
       // handler — v2's wire validation of the result (`Invalid tools/call
       // result: …`), which the client sees as a JSON-RPC error. The same
       // verdict as v1's output-schema failure: status error, category server.
+      //
+      // A throw after an interim round counts the same way, on that round's
+      // event (#168): v2 refusing the handler's input request on 2026-07-28
+      // (a capability the request did not declare, neither inputRequests nor
+      // requestState), or the shim giving up on an aborted request. A URL
+      // elicitation a later shim round throws is the exception: the call is
+      // not done, and the client retries it after the URL flow as a new
+      // tools/call, which records its own event.
       try {
         if (frame.event) {
           transport.send([
@@ -841,6 +930,12 @@ export function createProxy<T extends McpServerLike>(
               ? frame.event
               : postHandlerFailure(frame.event, toolName, (error as Error)?.message),
           ]);
+        } else if (frame.interim) {
+          if (!isUrlElicitationRequired(error)) {
+            transport.send([
+              postHandlerFailure(frame.interim, toolName, (error as Error)?.message),
+            ]);
+          }
         } else if (isToolNotFoundError(error, toolName)) {
           const rejection = {
             isError: true,
