@@ -163,8 +163,8 @@ conversions, conversion_value
   user is"; a per_request session maps no one (see individuals above).
 - Method break: the connection measure (#142), the session map of "Who a
   user is" (#145) and the per_request rule (#144) apply from the stats runs
-  after the ingest deploy that shipped them (one deploy; date to be filled in
-  at deploy time: YYYY-MM-DD). The first run after that deploy recomputes the
+  after the ingest deploy that shipped them (one deploy, 2026-10-24). The
+  first run after that deploy recomputes the
   previous month too; months before keep counting connection rows (one per
   session per server process) and per-request sessions as individuals, and
   keep the older key without the session map, so their individuals are
