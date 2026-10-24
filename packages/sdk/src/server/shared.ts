@@ -41,7 +41,8 @@ import type { Transport } from "../transport/types.js";
  * (which has no shutdown of its own). `client.shutdown()` drains and
  * releases that client's hold; the transport stops only when the last hold
  * is gone and nothing pins it — another client's events for the same key
- * keep flowing. The signal handlers drain everything regardless. The key's
+ * keep flowing. The signal handlers drain everything regardless, and so
+ * does a natural exit with events queued (#167, below). The key's
  * state object outlives its transports: proxies keep it, and a re-acquire
  * after a stop puts a fresh transport behind the same facade.
  *
@@ -78,6 +79,24 @@ import type { Transport } from "../transport/types.js";
  * without blocking the exit. Before #148 there were three clocks (the
  * signal, each `shutdown()` call, the post-signal transport's own drain),
  * which added up to 15–18 s with a 10 s default.
+ *
+ * Natural exit (#167). A process that ends on its own gets neither a
+ * signal nor a `shutdown()`: the loop empties and Node exits — a stdio
+ * server whose client closed its stdin (the MCP stdio binding's graceful
+ * shutdown), a script or CLI that never calls `shutdown()`, a host that
+ * closes its server without a signal. Node emits `beforeExit` first, and
+ * the SDK's listener — one per process, installed with the first transport
+ * — stops every live transport in the registry under min(1.5 s, D), as the
+ * last holder's release stops it: the stops hold the loop until the queue
+ * is delivered, given up or the deadline comes, and the exit hook prints
+ * what that deadline gave up in one `Exit deadline …` line. A higher
+ * explicit `shutdownTimeoutMs` does not raise the 1.5 s — the MCP
+ * TypeScript clients send `SIGTERM` 2 s after they close stdin — and a
+ * signal during the drain takes its stops over without extending them.
+ * With nothing queued the listener returns at once, as fast and quiet as
+ * before. `process.exit()`, a signal's default exit and an uncaught
+ * exception emit no `beforeExit`: those paths are unchanged. Before #167
+ * the queue went with the process, without a line.
  */
 
 export interface SharedSessions {
@@ -211,11 +230,12 @@ let draining = false;
 
 /**
  * The signal handler's drain, running or done — accumulated when a signal is
- * handled again after a hand-back. Awaited by every `releaseShared` and
- * `settleShared`, so an app handler's `client.shutdown()` waits for the
- * drain the SDK's listener started a tick earlier (#142). Cleared with the
- * rest of the state only in tests: a process that got a signal stays on
- * its way out.
+ * handled again after a hand-back, and joined by a natural-exit drain
+ * (#167). Awaited by every `releaseShared` and `settleShared`, so an app
+ * handler's `client.shutdown()` waits for the drain the SDK's listener
+ * started a tick earlier (#142) — and an app's own `beforeExit` listener
+ * for the natural-exit drain. Cleared with the rest of the state only in
+ * tests: a process that got a signal stays on its way out.
  */
 let signalDrain: Promise<void> | null = null;
 
@@ -396,6 +416,24 @@ let lastBudgetCut: number | undefined;
 let returnedIn: SignalCycle | null = null;
 
 /**
+ * The natural-exit drain that ran last (#167): its deadline, for the exit
+ * line's wording; the latest signal cycle when it started, so a cycle
+ * since — which took its stops over and printed the line — is told apart;
+ * and whether its stops have settled: an exit before they did (an app's
+ * `process.exit()` during the drain) was not its deadline's doing.
+ */
+interface ExitDrain {
+  budgetMs: number;
+  afterCycle: SignalCycle | null;
+  settled: boolean;
+  epoch: number;
+}
+let lastExitDrain: ExitDrain | null = null;
+let beforeExitInstalled = false;
+/** Transports a natural-exit drain stops: their loss is the exit line's, not a `shutdown()` line (#167). */
+const exitStops = new WeakSet<Transport>();
+
+/**
  * D for a signal arriving now: the smallest `shutdownTimeoutMs` set
  * explicitly by a live hold or pin (every key), by a `shutdown()` in
  * progress, or by `YAVIO_SHUTDOWN_TIMEOUT_MS`; the default when none is.
@@ -529,8 +567,10 @@ function releaseWaiters(): void {
  * re-raise is about to end the process; one line per non-signal
  * `shutdown()` that timed out; and one at `exit` for what was counted after
  * that, which covers an app calling `process.exit()` before its
- * `shutdown()` resolved. The exit hook is armed only after a signal or a
- * started `shutdown()`: a plain exit (tests, CLIs) stays quiet.
+ * `shutdown()` resolved, and what a natural-exit drain gave up (#167). The
+ * exit hook is armed only after a signal, a started `shutdown()` or a
+ * natural-exit drain, which runs only with events queued: a plain exit
+ * with nothing queued (tests, CLIs) stays quiet.
  *
  * A cycle handed back early (a second signal) ends before the stops it
  * started reach their deadline. What those stops give up afterwards is
@@ -641,26 +681,127 @@ function yavioReportAtExit(): void {
   reportedLost = lostTotal();
   // Synchronous: `process.exit()` ends the process right after its `exit`
   // listeners, and an asynchronous stderr pipe would lose a console.warn
-  // (#148 review round 3, as the hand-back line in round 2). After a
-  // `shutdown()` that a cycle's deadline cut, the rest is that deadline's,
-  // not an app's that forgot to await (#154 review round 1).
+  // (#148 review round 3, as the hand-back line in round 2).
   const cycle = lastCycle;
+  // After a natural-exit drain that settled, with no signal cycle since:
+  // the rest is what its deadline gave up (#167). A cycle since took its
+  // stops over, and its line counted them.
+  const drain = lastExitDrain;
+  const natural =
+    drain && drain.epoch === resets && drain.settled && drain.afterCycle === cycle ? drain : null;
+  // After a `shutdown()` that a cycle's deadline cut, the rest is that
+  // deadline's, not an app's that forgot to await (#154 review round 1).
   const cut =
-    cycle && cycle.epoch === resets && appWaits === 0 && returnedIn === cycle && deadlineCame(cycle)
+    !natural &&
+    cycle &&
+    cycle.epoch === resets &&
+    appWaits === 0 &&
+    returnedIn === cycle &&
+    deadlineCame(cycle)
       ? cycle
       : null;
   writeStderrLine(
-    cut
-      ? `[YAVIO-1205] Shutdown deadline of ${cut.budgetMs} ms reached — ${n} ${cut.printed ? "more " : ""}events not delivered (in flight when the deadline cut it, sent in its last 100 ms or after it, or queued behind a request it cut). ${RAISE_HINT}`
-      : `[YAVIO-1205] Process exit with ${n} events not delivered — await analytics.shutdown() before exiting, or raise shutdownTimeoutMs.`,
+    natural
+      ? `[YAVIO-1205] Exit deadline of ${natural.budgetMs} ms reached — ${n} events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the process ends.`
+      : cut
+        ? `[YAVIO-1205] Shutdown deadline of ${cut.budgetMs} ms reached — ${n} ${cut.printed ? "more " : ""}events not delivered (in flight when the deadline cut it, sent in its last 100 ms or after it, or queued behind a request it cut). ${RAISE_HINT}`
+        : `[YAVIO-1205] Process exit with ${n} events not delivered — await analytics.shutdown() before exiting, or raise shutdownTimeoutMs.`,
   );
 }
 
-/** Arm the exit-time report once: on the first signal, or the first `shutdown()` call. */
+/** Arm the exit-time report once: on the first signal, the first `shutdown()` call or a natural-exit drain. */
 export function armExitHook(): void {
   if (exitHookArmed) return;
   exitHookArmed = true;
   process.on("exit", yavioReportAtExit);
+}
+
+/**
+ * The natural-exit deadline's cap (#167). The MCP TypeScript clients send
+ * `SIGTERM` 2 s after they close a stdio server's stdin (v1 1.24–1.32,
+ * v2 2.0–2.4); 1.5 s leaves 0.5 s for the 0–6 ms to `beforeExit`,
+ * `ABORT_SETTLE_MS`, the teardown and a loaded host, and fits one retry
+ * after a 1 s backoff when the first failure comes within 0.5 s.
+ */
+const NATURAL_EXIT_MS = 1_500;
+
+/**
+ * The natural-exit deadline: min(1.5 s, D), where D is what a signal
+ * arriving now would fix. A lower explicit `shutdownTimeoutMs` (option,
+ * env or rc file) lowers it; a higher one does not raise it — a
+ * fleet-wide 25 s would push every stdio server past its client's
+ * `SIGKILL`. An app that wants to wait longer awaits `shutdown()` itself.
+ */
+function naturalExitBudgetMs(): number {
+  return Math.min(NATURAL_EXIT_MS, processBudgetMs());
+}
+
+/** Events the registry's live transports hold: what a natural exit would lose. */
+function registryPending(): number {
+  let n = 0;
+  for (const entry of registry.values()) {
+    if (entry.slot.live instanceof HttpTransport) n += entry.slot.live.pendingEvents();
+  }
+  return n;
+}
+
+/**
+ * The natural-exit drain (#167). Node emits `beforeExit` once the event
+ * loop has emptied: nothing of the app's is left, no signal came, no
+ * `shutdown()` is running. The process exits right after it, and before
+ * #167 everything still queued — the flush interval is 10 s and unref'd,
+ * a batch goes out early only at 100 events — went with it, without a
+ * line. Now every live transport is taken out of the registry and stopped
+ * under one deadline, as the last holder's release stops it (not
+ * `drain()`, whose deadline only stops waiting: a hanging fetch would hold
+ * its socket, and the process, for the 30 s fetch timeout): the stop's
+ * deadline timer is ref'd while it runs (#164) and its fetch holds the
+ * loop, so the process stays until the queue is delivered, given up, or
+ * the deadline comes, and at the deadline the fetch is aborted (#148).
+ * The stops are tracked like any stop in progress, so a signal arriving
+ * meanwhile takes them over within its own deadline and never extends
+ * theirs (`cutDeadline`); and an app's `shutdown()` called meanwhile — its
+ * own `beforeExit` listener, 0.5.4's workaround — awaits them
+ * (`signalDrain`). `draining` is not set: no signal came.
+ *
+ * Returns at once while a signal cycle is in flight (its stops hold the
+ * loop, so this is defensive) and when the registry holds nothing
+ * pending: an idle exit stays as fast and quiet as before, and so do the
+ * passes Node emits again once the drain's work settled or while a stop
+ * waits on its unref'd `ABORT_SETTLE_MS` — the drain took every entry
+ * out, so the registry is empty then. Not emitted on `process.exit()`, on
+ * a signal's default exit or on an uncaught exception: those paths are
+ * unchanged.
+ */
+function onBeforeExit(): void {
+  if (signalInFlight || registryPending() === 0) return;
+  const drain: ExitDrain = {
+    budgetMs: naturalExitBudgetMs(),
+    afterCycle: lastCycle,
+    settled: false,
+    epoch: resets,
+  };
+  lastExitDrain = drain;
+  armExitHook(); // what the deadline gives up is reported at exit, in one line
+  const stops: Promise<void>[] = [];
+  for (const [key, entry] of registry) {
+    registry.delete(key);
+    const live = entry.slot.live;
+    entry.slot.live = null;
+    if (!live) continue;
+    exitStops.add(live);
+    stops.push(trackStop(live, live.shutdown(drain.budgetMs)).catch(() => {}));
+  }
+  const drained = Promise.all(stops).then(() => {
+    drain.settled = true;
+  });
+  signalDrain = signalDrain ? Promise.all([signalDrain, drained]).then(() => {}) : drained;
+}
+
+function installBeforeExit(): void {
+  if (beforeExitInstalled) return;
+  beforeExitInstalled = true;
+  process.on("beforeExit", onBeforeExit);
 }
 
 /**
@@ -801,11 +942,12 @@ function writeStderrLine(line: string): void {
 /**
  * A `shutdown()` whose deadline gave events up: its own line, its own
  * count — unless a signal cycle started it (the cycle's line covers it,
- * at the hand-back or when its drain settles) or one is running (its line
- * counts every loss until it ends).
+ * at the hand-back or when its drain settles), one is running (its line
+ * counts every loss until it ends), or a natural-exit drain started it
+ * (the exit hook's line counts it, #167: nobody called `shutdown()`).
  */
 function reportCallLoss(transport: Transport, lost: number, deadlineMs: number): void {
-  if (signalInFlight || signalStops.has(transport)) return;
+  if (signalInFlight || signalStops.has(transport) || exitStops.has(transport)) return;
   reportedLost += lost;
   console.warn(
     `[YAVIO-1205] shutdown() deadline of ${deadlineMs} ms reached — ${lost} events not delivered. ${RAISE_HINT}`,
@@ -1047,6 +1189,7 @@ function entryFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string)
   const entry: Entry = { slot, holders: 0, pinned: false, generation: ++generations };
   registry.set(key, entry);
   installSignalHandlers();
+  installBeforeExit();
   return entry;
 }
 
@@ -1331,6 +1474,9 @@ export function _resetSharedState(): void {
   preCounted = [];
   resets++;
   if (exitHookArmed) process.off("exit", yavioReportAtExit);
+  if (beforeExitInstalled) process.off("beforeExit", onBeforeExit);
+  beforeExitInstalled = false;
+  lastExitDrain = null;
   exitHookArmed = false;
   exitReported = false;
   _setSignalReraise(null);
