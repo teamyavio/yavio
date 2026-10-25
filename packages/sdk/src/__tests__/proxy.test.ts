@@ -2730,7 +2730,9 @@ describe("one proxy, many conversations", () => {
     // The dedup map is bounded at 10,000. Keyless connects each mark a random
     // session id that nothing ever deletes; a conversation that stays active
     // throughout must keep its mark (a hit refreshes it) and not emit a second
-    // connection event once 10,000 newer marks have been inserted.
+    // connection event once 10,000 newer marks have been inserted. One marked
+    // once and then idle must lose its mark to the same pressure, so its next
+    // call emits a second one: the map is bounded at all (#120).
     // The bound is a module constant without a test hook, so the loop has to
     // insert the real 10,000: with fewer, nothing is evicted and a mark that is
     // never refreshed survives too. It runs in about a second alone; the
@@ -2752,6 +2754,7 @@ describe("one proxy, many conversations", () => {
     });
 
     await handler?.(extra("conv-0", "r0"));
+    await handler?.(extra("conv-idle", "ri"));
     for (let i = 1; i <= 10_100; i += 1) {
       // A transport that reports its own close, so the server can reconnect.
       // Plain functions, not vi.fn(): nothing asserts on them, and 30,000
@@ -2766,12 +2769,22 @@ describe("one proxy, many conversations", () => {
       if (i % 100 === 0) await handler?.(extra("conv-0", `r0-${i}`));
       await server.close();
     }
+    await handler?.(extra("conv-idle", "ri-2"));
 
     const first = deriveSessionId("conv-0");
     const connections = (transport.sent.flat() as Array<Record<string, unknown>>).filter(
       (e) => e.event_type === "connection" && e.session_id === first,
     );
     expect(connections).toHaveLength(1);
+    // The idle conversation is still in the proxy's session map (two keyed
+    // conversations, bound 1,000), so its second event comes from the dedup
+    // bound alone.
+    const idle = deriveSessionId("conv-idle");
+    expect(
+      (transport.sent.flat() as Array<Record<string, unknown>>).filter(
+        (e) => e.event_type === "connection" && e.session_id === idle,
+      ),
+    ).toHaveLength(2);
   }, 20_000);
 
   it("attributes overlapping calls from two conversations to their own sessions", async () => {
