@@ -78,6 +78,8 @@ import type { Transport } from "../transport/types.js";
  * running at or after the signal — one that started before it included —
  * resolve by that deadline; a `shutdown()` called with no time left
  * resolves at once. Values registered after the signal do not move it; a
+ * `SIGTERM` after the cycle's `SIGINT` — Claude Code's stop sequence —
+ * moves it in to SIGINT + 400 ms, never out (#175); a
  * new cycle after a hand-back gets a new deadline. After the hand-back a
  * `shutdown()` waits at most D from its own call, so a process that
  * survives a signal still delivers what requests finishing later send,
@@ -352,6 +354,15 @@ interface SignalCycle {
   deadlinePassed: boolean;
   /** `resets` when the cycle started: a cycle from before a test reset reports nothing after it. */
   epoch: number;
+  /**
+   * Set when a `SIGTERM` came after the `SIGINT` that started the cycle and
+   * before `ESCALATION_MS` had passed (#175): a client's stop sequence, not
+   * a request to give up at once. `afterMs`: when the `SIGTERM` came,
+   * counted from `startedAt`; `cut`: it moved `deadlineAt` in to
+   * `startedAt + ESCALATION_MS` — false when a lower D already ended the
+   * cycle sooner.
+   */
+  escalation?: { afterMs: number; cut: boolean };
 }
 
 /**
@@ -383,11 +394,34 @@ interface PendingMark {
  * at once) is swallowed and the drain goes on to the deadline; a forward
  * that arrives after 250 ms on a loaded host ends the drain early and some
  * events are given up, counted in the cycle's `YAVIO-1205` line. Neither
- * costs more than the deadline, and a DIFFERENT signal always hands back
- * at once (#148 review round 3).
+ * costs more than the deadline, and a DIFFERENT signal hands back at once
+ * (#148 review round 3) — except a `SIGTERM` after the cycle's `SIGINT`,
+ * which keeps the drain until `SIGINT + ESCALATION_MS` (#175). After that
+ * `SIGTERM` the window counts from the `SIGTERM`'s arrival: a repeat of it
+ * within 250 ms is the same delivery, and any other signal hands back at
+ * once.
  */
 let signalInFlight: SignalCycle | null = null;
 const SAME_DELIVERY_MS = 250;
+/**
+ * How long after the `SIGINT` that started a cycle a `SIGTERM` lets the
+ * drain run (#175): the cycle hands the `SIGTERM` back by min(SIGINT + D,
+ * SIGINT + 400 ms), at once when that has passed. Measured in Claude Code
+ * 2.1.310 on macOS and Linux: it stops a stdio server with `SIGINT`, a
+ * `SIGTERM` 100 ms later if the process is still alive, and a `SIGKILL`
+ * 400 ms after that — without closing stdin first. Before #175 that
+ * `SIGTERM` handed back at once, about 100 ms in, and a batch on a fresh
+ * connection to a remote ingest never left the machine; 400 ms leaves
+ * about 100 ms before the `SIGKILL` for the hand-back, its line and the
+ * re-raise. Counted from the `SIGINT`, never from the `SIGTERM`: the
+ * `SIGINT`'s drain is often the process's first `fetch()`, whose lazy
+ * setup blocks the loop for tens of milliseconds (more under load), so the
+ * `SIGTERM` is handled late and "its arrival + 300 ms" came after the
+ * `SIGKILL` in 5 of 12 measured runs. Only that order: `SIGTERM` then
+ * `SIGINT` — Ctrl-C on a process a supervisor is already stopping — still
+ * hands back at once.
+ */
+const ESCALATION_MS = 400;
 /**
  * Transport stops started outside a signal and still running (the last
  * holder's release), with the transport each one stops: a signal arriving
@@ -725,6 +759,22 @@ function outstandingOfMarked(marks: PendingMark[]): number {
 const RAISE_HINT =
   "Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.";
 
+/**
+ * "Shutdown deadline of D ms" — or, for a cycle a `SIGTERM` after its
+ * `SIGINT` cut (#175), the bound that ended it and when the `SIGTERM`
+ * came: raising D does not move that bound.
+ */
+const deadlineWords = (cycle: SignalCycle): string =>
+  cycle.escalation?.cut
+    ? `Shutdown deadline of ${cycle.deadlineAt - cycle.startedAt} ms (SIGTERM ${cycle.escalation.afterMs} ms after SIGINT)`
+    : `Shutdown deadline of ${cycle.budgetMs} ms`;
+
+/** The cycle's hint: not to raise D when the client's stop sequence cut it (#175). */
+const hintFor = (cycle: SignalCycle): string =>
+  cycle.escalation?.cut
+    ? "The client stops the server with SIGINT, SIGTERM and SIGKILL (Claude Code: 100 ms, then 400 ms); a higher shutdownTimeoutMs does not extend that."
+    : RAISE_HINT;
+
 function yavioReportAtExit(): void {
   if (exitReported) return;
   exitReported = true;
@@ -756,7 +806,7 @@ function yavioReportAtExit(): void {
     natural
       ? `[YAVIO-1205] Exit deadline of ${natural.budgetMs} ms reached — ${n} events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the event loop empties (on stdin's end or at the end of the script; a beforeExit listener is too late).`
       : cut
-        ? `[YAVIO-1205] Shutdown deadline of ${cut.budgetMs} ms reached — ${n} ${cut.printed ? "more " : ""}events not delivered (in flight when the deadline cut it, sent in its last 100 ms or after it, or queued behind a request it cut). ${RAISE_HINT}`
+        ? `[YAVIO-1205] ${deadlineWords(cut)} reached — ${n} ${cut.printed ? "more " : ""}events not delivered (in flight when the deadline cut it, sent in its last 100 ms or after it, or queued behind a request it cut). ${hintFor(cut)}`
         : `[YAVIO-1205] Process exit with ${n} events not delivered — await analytics.shutdown() before exiting, or raise shutdownTimeoutMs.`,
   );
 }
@@ -949,7 +999,7 @@ function reportCycleLoss(
   if (n <= 0) return;
   if (at === "late-deadline" || at === "drain-settled") cycle.lateReported = true;
   cycle.printed = true;
-  const line = `[YAVIO-1205] Shutdown deadline of ${cycle.budgetMs} ms reached — ${n} events not delivered (queued, in flight or refused after the deadline). ${RAISE_HINT}`;
+  const line = `[YAVIO-1205] ${deadlineWords(cycle)} reached — ${n} events not delivered (queued, in flight or refused after the deadline). ${hintFor(cycle)}`;
   if (at !== "drain-settled" && at !== "late-deadline" && cycle.sole) writeStderrLine(line);
   else console.warn(line);
 }
@@ -1048,7 +1098,9 @@ let reraise: (signal: HandledSignal) => void = defaultReraise;
  * running hands back at once, so a second Ctrl-C still ends the process
  * the way it does without the SDK — except the same signal within 250 ms,
  * taken for the first one delivered twice (a heuristic, see
- * `SAME_DELIVERY_MS`). What is handed back is the signal that ARRIVED,
+ * `SAME_DELIVERY_MS`), and a `SIGTERM` after the cycle's `SIGINT`, a
+ * client's stop sequence, which the cycle hands back by SIGINT +
+ * `ESCALATION_MS` (#175, `escalate`). What is handed back is the signal that ARRIVED,
  * with its own listeners deciding: re-raised only if the SDK is its only
  * listener (re-raising the first signal with the first's decision killed
  * an app that handles only the second one — SIGINT, say — with the default
@@ -1063,9 +1115,16 @@ let reraise: (signal: HandledSignal) => void = defaultReraise;
 function onSignal(signal: HandledSignal): void {
   const running = signalInFlight;
   if (running) {
-    if (running.signal === signal && Date.now() - running.startedAt < SAME_DELIVERY_MS) return;
+    const afterMs = Date.now() - running.startedAt;
+    // The same delivery: a repeat within 250 ms of the arrival of the
+    // signal the cycle hands back — the one it started with, or the
+    // `SIGTERM` an escalation took (#175).
+    const sinceArrival = afterMs - (running.escalation?.afterMs ?? 0);
+    if (running.signal === signal && sinceArrival < SAME_DELIVERY_MS) return;
+    const escalates = running.signal === "SIGINT" && signal === "SIGTERM" && !running.escalation;
     running.signal = signal;
     running.sole = process.listenerCount(signal) === 1;
+    if (escalates && escalate(running, afterMs)) return;
     finishSignal(running, "hand-back");
     return;
   }
@@ -1091,13 +1150,7 @@ function onSignal(signal: HandledSignal): void {
   // A new cycle starts afresh: a `shutdown()` that returned in an earlier
   // one says nothing about an exit in this one (#154 review round 2).
   lastCycle = cycle;
-  clearTimeout(cycleTimer);
-  cycleTimer = setTimeout(() => {
-    onCycleDeadline(cycle); // the cycle's line first, then the waiters (#154)
-    cycle.deadlinePassed = true;
-    releaseWaiters();
-  }, budgetMs);
-  unref(cycleTimer);
+  armCycleTimer(cycle);
   armExitHook();
   beginProcessShutdown()
     .catch(() => {})
@@ -1115,6 +1168,54 @@ function onSignal(signal: HandledSignal): void {
         });
       }
     });
+}
+
+/**
+ * The cycle's deadline timer, for its `deadlineAt` as it stands now: at
+ * the signal, and again when an escalation moves the deadline in (#175).
+ * Replaces the timer before it.
+ */
+function armCycleTimer(cycle: SignalCycle): void {
+  clearTimeout(cycleTimer);
+  cycleTimer = setTimeout(
+    () => {
+      onCycleDeadline(cycle); // the cycle's line first, then the waiters (#154)
+      cycle.deadlinePassed = true;
+      releaseWaiters();
+    },
+    Math.max(0, cycle.deadlineAt - Date.now()),
+  );
+  unref(cycleTimer);
+}
+
+/**
+ * A `SIGTERM` after the `SIGINT` that started the cycle (#175): Claude Code
+ * stops a stdio server with `SIGINT`, `SIGTERM` 100 ms later and `SIGKILL`
+ * 400 ms after that, so this is a client's stop sequence, not a request to
+ * give up at once. The cycle goes on and hands the `SIGTERM` back — its
+ * own listeners deciding, as at any hand-back — by min(SIGINT + D, SIGINT
+ * + `ESCALATION_MS`). Everything the cycle bounds follows the earlier
+ * deadline: `deadlineAt` moves in (never out), the cycle's timer is
+ * re-armed for it, the cycle's stops are cut to it (`cutDeadline` aborts
+ * their fetch there), the drain's wait and every `shutdown()` and
+ * `flush()` wait end on that timer (`deadlineWaiters`), and a post-signal
+ * fetch started from now on gets what is left (`lateFetchBudgetMs`). D
+ * itself (`budgetMs`) stays: after the hand-back a `shutdown()` still
+ * waits at most D from its call. A post-signal fetch already in flight
+ * keeps its budget; as the only listener the re-raise ends it anyway.
+ * False when SIGINT + `ESCALATION_MS` has passed: the hand-back comes now,
+ * as before #175.
+ */
+function escalate(cycle: SignalCycle, afterMs: number): boolean {
+  const at = cycle.startedAt + ESCALATION_MS;
+  if (at <= Date.now()) return false;
+  const cut = at < cycle.deadlineAt;
+  cycle.escalation = { afterMs, cut };
+  if (!cut) return true; // a lower D ends the cycle sooner
+  cycle.deadlineAt = at;
+  armCycleTimer(cycle);
+  for (const stop of cycle.stops) stop.cutDeadline?.(at);
+  return true;
 }
 
 /**
