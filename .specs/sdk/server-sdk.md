@@ -68,7 +68,7 @@ If no API key is found through any source, `withYavio()` logs a warning and retu
 The proxy uses JavaScript `Proxy` to intercept method calls on the `McpServer` instance. The key interception points are:
 
 - **`server.tool()` and `server.registerTool()` registration:** Intercepts both the deprecated `tool()` method and the modern `registerTool()` method (MCP SDK v1.26+) to capture tool names, descriptions, and schemas. Wraps the handler function with identical instrumentation via a shared `wrapToolCallback()` helper. For `tool()`, the callback is located by scanning for the first function argument (handles all overloads). For `registerTool()`, the callback is always the 3rd positional argument.
-- **Tool handler execution:** Before/after hooks capture invocation timestamp, measure latency, catch errors, detect platform, and capture full input values and derive input patterns.
+- **Tool handler execution:** Before/after hooks capture invocation timestamp, measure latency, catch errors, detect platform, and capture full input values and derive input patterns. A handler that asks for input (MCP SDK v2 `inputRequired()`, a result with `resultType: "input_required"`) runs once per round; a round that asks sends no event and its result passes through untouched, and the call's one `tool_call` comes from the round whose result is final, with `metadata.input_rounds` / `input_retry` and the rounds' summed handler time (0.5.5, #168, [protocol-layer-status.md](./protocol-layer-status.md#multi-round-trip-calls-168-055)).
 - **`server.connect()` / transport:** Intercepts transport connection to keep a reference to the MCP transport (its `sessionId`, when it has one, is the first session key) and to start the connection's own session. The `session_id` of a call is derived per `tools/call` (see [Section 3.7](#37-session-lifecycle)); nothing is read from `initialize`, which a per-request instance never sees.
 - **`tools/list` requests:** Wraps the low-level `tools/list` handler and sends one `tool_discovery` per instrumented tool per process, carrying the JSON Schema the client was shown (#83). Listing frequency and client capabilities are not recorded.
 - **Tool response inspection:** After the handler returns, the proxy inspects the response content. Captures response size (bytes), content type distribution (text/image/resource), result count for list-type responses, and detects zero-result responses via empty array and "no results" text heuristics.
@@ -284,7 +284,7 @@ After the tool handler returns and a widget token is available, the proxy inject
 
 `sessionSource` (#144, 0.5.4) is the session's `session_source` label (3.7.1), never a key; the React SDK stamps it on every widget event so a `per_request` session's widget rows are excluded like its server rows. Omitted while the session has no label. A widget before 0.5.4 ignores it.
 
-If the result already has a `_meta` object, the proxy preserves existing fields and adds `yavio` alongside them. If minting fails or the result is not an object, the result is returned unchanged.
+If the result already has a `_meta` object, the proxy preserves existing fields and adds `yavio` alongside them. If minting fails or the result is not an object, the result is returned unchanged. An `input_required` result (a round of a multi-round-trip call, MCP 2026-07-28, #168) is returned unchanged in every mode: no widget renders it, and the v2 client consumes it internally; the mint started for it is dropped unused, and the final round mints its own token.
 
 The AI platform (e.g., ChatGPT, Claude) may surface `_meta.yavio` directly in the tool result or transform it into a top-level `.yavio` field in the response metadata (e.g., Skybridge). The React widget SDK handles both shapes (see [Section 4.3.2](react-widget-sdk.md#432-client-side-detection)).
 
@@ -320,6 +320,8 @@ The `traceId` is the correlation key that stitches server-side and widget-side e
 8. Widget renders in iframe, initializes `useYavio()` which reads `window.__YAVIO__`
 9. Widget events sent directly to ingestion API with JWT auth and traceId in payload
 10. Ingestion API verifies JWT, stores all events — same traceId forms one funnel in ClickHouse
+
+The trace id is minted per `tools/call` request. A multi-round-trip call on MCP 2026-07-28 is several requests, so each round has its own trace, and only the final request's has a `tool_call`: a `track()` / `step()` / `conversion()` inside an earlier round carries a trace no `tool_call` has (#168, documented, not fixed). On v2's 2025-era shim every round runs inside one request and shares its trace.
 
 ### 3.5.2 Example Combined Funnel
 
@@ -414,4 +416,4 @@ Session (ses_xxx) ← one conversation (3.7.1), shared by server + widget events
 - [Tool-result errors count as errors](./tool-result-errors.md) — `isError: true` results become `status: error` / `error_category: tool_error`.
 - [Per-tool capture overrides](./per-tool-capture.md) — `tools: { "<name>": { inputValues, outputValues, rejectedInputValues, intent } }`, plus a warn-once for tracking calls outside a wrapped tool.
 - [`input_values` extra fields](./input-values-extra-fields.md) — what the `_`-prefixed fields are, which stay, which go.
-- [Status detection at the protocol layer](./protocol-layer-status.md) — calls the MCP SDK fails before the handler (unknown/disabled tool, argument validation) become `status: error` / `validation`; output-validation failures become `server`; one event per call.
+- [Status detection at the protocol layer](./protocol-layer-status.md) — calls the MCP SDK fails before the handler (unknown/disabled tool, argument validation) become `status: error` / `validation`; output-validation failures become `server`; one event per call, also for a tool that asks for input over several rounds (#168, 0.5.5).

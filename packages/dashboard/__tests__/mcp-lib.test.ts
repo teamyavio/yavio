@@ -194,4 +194,9 @@ describe("get_schema doc", () => {
       /uniqExactIf\(session_id,\s+ifNull\(session_source, ''\) != 'per_request'\)/,
     );
   });
+
+  it("names the multi-round-trip metadata keys of a tool_call (#168)", () => {
+    expect(SCHEMA_DOC).toContain("JSONExtractUInt(metadata, 'input_rounds')");
+    expect(SCHEMA_DOC).toMatch(/JSONExtractBool\(metadata,\s+'input_retry'\)/);
+  });
 });

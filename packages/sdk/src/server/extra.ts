@@ -48,6 +48,17 @@ export interface CallExtra {
    * the integrator's `sessionKey`; never recorded.
    */
   authInfo?: Record<string, unknown>;
+  /** The context is MCP SDK v2's: it has `mcpReq`. v1's has none (#168). */
+  v2?: boolean;
+  /**
+   * The request carries the material of a multi-round-trip retry (#168, MCP
+   * 2026-07-28): v2 lifted `inputResponses` / `requestState` out of the
+   * params into `ctx.mcpReq.inputResponses`, `droppedInputResponseKeys` and
+   * the `requestState()` accessor. v2's 2025-era legacy shim fills the same
+   * fields on the context it re-enters the handler with, so only the context
+   * the protocol layer received tells a client retry from a shim round.
+   */
+  inputRetry?: boolean;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -73,6 +84,21 @@ function headersToRecord(headers: unknown): Record<string, unknown> | undefined 
   return isRecord(headers) ? headers : undefined;
 }
 
+/**
+ * The `requestState` a v2 context carries: `ctx.mcpReq.requestState` is an
+ * accessor, a plain getter of the lifted value (`() => value`, the same from
+ * 2.0.0 to 2.4.0); anything else is read as the value. Isolated so that an
+ * accessor that throws costs only this field. Never throws.
+ */
+function requestStateOf(mcpReq: Record<string, unknown>): unknown {
+  try {
+    const state = mcpReq.requestState;
+    return typeof state === "function" ? (state as () => unknown)() : state;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Read the parts of a handler context the SDK uses. Never throws. */
 export function readCallExtra(extra: unknown): CallExtra {
   const out: CallExtra = {};
@@ -81,6 +107,16 @@ export function readCallExtra(extra: unknown): CallExtra {
     if (typeof extra.sessionId === "string") out.sessionId = extra.sessionId;
 
     const mcpReq = isRecord(extra.mcpReq) ? extra.mcpReq : undefined;
+    if (mcpReq) {
+      out.v2 = true;
+      if (
+        mcpReq.inputResponses !== undefined ||
+        Array.isArray(mcpReq.droppedInputResponseKeys) ||
+        requestStateOf(mcpReq) !== undefined
+      ) {
+        out.inputRetry = true;
+      }
+    }
     const meta = extra._meta ?? mcpReq?._meta;
     if (isRecord(meta)) out.meta = meta;
 
