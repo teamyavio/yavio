@@ -2520,7 +2520,7 @@ describe("the natural exit: beforeExit with events queued (#167)", () => {
     );
 
   it.each(["createYavio().wrap()", "withYavio()"] as const)(
-    "the process goes on after the drain (an app's beforeExit listener schedules more work) — %s: a later send through the same proxy re-enters the registry, and the next beforeExit delivers it (review round 1)",
+    "the process goes on after the drain, round after round (an app's beforeExit listener schedules more work; Lambda's Node 20/22 client answers a callback handler from beforeExit after every invocation) — %s: each round's sends through the same proxy re-enter the registry, and the next beforeExit delivers them (review round 1)",
     async (entry) => {
       const raw = wrapped(entry, "yav_167_late");
       await callTool(raw, "get_price", { q: "first" });
@@ -2529,14 +2529,20 @@ describe("the natural exit: beforeExit with events queued (#167)", () => {
       expect(qs(ingest.batches[0])).toEqual(["connection", "first"]);
       expect(_sharedStateCount()).toBe(0);
 
-      await callTool(raw, "get_price", { q: "late" }); // dropped without a line before review round 1
-      expect(_sharedStateCount()).toBe(1); // re-entered, with a fresh transport
-      expect(_trackedTransportCount()).toBe(1);
-      expect(ingest.batches).toHaveLength(1); // queued: the flush interval is 10 s
-      emitBeforeExit(); // what Node emits once the late work has settled
-      await vi.waitFor(() => expect(ingest.batches).toHaveLength(2));
-      expect(qs(ingest.batches[1])).toEqual(["late"]);
-      await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+      // drain → late sends → drain → late sends → drain: every round delivered.
+      for (const round of [1, 2, 3]) {
+        await callTool(raw, "get_price", { q: `late${round}a` }); // dropped without a line before review round 1
+        await callTool(raw, "get_price", { q: `late${round}b` });
+        expect(_sharedStateCount()).toBe(1); // re-entered, with a fresh transport
+        expect(_trackedTransportCount()).toBe(1);
+        expect(ingest.batches).toHaveLength(round); // queued: the flush interval is 10 s
+        emitBeforeExit(); // what Node emits once the late work has settled
+        await vi.waitFor(() => expect(ingest.batches).toHaveLength(round + 1));
+        expect(qs(ingest.batches[round])).toEqual([`late${round}a`, `late${round}b`]);
+        await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+        expect(_sharedStateCount()).toBe(0); // drained again: the next round re-enters again
+      }
+      expect(ingest.ofType("tool_call")).toHaveLength(7);
       exitHooks()[0]?.call(process, 0);
       expect(lines1205()).toEqual([]);
     },

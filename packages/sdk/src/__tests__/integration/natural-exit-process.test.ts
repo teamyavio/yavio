@@ -96,12 +96,14 @@ describe.each(ENTRIES)("a process that ends on its own, %s", (entry) => {
   );
 
   it(
-    "an app's beforeExit listener schedules 2 more calls after the drain: they re-enter, and the next beforeExit delivers them (review round 1)",
+    "an app's beforeExit listener schedules 2 more calls after each of two drains: each round re-enters, and the next beforeExit delivers it — drain → sends → drain → sends → drain (review round 1)",
     { timeout: 30_000 },
     async () => {
       const result = await run("rearm");
-      expect(result.stderr).toContain("2 late calls done");
-      expectDelivered(result, ["q0", "q1", "q2", "late0", "late1"]);
+      expect(result.stderr).toContain("round 2: 2 late calls done");
+      expectDelivered(result, ["q0", "q1", "q2", "late1a", "late1b", "late2a", "late2b"]);
+      // One batch per pass: the first drain, then each round's.
+      expect(ingest.batches.map((b) => b.status)).toEqual([200, 200, 200]);
     },
   );
 

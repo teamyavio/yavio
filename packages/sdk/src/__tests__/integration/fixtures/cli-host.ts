@@ -8,8 +8,8 @@
  * Env: ENDPOINT (the mock ingest); ENTRY = "with" (`withYavio()`) |
  * "create" (`createYavio().wrap()`); SCENARIO = "cli" (3 calls, then
  * nothing) | "rearm" (3 calls; an app `beforeExit` listener schedules 2
- * more calls 300 ms after the first pass, so the process goes on after the
- * SDK's natural-exit drain) | "unref-tick" (3 calls; an unref'd interval of
+ * more calls 300 ms after each of the first two passes, so the process
+ * goes on after the SDK's natural-exit drain twice) | "unref-tick" (3 calls; an unref'd interval of
  * the app's makes 2 more calls 250 ms apart, which fire only while the
  * SDK's drain holds the loop — the test makes ingest answer late). Progress
  * goes to stderr; nothing here writes to stdout.
@@ -42,14 +42,18 @@ for (let i = 0; i < 3; i++) await call(`q${i}`);
 log("3 calls done");
 
 if (scenario === "rearm") {
-  let rearmed = false;
+  // Two rounds, as Lambda's Node 20/22 client answers a callback handler
+  // from beforeExit after every invocation: drain → 2 calls → drain → 2
+  // calls → drain.
+  let rounds = 0;
   process.on("beforeExit", () => {
-    if (rearmed) return;
-    rearmed = true;
+    if (rounds >= 2) return;
+    rounds++;
+    const round = rounds;
     setTimeout(async () => {
-      await call("late0");
-      await call("late1");
-      log("2 late calls done");
+      await call(`late${round}a`);
+      await call(`late${round}b`);
+      log(`round ${round}: 2 late calls done`);
     }, 300);
   });
 }
