@@ -51,9 +51,9 @@ import type { Transport } from "../transport/types.js";
  * (#179; before, that release only drained, and its deadline neither
  * aborted the fetch nor counted the loss). The signal handlers drain
  * everything regardless, and so does a natural exit with events queued
- * (#167, below). The key's
- * state object outlives its transports: proxies keep it, and a re-acquire
- * after a stop puts a fresh transport behind the same facade.
+ * (#167, below). The key's state object outlives its transports: proxies
+ * keep it, and a re-acquire after a stop puts a fresh transport behind the
+ * same facade.
  *
  * Shutdown from a signal handler (#142). The SDK's listener is prepended,
  * so it runs first and drains the registry; the app's handler then calls
@@ -83,8 +83,8 @@ import type { Transport } from "../transport/types.js";
  * resolve by that deadline; a `shutdown()` called with no time left
  * resolves at once. Values registered after the signal do not move it; a
  * `SIGTERM` after the cycle's `SIGINT` — Claude Code's stop sequence —
- * moves it in to SIGINT + 400 ms, never out (#175); a
- * new cycle after a hand-back gets a new deadline. After the hand-back a
+ * moves it in to SIGINT + 400 ms, never out (#175); a new cycle after a
+ * hand-back gets a new deadline. After the hand-back a
  * `shutdown()` waits at most D from its own call, so a process that
  * survives a signal still delivers what requests finishing later send,
  * without blocking the exit. Before #148 there were three clocks (the
@@ -1111,17 +1111,17 @@ let reraise: (signal: HandledSignal) => void = defaultReraise;
  * taken for the first one delivered twice (a heuristic, see
  * `SAME_DELIVERY_MS`), and a `SIGTERM` after the cycle's `SIGINT`, a
  * client's stop sequence, which the cycle hands back by SIGINT +
- * `ESCALATION_MS` (#175, `escalate`). What is handed back is the signal that ARRIVED,
- * with its own listeners deciding: re-raised only if the SDK is its only
- * listener (re-raising the first signal with the first's decision killed
- * an app that handles only the second one — SIGINT, say — with the default
- * action of the first, SIGTERM's 143, in the middle of its own shutdown;
- * #148 review round 4). Whether to re-raise is decided when the signal
- * arrives: an app listener registered with `process.once` is gone by the
- * time the drain is done, and that app must not be killed in the middle of
- * its own shutdown. Each cycle is its own object, and `finishSignal(cycle)`
- * ends only the cycle still in flight: a drain that ends after its cycle
- * was handed back cannot end a later cycle.
+ * `ESCALATION_MS` (#175, `escalate`). What is handed back is the signal
+ * that ARRIVED, with its own listeners deciding: re-raised only if the SDK
+ * is its only listener (re-raising the first signal with the first's
+ * decision killed an app that handles only the second one — SIGINT, say —
+ * with the default action of the first, SIGTERM's 143, in the middle of
+ * its own shutdown; #148 review round 4). Whether to re-raise is decided
+ * when the signal arrives: an app listener registered with `process.once`
+ * is gone by the time the drain is done, and that app must not be killed
+ * in the middle of its own shutdown. Each cycle is its own object, and
+ * `finishSignal(cycle)` ends only the cycle still in flight: a drain that
+ * ends after its cycle was handed back cannot end a later cycle.
  */
 function onSignal(signal: HandledSignal): void {
   const running = signalInFlight;
