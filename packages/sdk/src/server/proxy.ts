@@ -336,9 +336,13 @@ const MAX_CAPABILITY_NAMES = 20;
  * `clientCapabilities` key on 2025-era requests, which v2 lifts too), else
  * the `initialize` handshake's (`getClientCapabilities()`, v1 and v2).
  * Top-level keys whose value is an object — how MCP declares a capability —
- * in the protocol's spelling, sorted, at most 20. Undefined when neither
- * source has any (a 2025-era request on a per-request host, whose instance
- * never saw `initialize`). Never throws.
+ * in the protocol's spelling, sorted, at most 20. A name that is not
+ * `recordable()` — outside the MCP key format, or with a run of 8 or more
+ * hex digits, which can carry an id or a token — is left out, the rule
+ * `_metaDroppedKeys` uses: these names are recorded whatever the capture
+ * flags (review round 1). Undefined when neither source has any (a
+ * 2025-era request on a per-request host, whose instance never saw
+ * `initialize`). Never throws.
  */
 function clientCapabilityNames(
   ex: ReturnType<typeof readCallExtra>,
@@ -357,7 +361,12 @@ function clientCapabilityNames(
     const names = Object.keys(capabilities)
       .filter((name) => {
         const value = (capabilities as Record<string, unknown>)[name];
-        return CAPABILITY_NAME.test(name) && typeof value === "object" && value !== null;
+        return (
+          CAPABILITY_NAME.test(name) &&
+          recordable(name) &&
+          typeof value === "object" &&
+          value !== null
+        );
       })
       .sort()
       .slice(0, MAX_CAPABILITY_NAMES);

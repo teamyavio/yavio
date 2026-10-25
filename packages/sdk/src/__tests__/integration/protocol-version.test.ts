@@ -334,6 +334,23 @@ describe("protocol_version off HTTP, MCP SDK v2 (#170)", () => {
     ]);
   });
 
+  it("drops a capability name that can carry an id, as _metaDroppedKeys does (review round 1)", async () => {
+    // Recorded whatever the capture flags, so a name with a run of 8 or more
+    // hex digits (an install id, a user id, a UUID) is left out.
+    const connection = await directCall(
+      envelope("2026-07-28", {
+        elicitation: {},
+        "install-3f2a9c1e4b5d6a7f": {},
+        "user/8f14e45fceea167a": {},
+        "vendor.example/3f2a9c1e-4b5d-6a7f-8e9d-0c1b2a3f4e5d": {},
+        "vendor.example/ui": {},
+      }),
+    );
+    expect(
+      (connection?.metadata as { client_capabilities?: string[] }).client_capabilities,
+    ).toEqual(["elicitation", "vendor.example/ui"]);
+  });
+
   it("ignores the capabilities of an envelope that names no version (2025-era _meta)", async () => {
     const connection = await directCall({
       envelope: { "io.modelcontextprotocol/clientCapabilities": { experimental: {} } },
