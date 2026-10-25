@@ -38,10 +38,11 @@ Deferred to a session's first tool call: at least once per session per server pr
 
 | Field | Type | Description |
 |-------|------|-------------|
-| protocol_version | TEXT | MCP protocol version (the `mcp-protocol-version` header, date-shaped only) |
+| protocol_version | TEXT | MCP protocol version, date-shaped only (`^\d{4}-\d{2}-\d{2}$`), from the first source that has one (#170, SDK 0.5.5): the 2026-07-28 request envelope (`io.modelcontextprotocol/protocolVersion`), the `mcp-protocol-version` header, the version the server answered `initialize` with (MCP SDK v2's `getNegotiatedProtocolVersion()`, else the protocol layer's `initialize` tap; the only source on a 2025-era stdio or in-memory connection). Before 0.5.5 the header only, so NULL off HTTP |
 | client_name | TEXT | The client's name: the 2026-07-28 envelope, else `clientInfo.name` from initialize, else the request's User-Agent (known MCP clients only) |
 | client_version | TEXT | The same source's version |
 | connection_duration_ms | REAL | Reserved: connection lifetime (never set) |
+| metadata | TEXT (JSON) | `intent_enabled` (always); `client_info_source` (`envelope` \| `initialize` \| `user_agent`, set with `client_name`, #142); `client_capabilities` (#170, SDK 0.5.5): the names of the capabilities the client declared — top-level keys with an object value, matching `^[A-Za-z][A-Za-z0-9_./-]{0,63}$`, sorted, at most 20, never their values — from the 2026-07-28 envelope when it names a version, else `getClientCapabilities()` from the `initialize` handshake; absent when there are none (also a 2025-era request on a per-request host, whose instance never saw `initialize`). Read with `JSONExtract(metadata, 'client_capabilities', 'Array(String)')` |
 
 ### resource_access
 

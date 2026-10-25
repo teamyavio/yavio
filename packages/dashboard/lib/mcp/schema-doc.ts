@@ -77,8 +77,13 @@ Geo: country_code (Nullable, ISO 3166-1 alpha-2), region (Nullable: state or
 province as the platform names it, e.g. 'North Rhine-Westphalia' or 'State of
 Berlin' — English, not ISO 3166-2; only set next to a country_code; NULL before
 SDK 0.4.1). Both come from ChatGPT's request _meta and need the app's argument
-capture on. Connection: protocol_version, client_name, client_version,
-connection_duration_ms. SDK: sdk_version.
+capture on. Connection: protocol_version (the 2026-07-28 request envelope, else
+the mcp-protocol-version header, else the version the server answered
+initialize with; NULL on stdio and in-memory connections before SDK 0.5.5),
+client_name, client_version, connection_duration_ms;
+JSONExtract(metadata, 'client_capabilities', 'Array(String)') = the names of
+the capabilities the client declared, e.g. 'elicitation', 'roots', 'sampling'
+(SDK 0.5.5+; empty when none or not known). SDK: sdk_version.
 session_source (Nullable): how the SDK derived session_id — 'mcp_session_id'
 (the transport's Mcp-Session-Id), 'openai_session' (ChatGPT's conversation),
 'vscode_conversation' (VS Code's conversation id), 'codex_thread' (the Codex

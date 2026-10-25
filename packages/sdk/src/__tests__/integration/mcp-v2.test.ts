@@ -3,9 +3,11 @@
  *
  * v2 has no `tool()`, registers its low-level handlers by method string,
  * keeps the request `_meta` under `ctx.mcpReq`, throws for an unknown tool
- * where v1 returns an isError result, and negotiates the 2026-07-28 era only
- * over Streamable HTTP. Every one of those shows up here against the real
- * packages, not a fake.
+ * where v1 returns an isError result, and negotiates the 2026-07-28 era
+ * through `createMcpHandler` (Streamable HTTP) and `serveStdio` when the
+ * client asks for it, while a bare `connect()` (InMemoryTransport) stays on
+ * 2025-11-25 (#172). Every one of those shows up here against the real
+ * packages, not a fake; `serveStdio` in protocol-version.test.ts (#170).
  */
 import { randomUUID } from "node:crypto";
 import { type IncomingMessage, type ServerResponse, createServer } from "node:http";

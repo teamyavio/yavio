@@ -72,9 +72,13 @@ Both wrap the same handler, so the order must be fixed in one place. `server/pro
 
 Status must be the inner wrapper: it then runs inside the intent store (so a pre-handler failure still carries `intent_signals`) and sees arguments with `context` already removed.
 
+### The `initialize` tap (#170, 0.5.5)
+
+`installProtocolWrappers()` also wraps the low-level server's `initialize` handler, through the same handler map and `compose()` guards: in place, because the `Server` constructor registers it before `withYavio()` runs (v1 `setRequestHandler(InitializeRequestSchema, …)`, v2 `setRequestHandler("initialize", …)`), and through the patched `setRequestHandler` for a later re-registration. The tap awaits the stored handler, records the result's `protocolVersion` in a module-level `WeakMap` keyed by the low-level server, and returns the result unchanged. A handler that throws throws the same error, and the tap's own read cannot fail the handshake; the client identity is still filled by `_oninitialize`, which runs inside it. It is the only record of the negotiated version on MCP SDK v1, whose `Server._oninitialize` keeps the client's identity and capabilities but not the version; on v2 it backs `getNegotiatedProtocolVersion()` (deprecated since 2.0.0), which is read first. `negotiatedProtocolVersion()` is the connection event's third source of `protocol_version`, after the 2026-07-28 envelope and the `mcp-protocol-version` header ([per-request-servers.md](./per-request-servers.md)).
+
 ### When the private API is missing
 
-`installProtocolWrappers()` returns `false` when the server exposes no `server.setRequestHandler` (Skybridge-style facades in the test-suite, an MCP SDK that moved the field). Nothing else changes: no frame is ever opened, the callback wrapper sends immediately, and pre-handler failures stay invisible — today's behaviour, never worse. Intent capture already degrades the same way.
+`installProtocolWrappers()` returns `false` when the server exposes no `server.setRequestHandler` (Skybridge-style facades in the test-suite, an MCP SDK that moved the field). Nothing else changes: no frame is ever opened, the callback wrapper sends immediately, and pre-handler failures stay invisible — today's behaviour, never worse. Intent capture already degrades the same way. So does the `initialize` tap (#170): without the handler map it is not installed, and a connection with neither a 2026-07-28 envelope nor an `mcp-protocol-version` header (v1 over stdio or in memory) keeps `protocol_version` unset, as before 0.5.5.
 
 ## Changes
 
