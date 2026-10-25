@@ -34,6 +34,7 @@ import {
   type HandlerWrapper,
   currentCallFrame,
   installProtocolWrappers,
+  negotiatedProtocolVersion,
   runInCallFrame,
 } from "./protocol.js";
 import { type SessionKey, findSessionKey } from "./session-key.js";
@@ -233,13 +234,20 @@ function openCallContext(
     }
   }
 
-  // The wire protocol version the client sends on every Streamable HTTP
-  // request (allowlisted in `_requestInfo` as well). Only a date-shaped
-  // value is stored: a Streamable HTTP transport rejects anything else,
-  // a custom one may not, and the column is not a place for free text.
-  const protocolVersion = protocolVersionHeader(
-    headerValue(ex.requestHeaders, "mcp-protocol-version"),
-  );
+  // The request's protocol version, from the first source that has one
+  // (#170): the 2026-07-28 envelope, which names it on every request and
+  // every transport; the `mcp-protocol-version` header, which a Streamable
+  // HTTP client sends on every request after `initialize` since 2025-06-18
+  // (allowlisted in `_requestInfo` as well) and which must equal the
+  // envelope's; the version the server answered `initialize` with, the only
+  // source on a 2025-era stdio or in-memory connection and for a 2025-03-26
+  // client, which sends no header. Only a date-shaped value is
+  // stored: MCP SDK transports reject anything else, a custom one may not,
+  // and the column is not a place for free text.
+  const protocolVersion =
+    datedVersion(ex.protocolVersion) ??
+    datedVersion(headerValue(ex.requestHeaders, "mcp-protocol-version")) ??
+    datedVersion(negotiatedProtocolVersion(server));
 
   // The connection event: once per session — deferred from connect() so
   // that OpenAI's per-tool-call reconnects don't spam one per tool call in
@@ -277,6 +285,7 @@ function openCallContext(
         clientName: info?.name,
         clientVersion: info?.version,
         clientInfoSource: info?.name ? source : undefined,
+        clientCapabilities: clientCapabilityNames(ex, server),
         intentEnabled: config.intent.enabled,
       },
     );
@@ -312,8 +321,50 @@ function perRequestConnectionKey(
 /** The MCP protocol versions are dates (`2025-06-18`); anything else is not recorded (#142 review). */
 const PROTOCOL_VERSION = /^\d{4}-\d{2}-\d{2}$/;
 
-function protocolVersionHeader(value: string | undefined): string | undefined {
-  return value !== undefined && PROTOCOL_VERSION.test(value) ? value : undefined;
+function datedVersion(value: unknown): string | undefined {
+  return typeof value === "string" && PROTOCOL_VERSION.test(value) ? value : undefined;
+}
+
+/** A capability name as the protocol spells them (`elicitation`, `sampling`, `roots`, …). */
+const CAPABILITY_NAME = /^[A-Za-z][A-Za-z0-9_.\/-]{0,63}$/;
+const MAX_CAPABILITY_NAMES = 20;
+
+/**
+ * The names of the capabilities the client declared (#170), never their
+ * values: on a 2026-07-28 request the envelope's (an envelope is one when it
+ * names a protocol version, v2's own rule; ChatGPT sends a bare
+ * `clientCapabilities` key on 2025-era requests, which v2 lifts too), else
+ * the `initialize` handshake's (`getClientCapabilities()`, v1 and v2).
+ * Top-level keys whose value is an object — how MCP declares a capability —
+ * in the protocol's spelling, sorted, at most 20. Undefined when neither
+ * source has any (a 2025-era request on a per-request host, whose instance
+ * never saw `initialize`). Never throws.
+ */
+function clientCapabilityNames(
+  ex: ReturnType<typeof readCallExtra>,
+  server: McpServerLike,
+): string[] | undefined {
+  try {
+    let capabilities: unknown =
+      ex.protocolVersion !== undefined ? ex.clientCapabilities : undefined;
+    if (capabilities === undefined) {
+      const low = server.server as { getClientCapabilities?: () => unknown } | undefined;
+      capabilities = low?.getClientCapabilities?.();
+    }
+    if (!capabilities || typeof capabilities !== "object" || Array.isArray(capabilities)) {
+      return undefined;
+    }
+    const names = Object.keys(capabilities)
+      .filter((name) => {
+        const value = (capabilities as Record<string, unknown>)[name];
+        return CAPABILITY_NAME.test(name) && typeof value === "object" && value !== null;
+      })
+      .sort()
+      .slice(0, MAX_CAPABILITY_NAMES);
+    return names.length > 0 ? names : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

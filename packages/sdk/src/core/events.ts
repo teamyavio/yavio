@@ -216,6 +216,8 @@ export interface ConnectionData {
   clientVersion?: string;
   /** Set when `clientName` is: which of the three sources named the client. */
   clientInfoSource?: ClientInfoSource;
+  /** The names of the client's declared capabilities, sorted (#170). */
+  clientCapabilities?: string[];
   intentEnabled?: boolean;
 }
 
@@ -233,6 +235,9 @@ export function buildConnectionEvent(ctx: EventContext, data: ConnectionData): C
     metadata: {
       intent_enabled: data.intentEnabled ?? false,
       ...(data.clientInfoSource ? { client_info_source: data.clientInfoSource } : {}),
+      // Names only, never values (#170): which clients can answer an
+      // elicitation, a sampling request or a roots listing at all.
+      ...(data.clientCapabilities?.length ? { client_capabilities: data.clientCapabilities } : {}),
     },
   };
 }

@@ -4,7 +4,8 @@ import type { McpServerLike, SessionState } from "../core/types.js";
 
 /**
  * The protocol layer: wrappers around the low-level server's `tools/call`
- * and `tools/list` request handlers.
+ * and `tools/list` request handlers, and a read-only tap on `initialize`
+ * (#170).
  *
  * Two concerns live here — the intent controller (advertise/strip/capture
  * `context`) and status detection (count the calls McpServer fails BEFORE the
@@ -89,6 +90,56 @@ export function requestMethod(schema: unknown): string | undefined {
 
 const installedServers = new WeakSet<object>();
 
+/**
+ * The protocol version each low-level server answered `initialize` with
+ * (#170). MCP SDK v1 computes it in `Server._oninitialize` and keeps only the
+ * client's identity and capabilities; v2 keeps it too
+ * (`getNegotiatedProtocolVersion()`, deprecated since 2.0.0). Read by
+ * `negotiatedProtocolVersion()`; held weakly, it ends with its server.
+ */
+const initializedVersions = new WeakMap<object, string>();
+
+/**
+ * The tap: the handler's result is returned unchanged, a failing handler
+ * throws unchanged, and nothing here can fail the handshake.
+ */
+const initializeTap =
+  (low: object): HandlerWrapper =>
+  (handler) =>
+  async (request, extra) => {
+    const result = await handler(request, extra);
+    try {
+      const version = (result as { protocolVersion?: unknown } | undefined)?.protocolVersion;
+      if (typeof version === "string") initializedVersions.set(low, version);
+    } catch {
+      // Analytics never changes the handshake.
+    }
+    return result;
+  };
+
+/**
+ * The protocol version a server negotiated in its `initialize` handshake:
+ * v2's own accessor, else what the tap saw (v1, or a v2 without the
+ * accessor). Undefined before `initialize`, on an instance that never saw it
+ * (a per-request host), and when the private API is missing. Unvalidated.
+ * Never throws.
+ */
+export function negotiatedProtocolVersion(server: McpServerLike): string | undefined {
+  try {
+    const low = (server as { server?: unknown }).server;
+    if (!low || typeof low !== "object") return undefined;
+    const accessor = (low as { getNegotiatedProtocolVersion?: unknown })
+      .getNegotiatedProtocolVersion;
+    if (typeof accessor === "function") {
+      const version: unknown = accessor.call(low);
+      if (typeof version === "string") return version;
+    }
+    return initializedVersions.get(low);
+  } catch {
+    return undefined;
+  }
+}
+
 export interface ProtocolWrappers {
   /** Applied innermost first. */
   call: HandlerWrapper[];
@@ -138,10 +189,19 @@ export function installProtocolWrappers(
 
     const originalSet = low.setRequestHandler.bind(low);
     const handlers = low._requestHandlers;
+    // The Server constructor registers `initialize` (v1 and v2), so the tap
+    // goes on in place below; this covers a later re-registration.
+    const initialize = [initializeTap(low)];
     low.setRequestHandler = (...args: unknown[]) => {
       const method = requestMethod(args[0]);
       const list =
-        method === "tools/call" ? wrappers.call : method === "tools/list" ? wrappers.list : null;
+        method === "tools/call"
+          ? wrappers.call
+          : method === "tools/list"
+            ? wrappers.list
+            : method === "initialize"
+              ? initialize
+              : null;
       if (!list) return originalSet(...args);
       // The handler is the last function argument in every form:
       // (schema, handler), (method, handler), (method, schemas, handler).
@@ -170,6 +230,8 @@ export function installProtocolWrappers(
       if (existingCall) handlers.set("tools/call", compose(existingCall, wrappers.call));
       const existingList = handlers.get("tools/list");
       if (existingList) handlers.set("tools/list", compose(existingList, wrappers.list));
+      const existingInitialize = handlers.get("initialize");
+      if (existingInitialize) handlers.set("initialize", compose(existingInitialize, initialize));
     }
     return true;
   } catch {
