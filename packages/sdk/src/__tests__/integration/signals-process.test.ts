@@ -882,11 +882,12 @@ describe.each(STACKS)("a failed send at the signal on MCP SDK %s (#164)", (stack
   );
 
   it(
-    "no drain running: a host whose server closes with events queued and a background flush in its backoff still exits on its own, at once",
+    "no signal, no shutdown(): a host whose server closes with events queued and a background flush in its backoff exits on its own once the natural-exit drain delivered them (#167; #164 asserted the opposite)",
     { timeout: 30_000 },
     async () => {
-      // Two rounds: 106 events, so the batch of 100 goes out on its own (no
-      // drain) into a 503 and waits out its backoff; 6 stay queued.
+      // Two rounds: 103 events (the second adds 50 calls; its connection
+      // and discoveries are deduplicated), so the batch of 100 goes out on
+      // its own (no drain) into a 503 and waits out its backoff; 3 stay queued.
       ingest.failNext = [503];
       const child = await start("idle");
       await drive(child.port);
@@ -896,15 +897,40 @@ describe.each(STACKS)("a failed send at the signal on MCP SDK %s (#164)", (stack
       child.kill("SIGUSR2"); // the app closes its server; no signal the SDK handles, no shutdown()
       const exit = await child.exited;
 
-      // Outside a drain the backoff and the flush interval stay unref'd:
-      // nothing of the SDK's keeps an idle host alive (0.5.2's ref'd backoff
-      // held it for the retry). No signal, no shutdown(): the exit hook is
-      // not armed and the exit is quiet.
-      // The retry was never sent: the process went before its backoff ended.
-      expect(ingest.batches).toHaveLength(1);
+      // The loop empties, Node emits beforeExit, and the SDK stops the
+      // transport under min(1.5 s, D): its ref'd deadline holds the process
+      // through the backoff, the retry delivers the batch and the 3 follow.
+      // Before #167 the process went at once and the 103 events with it.
       expect(exit, child.output()).toMatchObject({ code: 0, signal: null });
-      expect(exit.afterSignalMs).toBeLessThan(900); // at once, not after the 1 s backoff
+      expect(ingest.batches.map((b) => b.status)).toEqual([503, 200, 200]);
+      expect(ingest.events).toHaveLength(103 + 100); // the 503's batch was received once and re-sent once
+      expect(
+        new Set(ingest.batches.slice(1).flatMap((b) => b.events.map((e) => e.event_id))).size,
+      ).toBe(103);
+      expect(exit.afterSignalMs).toBeLessThan(1_500);
       expect(child.lossLines()).toEqual([]);
+    },
+  );
+
+  it(
+    "no signal, no shutdown(), ingest failing for good: the natural-exit drain gives up at its bound — exit on its own within 1.5 s, not after the retries (0.5.2: 31 s), one counted line (#167)",
+    { timeout: 30_000 },
+    async () => {
+      ingest.failWith = 503;
+      const child = await start("idle");
+      await drive(child.port);
+      await drive(child.port);
+      await vi.waitFor(() => expect(child.output()).toContain("YAVIO-1200"), { timeout: 2_000 });
+      agent.destroy();
+      child.kill("SIGUSR2");
+      const exit = await child.exited;
+
+      expect(exit, child.output()).toMatchObject({ code: 0, signal: null });
+      expect(exit.afterSignalMs).toBeLessThan(1_700);
+      expect(child.lossLines()).toEqual([103]);
+      expect(child.output()).toContain(
+        "Exit deadline of 1500 ms reached — 103 events not delivered",
+      );
     },
   );
 });

@@ -1315,7 +1315,7 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
         headers: { get: () => null },
         json: () => Promise.reject(new SyntaxError("Unexpected end of JSON input")),
       });
-      const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+      const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
       try {
         const transport = new HttpTransport({ ...base, flushIntervalMs: 60_000, fetch });
         transport.send([fakeEvent()]);
@@ -1329,14 +1329,14 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
         expect(transport.lostEvents()).toBe(0);
         expect(transport.pendingEvents()).toBe(0);
         expect(warn).not.toHaveBeenCalled();
-        expect(debug).toHaveBeenCalledWith(expect.stringContaining("207 body unreadable"));
+        expect(stderr).toHaveBeenCalledWith(expect.stringContaining("207 body unreadable"));
         // Under a deadline it is not the deadline's loss either.
         transport.send([fakeEvent()]);
         await transport.shutdown(500);
         expect(fetch).toHaveBeenCalledTimes(2);
         expect(transport.deadlineLostEvents()).toBe(0);
       } finally {
-        debug.mockRestore();
+        stderr.mockRestore();
       }
     });
 
@@ -1352,7 +1352,7 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
         headers: { get: () => null },
         json: () => new Promise((resolve) => setTimeout(() => resolve({ rejected: 0 }), 10_000)),
       });
-      const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+      const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
       const losses: Array<[number, number]> = [];
       try {
         const transport = new HttpTransport({
@@ -1380,14 +1380,14 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
         expect(transport.deliveredEvents()).toBe(1);
         expect(transport.pendingEvents()).toBe(0);
         expect(losses).toEqual([]);
-        expect(debug).toHaveBeenCalledWith(expect.stringContaining("207 body unreadable"));
+        expect(stderr).toHaveBeenCalledWith(expect.stringContaining("207 body unreadable"));
         // The body coming later changes nothing: delivered once.
         await vi.advanceTimersByTimeAsync(10_000);
         expect(transport.deliveredEvents()).toBe(1);
         expect(transport.deadlineLostEvents()).toBe(0);
         expect(fetch).toHaveBeenCalledTimes(1);
       } finally {
-        debug.mockRestore();
+        stderr.mockRestore();
       }
     });
 

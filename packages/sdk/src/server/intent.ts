@@ -462,7 +462,7 @@ export function createIntentController(
     }
     if (widget && config.required && name) {
       logOnce(`intent-widget-override:${name}`, () =>
-        console.info(
+        console.error(
           `[yavio] Intent context advertised as OPTIONAL on widget-invoked tool "${name}" (a required parameter would make the host refuse the widget's own calls). Model calls that fill it are still captured.`,
         ),
       );
