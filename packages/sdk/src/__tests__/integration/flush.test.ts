@@ -260,6 +260,20 @@ describe("flush() (#171)", () => {
     expect(new Set(ids).size).toBe(20);
   });
 
+  it("a flush() during the last holder's shutdown() waits for that stop (decision J)", async () => {
+    ingest.respondAfterMs = 200;
+    const analytics = createYavio({
+      apiKey: "yav_j",
+      endpoint: ingest.endpoint,
+      serverOnly: true,
+    });
+    await invoke(analytics);
+    const closing = analytics.shutdown(); // the last hold: the transport stops, its batch on its way
+    await analytics.flush();
+    expect(ingest.responded).toBe(1);
+    await closing;
+  });
+
   it("after shutdown(): a later wrap() holds the transport again and flush() delivers what it queued", async () => {
     const analytics = createYavio({
       apiKey: "yav_f7",
