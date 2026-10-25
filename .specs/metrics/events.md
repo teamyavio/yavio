@@ -10,14 +10,15 @@ All events stored as rows in the `events` table. Each event carries `event_id` (
 
 ### tool_call
 
-Fires on every tool invocation. The core event.
+Fires on every tool invocation. The core event. One per logical call also when the tool asks for input over several rounds (MCP SDK v2 `inputRequired()`, SDK 0.5.5+, #168): the event comes from the round whose result is final; rounds that asked for input send none.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | event_name | TEXT | Tool name |
-| latency_ms | REAL | Handler execution time. **Absent** when the handler never ran (pre-handler failures, see `validation`) |
+| latency_ms | REAL | Handler execution time. **Absent** when the handler never ran (pre-handler failures, see `validation`). For a call that asked for input: the handler time of the rounds inside the request, never the user's think time — every round on v2's 2025-era shim, the final request only on MCP 2026-07-28 (its earlier rounds were other requests) |
+| metadata | TEXT (JSON) | Unset on an ordinary call. Multi-round-trip markers (SDK 0.5.5+, #168): `input_rounds` — how many times the handler returned `input_required` inside this request before the result that went out (exact on the 2025 shim; `1` when v2 refused a 2026-07-28 round's input request); `input_retry: true` — the request is the client's 2026-07-28 retry. A call asked for input when `input_rounds > 0 OR input_retry`. A 2026-07-28 call whose client never retries leaves no `tool_call`. Not columns: no migration until the dashboard filters on them |
 | status | TEXT | `success` or `error`. `error` when the handler threw, returned a result with `isError: true`, or the MCP SDK rejected the call before or after the handler (SDK ≥ 0.4.0; earlier SDKs only report throws) |
-| error_category | TEXT | `tool_error` (handler returned `isError: true`) / `unknown` (handler threw) / `validation` (failed before the handler: unknown or disabled tool, argument validation) / `server` (result failed the tool's `outputSchema`) / reserved: `auth`, `timeout`, `rate_limit`. See [sdk/tool-result-errors.md](../sdk/tool-result-errors.md) and [sdk/protocol-layer-status.md](../sdk/protocol-layer-status.md) |
+| error_category | TEXT | `tool_error` (handler returned `isError: true`) / `unknown` (handler threw) / `validation` (failed before the handler: unknown or disabled tool, argument validation) / `server` (result failed the tool's `outputSchema`; or the handler asked for input and the MCP SDK could not get it or refused it; or a 2026-07-28 retry was rejected before its handler — refused `requestState`, a tool changed or removed between rounds; #168) / reserved: `auth`, `timeout`, `rate_limit`. See [sdk/tool-result-errors.md](../sdk/tool-result-errors.md) and [sdk/protocol-layer-status.md](../sdk/protocol-layer-status.md) |
 | error_message | TEXT | The exception message, or the first `text` content item of an `isError` result. PII-stripped, ≤ 500 chars. The result text is output and is only stored with `capture.outputValues` on |
 | is_retry | INTEGER | Intended: `1` if the immediately preceding event in the session was a `tool_call` with the same `event_name`. **Not implemented** — the SDK never sets it and ingest does not derive it, so the column is always `0` |
 | input_keys | TEXT (JSON) | Parameter key names |

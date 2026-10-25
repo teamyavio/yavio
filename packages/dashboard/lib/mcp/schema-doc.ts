@@ -103,6 +103,12 @@ sessions as above, over any event type. client_name comes from the protocol
 envelope, the initialize handshake or the request's User-Agent;
 JSONExtractString(metadata, 'client_info_source') says which ('envelope',
 'initialize', 'user_agent').
+A tool_call whose tool asked the user for input over several rounds is one row,
+from the final round (SDK 0.5.5+): JSONExtractUInt(metadata, 'input_rounds') =
+rounds inside the request that asked for input, JSONExtractBool(metadata,
+'input_retry') = the request is the client's MCP 2026-07-28 retry (its earlier
+rounds were other requests and have no row). Such a call: input_rounds > 0 OR
+input_retry. Its latency_ms is handler time only, never the user's think time.
 Widget: viewport_width/height, scroll_depth_pct, click_count, visible_duration_ms,
 field_name, nav_from, nav_to, device_touch, device_pixel_ratio, load_time_ms.
 Funnel steps: event_type 'step', event_name = the step, step_sequence (Nullable

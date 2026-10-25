@@ -204,4 +204,9 @@ describe("get_schema doc", () => {
     );
     expect(doc).not.toMatch(/only on (a )?servers? that builds? a new MCP server per request/);
   });
+
+  it("names the multi-round-trip metadata keys of a tool_call (#168)", () => {
+    expect(SCHEMA_DOC).toContain("JSONExtractUInt(metadata, 'input_rounds')");
+    expect(SCHEMA_DOC).toMatch(/JSONExtractBool\(metadata,\s+'input_retry'\)/);
+  });
 });
