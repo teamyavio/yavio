@@ -1908,8 +1908,12 @@ describe("HttpTransport.flushQueued() (#171)", () => {
     // 503, the 1 s backoff ends within the deadline and is waited out, the
     // retry hangs until the deadline.
     const flushing = transport.flushQueued(1_500);
+    // The deadline, and nothing else: from the absolute deadline, so a
+    // millisecond spent starting the first fetch shows.
     const held = timers.filter((t) => t.handle.hasRef());
-    expect(held.map((t) => t.ms)).toEqual([1_500]); // the deadline, and nothing else
+    expect(held).toHaveLength(1);
+    expect(held[0]?.ms).toBeGreaterThan(1_450);
+    expect(held[0]?.ms).toBeLessThanOrEqual(1_500);
     expect(await flushing).toBe("deadline");
     expect(settled(held[0]?.handle as NodeJS.Timeout)).toBe(true);
     expect(fetch).toHaveBeenCalledTimes(2);
