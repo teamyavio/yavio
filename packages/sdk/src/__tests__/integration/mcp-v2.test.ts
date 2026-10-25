@@ -15,13 +15,17 @@ import type { AddressInfo } from "node:net";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { NodeStreamableHTTPServerTransport, toNodeHandler } from "@modelcontextprotocol/node";
 import {
+  BAGGAGE_META_KEY,
   InMemoryTransport,
   McpServer,
+  TRACEPARENT_META_KEY,
+  TRACESTATE_META_KEY,
   UrlElicitationRequiredError,
   acceptedContent,
   createMcpHandler,
   inputRequired,
 } from "@modelcontextprotocol/server";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import type {
   BaseEvent,
   ConnectionEvent,
@@ -1286,5 +1290,127 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
     expect(returned).toBe(interim);
     expect(JSON.stringify(returned)).toBe(before);
     expect(toolCalls(transport.sent)).toHaveLength(0);
+  });
+});
+
+// #173: SEP-414 trace context, sent the way a 2026-07-28 client sends it —
+// with the v2 package's own `_meta` key names (exported since 2.0.0).
+describe("MCP SDK v2 — SEP-414 trace context in _meta (#173)", () => {
+  const META_TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+  const HEADER_TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+  const traceMeta = {
+    "openai/locale": "de-DE",
+    [TRACEPARENT_META_KEY]: META_TRACEPARENT,
+    [TRACESTATE_META_KEY]: "congo=t61rcWkgMzE",
+    [BAGGAGE_META_KEY]: "user.id=u-48213,tenant.id=acme-gmbh",
+  };
+  let ingest: MockIngest;
+  let mcp: ReturnType<typeof createServer> | undefined;
+
+  beforeEach(async () => {
+    _resetGlobalState();
+    ingest = await startMockIngest();
+  });
+
+  afterEach(async () => {
+    await ingest.close();
+    if (mcp) {
+      mcp.closeAllConnections();
+      await new Promise<void>((resolve) => mcp?.close(() => resolve()));
+    }
+    mcp = undefined;
+  });
+
+  const buildServer = () => {
+    const server = new McpServer({ name: "trace-v2", version: "1.0" });
+    server.registerTool(
+      "get_price",
+      { description: "d", inputSchema: { sku: z.string() } },
+      async ({ sku }) => ok(`price of ${sku}`),
+    );
+    return server;
+  };
+
+  function expectTraceContext(call: Record<string, unknown> | undefined, traceparent: string) {
+    expect(call?.metadata).toEqual({ traceparent });
+    const inputValues = call?.input_values as Record<string, unknown>;
+    expect(inputValues._meta).toEqual({ "openai/locale": "de-DE" });
+    expect(inputValues._metaDroppedKeys).toEqual(["baggage", "tracestate"]);
+    const serialized = JSON.stringify(call);
+    for (const value of ["u-48213", "acme-gmbh", "t61rcWkgMzE"]) {
+      expect(serialized, value).not.toContain(value);
+    }
+  }
+
+  it("2026-07-28 per-request host: the _meta traceparent is metadata.traceparent, no baggage is stored, a rejected call keeps it too", async () => {
+    // Defaults: capture.geo true, where _meta was kept verbatim before.
+    const yavio = createYavio({
+      apiKey: "yav_v2_trace",
+      endpoint: ingest.endpoint,
+      serverOnly: true,
+    });
+    const nodeHandler = toNodeHandler(createMcpHandler(() => yavio.wrap(buildServer())));
+    const httpServer = createServer((req, res) => {
+      void nodeHandler(req, res);
+    });
+    mcp = httpServer;
+    await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+    const url = new URL(`http://127.0.0.1:${(httpServer.address() as AddressInfo).port}/mcp`);
+    const client = new Client(
+      { name: "trace-client", version: "1.0" },
+      { versionNegotiation: { mode: "auto" } },
+    );
+    // An HTTP hop's own traceparent on every request: the _meta one wins.
+    await client.connect(
+      new StreamableHTTPClientTransport(url, {
+        requestInit: { headers: { traceparent: HEADER_TRACEPARENT } },
+      }),
+    );
+    expect(client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
+    await client.callTool({ name: "get_price", arguments: { sku: "A1" }, _meta: traceMeta });
+    const rejected = await client.callTool({
+      name: "get_price",
+      arguments: { sku: 42 },
+      _meta: traceMeta,
+    });
+    expect(rejected.isError).toBe(true);
+    await client.close();
+    await yavio.shutdown();
+
+    const [call, validation] = ingest.events.filter((e) => e.event_type === "tool_call");
+    expectTraceContext(call, META_TRACEPARENT);
+    expect(validation?.error_category).toBe("validation");
+    expectTraceContext(validation, META_TRACEPARENT);
+    // Stored once: the header copy is gone from _requestInfo.
+    const requestInfo = (call?.input_values as { _requestInfo?: { headers?: object } })
+      ._requestInfo;
+    expect(requestInfo?.headers).not.toHaveProperty("traceparent");
+    expect(JSON.stringify({ ...call, metadata: undefined })).not.toContain("0af7651916cd43dd");
+  });
+
+  it("2026-07-28 over serveStdio: _meta is the only carrier, and the traceparent survives", async () => {
+    const yavio = createYavio({
+      apiKey: "yav_v2_trace_stdio",
+      endpoint: ingest.endpoint,
+      serverOnly: true,
+    });
+    // serveStdio over a caller-supplied transport: the stdio entry with its
+    // era decision, no HTTP request anywhere.
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const handle = serveStdio(() => yavio.wrap(buildServer()), { transport: serverTransport });
+    const client = new Client(
+      { name: "trace-client", version: "1.0" },
+      { versionNegotiation: { mode: "auto" } },
+    );
+    await client.connect(clientTransport);
+    expect(client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
+    await client.callTool({ name: "get_price", arguments: { sku: "A1" }, _meta: traceMeta });
+    await client.close();
+    await handle.close();
+    await yavio.shutdown();
+
+    const [call] = ingest.events.filter((e) => e.event_type === "tool_call");
+    expectTraceContext(call, META_TRACEPARENT);
+    expect(call?.input_values).not.toHaveProperty("_requestInfo");
   });
 });

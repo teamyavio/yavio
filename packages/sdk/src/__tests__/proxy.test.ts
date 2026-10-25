@@ -1969,10 +1969,13 @@ describe("client metadata capture", () => {
           ...(geo === false ? [] : ["openai/userLocation"]),
         ].sort(),
       );
-      // Names only, sorted; values never.
-      expect(inputValues._metaDroppedKeys).toEqual([...Object.keys(dropped), "timezone"].sort());
+      // Names only, sorted; values never. The valid traceparent is moved, not
+      // dropped: metadata.traceparent (#173).
+      const { traceparent, ...lost } = dropped;
+      expect(inputValues._metaDroppedKeys).toEqual([...Object.keys(lost), "timezone"].sort());
       expect(inputValues).not.toHaveProperty("_metaDroppedUnnamed");
-      const serialized = leakScan(event, CHATGPT_SESSION_ID);
+      expect(event.metadata).toEqual({ traceparent });
+      const serialized = leakScan({ ...event, metadata: undefined }, CHATGPT_SESSION_ID);
       for (const leak of [
         "session-test-0001",
         "exec-test",
@@ -2573,7 +2576,7 @@ describe("input_values extra fields (_-prefixed)", () => {
     expect(Object.keys(inputValues)).toEqual(["q"]);
   });
 
-  it("keeps exactly the five allow-listed headers", async () => {
+  it("keeps exactly the four allow-listed headers; traceparent moves to metadata (#173)", async () => {
     const inputValues = await inputValuesFor({
       requestInfo: {
         headers: {
@@ -2593,10 +2596,232 @@ describe("input_values extra fields (_-prefixed)", () => {
     expect(Object.keys(headers).sort()).toEqual([
       "accept-language",
       "mcp-protocol-version",
-      "traceparent",
       "user-agent",
       "x-anthropic-client",
     ]);
+  });
+});
+
+describe("SEP-414 trace context: traceparent, tracestate, baggage (#173)", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue(null);
+    _resetGlobalState();
+  });
+
+  // W3C Trace Context's own examples. The header's parent id ends in ten
+  // decimal digits, which the PII stripper's phone pattern used to cut.
+  const META_TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+  const HEADER_TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+  // Baggage as OpenTelemetry JS writes it: values percent-encoded, so an
+  // email has no `@` for the email pattern to find.
+  const BAGGAGE = "user.id=u-48213,tenant.id=acme-gmbh,user.email=alice%40example.com";
+  const TRACESTATE = "congo=t61rcWkgMzE,rojo=00f067aa0ba902b7";
+  const CLIENT_META = {
+    "openai/locale": "de-DE",
+    "openai/session": "conv-173",
+    "openai/userLocation": { country: "DE", region: "Hesse", city: "Frankfurt" },
+  };
+
+  async function call(
+    extra: Record<string, unknown>,
+    options: {
+      geo?: CaptureConfig["geo"];
+      inputValues?: boolean;
+      schemaLess?: boolean;
+      tools?: YavioConfig["tools"];
+      outcome?: "throw" | "isError";
+    } = {},
+  ) {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const config: YavioConfig = {
+      ...testConfig,
+      capture: {
+        ...testConfig.capture,
+        geo: options.geo ?? true,
+        inputValues: options.inputValues ?? true,
+      },
+      tools: options.tools ?? {},
+    };
+    const proxy = createProxy(server, config, transport, "0.0.1");
+    const result = () => {
+      if (options.outcome === "throw") throw new Error("backend down");
+      return {
+        content: [{ type: "text" as const, text: "ok" }],
+        ...(options.outcome === "isError" ? { isError: true } : {}),
+      };
+    };
+    if (options.schemaLess) proxy.tool("tc_tool", result);
+    else proxy.tool("tc_tool", { q: z.string() }, result);
+    const base = {
+      signal: new AbortController().signal,
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+      ...extra,
+    };
+    const handler = registeredTool(server, "tc_tool")?.handler;
+    await Promise.resolve(
+      options.schemaLess ? handler?.(base) : handler?.({ q: "hello" }, base),
+    ).catch(() => undefined);
+    return transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+      string,
+      unknown
+    >;
+  }
+  const inputValuesOf = (event: Record<string, unknown>) =>
+    (event.input_values ?? {}) as Record<string, unknown>;
+
+  it.each([true, "region", "country", false] as const)(
+    "stores no baggage and no tracestate under geo %s, only their names",
+    async (geo) => {
+      const event = await call(
+        {
+          _meta: {
+            ...CLIENT_META,
+            traceparent: META_TRACEPARENT,
+            tracestate: TRACESTATE,
+            baggage: BAGGAGE,
+          },
+        },
+        { geo },
+      );
+      const serialized = JSON.stringify(event);
+      for (const value of ["u-48213", "acme-gmbh", "alice", "t61rcWkgMzE"]) {
+        expect(serialized, value).not.toContain(value);
+      }
+      const inputValues = inputValuesOf(event);
+      const meta = inputValues._meta as Record<string, unknown>;
+      expect(meta).not.toHaveProperty("baggage");
+      expect(meta).not.toHaveProperty("tracestate");
+      expect(meta).not.toHaveProperty("traceparent");
+      // The _meta key names only: never a baggage member's (user.id, tenant.id).
+      expect(inputValues._metaDroppedKeys).toEqual(["baggage", "tracestate"]);
+      expect(event.metadata).toEqual({ traceparent: META_TRACEPARENT });
+    },
+  );
+
+  it("keeps every other _meta key verbatim under geo: true", async () => {
+    const event = await call({
+      _meta: { ...CLIENT_META, traceparent: META_TRACEPARENT, baggage: BAGGAGE },
+    });
+    expect(inputValuesOf(event)._meta).toEqual(CLIENT_META);
+  });
+
+  it("lifts a valid traceparent from _meta, else from the header; _meta wins", async () => {
+    const headers = { traceparent: HEADER_TRACEPARENT, "user-agent": "probe/1.0" };
+    const metaOnly = await call({ _meta: { traceparent: META_TRACEPARENT } });
+    // v1 passes a header record, v2 a web Request whose headers are `Headers`.
+    const headerOnly = await call({ requestInfo: { headers } });
+    const headerOnlyV2 = await call({ http: { req: { headers: new Headers(headers) } } });
+    const both = await call({ _meta: { traceparent: META_TRACEPARENT }, requestInfo: { headers } });
+    expect(metaOnly.metadata).toEqual({ traceparent: META_TRACEPARENT });
+    expect(headerOnly.metadata).toEqual({ traceparent: HEADER_TRACEPARENT });
+    expect(headerOnlyV2.metadata).toEqual({ traceparent: HEADER_TRACEPARENT });
+    expect(both.metadata).toEqual({ traceparent: META_TRACEPARENT });
+    // Stored once: not in _requestInfo, not in _meta.
+    for (const event of [headerOnly, headerOnlyV2, both]) {
+      const requestInfo = inputValuesOf(event)._requestInfo as { headers: Record<string, string> };
+      expect(requestInfo.headers).toEqual({ "user-agent": "probe/1.0" });
+    }
+    expect(JSON.stringify({ ...both, metadata: undefined })).not.toContain("4bf92f3577b34da6");
+  });
+
+  it.each([
+    ["one character short", META_TRACEPARENT.slice(0, -1)],
+    ["one character long", `${META_TRACEPARENT}0`],
+    ["a higher version's extra field", `01${META_TRACEPARENT.slice(2)}-00`],
+    ["version ff", `ff${META_TRACEPARENT.slice(2)}`],
+    ["an all-zero trace id", `00-${"0".repeat(32)}-00f067aa0ba902b7-01`],
+    ["an all-zero parent id", `00-4bf92f3577b34da6a3ce929d0e0e4736-${"0".repeat(16)}-01`],
+    ["upper-case hex", META_TRACEPARENT.toUpperCase()],
+    ["surrounding whitespace", ` ${META_TRACEPARENT}`],
+    ["a trailing newline", `${META_TRACEPARENT}\n`],
+    ["two joined headers", `${META_TRACEPARENT}, ${HEADER_TRACEPARENT}`],
+    ["free text", "user=alice@example.com"],
+  ])("lifts no traceparent with %s, and stores none of it", async (_case, value) => {
+    const fromMeta = await call({ _meta: { "openai/locale": "de-DE", traceparent: value } });
+    expect(fromMeta.metadata).toBeUndefined();
+    expect(inputValuesOf(fromMeta)._meta).toEqual({ "openai/locale": "de-DE" });
+    expect(inputValuesOf(fromMeta)._metaDroppedKeys).toEqual(["traceparent"]);
+    const fromHeader = await call({ requestInfo: { headers: { traceparent: value } } });
+    expect(fromHeader.metadata).toBeUndefined();
+    expect(inputValuesOf(fromHeader)).not.toHaveProperty("_requestInfo");
+  });
+
+  it("lifts a one-line header array, never two header lines", async () => {
+    // A hand-built v1 header record can hold an array; it is joined as
+    // _requestInfo joins it, so a repeated header is never read as its first line.
+    const one = await call({ requestInfo: { headers: { traceparent: [HEADER_TRACEPARENT] } } });
+    expect(one.metadata).toEqual({ traceparent: HEADER_TRACEPARENT });
+    const two = await call({
+      requestInfo: { headers: { traceparent: [HEADER_TRACEPARENT, META_TRACEPARENT] } },
+    });
+    expect(two.metadata).toBeUndefined();
+    expect(inputValuesOf(two)).not.toHaveProperty("_requestInfo");
+  });
+
+  it("lifts no traceparent that is not a string", async () => {
+    const event = await call({ _meta: { traceparent: { value: META_TRACEPARENT } } });
+    expect(event.metadata).toBeUndefined();
+    expect(inputValuesOf(event)._metaDroppedKeys).toEqual(["traceparent"]);
+  });
+
+  it("keeps the traceparent of a schema-less tool, which has no input_values", async () => {
+    const event = await call({ _meta: { traceparent: META_TRACEPARENT } }, { schemaLess: true });
+    expect(event.input_values).toBeUndefined();
+    expect(event.metadata).toEqual({ traceparent: META_TRACEPARENT });
+  });
+
+  it.each(["throw", "isError"] as const)(
+    "keeps the traceparent on a call that ends in %s",
+    async (outcome) => {
+      const event = await call({ _meta: { traceparent: META_TRACEPARENT } }, { outcome });
+      expect(event.status).toBe("error");
+      expect(event.metadata).toEqual({ traceparent: META_TRACEPARENT });
+    },
+  );
+
+  it("merges the traceparent with the multi-round-trip markers of a 2026-07-28 retry (#168)", async () => {
+    // A v2 context with inputResponses is the client's retry: input_retry.
+    const event = await call({
+      mcpReq: {
+        id: 2,
+        method: "tools/call",
+        _meta: { traceparent: META_TRACEPARENT, baggage: BAGGAGE },
+        inputResponses: { confirm: { action: "accept", content: { confirm: true } } },
+      },
+    });
+    expect(event.metadata).toEqual({ input_retry: true, traceparent: META_TRACEPARENT });
+    expect(JSON.stringify(event)).not.toContain("u-48213");
+  });
+
+  it("stores none of it under a per-tool inputValues: false", async () => {
+    const event = await call(
+      {
+        _meta: { traceparent: META_TRACEPARENT, tracestate: TRACESTATE, baggage: BAGGAGE },
+        requestInfo: { headers: { traceparent: HEADER_TRACEPARENT } },
+      },
+      { tools: { tc_tool: { inputValues: false } } },
+    );
+    expect(event.metadata).toBeUndefined();
+    expect(event.input_values).toBeUndefined();
+    const serialized = JSON.stringify(event);
+    for (const value of ["4bf92f3577b34da6", "0af7651916cd43dd", "u-48213", "t61rcWkgMzE"]) {
+      expect(serialized, value).not.toContain(value);
+    }
+  });
+
+  it("stores none of it under inputValues: false", async () => {
+    const event = await call(
+      {
+        _meta: { traceparent: META_TRACEPARENT, tracestate: TRACESTATE, baggage: BAGGAGE },
+        requestInfo: { headers: { traceparent: HEADER_TRACEPARENT } },
+      },
+      { inputValues: false },
+    );
+    expect(event.metadata).toBeUndefined();
+    expect(event.input_values).toBeUndefined();
   });
 });
 
