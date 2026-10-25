@@ -294,9 +294,9 @@ export interface WithYavioOptions {
    * request once the flush ends, so an ingest slower than
    * `flushTimeoutMs` would never have its batches answered. Only the
    * flush with a fetch of its own out waits, and no other flush takes that
-   * batch back meanwhile; once it is answered, the flush sends what
-   * concurrent requests queued, while a round trip still fits (review
-   * round 3). A fetch gives up at its 30 s timeout anyway.
+   * batch back meanwhile; once it is answered, the flush also sends the
+   * events of concurrent requests whose flushes gave up waiting on it,
+   * while a round trip still fits (review rounds 3 and 4). A fetch gives up at its 30 s timeout anyway.
    * Workers allow 30 s of `waitUntil` after the response; on Vercel the
    * function runs as long as it waits, so lower it there if an ingest that
    * hangs must not cost more (#171 review round 2).
@@ -408,7 +408,9 @@ export interface YavioClient {
    * (1 s by default) from the call. Never rejects and never drops: what it
    * could not deliver stays queued for the next flush, the flush interval
    * or `shutdown()`, with one `YAVIO-1208` line until a flush delivers
-   * everything again. A fetch an earlier request left in flight, older
+   * everything again, at most one a minute; not from a flush that gave up
+   * waiting on another running flush's batch, which reports for it. Events
+   * queued after the call are the next flush's. A fetch an earlier request left in flight, older
    * than `flushTimeoutMs` (twice that each time the batch is taken back,
    * and at least twice ingest's last round trip) — after a freeze its
    * connection is likely dead, on Cloudflare Workers it never settles once

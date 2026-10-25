@@ -1451,8 +1451,10 @@ export async function settleShared(config: Key): Promise<void> {
 }
 
 /**
- * `client.flush()` (#171): everything queued for the config's key, sent now
- * and answered, without releasing, stopping or arming anything. First what
+ * `client.flush()` (#171): everything queued for the config's key at the
+ * call, sent now and answered — what is queued later is the next flush's
+ * (decision A, review round 4) — without releasing, stopping or arming
+ * anything. First what
  * a signal or natural-exit drain is still sending (`signalDrain`) and the
  * key's own stops in progress (a last holder's release): events queued
  * before the call may be on their way out there. Then the key's live
