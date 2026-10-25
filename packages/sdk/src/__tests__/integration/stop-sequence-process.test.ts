@@ -312,6 +312,29 @@ describe.each(STACKS)("stop sequences against a stdio server on MCP SDK %s", (st
     );
 
     it(
+      "a second, wrapping createYavio() client still holds the pinned key (it serves the calls), ingest hanging: the shutdown-only client's shutdown() stops the transport anyway — one shutdown() line, exit 0 before the client's SIGTERM (review round 3)",
+      { timeout: 30_000 },
+      async () => {
+        ingest.hangEvents = true;
+        const wire = await open({ MODE: "stdin-end-mixed", RECIPE_SHUTDOWN_TIMEOUT_MS: "1000" });
+        await fiveCalls(wire);
+        const t0 = Date.now();
+        await wire.client.close(); // stdin's end; SIGTERM 2 s later
+        const exit = await wire.exited;
+
+        expect(exit, wire.stderr()).toMatchObject({ code: 0, signal: null });
+        expect(exit.at - t0).toBeGreaterThanOrEqual(950);
+        expect(exit.at - t0).toBeLessThan(2_000);
+        // On 28b5ecd the other client's hold made it a drain: "Process exit
+        // with 6 events not delivered — await analytics.shutdown() …".
+        expect(lossLines(wire.stderr())).toEqual([
+          "[YAVIO-1205] shutdown() deadline of 1000 ms reached — 6 events not delivered. Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.",
+        ]);
+        await vi.waitFor(() => expect(ingest.batches[0]?.abortedAt).toBeDefined());
+      },
+    );
+
+    it(
       "the same without process.exit(), stdin's end only (a client with a long grace): the stop aborts the fetch at 1 000 ms and the process exits on its own within D + 1 s, not after the 30 s fetch timeout",
       { timeout: 45_000 },
       async () => {

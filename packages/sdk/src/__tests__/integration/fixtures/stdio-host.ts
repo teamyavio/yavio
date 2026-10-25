@@ -21,7 +21,11 @@
  * same key with RECIPE_SHUTDOWN_TIMEOUT_MS or 1 500, and on stdin's end
  * await its `shutdown()`, then exit, #179) | "stdin-end-with-noexit" (the
  * same without `process.exit()`: prints `[fixture] shutdown resolved` to
- * stderr, and the process ends once nothing keeps it alive, #179); INTENT =
+ * stderr, and the process ends once nothing keeps it alive, #179) |
+ * "stdin-end-mixed" (the recipe on a key a second `createYavio()` client also
+ * holds: it wraps the servers, `withYavio()` only pins the key — the
+ * shutdown-only client's `shutdown()` must stop the transport anyway,
+ * #187 review round 3); INTENT =
  * "1" turns intent capture on and adds `widget_echo`, a widget-invoked
  * tool, so every informational line the SDK has is printed (#174);
  * SIGNAL_PROBE = "1" prints `[fixture] <signal> <Date.now()>` to stderr
@@ -61,7 +65,8 @@ const echo = async ({ q }: { q: string }) => ({ content: [{ type: "text" as cons
 /** Marks a tool as one the widget calls: with intent required, the SDK logs that it advertises `context` as optional there. */
 const widgetMeta = { "openai/widgetAccessible": true };
 /** #179: the README's stdio recipe next to `withYavio()`. */
-const pinnedRecipe = mode === "stdin-end-with" || mode === "stdin-end-with-noexit";
+const pinnedRecipe =
+  mode === "stdin-end-with" || mode === "stdin-end-with-noexit" || mode === "stdin-end-mixed";
 
 if (process.env.SIGNAL_PROBE === "1") {
   // Node dispatches a signal through `process.emit(name, name)`: wrapping
@@ -82,6 +87,10 @@ if (pinnedRecipe) {
     ...options,
     shutdownTimeoutMs: Number(process.env.RECIPE_SHUTDOWN_TIMEOUT_MS ?? 1_500),
   });
+  // "stdin-end-mixed" (#187 review round 3): a second createYavio() client
+  // wraps the servers and so holds the key, withYavio() only pins it.
+  const serving = mode === "stdin-end-mixed" ? createYavio(options) : undefined;
+  if (serving) withYavio(new McpServerV1({ name: "pin", version: "1.0.0" }), options);
   // Wrapped first: withYavio() tracks the tools registered through its proxy.
   // `slow` answers after `ms`: a call still running when stdin ends, which
   // finishes during the recipe's shutdown() (#179 review round 1). It says
@@ -95,13 +104,15 @@ if (pinnedRecipe) {
   };
   if (stack === "v2") {
     serveStdio(() => {
-      const server = withYavio(new McpServerV2({ name: "child", version: "1.0.0" }), options);
+      const raw = new McpServerV2({ name: "child", version: "1.0.0" });
+      const server = serving ? serving.wrap(raw) : withYavio(raw, options);
       server.registerTool("echo", { description: "Echo", inputSchema: { q: z.string() } }, echo);
       server.registerTool("slow", slowSchema, slow);
       return server;
     });
   } else {
-    const server = withYavio(new McpServerV1({ name: "child", version: "1.0.0" }), options);
+    const raw = new McpServerV1({ name: "child", version: "1.0.0" });
+    const server = serving ? serving.wrap(raw) : withYavio(raw, options);
     server.registerTool("echo", { description: "Echo", inputSchema: { q: z.string() } }, echo);
     server.registerTool("slow", slowSchema, slow);
     await server.connect(new StdioServerTransport());
@@ -137,7 +148,7 @@ if (pinnedRecipe) {
   await server.connect(new StdioServerTransport());
 }
 
-if (mode === "stdin-end" || mode === "stdin-end-with") {
+if (mode === "stdin-end" || mode === "stdin-end-with" || mode === "stdin-end-mixed") {
   process.stdin.on("end", async () => {
     await analytics?.shutdown();
     process.exit(0);

@@ -3243,7 +3243,11 @@ describe("the last client's shutdown() on a key withYavio() pinned (#179)", () =
     expect(toolCallQs()).toEqual(["before", "after"]);
   });
 
-  it("with a second client still holding the key, the first's shutdown() only drains; the second's stops the transport", async () => {
+  it("two never-wrapping clients on a pinned key: each one's shutdown() stops the transport — the first's while the second still holds it, the second's the fresh one (review round 3)", async () => {
+    // Until review round 3 the first only drained ("the first's shutdown()
+    // only drains; the second's stops it"): #179's original decision that a
+    // client with other holders left drains. On a pinned key the client
+    // decides now — a never-wrapping one means the process ends.
     const { analytics, raw } = setup("yav_179_two");
     const other = createYavio({
       apiKey: "yav_179_two",
@@ -3253,11 +3257,90 @@ describe("the last client's shutdown() on a key withYavio() pinned (#179)", () =
     await callTool(raw, "get_price", { q: "x" });
     const shutdowns = vi.spyOn(HttpTransport.prototype, "shutdown");
     await analytics.shutdown();
-    expect(shutdowns).not.toHaveBeenCalled();
-    expect(toolCallQs()).toEqual(["x"]); // drained: delivered
+    expect(shutdowns).toHaveBeenCalledTimes(1);
+    expect(toolCallQs()).toEqual(["x"]); // stopped: delivered
+    await callTool(raw, "get_price", { q: "y" }); // the fresh transport
     await other.shutdown();
-    expect(shutdowns).toHaveBeenCalledTimes(1); // before #179: 0
+    expect(shutdowns).toHaveBeenCalledTimes(2);
+    expect(toolCallQs()).toEqual(["x", "y"]);
     expect(_sharedStateCount()).toBe(1);
+  });
+
+  it("P6: a pinned key held by a wrapping client A, hanging ingest — the shutdown-only client B's shutdown() alone stops the transport at its own deadline with its line; A keeps its hold, its later calls go through the fresh transport and its own shutdown() drains them once ingest is back (review round 3)", async () => {
+    const apiKey = "yav_179_p6";
+    const endpoint = ingest.endpoint;
+    const a = createYavio({ apiKey, endpoint, serverOnly: true, shutdownTimeoutMs: 600 });
+    const b = createYavio({ apiKey, endpoint, serverOnly: true, shutdownTimeoutMs: 600 });
+    const pin = new McpServer({ name: "pin", version: "1.0" });
+    withYavio(pin, { apiKey, endpoint, serverOnly: true }).registerTool(
+      "get_price",
+      { inputSchema: { q: z.string() } },
+      ok,
+    );
+    const request = new McpServer({ name: "request", version: "1.0" });
+    a.wrap(request).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+    await callTool(request, "get_price", { q: "r1" });
+    await a.flush(); // the README's advice for such a host: flush per request
+    await callTool(pin, "get_price", { q: "p1" });
+    ingest.hangEvents = true;
+    await callTool(request, "get_price", { q: "r2" });
+    const t = Date.now();
+    await b.shutdown();
+    const took = Date.now() - t;
+    // On 28b5ecd B's release saw A's hold and only drained: no abort, no
+    // line, and at exit "Process exit with 2 events not delivered — await
+    // analytics.shutdown() …"; without process.exit() a hold up to 30 s.
+    expect(took).toBeGreaterThanOrEqual(580);
+    expect(took).toBeLessThan(1_100);
+    expect(lines1205()).toEqual([
+      "[YAVIO-1205] shutdown() deadline of 600 ms reached — 2 events not delivered. Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.",
+    ]);
+    await vi.waitFor(() => expect(ingest.batches.at(-1)?.abortedAt).toBeDefined());
+    expect(_sharedStateCount()).toBe(1); // A's hold and the pin live on
+    // A goes on: its calls go through the fresh transport, and its own
+    // shutdown() (it wraps) drains it once ingest is back.
+    await callTool(request, "get_price", { q: "r3" });
+    ingest.hangEvents = false;
+    await ingest.answerHung();
+    await a.shutdown();
+    expect(toolCallQs()).toContain("r3");
+    const r3 = ingest.batches.find((batch) =>
+      batch.events.some((e) => (e.input_values as { q?: string } | undefined)?.q === "r3"),
+    );
+    expect(r3?.status).toBe(200);
+    exitHooks()[0]?.call(process, 0);
+    expect(lines1205()).toHaveLength(1);
+  });
+
+  it("a signal after the shutdown-only client's stop, A still holding the key: the cycle stops the fresh transport, and every event is counted once — B's in its line, the fresh transport's in the cycle's (review round 3)", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      const apiKey = "yav_179_p6_signal";
+      const endpoint = ingest.endpoint;
+      const a = createYavio({ apiKey, endpoint, serverOnly: true, shutdownTimeoutMs: 600 });
+      const b = createYavio({ apiKey, endpoint, serverOnly: true, shutdownTimeoutMs: 600 });
+      withYavio(new McpServer({ name: "pin", version: "1.0" }), {
+        apiKey,
+        endpoint,
+        serverOnly: true,
+      });
+      const request = new McpServer({ name: "request", version: "1.0" });
+      a.wrap(request).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+      ingest.hangEvents = true;
+      await callTool(request, "get_price", { q: "before" }); // connection + call
+      await b.shutdown(); // the stop: 2 events given up, its line
+      await callTool(request, "get_price", { q: "after" }); // the fresh transport
+      process.emit("SIGTERM", "SIGTERM"); // D = 600 ms (A's explicit value)
+      await vi.waitFor(() => expect(lines1205()).toHaveLength(2), { timeout: 3_000 });
+      expect(lines1205()[0]).toBe(
+        "[YAVIO-1205] shutdown() deadline of 600 ms reached — 2 events not delivered. Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.",
+      );
+      expect(lines1205()[1]).toMatch(
+        /^\[YAVIO-1205\] Shutdown deadline of 600 ms reached — 1 events not delivered/,
+      );
+      await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+      exitHooks()[0]?.call(process, 0);
+      expect(lines1205()).toHaveLength(2);
+    });
   });
 
   it("after a natural-exit drain took the pinned entry and a send put it back, the client's shutdown() stops the restored transport: the fetch aborted, its shutdown() line (#167)", async () => {
