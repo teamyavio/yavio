@@ -137,7 +137,7 @@ Tool names are not validated — tools register after `withYavio()` runs — so 
 
 ## Session key
 
-`sessionKey` tells the SDK which conversation a call belongs to when the call carries no session key the SDK knows — on a per-request server (a new `McpServer` per request, stateless Streamable HTTP) every such call would otherwise be a session of its own, which the dashboard does not count (`session_source: "per_request"`). Code option only, on `createYavio()` and `withYavio()`:
+`sessionKey` tells the SDK which conversation a call belongs to when the call carries no session key the SDK knows — over HTTP every such call would otherwise be a session of its own (since SDK 0.5.5, on any host; 0.5.4 put all key-less callers of a server that reuses one stateless transport into one), which the dashboard does not count (`session_source: "per_request"`). Code option only, on `createYavio()` and `withYavio()`:
 
 ```ts
 const analytics = createYavio({
@@ -146,13 +146,13 @@ const analytics = createYavio({
 });
 ```
 
-The SDK takes a call's session from the first key it finds: `Mcp-Session-Id`, ChatGPT's `_meta["openai/session"]`, VS Code's `_meta["vscode.conversationId"]`, the Codex CLI's `_meta.threadId` (only from `codex-mcp-client`), then `sessionKey`, else the connection's own session. `sessionKey(request)` gets `{ headers, meta, authInfo, extra }` — the HTTP headers (names lower-cased, `{}` off HTTP), the request `_meta`, what your auth middleware set as `req.auth`, and the MCP SDK's handler context — the same on MCP SDK v1 and v2. It runs synchronously before the handler, at most once per call. Return a string of at most 1 024 characters, or `undefined` / `""` for none; a throw, a promise, a non-string or a longer string counts as none, with one `YAVIO-1102` warning per process, and never affects the call. A value that is not a function logs `YAVIO-1006` once and is ignored. The SDK stores `ses_` + an HMAC of the value keyed with the API key, never the value.
+The SDK takes a call's session from the first key it finds: `Mcp-Session-Id`, ChatGPT's `_meta["openai/session"]`, VS Code's `_meta["vscode.conversationId"]`, the Codex CLI's `_meta.threadId` (only from `codex-mcp-client`), then `sessionKey`; without any, a session of its own for the call over HTTP (`per_request`) and the connection's own session on stdio (`connection`). `sessionKey(request)` gets `{ headers, meta, authInfo, extra }` — the HTTP headers (names lower-cased, `{}` off HTTP), the request `_meta`, what your auth middleware set as `req.auth`, and the MCP SDK's handler context — the same on MCP SDK v1 and v2. It runs synchronously before the handler, at most once per call. Return a string of at most 1 024 characters, or `undefined` / `""` for none; a throw, a promise, a non-string or a longer string counts as none, with one `YAVIO-1102` warning per process, and never affects the call. A value that is not a function logs `YAVIO-1006` once and is ignored. The SDK stores `ses_` + an HMAC of the value keyed with the API key, never the value.
 
 <Callout type="warn">
   Return a **conversation** id. Funnels, paths, the step sequence and `identify()` work per session, and a session keeps its first identified user. A per-user id on its own — an auth subject such as `authInfo.extra.sub` — would chain all of that user's conversations into one endless session and one funnel attempt. Never return `authInfo.clientId` (the OAuth client, shared by every user of a client app), the bearer token, a constant, or a per-request id.
 </Callout>
 
-Each session a process sees takes an entry in its session store (1 000, least recently used out) and in the connection-event marks (10 000); with more concurrent conversations than that an idle one ages out and starts over. See [Setup](/docs/02-sdk/01-setup#sessions-on-per-request-servers) for the order of the keys and what `per_request` means.
+Each session a process sees takes an entry in its session store (1 000, least recently used out) and in the connection-event marks (10 000); with more concurrent conversations than that an idle one ages out and starts over. A call without a key on an HTTP request takes no entry in the session store. See [Setup](/docs/02-sdk/01-setup#sessions-on-per-request-servers) for the order of the keys and what `per_request` means.
 
 ## Example configurations
 

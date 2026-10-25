@@ -66,7 +66,7 @@ Database migrations run automatically when services start. Both PostgreSQL (via 
 
 ### Sessions of clients without a session key (migration `0022`)
 
-Migration `0022` adds `session_source` to `events`. From this release on, a session the SDK labels `per_request` — a client that sends no session key to a server building a new `McpServer` per request, one call per "session" — is no longer counted as a session: the Sessions KPI and the users list leave it out (the KPI says how many such calls there were), and the anonymous statistics count such an event as a person only through its user key and leave its `connection` rows out of the session cells. Older rows have no `session_source` and count as before. The statistics job recomputes the current and the previous month on its first run, so a figure in the anonymous statistics that spans the upgrade mixes the two methods.
+Migration `0022` adds `session_source` to `events`. From this release on, a session the SDK labels `per_request` — an HTTP call that carries no session key, on any host (SDK 0.5.4 and later; one call per "session" since 0.5.5, while 0.5.4 put all key-less callers of a server that reuses one stateless transport into one) — is no longer counted as a session: the Sessions KPI and the users list leave it out (the KPI says how many such calls there were), and the anonymous statistics count such an event as a person only through its user key and leave its `connection` rows out of the session cells. Older rows have no `session_source` and count as before. The statistics job recomputes the current and the previous month on its first run, so a figure in the anonymous statistics that spans the upgrade mixes the two methods.
 
 Expect three changes once your apps run `@yavio/sdk` 0.5.4:
 
