@@ -2619,6 +2619,55 @@ describe("the natural exit: beforeExit with events queued (#167)", () => {
     expect(lines1205()).toHaveLength(1);
   });
 
+  const toolCallQs = () =>
+    ingest.ofType("tool_call").map((e) => (e.input_values as { q: string }).q);
+
+  it("two createYavio() clients on one key: after the drain one re-wraps and shuts down, and the other's later calls are still delivered — the re-wrap put the drained entry back (review round 3)", async () => {
+    const a = build("yav_167_r3_two");
+    const b = build("yav_167_r3_two");
+    await callTool(a.raw, "get_price", { q: "a1" });
+    await callTool(b.raw, "get_price", { q: "b1" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    a.client.wrap(new McpServer({ name: "a2", version: "1.0" })); // a re-acquire
+    await callTool(b.raw, "get_price", { q: "b2" });
+    await a.client.shutdown(); // a releases; b still holds
+    // Before round 3: a's wrap made a new entry, a's shutdown() stopped it,
+    // and b's hold — on the drained entry — was stale: b3 was dropped.
+    expect(_sharedStateCount()).toBe(1);
+    await callTool(b.raw, "get_price", { q: "b3" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(toolCallQs()).toEqual(["a1", "b1", "b2", "b3"]));
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    // No phantom holder: a's hold was revived, not taken twice, so b's
+    // shutdown() is the last release and stops the transport.
+    await callTool(b.raw, "get_price", { q: "b4" });
+    await b.client.shutdown();
+    expect(_sharedStateCount()).toBe(0);
+    expect(toolCallQs()).toEqual(["a1", "b1", "b2", "b3", "b4"]);
+    expect(lines1205()).toEqual([]);
+  });
+
+  it("a client created after the drain shuts down, and the older client's later calls are still delivered — createYavio() put the drained entry back (review round 3)", async () => {
+    const a = build("yav_167_r3_late_client");
+    await callTool(a.raw, "get_price", { q: "a1" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    const late = build("yav_167_r3_late_client"); // createYavio() takes a hold
+    expect(_sharedStateCount()).toBe(1);
+    await late.client.shutdown(); // the late client releases; a still holds
+    // Before round 3: the late client's hold was on a new entry, its
+    // shutdown() stopped it, and a's later calls vanished without a line.
+    expect(_sharedStateCount()).toBe(1);
+    await callTool(a.raw, "get_price", { q: "a2" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(toolCallQs()).toEqual(["a1", "a2"]));
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    await a.client.shutdown(); // a's hold, revived by the send: the last release
+    expect(_sharedStateCount()).toBe(0);
+    expect(lines1205()).toEqual([]);
+  });
+
   it.each(["createYavio().wrap()", "withYavio()"] as const)(
     "100 rounds of drain → send → drain accumulate nothing — %s: at most one registry entry and one transport, one beforeExit listener, D unchanged, every event once (review round 2)",
     async (entry) => {

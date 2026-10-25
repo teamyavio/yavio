@@ -14,7 +14,10 @@
  * SDK's drain holds the loop — the test makes ingest answer late) |
  * "reenter-shutdown" (ENTRY "create" only: 3 calls; once the first drain
  * ran, the app makes one more call and ends with `await
- * analytics.shutdown()`, no `process.exit()` — review round 2). Progress
+ * analytics.shutdown()`, no `process.exit()` — review round 2) |
+ * "late-client" (3 calls; once the first drain ran, the app creates a
+ * second `createYavio()` client on the same key, shuts it down, then calls
+ * through the first proxy — review round 3). Progress
  * goes to stderr as `[cli +<ms>] …`; nothing here writes to stdout.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -81,6 +84,16 @@ if (scenario === "reenter-shutdown") {
       log("late call done");
       await analytics?.shutdown();
       log("shutdown() resolved");
+    }, 100);
+  });
+}
+if (scenario === "late-client") {
+  process.once("beforeExit", () => {
+    setTimeout(async () => {
+      const late = createYavio(options);
+      await late.shutdown();
+      await call("after-late-client");
+      log("late client shut down, 1 more call done");
     }, 100);
   });
 }

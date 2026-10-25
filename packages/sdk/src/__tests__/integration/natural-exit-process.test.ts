@@ -39,7 +39,7 @@ interface Run {
   stderr: string;
 }
 
-type Scenario = "cli" | "rearm" | "unref-tick" | "reenter-shutdown";
+type Scenario = "cli" | "rearm" | "unref-tick" | "reenter-shutdown" | "late-client";
 
 /** Run the fixture to its exit; killed with SIGKILL after `killAfterMs`, so a process that stays up fails the test instead of timing it out. */
 function runChild(
@@ -145,6 +145,18 @@ describe.each(ENTRIES)("a process that ends on its own, %s", (entry) => {
       const result = await run("unref-tick");
       expect(result.stderr).toContain("tick 2 done");
       expectDelivered(result, ["q0", "q1", "q2", "tick1", "tick2"]);
+    },
+  );
+
+  it(
+    "after the drain the app creates a second createYavio() client on the key and shuts it down: the first proxy's next call is still delivered by the next beforeExit (review round 3)",
+    { timeout: 30_000 },
+    async () => {
+      const result = await run("late-client");
+      expect(result.stderr).toContain("late client shut down, 1 more call done");
+      // Before round 3 the late client's hold was on a new entry, its
+      // shutdown() stopped it, and this call vanished without a line.
+      expectDelivered(result, ["q0", "q1", "q2", "after-late-client"]);
     },
   );
 });

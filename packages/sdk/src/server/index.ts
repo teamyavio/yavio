@@ -21,6 +21,7 @@ import {
   logOnce,
   pinShared,
   releaseShared,
+  reviveHold,
   settleShared,
 } from "./shared.js";
 
@@ -220,7 +221,11 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
   // resolving with the batch still on its way (#142).
   let closing: Promise<void> = Promise.resolve();
   const state = (): SharedState => {
-    if (hold && isLiveHold(config, hold)) return hold.state;
+    // A hold a natural-exit drain took is live again once its entry is
+    // back: revived, not replaced, or the entry would count it twice (#167).
+    if (hold && (isLiveHold(config, hold) || reviveHold(config, hold, SDK_VERSION))) {
+      return hold.state;
+    }
     // A stale hold is replaced, not released: its explicit value leaves the
     // live set here, or it would count towards D after this client's
     // shutdown() released the new one (#148 review round 7).

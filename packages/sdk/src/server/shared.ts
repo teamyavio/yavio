@@ -436,8 +436,9 @@ let beforeExitInstalled = false;
 const exitStops = new WeakSet<Transport>();
 /**
  * The entries a natural-exit drain took out of the registry, by key, until
- * something re-acquires the key or the last hold on such an entry is
- * released (#167 review rounds 1 and 2). Nobody released them: the process
+ * one is put back — by a send, a re-acquire or a client's next `wrap()`
+ * (`restoreDrained`) — or the last hold on it is released (#167 review
+ * rounds 1–3). Nobody released them: the process
  * went on after `beforeExit` — an app's `beforeExit` listener that
  * schedules more work, an unref'd timer of the app's firing while the
  * drain holds the loop — and a proxy it already has still sends. Such a
@@ -1201,13 +1202,8 @@ function slotFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string) 
         // goes back with a fresh transport, its holds and pin live again,
         // and the next `beforeExit` drains it (#167 review rounds 1 and 2).
         if (!slot.live) {
-          const drained = draining ? undefined : exitDrained.get(key);
           if (draining) slot.live = newTransport(config, sdkVersion);
-          else if (drained) {
-            exitDrained.delete(key);
-            drained.slot.live = newTransport(config, sdkVersion);
-            registry.set(key, drained);
-          }
+          else restoreDrained(config, sdkVersion);
         }
         slot.live?.send(events);
       },
@@ -1220,10 +1216,34 @@ function slotFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string) 
   return slot;
 }
 
+/**
+ * Put back the entry a natural-exit drain took for this config's key, with
+ * a fresh transport and the same generation, holders and pin, so every
+ * hold the drain took is live again (#167 review rounds 2 and 3). Nothing
+ * after a signal: a send then goes out through an immediate transport.
+ */
+function restoreDrained(config: Key, sdkVersion: string): Entry | undefined {
+  if (draining) return undefined;
+  const key = keyOf(config);
+  const drained = exitDrained.get(key);
+  if (!drained) return undefined;
+  exitDrained.delete(key);
+  drained.slot.live = newTransport(config, sdkVersion);
+  registry.set(key, drained);
+  return drained;
+}
+
 function entryFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string) => void): Entry {
   const key = keyOf(config);
   const existing = registry.get(key);
   if (existing) return existing;
+  // A re-acquire after a natural drain — a `wrap()`, a `withYavio()`, a new
+  // `createYavio()` — puts back the entry the drain took instead of making
+  // a new one: a new entry left the drained entry's holds stale, and once
+  // its last holder released, a stale client's later sends were dropped
+  // without a line (review round 3).
+  const restored = restoreDrained(config, sdkVersion);
+  if (restored) return restored;
 
   const slot = slotFor(config, sdkVersion, onEvict);
   // After a signal the facade may already have started an immediate
@@ -1234,9 +1254,10 @@ function entryFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string)
   slot.live = transport;
   const entry: Entry = { slot, holders: 0, pinned: false, generation: ++generations };
   registry.set(key, entry);
-  // Re-acquired: a new entry, and the holds the drain took stay stale; a
-  // later release that stops this transport is a release, and a send after
-  // it is dropped as before (review round 1).
+  // A new entry after a signal: a drained entry's holds stay stale, and
+  // their sends go out through immediate transports. A release that stops
+  // this transport is a release, and a send after it is dropped (review
+  // round 1).
   exitDrained.delete(key);
   installSignalHandlers();
   installBeforeExit();
@@ -1308,6 +1329,18 @@ export function dropHoldDeadline(hold: SharedHold): void {
 /** Is this hold on the transport that is live for its config right now? */
 export function isLiveHold(config: Key, hold: SharedHold): boolean {
   return registry.get(keyOf(config))?.generation === hold.generation;
+}
+
+/**
+ * A hold on the entry a natural-exit drain took, which nothing has put back
+ * yet: put it back and say so, so the client keeps this hold instead of
+ * taking a second one on the same entry — a holder that no `shutdown()`
+ * would ever release (#167 review round 3).
+ */
+export function reviveHold(config: Key, hold: SharedHold, sdkVersion: string): boolean {
+  const key = keyOf(config);
+  if (registry.has(key) || exitDrained.get(key)?.generation !== hold.generation) return false;
+  return restoreDrained(config, sdkVersion) !== undefined;
 }
 
 /**
