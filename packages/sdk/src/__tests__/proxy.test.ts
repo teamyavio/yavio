@@ -2824,6 +2824,16 @@ describe("valueFreeRejection (#123): what a rejected call may keep as error_mess
     expect(valueFreeRejection(undefined, "book")).toBeUndefined();
     expect(valueFreeRejection("", "book")).toBeUndefined();
   });
+
+  it("keeps MCP SDK v2's frozen requestState refusal, and only that exact text (#168)", () => {
+    expect(valueFreeRejection("Invalid or expired requestState", "book")).toBe(
+      "Invalid or expired requestState",
+    );
+    expect(valueFreeRejection("MCP error -32602: Invalid or expired requestState", "book")).toBe(
+      "MCP error -32602: Invalid or expired requestState",
+    );
+    expect(valueFreeRejection("Invalid or expired requestState: s1", "book")).toBeUndefined();
+  });
 });
 
 describe("session keys and session_source (#144)", () => {

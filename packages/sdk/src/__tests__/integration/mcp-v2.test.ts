@@ -725,7 +725,23 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
     urlAfterConfirm?: boolean;
     /** Once round 1 ran, the instances serving the retry have the tool changed or removed (a fleet mid-deploy). */
     afterRound1?: "schema_changed" | "removed";
+    /** The server's `requestState.verify` hook refuses every state (a signed state past its expiry). */
+    rejectState?: boolean;
   }
+
+  const mrtrServer = (opts: DeployOptions) =>
+    new McpServer(
+      { name: "mrtr", version: "1.0" },
+      opts.rejectState
+        ? {
+            requestState: {
+              verify: (state: string) => {
+                throw new Error(`expired: ${state}`);
+              },
+            },
+          }
+        : undefined,
+    );
 
   /**
    * As in v2's own `inputRequired` docs: round 1 works 40 ms and asks for a
@@ -859,7 +875,7 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
     const runs = { n: 0 };
     const nodeHandler = toNodeHandler(
       createMcpHandler(() => {
-        const server = new McpServer({ name: "mrtr", version: "1.0" });
+        const server = mrtrServer(opts);
         registerDeploy(server, opts, runs);
         return yavio.wrap(server);
       }),
@@ -917,7 +933,7 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
     serverOnly = true,
   ) {
     const yavio = createYavio({ apiKey: "yav_mrtr_shim", endpoint: ingest.endpoint, serverOnly });
-    const server = new McpServer({ name: "mrtr", version: "1.0" });
+    const server = mrtrServer(opts);
     const runs = registerDeploy(server, opts);
     const wrapped = yavio.wrap(server);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -1030,6 +1046,25 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
       ).toBe(call.calls[0]?.trace_id);
     });
 
+    it("a retry whose requestState the server's verify hook refuses (-32602 before the handler) is one server error, marked as a retry", async () => {
+      const call = await modernCall({ stateOnly: true, rejectState: true });
+      expect(call.era).toBe("2026-07-28");
+      expect(call.runs).toBe(1);
+      expect(call.result).toBeInstanceOf(Error);
+      expect(String(call.result)).toContain("Invalid or expired requestState");
+      expect(call.calls).toHaveLength(1);
+      const [event] = call.calls;
+      expect(event?.status).toBe("error");
+      expect(event?.error_category).toBe("server");
+      expect(event?.error_message).toBe("Invalid or expired requestState");
+      // Nothing ran in the retry request.
+      expect(event?.latency_ms).toBeUndefined();
+      expect(event?.metadata).toEqual({ input_retry: true });
+      // Nothing validated the retry's arguments: stored like a rejected call's.
+      expect(event?.input_keys).toEqual({ env: true });
+      expect(event?.input_values).not.toHaveProperty("env");
+    });
+
     it("a retry the MCP SDK rejects before the handler (the tool changed or vanished between the rounds) is one validation event, marked as a retry", async () => {
       const changed = await modernCall({ afterRound1: "schema_changed" });
       expect(changed.runs).toBe(1);
@@ -1109,6 +1144,20 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
       expect(call.calls).toHaveLength(1);
       expect(call.calls[0]?.error_category).toBe("server");
       expect(call.calls[0]?.metadata).toEqual({ input_rounds: 1 });
+    });
+
+    it("the verify hook refusing the round's requestState is one server error, as on 2026-07-28", async () => {
+      const call = await shimCall({ stateOnly: true, rejectState: true });
+      expect(call.runs).toBe(1);
+      expect(call.result).toBeInstanceOf(Error);
+      expect(call.calls).toHaveLength(1);
+      const [event] = call.calls;
+      expect(event?.status).toBe("error");
+      expect(event?.error_category).toBe("server");
+      expect(event?.error_message).toBe("Invalid or expired requestState");
+      expect(event?.metadata).toEqual({ input_rounds: 1 });
+      // Round 1 ran (40 ms) in this request.
+      expect(event?.latency_ms).toBeGreaterThanOrEqual(35);
     });
 
     it("a URL elicitation after an interim round leaves no event: the client retries the call after the URL flow", async () => {

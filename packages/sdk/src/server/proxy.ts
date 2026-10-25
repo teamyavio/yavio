@@ -99,6 +99,27 @@ function isToolNotFoundError(error: unknown, toolName: string): boolean {
   return text === `Tool ${toolName} not found` || text === `Tool ${toolName} disabled`;
 }
 
+/**
+ * MCP SDK v2's refusal of a multi-round-trip round's `requestState` (#168):
+ * the integrator's `requestState.verify` hook threw (a signed state past its
+ * expiry, a forged one) or the state is not a string. A thrown InvalidParams
+ * whose `data.reason` is `invalid_request_state` and whose message v2 freezes
+ * to `"Invalid or expired requestState"` (2.0.0 to 2.4.0); the hook's own
+ * reason goes to the server's `onerror` only.
+ */
+const INVALID_REQUEST_STATE_MESSAGE = "Invalid or expired requestState";
+
+function isInvalidRequestState(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { code, data } = error as { code?: unknown; data?: unknown };
+  return (
+    code === INVALID_PARAMS &&
+    typeof data === "object" &&
+    data !== null &&
+    (data as { reason?: unknown }).reason === "invalid_request_state"
+  );
+}
+
 /** A URL elicitation is a protocol flow McpServer passes to the client unwrapped, not a failure. */
 function isUrlElicitationRequired(error: unknown): boolean {
   return (
@@ -778,6 +799,10 @@ export function createProxy<T extends McpServerLike>(
     args: unknown,
     extra: unknown,
     result: unknown,
+    // `server` only for a 2026-07-28 retry whose requestState v2 refused
+    // (see the status wrapper); every other pre-handler failure is
+    // `validation`.
+    rejectionCategory: "validation" | "server" = "validation",
   ): ToolCallEvent | null => {
     const { toolName, context } = frame;
     // The interim result of a 2026-07-28 multi-round-trip call: the client
@@ -836,7 +861,7 @@ export function createProxy<T extends McpServerLike>(
       {
         toolName,
         status: "error",
-        errorCategory: "validation",
+        errorCategory: rejectionCategory,
         // Result-derived text, so under outputValues; McpServer's text can
         // echo the rejected value (Zod 3), so as-is only with the values.
         errorMessage: !capture.outputValues
@@ -927,6 +952,16 @@ export function createProxy<T extends McpServerLike>(
       // elicitation a later shim round throws is the exception: the call is
       // not done, and the client retries it after the URL flow as a new
       // tools/call, which records its own event.
+      //
+      // And a 2026-07-28 retry whose requestState v2 refused before the
+      // handler ran (the integrator's verify hook threw: a signed state past
+      // its expiry, a forged one; or a non-string state). The call's handler
+      // ran in an earlier request and asked for input, and the round trip
+      // failed: `error` / `server`, as on the shim, where the same refusal
+      // comes after an interim round in the same request (the branch above).
+      // Built like a pre-handler failure — no latency (nothing ran in this
+      // request), and the retry's arguments, which nothing validated in this
+      // request, stored like a rejected call's.
       try {
         if (frame.event) {
           transport.send([
@@ -946,6 +981,13 @@ export function createProxy<T extends McpServerLike>(
             content: [{ type: "text", text: (error as Error).message }],
           };
           const event = finalizeCallEvent(frame, params?.arguments, extra, rejection);
+          if (event) transport.send([event]);
+        } else if (frame.inputRetry && isInvalidRequestState(error)) {
+          const rejection = {
+            isError: true,
+            content: [{ type: "text", text: INVALID_REQUEST_STATE_MESSAGE }],
+          };
+          const event = finalizeCallEvent(frame, params?.arguments, extra, rejection, "server");
           if (event) transport.send([event]);
         }
       } catch {
@@ -1496,6 +1538,9 @@ export function valueFreeRejection(
   if (text.startsWith("Input validation error:")) {
     return "Input validation error: the arguments did not match the tool's schema (values not stored, see capture.rejectedInputValues)";
   }
+  // v2's frozen refusal of a retry's requestState (#168): fixed text, the
+  // verify hook's reason never reaches it.
+  if (text === INVALID_REQUEST_STATE_MESSAGE) return message;
   return undefined;
 }
 
