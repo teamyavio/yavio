@@ -854,6 +854,10 @@ export function createProxy<T extends McpServerLike>(
         intentSignals: getCapturedIntent() ?? undefined,
         intentContext: intentContextFor(config),
         clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
+        // A 2026-07-28 retry the MCP SDK rejects before the handler — the tool
+        // was disabled, removed or changed its schema between the rounds (a
+        // fleet mid-deploy) — is still the client's retry (#168).
+        metadata: inputMetadata(0, frame.inputRetry),
       },
     );
   };

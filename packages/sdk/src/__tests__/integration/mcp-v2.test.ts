@@ -723,6 +723,8 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
     badOutput?: boolean;
     throwFinal?: boolean;
     urlAfterConfirm?: boolean;
+    /** Once round 1 ran, the instances serving the retry have the tool changed or removed (a fleet mid-deploy). */
+    afterRound1?: "schema_changed" | "removed";
   }
 
   /**
@@ -736,6 +738,17 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
    * (`-32042`, 2025 era).
    */
   function registerDeploy(server: McpServer, opts: DeployOptions = {}, runs = { n: 0 }) {
+    if (opts.afterRound1 && runs.n > 0) {
+      if (opts.afterRound1 === "schema_changed") {
+        server.registerTool("deploy", { inputSchema: z.object({ env: z.number() }) }, async () =>
+          ok("deployed"),
+        );
+      } else {
+        // Another tool keeps tools/call registered: `deploy` is unknown, not the method.
+        server.registerTool("status", { inputSchema: z.object({}) }, async () => ok("up"));
+      }
+      return runs;
+    }
     const final = async (text: string) => {
       await sleep(20);
       if (opts.throwFinal) throw new Error("deploy backend down");
@@ -1015,6 +1028,23 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
       expect(
         (call.result as { _meta?: { yavio?: { traceId?: string } } })._meta?.yavio?.traceId,
       ).toBe(call.calls[0]?.trace_id);
+    });
+
+    it("a retry the MCP SDK rejects before the handler (the tool changed or vanished between the rounds) is one validation event, marked as a retry", async () => {
+      const changed = await modernCall({ afterRound1: "schema_changed" });
+      expect(changed.runs).toBe(1);
+      expect((changed.result as { isError?: boolean }).isError).toBe(true);
+      expect(changed.calls).toHaveLength(1);
+      expect(changed.calls[0]?.error_category).toBe("validation");
+      expect(changed.calls[0]?.latency_ms).toBeUndefined();
+      expect(changed.calls[0]?.metadata).toEqual({ input_retry: true });
+      _resetGlobalState();
+      ingest.events.length = 0;
+      const removed = await modernCall({ afterRound1: "removed" });
+      expect(removed.runs).toBe(1);
+      expect(removed.calls).toHaveLength(1);
+      expect(removed.calls[0]?.error_category).toBe("validation");
+      expect(removed.calls[0]?.metadata).toEqual({ input_retry: true });
     });
 
     it("a 2025-era client against a per-request host: the shim has no channel, one server error as before", async () => {
