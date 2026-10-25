@@ -857,7 +857,7 @@ describe.each(STACKS)("a failed send at the signal on MCP SDK %s (#164)", (stack
   );
 
   it.each(failures)(
-    "no signal — a withYavio() pin and a client's awaited shutdown(), a CLI or cron shape — ingest answers with %s, then 200: the drain holds the process until its retry delivers, shutdown() resolves (#164 review round 4)",
+    "no signal — a withYavio() pin and a client's awaited shutdown(), a CLI or cron shape — ingest answers with %s, then 200: the stop holds the process until its retry delivers, shutdown() resolves (#164 review round 4; a drain before #179)",
     { timeout: 30_000 },
     async (_label, failure) => {
       ingest.failNext = [failure];
@@ -879,6 +879,33 @@ describe.each(STACKS)("a failed send at the signal on MCP SDK %s (#164)", (stack
       expect(exit.afterSignalMs).toBeLessThan(4_000);
       expectDeliveredOnRetry(failure, exit, exitAt);
       expect(child.lossLines()).toEqual([]);
+    },
+  );
+
+  it(
+    "no signal — a withYavio() pin and a client's awaited shutdown(), without process.exit() — ingest hanging: the stop aborts the fetch at D and counts it in its shutdown() line, and the process exits on its own within D + 1 s, not after the 30 s fetch timeout (#179)",
+    { timeout: 45_000 },
+    async () => {
+      ingest.hangEvents = true;
+      const child = await start("pinned-cli");
+      await drive(child.port);
+      agent.destroy();
+      child.kill("SIGUSR2"); // the app closes its server and awaits shutdown(): no signal the SDK handles
+      const exit = await child.exited;
+
+      // Before #179 the pin made the shutdown a drain: it stopped waiting at
+      // 4 s, the fetch held the process to its 30 s timeout and a retry went
+      // out — exit at 31.6 s.
+      expect(exit, child.output()).toMatchObject({ code: 0, signal: null });
+      expect(child.output()).toContain("shutdown resolved");
+      expect(exit.afterSignalMs).toBeGreaterThanOrEqual(3_900);
+      expect(exit.afterSignalMs).toBeLessThan(5_000);
+      expect(child.lossLines()).toEqual([EVENTS_BEFORE_SIGNAL]);
+      expect(child.output()).toContain(
+        `[YAVIO-1205] shutdown() deadline of 4000 ms reached — ${EVENTS_BEFORE_SIGNAL} events not delivered.`,
+      );
+      expect(ingest.batches).toHaveLength(1); // no retry went out
+      expect(ingest.batches[0]?.abortedAt).toBeDefined();
     },
   );
 

@@ -17,6 +17,7 @@ import {
   _trackedTransportCount,
   processBudgetMs,
 } from "../../server/shared.js";
+import { HttpTransport } from "../../transport/http.js";
 import { restoreEnv } from "../env.js";
 import { type MockIngest, callTool, startMockIngest } from "./helpers.js";
 
@@ -2705,4 +2706,543 @@ describe("the natural exit: beforeExit with events queued (#167)", () => {
     },
     20_000,
   );
+});
+
+describe("a SIGTERM after the cycle's SIGINT: a client's stop sequence (#175)", () => {
+  // Claude Code 2.1.310 (macOS, Linux) stops a stdio server with SIGINT, a
+  // SIGTERM 100 ms later and a SIGKILL 400 ms after that. Before #175 the
+  // SIGTERM handed the drain back at once, about 100 ms in.
+  let ingest: MockIngest;
+  let warn: ReturnType<typeof vi.spyOn>;
+  let stderr: ReturnType<typeof vi.spyOn>;
+  let lines: string[];
+  /** What the SDK re-raised: the signal, ms after `t0` (the SIGINT), and the event batches ingest had answered by then. */
+  let reraised: Array<{ signal: string; at: number; answered: number }>;
+  let t0 = 0;
+  const lines1205 = () => lines.filter((l) => l.includes("YAVIO-1205"));
+  const exitHooks = () => process.listeners("exit").filter((l) => l.name === "yavioReportAtExit");
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const CLIENT_HINT =
+    "The client stops the server with SIGINT, SIGTERM and SIGKILL (Claude Code: 100 ms, then 400 ms); a higher shutdownTimeoutMs does not extend that.";
+  const BOUND_LINE =
+    /^\[YAVIO-1205\] Shutdown deadline of 400 ms \(SIGTERM (\d+) ms after SIGINT\) reached — (\d+) events not delivered \(queued, in flight or refused after the deadline\)\. /;
+
+  /** The SDK the only listener on both signals: a stdio server with no handler of its own. */
+  const alone = (fn: () => Promise<void>) =>
+    withoutOtherListeners("SIGINT", () => withoutOtherListeners("SIGTERM", fn));
+
+  /** A `withYavio()` server, called once: two events queued (connection, tool_call). */
+  async function pinned(apiKey: string, options: { shutdownTimeoutMs?: number } = {}) {
+    const raw = new McpServer({ name: "app", version: "1.0" });
+    withYavio(raw, {
+      apiKey,
+      endpoint: ingest.endpoint,
+      serverOnly: true,
+      ...options,
+    }).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+    await callTool(raw, "get_price", { q: "x" });
+    return raw;
+  }
+
+  /**
+   * Emit `signal` with the clock pinned at `t0 + ms`: the cycle's decisions
+   * read `Date.now()` when the signal arrives, so the rules are tested at
+   * exact offsets, independent of how late a timer fires on a loaded host.
+   */
+  function emitAt(ms: number, signal: "SIGINT" | "SIGTERM"): void {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(t0 + ms);
+    try {
+      process.emit(signal, signal);
+    } finally {
+      clock.mockRestore();
+    }
+  }
+
+  beforeEach(async () => {
+    _resetGlobalState();
+    lines = [];
+    reraised = [];
+    _setSignalReraise((signal) =>
+      reraised.push({ signal, at: Date.now() - t0, answered: ingest.responded }),
+    );
+    warn = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      lines.push(String(args[0]));
+    });
+    stderr = spyStderr(lines);
+    ingest = await startMockIngest();
+  });
+
+  afterEach(async () => {
+    await ingest.answerHung();
+    _resetGlobalState();
+    warn.mockRestore();
+    stderr.mockRestore();
+    vi.restoreAllMocks(); // the clock and transport spies a failed assertion left behind
+    await ingest.close();
+  });
+
+  it("SIGINT, then SIGTERM 100 ms later, ingest answering at SIGINT + 200 ms: nothing is handed back at the SIGTERM; the batch is answered, then the SIGTERM is re-raised before SIGINT + 400 ms, with no line", async () => {
+    await alone(async () => {
+      await pinned("yav_175_deliver");
+      // Answered after the SIGTERM and well before the bound, wherever the
+      // batch's receipt falls.
+      ingest.respondAfterMs = (batch) => Math.max(0, t0 + 200 - batch.receivedAt);
+      t0 = Date.now();
+      process.emit("SIGINT", "SIGINT");
+      await sleep(100);
+      process.emit("SIGTERM", "SIGTERM");
+      // Before #175: [{ signal: "SIGTERM", at: ~100, answered: 0 }] here.
+      expect(reraised).toEqual([]);
+      await vi.waitFor(() => expect(reraised).toHaveLength(1), { timeout: 2_000 });
+      expect(reraised[0]).toMatchObject({ signal: "SIGTERM", answered: 1 });
+      expect(reraised[0]?.at).toBeGreaterThanOrEqual(195);
+      expect(reraised[0]?.at).toBeLessThan(400);
+      expect(ingest.batches.map((b) => b.abortedAt)).toEqual([undefined]);
+      expect(lines1205()).toEqual([]);
+    });
+  });
+
+  it("against a hanging ingest: handed back at SIGINT + 400 ms, the stop's fetch aborted there, one line that names that bound and drops the hint to raise shutdownTimeoutMs", async () => {
+    await alone(async () => {
+      ingest.hangEvents = true;
+      await pinned("yav_175_hang");
+      t0 = Date.now();
+      process.emit("SIGINT", "SIGINT");
+      await sleep(100);
+      process.emit("SIGTERM", "SIGTERM");
+      await vi.waitFor(() => expect(reraised).toHaveLength(1), { timeout: 2_000 });
+      expect(reraised[0]?.signal).toBe("SIGTERM");
+      // Before #175: at the SIGTERM, about 100 ms in.
+      expect(reraised[0]?.at).toBeGreaterThanOrEqual(395);
+      expect(reraised[0]?.at).toBeLessThan(1_000);
+      expect(lines1205()).toHaveLength(1);
+      const [line] = lines1205() as [string];
+      const [, sigtermAfter, lost] = BOUND_LINE.exec(line) ?? [];
+      expect(line, line).toMatch(BOUND_LINE);
+      expect(Number(sigtermAfter)).toBeGreaterThanOrEqual(95);
+      expect(Number(sigtermAfter)).toBeLessThan(400);
+      expect(Number(lost)).toBe(2);
+      expect(line.endsWith(CLIENT_HINT)).toBe(true);
+      expect(line).not.toContain("Raise shutdownTimeoutMs");
+      // Cut to the bound (`cutDeadline`), not left to run to D = 4 s.
+      await vi.waitFor(() => expect(ingest.batches[0]?.abortedAt).toBeDefined(), {
+        timeout: 1_000,
+      });
+      expect((ingest.batches[0]?.abortedAt as number) - t0).toBeLessThan(1_000);
+    });
+  });
+
+  it("the bound counts from the SIGINT, never from the SIGTERM: a SIGTERM at SIGINT + 200 ms still ends the cycle at SIGINT + 400 ms", async () => {
+    await alone(async () => {
+      ingest.hangEvents = true;
+      await pinned("yav_175_anchor");
+      t0 = Date.now();
+      emitAt(0, "SIGINT");
+      emitAt(200, "SIGTERM");
+      expect(reraised).toEqual([]);
+      await vi.waitFor(() => expect(reraised).toHaveLength(1), { timeout: 2_000 });
+      expect(lines1205()).toEqual([
+        expect.stringMatching(
+          /^\[YAVIO-1205\] Shutdown deadline of 400 ms \(SIGTERM 200 ms after SIGINT\) reached — 2 events not delivered/,
+        ),
+      ]);
+    });
+  });
+
+  it("a third signal hands back at once: SIGINT, SIGTERM at +100 ms, SIGINT at +150 ms", async () => {
+    await alone(async () => {
+      ingest.hangEvents = true;
+      await pinned("yav_175_third");
+      t0 = Date.now();
+      emitAt(0, "SIGINT");
+      emitAt(100, "SIGTERM");
+      expect(reraised).toEqual([]); // before #175: [{ signal: "SIGTERM", at: 100, … }]
+      emitAt(150, "SIGINT"); // an impatient Ctrl-C still ends it
+      expect(reraised).toEqual([{ signal: "SIGINT", at: 150, answered: 0 }]);
+    });
+  });
+
+  it("after the SIGTERM, a repeat of it within 250 ms of its arrival is the same delivery; one after that hands back at once", async () => {
+    await alone(async () => {
+      ingest.hangEvents = true;
+      await pinned("yav_175_repeat");
+      t0 = Date.now();
+      emitAt(0, "SIGINT");
+      emitAt(100, "SIGTERM");
+      emitAt(340, "SIGTERM"); // 240 ms after the SIGTERM's arrival (340 after the SIGINT): one delivery, twice
+      expect(reraised).toEqual([]);
+      emitAt(360, "SIGTERM"); // 260 ms after it: a new delivery
+      expect(reraised).toEqual([{ signal: "SIGTERM", at: 360, answered: 0 }]);
+    });
+  });
+
+  it("guard: a SIGTERM at SIGINT + 400 ms or later hands back at once, as before #175", async () => {
+    await alone(async () => {
+      ingest.hangEvents = true;
+      await pinned("yav_175_late", { shutdownTimeoutMs: 2_000 });
+      t0 = Date.now();
+      emitAt(0, "SIGINT");
+      emitAt(400, "SIGTERM");
+      expect(reraised).toEqual([{ signal: "SIGTERM", at: 400, answered: 0 }]);
+    });
+  });
+
+  it("guard: SIGTERM, then SIGINT 100 ms later, hands back at once — only the SIGINT → SIGTERM order is a stop sequence (decision E)", async () => {
+    await alone(async () => {
+      ingest.hangEvents = true;
+      await pinned("yav_175_order");
+      t0 = Date.now();
+      emitAt(0, "SIGTERM");
+      emitAt(100, "SIGINT");
+      expect(reraised).toEqual([{ signal: "SIGINT", at: 100, answered: 0 }]);
+    });
+  });
+
+  it("a lower explicit shutdownTimeoutMs is not extended: D = 250 ms hands the SIGTERM back at SIGINT + 250 ms, with D's wording and hint", async () => {
+    await alone(async () => {
+      ingest.hangEvents = true;
+      await pinned("yav_175_lower", { shutdownTimeoutMs: 250 });
+      t0 = Date.now();
+      process.emit("SIGINT", "SIGINT");
+      await sleep(100);
+      process.emit("SIGTERM", "SIGTERM");
+      expect(reraised).toEqual([]); // before #175: handed back here
+      await vi.waitFor(() => expect(reraised).toHaveLength(1), { timeout: 2_000 });
+      expect(reraised[0]?.signal).toBe("SIGTERM");
+      expect(reraised[0]?.at).toBeGreaterThanOrEqual(245);
+      expect(reraised[0]?.at).toBeLessThan(1_000);
+      expect(lines1205()).toEqual([
+        "[YAVIO-1205] Shutdown deadline of 250 ms reached — 2 events not delivered (queued, in flight or refused after the deadline). Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.",
+      ]);
+    });
+  });
+
+  it("next to the app's own handler on both signals: its shutdown() returns at SIGINT + 400 ms, after the cycle's one line, and nothing is re-raised", async () => {
+    await alone(async () => {
+      ingest.hangEvents = true;
+      const analytics = createYavio({
+        apiKey: "yav_175_app",
+        endpoint: ingest.endpoint,
+        serverOnly: true,
+      });
+      const raw = new McpServer({ name: "app", version: "1.0" });
+      analytics.wrap(raw).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+      await callTool(raw, "get_price", { q: "x" });
+      let returnedAt: number | undefined;
+      let linesAtReturn = -1;
+      let stopping: Promise<void> | undefined;
+      const stop = () => {
+        stopping ??= analytics.shutdown().then(() => {
+          returnedAt = Date.now() - t0;
+          linesAtReturn = lines1205().length;
+        });
+      };
+      process.on("SIGINT", stop);
+      process.on("SIGTERM", stop);
+      try {
+        t0 = Date.now();
+        process.emit("SIGINT", "SIGINT");
+        await sleep(100);
+        process.emit("SIGTERM", "SIGTERM");
+        await vi.waitFor(() => expect(returnedAt).toBeDefined(), { timeout: 5_000 });
+        // Before #175 the SIGTERM handed back at once and the app's
+        // shutdown() waited for the 4 s deadline: under Claude Code the
+        // SIGKILL at 500 ms came first, without a line.
+        expect(returnedAt).toBeGreaterThanOrEqual(395);
+        expect(returnedAt).toBeLessThan(1_500);
+        expect(linesAtReturn).toBe(1);
+        expect(lines1205()[0]).toMatch(BOUND_LINE);
+        expect(reraised).toEqual([]);
+      } finally {
+        process.off("SIGINT", stop);
+        process.off("SIGTERM", stop);
+      }
+    });
+  });
+
+  it("a flush() during the cycle ends at the bound too, not at its own flushTimeoutMs", async () => {
+    await alone(async () => {
+      ingest.hangEvents = true;
+      const analytics = createYavio({
+        apiKey: "yav_175_flush",
+        endpoint: ingest.endpoint,
+        serverOnly: true,
+        flushTimeoutMs: 2_000,
+      });
+      const raw = new McpServer({ name: "app", version: "1.0" });
+      analytics.wrap(raw).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+      await callTool(raw, "get_price", { q: "x" });
+      t0 = Date.now();
+      process.emit("SIGINT", "SIGINT");
+      const flushed = analytics.flush().then(() => Date.now() - t0);
+      await sleep(100);
+      process.emit("SIGTERM", "SIGTERM");
+      const took = await flushed;
+      // Before #175: the SIGTERM handed back at once, and the flush waited
+      // for its own 2 s.
+      expect(took).toBeGreaterThanOrEqual(395);
+      expect(took).toBeLessThan(1_500);
+    });
+  });
+
+  it("a request served after the SIGTERM sends through a post-signal transport whose fetch is cut at the bound, not at SIGINT + D", async () => {
+    await alone(async () => {
+      ingest.hangEvents = true;
+      const raw = await pinned("yav_175_late_fetch");
+      t0 = Date.now();
+      process.emit("SIGINT", "SIGINT");
+      await sleep(100);
+      process.emit("SIGTERM", "SIGTERM");
+      await sleep(50);
+      await callTool(raw, "get_price", { q: "late" }); // sent at once, one attempt
+      await vi.waitFor(() => expect(ingest.batches).toHaveLength(2));
+      // Before #175 the hand-back at the SIGTERM left SIGINT + 4 s as the
+      // last deadline, and the late fetch ran until then.
+      await vi.waitFor(() => expect(ingest.batches[1]?.abortedAt).toBeDefined(), {
+        timeout: 2_000,
+      });
+      const abortedAfter = (ingest.batches[1]?.abortedAt as number) - t0;
+      expect(abortedAfter).toBeGreaterThanOrEqual(395);
+      expect(abortedAfter).toBeLessThan(1_000);
+    });
+  });
+
+  it("the README recipe next to an escalated cycle: what the line cannot count — a second late request's events, queued behind the first's cut batch — comes at exit in the bound's wording, not D's", async () => {
+    await alone(async () => {
+      ingest.hangEvents = true;
+      const client = createYavio({
+        apiKey: "yav_175_exit",
+        endpoint: ingest.endpoint,
+        serverOnly: true,
+      });
+      const raw = new McpServer({ name: "app", version: "1.0" });
+      client.wrap(raw).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+      await callTool(raw, "get_price", { q: "before" }); // connection + call, queued
+      let atReturn: string[] | undefined;
+      let stopping: Promise<void> | undefined;
+      const app = () => {
+        stopping ??= (async () => {
+          await client.shutdown();
+          atReturn = lines1205();
+          exitHooks()[0]?.call(process, 0); // process.exit(0)
+        })();
+      };
+      process.on("SIGINT", app);
+      process.on("SIGTERM", app);
+      try {
+        t0 = Date.now();
+        process.emit("SIGINT", "SIGINT");
+        await sleep(100);
+        process.emit("SIGTERM", "SIGTERM");
+        // Two calls served after the SIGTERM, through one post-signal
+        // transport: the first's batch in flight, its fetch bounded by
+        // SIGINT + 400 ms, the second's events queued behind it.
+        await callTool(raw, "get_price", { q: "after-1" });
+        await callTool(raw, "get_price", { q: "after-2" });
+        await vi.waitFor(() => expect(atReturn).toBeDefined(), { timeout: 5_000 });
+        expect(atReturn).toEqual([expect.stringMatching(BOUND_LINE)]);
+        expect(lines1205()).toHaveLength(2);
+        expect(lines1205()[1]).toMatch(
+          /^\[YAVIO-1205\] Shutdown deadline of 400 ms \(SIGTERM \d+ ms after SIGINT\) reached — 1 more events not delivered \(in flight when the deadline cut it, sent in its last 100 ms or after it, or queued behind a request it cut\)\. /,
+        );
+        expect(lines1205()[1]?.endsWith(CLIENT_HINT)).toBe(true);
+        expect(lines1205().join("\n")).not.toContain("Raise shutdownTimeoutMs");
+        const counts = lines1205().map((l) => Number(/(\d+) (more )?events/.exec(l)?.[1]));
+        expect(counts).toEqual([3, 1]);
+      } finally {
+        process.off("SIGINT", app);
+        process.off("SIGTERM", app);
+      }
+    });
+  });
+});
+
+describe("the last client's shutdown() on a key withYavio() pinned (#179)", () => {
+  let ingest: MockIngest;
+  let warn: ReturnType<typeof vi.spyOn>;
+  let stderr: ReturnType<typeof vi.spyOn>;
+  let lines: string[];
+  const lines1205 = () => lines.filter((l) => l.includes("YAVIO-1205"));
+  const exitHooks = () => process.listeners("exit").filter((l) => l.name === "yavioReportAtExit");
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const toolCallQs = () =>
+    ingest.ofType("tool_call").map((e) => (e.input_values as { q: string }).q);
+  /** What Node does when the loop empties, for the SDK's listener only (vitest may have its own). */
+  const emitBeforeExit = () => {
+    for (const listener of process.listeners("beforeExit")) {
+      if (listener.name === "onBeforeExit") listener.call(process, 0);
+    }
+  };
+
+  /** The README's shape: a `withYavio()` server — the pin — and a shutdown-only `createYavio()` client for the same key. */
+  function setup(apiKey: string, shutdownTimeoutMs = 300) {
+    const analytics = createYavio({
+      apiKey,
+      endpoint: ingest.endpoint,
+      serverOnly: true,
+      shutdownTimeoutMs,
+    });
+    const raw = new McpServer({ name: "app", version: "1.0" });
+    withYavio(raw, { apiKey, endpoint: ingest.endpoint, serverOnly: true }).registerTool(
+      "get_price",
+      { inputSchema: { q: z.string() } },
+      ok,
+    );
+    return { analytics, raw };
+  }
+
+  beforeEach(async () => {
+    _resetGlobalState();
+    _setSignalReraise(() => {});
+    lines = [];
+    warn = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      lines.push(String(args[0]));
+    });
+    stderr = spyStderr(lines);
+    ingest = await startMockIngest();
+  });
+
+  afterEach(async () => {
+    await ingest.answerHung();
+    _resetGlobalState();
+    warn.mockRestore();
+    stderr.mockRestore();
+    vi.restoreAllMocks(); // the transport spies a failed assertion left behind
+    await ingest.close();
+  });
+
+  it("against a hanging ingest: shutdown() stops the transport at its own deadline — the fetch aborted, one shutdown() line — and the exit hook adds nothing", async () => {
+    const { analytics, raw } = setup("yav_179_hang");
+    await callTool(raw, "get_price", { q: "x" });
+    ingest.hangEvents = true;
+    const t = Date.now();
+    await analytics.shutdown();
+    const took = Date.now() - t;
+    expect(took).toBeGreaterThanOrEqual(280);
+    expect(took).toBeLessThan(1_000);
+    // Before #179: [] — a drain's deadline only stops waiting.
+    expect(lines1205()).toEqual([
+      "[YAVIO-1205] shutdown() deadline of 300 ms reached — 2 events not delivered. Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.",
+    ]);
+    await vi.waitFor(() => expect(ingest.batches[0]?.abortedAt).toBeDefined(), { timeout: 1_000 });
+    expect(_sharedStateCount()).toBe(1); // the pin keeps its entry, with a fresh transport
+    // Before #179: "Process exit with 2 events not delivered — await analytics.shutdown() …"
+    exitHooks()[0]?.call(process, 0);
+    expect(lines1205()).toHaveLength(1);
+  });
+
+  it("a call through the pin during the stop goes into the fresh transport, not into this shutdown(), and the next client's shutdown() delivers it", async () => {
+    const { analytics, raw } = setup("yav_179_during", 2_000);
+    ingest.respondAfterMs = 200;
+    await callTool(raw, "get_price", { q: "before" });
+    const stopping = analytics.shutdown();
+    await sleep(50); // the stop's batch is in flight
+    await callTool(raw, "get_price", { q: "during" });
+    await stopping;
+    // Before #179 the call joined the drain and went out with it.
+    expect(toolCallQs()).toEqual(["before"]);
+    expect(ingest.batches).toHaveLength(1);
+    await createYavio({
+      apiKey: "yav_179_during",
+      endpoint: ingest.endpoint,
+      serverOnly: true,
+    }).shutdown();
+    expect(toolCallQs()).toEqual(["before", "during"]);
+  });
+
+  it("with a second client still holding the key, the first's shutdown() only drains; the second's stops the transport", async () => {
+    const { analytics, raw } = setup("yav_179_two");
+    const other = createYavio({
+      apiKey: "yav_179_two",
+      endpoint: ingest.endpoint,
+      serverOnly: true,
+    });
+    await callTool(raw, "get_price", { q: "x" });
+    const shutdowns = vi.spyOn(HttpTransport.prototype, "shutdown");
+    await analytics.shutdown();
+    expect(shutdowns).not.toHaveBeenCalled();
+    expect(toolCallQs()).toEqual(["x"]); // drained: delivered
+    await other.shutdown();
+    expect(shutdowns).toHaveBeenCalledTimes(1); // before #179: 0
+    expect(_sharedStateCount()).toBe(1);
+  });
+
+  it("after a natural-exit drain took the pinned entry and a send put it back, the client's shutdown() stops the restored transport: the fetch aborted, its shutdown() line (#167)", async () => {
+    const { analytics, raw } = setup("yav_179_natural", 600);
+    await callTool(raw, "get_price", { q: "first" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    await callTool(raw, "get_price", { q: "re-entered" }); // the entry goes back, holds and pin live again
+    expect(_sharedStateCount()).toBe(1);
+    ingest.hangEvents = true;
+    const t = Date.now();
+    await analytics.shutdown();
+    const took = Date.now() - t;
+    expect(took).toBeGreaterThanOrEqual(580);
+    expect(took).toBeLessThan(1_100);
+    // Before #179 the restored pinned entry was only drained: no line. The
+    // release awaited the natural drain first, so the stop's deadline timer
+    // was armed after the wait's and its line can follow shutdown()'s
+    // return by a few milliseconds — as on #167's unpinned re-entry.
+    await vi.waitFor(() => expect(lines1205()).toHaveLength(1), { timeout: 1_000 });
+    expect(lines1205()).toEqual([
+      "[YAVIO-1205] shutdown() deadline of 600 ms reached — 1 events not delivered. Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.",
+    ]);
+    await vi.waitFor(() => expect(ingest.batches[1]?.abortedAt).toBeDefined(), { timeout: 1_000 });
+    expect(_sharedStateCount()).toBe(1);
+    exitHooks()[0]?.call(process, 0);
+    expect(lines1205()).toHaveLength(1);
+  });
+
+  it("guard: a flush() during the pinned stop waits for that stop, then flushes the fresh transport (#171)", async () => {
+    const { analytics, raw } = setup("yav_179_flush", 2_000);
+    // The stop's batch is answered late, everything after it at once.
+    ingest.respondAfterMs = (batch) => (ingest.batches.indexOf(batch) === 0 ? 300 : 0);
+    await callTool(raw, "get_price", { q: "before" });
+    const stopping = analytics.shutdown();
+    await sleep(50);
+    await callTool(raw, "get_price", { q: "during" }); // the fresh transport
+    await analytics.flush();
+    // Both answered when the flush returns: it awaited the key's stop.
+    expect(ingest.responded).toBe(2);
+    expect(toolCallQs()).toEqual(["before", "during"]);
+    await stopping;
+  });
+
+  it("a signal during the pinned stop takes it over and cuts it to the cycle's deadline, and stops the fresh transport, which carries what the pin sent meanwhile — one cycle line, no shutdown() line", async () => {
+    await withoutOtherListeners("SIGTERM", async () => {
+      ingest.hangEvents = true;
+      const { analytics, raw } = setup("yav_179_signal", 20_000);
+      // A second pin on the key with an explicit 1 s: D at the signal.
+      withYavio(new McpServer({ name: "app2", version: "1.0" }), {
+        apiKey: "yav_179_signal",
+        endpoint: ingest.endpoint,
+        serverOnly: true,
+        shutdownTimeoutMs: 1_000,
+      });
+      await callTool(raw, "get_price", { q: "before" });
+      const t = Date.now();
+      const stopping = analytics.shutdown(); // its own 20 s
+      await sleep(50);
+      await callTool(raw, "get_price", { q: "during" }); // the fresh transport
+      process.emit("SIGTERM", "SIGTERM");
+      await stopping;
+      const took = Date.now() - t;
+      expect(took).toBeGreaterThanOrEqual(1_000);
+      expect(took).toBeLessThan(2_500);
+      // The stop's batch, cut at signal + D, and the fresh transport's,
+      // which the cycle stopped too. Before #179 "during" queued behind the
+      // drained batch on the same transport and never went out.
+      await vi.waitFor(() => expect(ingest.batches).toHaveLength(2));
+      await vi.waitFor(() => {
+        for (const batch of ingest.batches) expect(batch.abortedAt).toBeDefined();
+      });
+      for (const batch of ingest.batches) {
+        expect((batch.abortedAt as number) - t).toBeLessThan(2_500);
+      }
+      expect(lines1205()).toEqual([
+        expect.stringMatching(/^\[YAVIO-1205\] Shutdown deadline of 1000 ms reached — 3 events/),
+      ]);
+    });
+  });
 });
