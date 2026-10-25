@@ -46,14 +46,16 @@ import type { Transport } from "../transport/types.js";
  * (which has no shutdown of its own). `client.shutdown()` drains and
  * releases that client's hold; the last hold's release stops the transport
  * — another client's events for the same key keep flowing until then. On
- * a pinned key a fresh transport takes over at once, so a release never
- * leaves a pinned key without a live transport and its `withYavio()`
- * servers keep sending (#179; before, that release only drained, and its
- * deadline neither aborted the fetch nor counted the loss). The signal handlers drain
- * everything regardless, and so does a natural exit with events queued
- * (#167, below). The key's state object outlives its transports: proxies
- * keep it, and a re-acquire after a stop puts a fresh transport behind the
- * same facade.
+ * a pinned key only a client that never wrapped a server stops it (#179;
+ * before, that release only drained, and its deadline neither aborted the
+ * fetch nor counted the loss), and a fresh transport takes over at once,
+ * so a release never leaves a pinned key without a live transport and its
+ * `withYavio()` servers keep sending; a client that wraps servers only
+ * drains a pinned key, as in 0.5.5 (#187 review round 2). The signal
+ * handlers drain everything regardless, and so does a natural exit with
+ * events queued (#167, below). The key's state object outlives its
+ * transports: proxies keep it, and a re-acquire after a stop puts a fresh
+ * transport behind the same facade.
  *
  * Shutdown from a signal handler (#142). The SDK's listener is prepended,
  * so it runs first and drains the registry; the app's handler then calls
@@ -184,8 +186,9 @@ interface Entry {
   holders: number;
   /**
    * Set by `withYavio()`, which never releases: the entry stays in the
-   * registry, with a live transport — the last client's release stops the
-   * current one and puts a fresh one behind the pin (#179) — until a signal
+   * registry, with a live transport — the last release by a client that
+   * never wrapped a server stops the current one and puts a fresh one
+   * behind the pin (#179) — until a signal
    * or a natural-exit drain takes it out; a natural-exit drain's entry
    * comes back with the next send (`exitDrained`).
    */
@@ -1480,9 +1483,10 @@ async function drainTransport(transport: Transport | null, deadlineMs?: number):
  * reused by every later wrap with the same endpoint and key, with a live
  * transport until a signal or a natural-exit drain takes it out — the
  * next send starts one again (`withYavio()` has no shutdown). The last
- * `createYavio()` client's `shutdown()` on the key stops the current
- * transport and a fresh one takes over at once (#179). Installs the process
- * signal handlers the first time any state is created.
+ * `shutdown()` on the key by a `createYavio()` client that never wrapped a
+ * server stops the current transport and a fresh one takes over at once
+ * (#179); one by a client that wraps servers only drains it. Installs the
+ * process signal handlers the first time any state is created.
  */
 export function pinShared(
   config: Key,
@@ -1555,15 +1559,21 @@ export function reviveHold(config: Key, hold: SharedHold, sdkVersion: string): b
  * drains the key's current transport, through which a request served after
  * the signal sent its events (#142). The transport stops once no other
  * client holds it — so a later wrap starts afresh, or, on a key a
- * `withYavio()` call pinned, a fresh transport takes over at once (#179);
- * otherwise the other holders keep delivering through it, with
+ * `withYavio()` call pinned, a fresh transport takes over at once (#179)
+ * — except that on a pinned key a releasing client that wrapped servers
+ * (`wrapped`: a per-request client) only drains, as in 0.5.5 (#179 review
+ * round 2); otherwise the other holders keep delivering through it, with
  * everything this client queued delivered first. Every drain or stop this
  * causes runs under the releasing config's own `shutdownTimeoutMs`, not the
  * transport creator's, cut to the process deadline once a signal fixed one
  * (`boundedBy`). The config's explicit value counts towards D while the
  * call is in progress.
  */
-export async function releaseShared(config: Key, hold: SharedHold): Promise<void> {
+export async function releaseShared(
+  config: Key,
+  hold: SharedHold,
+  options: { wrapped?: boolean } = {},
+): Promise<void> {
   const key = keyOf(config);
   const ownMs = config.shutdownTimeoutMs;
   const calledAt = Date.now();
@@ -1607,11 +1617,19 @@ export async function releaseShared(config: Key, hold: SharedHold): Promise<void
       return;
     }
     entry.holders = Math.max(0, entry.holders - 1);
-    if (entry.holders > 0) {
+    // On a pinned key only a client that never wrapped a server — the
+    // README's shutdown-only client, whose shutdown() ends the process —
+    // stops the transport. A per-request client that wraps and shuts down
+    // at every request's end drains it, as in 0.5.5: stopping there gave up
+    // the withYavio() servers' queue at each such shutdown() against a
+    // failing ingest (4 of 36 calls delivered in a 3 s outage, review round
+    // 2).
+    if (entry.holders > 0 || (entry.pinned && options.wrapped)) {
       await drainTransport(entry.slot.live, boundedBy(ownMs));
       return;
     }
-    // The last client's release stops the key's transport, pinned or not
+    // The last client's release stops the key's transport, pinned or not —
+    // on a pinned key when the client never wrapped a server, see above
     // (#179): a stop aborts the fetch in flight at its deadline and counts
     // what it gave up in its own `shutdown()` line. The drain a pinned key
     // got before did neither, so the README's shutdown-only client next to

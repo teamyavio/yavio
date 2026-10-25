@@ -3286,6 +3286,76 @@ describe("the last client's shutdown() on a key withYavio() pinned (#179)", () =
     expect(lines1205()).toHaveLength(1);
   });
 
+  it.each([
+    ["answers 503", "503"],
+    ["hangs", "hang"],
+  ] as const)(
+    "a mixed host — a withYavio() server called every 100 ms, a per-request createYavio() client that wraps and shuts down every 500 ms — through a 3 s outage in which ingest %s: the per-request shutdown()s only drain the pinned key, and every call is delivered once ingest is back (review round 2)",
+    async (_label, mode) => {
+      const apiKey = `yav_179_mixed_${mode}`;
+      const endpoint = ingest.endpoint;
+      if (mode === "hang") ingest.hangEvents = true;
+      else ingest.failWith = 503;
+      const pin = new McpServer({ name: "pin", version: "1.0" });
+      withYavio(pin, { apiKey, endpoint, serverOnly: true }).registerTool(
+        "get_price",
+        { inputSchema: { q: z.string() } },
+        ok,
+      );
+      const t0 = Date.now();
+      let sent = 0;
+      const stops: Promise<void>[] = [];
+      const pinLoop = (async () => {
+        while (Date.now() - t0 < 3_000) {
+          await callTool(pin, "get_price", { q: `pin${sent}` });
+          sent++;
+          await sleep(100);
+        }
+      })();
+      const requestLoop = (async () => {
+        while (Date.now() - t0 < 3_000) {
+          const client = createYavio({
+            apiKey,
+            endpoint,
+            serverOnly: true,
+            shutdownTimeoutMs: 1_000,
+          });
+          const raw = new McpServer({ name: "request", version: "1.0" });
+          client.wrap(raw).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+          await callTool(raw, "get_price", { q: `request${sent}` });
+          sent++;
+          stops.push(client.shutdown()); // at the request's end, not awaited by the next one
+          await sleep(500);
+        }
+      })();
+      await Promise.all([pinLoop, requestLoop]);
+      // The outage ends.
+      ingest.failWith = undefined;
+      ingest.hangEvents = false;
+      await ingest.answerHung();
+      await Promise.all(stops);
+      // The process ends: the README's shutdown-only client, which never
+      // wrapped, stops the key's transport and waits through its backoff.
+      await createYavio({
+        apiKey,
+        endpoint,
+        serverOnly: true,
+        shutdownTimeoutMs: 10_000,
+      }).shutdown();
+      const delivered = new Set<unknown>();
+      for (const batch of ingest.batches) {
+        if (batch.status !== 200 || batch.abortedAt !== undefined) continue;
+        for (const e of batch.events) if (e.event_type === "tool_call") delivered.add(e.event_id);
+      }
+      // 7d2252e stopped the transport at every per-request shutdown(): 4
+      // of 36 calls delivered, the rest given up at those deadlines.
+      expect(sent).toBeGreaterThanOrEqual(30);
+      expect(delivered.size).toBe(sent);
+      expect(lines1205()).toEqual([]);
+    },
+    30_000,
+  );
+
   it("a shutdown() called while the natural-exit drain still runs, on an entry a send put back: it waits for the drain, its stop's deadline counts from the call, and the stop's line comes before shutdown() returns (#178 follow-up)", async () => {
     const { analytics, raw } = setup("yav_178_running", 600);
     // The drain's batch is answered after 300 ms; every later one hangs.

@@ -31,7 +31,7 @@ const UA = "openai-mcp/1.0.0";
 const PROTOCOL = "2025-06-18";
 const STACKS = ["v1", "v2"] as const;
 type Stack = (typeof STACKS)[number];
-type Mode = "readme" | "none" | "noexit" | "none-stdin" | "idle" | "pinned-cli";
+type Mode = "readme" | "none" | "noexit" | "none-stdin" | "idle" | "pinned-cli" | "pinned-cli-with";
 
 /** The events a run produces before the signal: 50 calls, one connection, two discoveries. */
 const EVENTS_BEFORE_SIGNAL = 53;
@@ -856,20 +856,26 @@ describe.each(STACKS)("a failed send at the signal on MCP SDK %s (#164)", (stack
     },
   );
 
-  it.each(failures)(
-    "no signal — a withYavio() pin and a client's awaited shutdown(), a CLI or cron shape — ingest answers with %s, then 200: the stop holds the process until its retry delivers, shutdown() resolves (#164 review round 4; a drain before #179)",
+  it.each([
+    { shape: "its client wraps every request: a drain", mode: "pinned-cli", failure: 503 },
+    { shape: "its client wraps every request: a drain", mode: "pinned-cli", failure: "reset" },
+    { shape: "the README's withYavio() host: a stop", mode: "pinned-cli-with", failure: 503 },
+    { shape: "the README's withYavio() host: a stop", mode: "pinned-cli-with", failure: "reset" },
+  ] as const)(
+    "no signal — a withYavio() pin and a client's awaited shutdown(), a CLI or cron shape, $shape — ingest answers with $failure, then 200: the shutdown holds the process until its retry delivers, shutdown() resolves (#164 review round 4)",
     { timeout: 30_000 },
-    async (_label, failure) => {
+    async ({ mode, failure }) => {
       ingest.failNext = [failure];
-      const child = await start("pinned-cli");
+      const child = await start(mode);
       await drive(child.port);
       agent.destroy();
       child.kill("SIGUSR2"); // the app closes its server and awaits shutdown(): no signal the SDK handles
       const exit = await child.exited;
       const exitAt = Date.now();
 
-      // The last client's shutdown() stops the pinned key's transport (#179;
-      // a drain before), and the stop's own deadline (shutdownTimeoutMs,
+      // A client that wraps requests only drains the pinned key (as in
+      // 0.5.5, review round 2 of #187); a shutdown-only client stops it
+      // (#179). Either way the shutdown's own deadline (shutdownTimeoutMs,
       // 4 s) is what holds the process through the 1 s backoff. Without its
       // keepAlive the process exits mid-backoff, nothing delivered,
       // shutdown() unresolved.
@@ -883,11 +889,11 @@ describe.each(STACKS)("a failed send at the signal on MCP SDK %s (#164)", (stack
   );
 
   it(
-    "no signal — a withYavio() pin and a client's awaited shutdown(), without process.exit() — ingest hanging: the stop aborts the fetch at D and counts it in its shutdown() line, and the process exits on its own within D + 1 s, not after the 30 s fetch timeout (#179)",
+    "no signal — the README's withYavio() host: per-request withYavio() servers and a shutdown-only client's awaited shutdown(), without process.exit() — ingest hanging: the stop aborts the fetch at D and counts it in its shutdown() line, and the process exits on its own within D + 1 s, not after the 30 s fetch timeout (#179)",
     { timeout: 45_000 },
     async () => {
       ingest.hangEvents = true;
-      const child = await start("pinned-cli");
+      const child = await start("pinned-cli-with");
       await drive(child.port);
       agent.destroy();
       child.kill("SIGUSR2"); // the app closes its server and awaits shutdown(): no signal the SDK handles
