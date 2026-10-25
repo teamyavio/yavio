@@ -35,6 +35,15 @@ export interface YavioConfig {
    */
   shutdownTimeoutMsSource: ShutdownTimeoutSource;
   /**
+   * How long a `flush()` waits for ingest, in milliseconds (#171): the
+   * option, `YAVIO_FLUSH_TIMEOUT_MS` or `.yaviorc.json`, else 1 s. Always
+   * set by `resolveConfig()`; optional for configs built by hand (tests),
+   * which get the default. Not part of the process deadline a signal
+   * fixes, and not part of `configFingerprint()`: a flush is not a
+   * shutdown, and the bound is per client.
+   */
+  flushTimeoutMs?: number;
+  /**
    * The integrator's session key for calls that carry no key the SDK knows
    * (#144), when one was given and is a function. Code option only.
    */
@@ -257,6 +266,18 @@ export interface WithYavioOptions {
    */
   shutdownTimeoutMs?: number;
   /**
+   * How long `flush()` waits for ingest: an
+   * integer number of milliseconds in [100, 2147483647] (default 1 000;
+   * env `YAVIO_FLUSH_TIMEOUT_MS`; anything else logs `YAVIO-1006` once and
+   * uses the default). Keep it well inside the function's own timeout
+   * when you `await` the flush before returning — AWS Lambda's default is
+   * 3 s: a slow or unreachable ingest costs at most this much per
+   * invocation. Nothing is dropped at this deadline: what is undelivered
+   * stays queued for the next flush. During a `SIGTERM`/`SIGINT` the flush
+   * ends by the process deadline instead, when that comes first (#171).
+   */
+  flushTimeoutMs?: number;
+  /**
    * The conversation a call belongs to, for clients that send no session key
    * the SDK knows (#144). Over HTTP, on any host, every such call is
    * otherwise a session of its own (`session_source: "per_request"`, not
@@ -339,8 +360,39 @@ export interface YavioClient {
    * app `beforeExit` listener registered after the SDK's) waits for that
    * drain, which ends within min(1.5 s, D) whatever this client's own
    * value (#167): to wait longer, call it before the event loop empties.
+   * It is for the end of the process, not for every request: on a host
+   * that freezes the instance after the response, use `flush()`.
    */
   shutdown(): Promise<void>;
+  /**
+   * Send everything queued now and wait until ingest has answered, for
+   * runtimes that freeze or throttle the instance once the response is
+   * out: AWS Lambda, Vercel Functions, Cloudflare Workers, Cloud Run with
+   * request-based billing, Netlify Functions (#171). Where the platform has
+   * a `waitUntil`, hand it the flush once the response body has been sent;
+   * where it has none, `await analytics.flush()` once the response body is
+   * complete and before the handler returns.
+   *
+   * Resolves once nothing that was queued or in flight at the call is
+   * left; or once a batch failed and waits for a retry that ends past the
+   * deadline — a failed batch is retried at once, once per flush, and the
+   * retry after that goes on in the background; or at `flushTimeoutMs`
+   * (1 s by default) from the call. Never rejects and never drops: what it
+   * could not deliver stays queued for the next flush, the flush interval
+   * or `shutdown()`, with one `YAVIO-1208` line until a flush delivers
+   * everything again. A fetch still out from before, older than
+   * `flushTimeoutMs` — its connection likely died in a freeze — is aborted
+   * and its batch re-sent unchanged; ingest drops the duplicate.
+   *
+   * Keeps this client's hold, the transport and its timer, so the next
+   * request's `wrap()` finds the same transport, and arms no exit report.
+   * The transport is shared per endpoint and API key: a flush sends the
+   * events of every request and client on that key, and concurrent flushes
+   * share the batches — each event goes out once. During a signal cycle it
+   * ends by the process deadline when that comes first. In no-op mode it
+   * resolves at once.
+   */
+  flush(): Promise<void>;
 }
 
 /** The tracking context available via the `yavio` singleton. */

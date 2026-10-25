@@ -147,8 +147,26 @@ async function readPartial(
   }
 }
 
+/**
+ * How a `flushQueued()` ended (#171): `done` — everything queued was sent
+ * and answered, or the transport stopped (its shutdown reports its own
+ * losses); `deadline` — its deadline came with events still queued or in
+ * flight; `retrying` — a batch failed and waits for a retry that ends past
+ * the deadline, which goes on in the background.
+ */
+export type FlushOutcome = "done" | "deadline" | "retrying";
+
 export class HttpTransport implements Transport {
   private buffer: BaseEvent[] = [];
+  /**
+   * A batch a flush aborted as stale (#171, decision C3), to be sent again
+   * before anything else and exactly as it was: the same events in the
+   * same order, so ingest can drop the resend if the first attempt was
+   * stored after all (the ClickHouse insert dedup token over event_id and
+   * timestamp, migration 0014, when it makes up the same block; the
+   * ReplacingMergeTree on event_id otherwise).
+   */
+  private resendBatch: BaseEvent[] | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Set by `start()`: the flush interval is armed by the first `send()` after it (#171). */
   private started = false;
@@ -205,7 +223,26 @@ export class HttpTransport implements Transport {
    * batch counted as lost at the deadline and re-sent when the sleep ends
    * (#148 review round 1).
    */
-  private pendingDelay: { timer: ReturnType<typeof setTimeout>; resolve: () => void } | null = null;
+  private pendingDelay: {
+    timer: ReturnType<typeof setTimeout>;
+    resolve: () => void;
+    /** When the wait ends, absolute: a flush watches only a wait that ends before its deadline (#171). */
+    endsAt: number;
+    /** A `Retry-After` the server sent: a flush waits it out, it never cuts it short (#171). */
+    honoured: boolean;
+  } | null = null;
+  /**
+   * Set by a flush that ends a retry wait early (#171, decision C2): the
+   * attempt the wait was for goes out now and does not count towards
+   * `maxRetries`. Read and cleared as soon as the wait returns.
+   */
+  private retryNow = false;
+  /** Called when a retry wait begins: how a flush watching the batch in flight learns that it failed (#171). */
+  private readonly retryWaitWatchers = new Set<() => void>();
+  /** When the fetch in flight started, absolute; undefined when none is out (#171). */
+  private inflightStartedAt: number | undefined;
+  /** The controller a flush aborted because its fetch was stale: that fetch's batch is re-sent, not retried (#171). */
+  private staleAbort: AbortController | null = null;
   /**
    * Events a shutdown deadline gave up: queued at the deadline, in flight
    * and cut by it, refused after it, or a batch given up because its retry
@@ -290,7 +327,7 @@ export class HttpTransport implements Transport {
    */
   start(): void {
     this.started = true;
-    if (this.buffer.length > 0) this.armTimer();
+    if (this.queued() > 0) this.armTimer();
   }
 
   private armTimer(): void {
@@ -304,7 +341,22 @@ export class HttpTransport implements Transport {
 
   /** Events ingest has not acknowledged: queued, plus the batch in flight unless a line already counted it (`precountDue`). */
   pendingEvents(): number {
-    return this.buffer.length + (this.inflightPrecounted ? 0 : this.inflightSize);
+    return this.queued() + (this.inflightPrecounted ? 0 : this.inflightSize);
+  }
+
+  /** Events waiting to be sent: the buffer, and a batch waiting to be re-sent (#171). */
+  private queued(): number {
+    return this.buffer.length + (this.resendBatch?.length ?? 0);
+  }
+
+  /** The next batch to send: a batch to re-send first, as it was, else the head of the buffer. */
+  private takeBatch(): BaseEvent[] {
+    const resend = this.resendBatch;
+    if (resend) {
+      this.resendBatch = null;
+      return resend;
+    }
+    return this.buffer.splice(0, this.maxBatchSize);
   }
 
   /** Events a shutdown deadline gave up: queued, in flight or refused at or after it, or given up because a retry would have ended past it. What `YAVIO-1205` reports. */
@@ -388,15 +440,14 @@ export class HttpTransport implements Transport {
   }
 
   async flush(): Promise<void> {
-    if (this.stopped || this.inflight || this.buffer.length === 0) return;
+    if (this.stopped || this.inflight || this.queued() === 0) return;
 
-    // Atomic swap: take the batch and leave any concurrently-added events
-    const batch = this.buffer.slice(0, this.maxBatchSize);
-    this.buffer = this.buffer.slice(this.maxBatchSize);
+    // Take the batch synchronously and leave any concurrently-added events.
+    const batch = this.takeBatch();
     await this.startBatch(batch, () => {
       // An immediate transport has no timer to pick up what was queued
       // while this batch was out: send it now.
-      if (this.immediate && !this.stopped && this.buffer.length > 0) {
+      if (this.immediate && !this.stopped && this.queued() > 0) {
         this.flush().catch(() => {});
       }
     });
@@ -440,7 +491,7 @@ export class HttpTransport implements Transport {
           await this.inflight.catch(() => {});
           continue;
         }
-        if (this.buffer.length === 0) return;
+        if (this.queued() === 0) return;
         try {
           await this.flush();
         } catch {
@@ -456,6 +507,114 @@ export class HttpTransport implements Transport {
         expired = true;
       },
     });
+  }
+
+  /**
+   * What `client.flush()` does with the transport (#171): send everything
+   * queued now, batch after batch, and say how it ended — without stopping
+   * anything, and giving up waiting at `deadlineMs` without dropping or
+   * aborting anything (decision C1): the fetch in flight goes on, what is
+   * queued stays queued. Unlike `drain()` it does not wait through a retry
+   * backoff, which on a host that freezes after the response is time the
+   * response or the invocation pays for while the instance may never run
+   * the retry:
+   *
+   * - A batch waiting for its retry (a 5xx, a network error, a 429 without
+   *   `Retry-After`) is retried at once, once per flush; that attempt does
+   *   not count towards `maxRetries`, and its failure prints no
+   *   `YAVIO-1200` line (C2). A `Retry-After` wait is never cut. After the
+   *   early retry, a retry wait is watched only if it ends before the
+   *   deadline; otherwise the flush returns `retrying` and the retry stays
+   *   scheduled.
+   * - A fetch in flight for longer than `staleAfterMs` (the flush's own
+   *   budget) is aborted and its batch re-sent unchanged, first and not
+   *   counted as an attempt (C3): an earlier flush already waited its
+   *   whole budget on it, and after a freeze its connection is likely
+   *   dead — without this a hang held the one in-flight slot, and every
+   *   later flush, for the 30 s fetch timeout.
+   *
+   * A shutdown that takes over is what it then waits for. Concurrent
+   * flushes share the batches: each event goes out once.
+   */
+  async flushQueued(deadlineMs: number, staleAfterMs: number = deadlineMs): Promise<FlushOutcome> {
+    const deadlineAt = Date.now() + deadlineMs;
+    let expired = false;
+    let outcome: FlushOutcome = "done";
+    let retried = false; // one early retry per flush (C2)
+    const loop = async () => {
+      // A batch takes two rounds here (started, then watched), plus the
+      // early retry: bounded by the buffer cap like `drain()`.
+      const rounds = (Math.ceil(this.maxBufferSize / this.maxBatchSize) + 1) * 2 + 1;
+      for (let i = 0; i < rounds && !expired; i++) {
+        if (this.closing) {
+          await this.closing;
+          return;
+        }
+        if (this.stopped) return;
+        if (!this.inflight) {
+          if (this.queued() === 0) return;
+          // Started, not awaited: the next round watches it.
+          this.flush().catch(() => {});
+          if (!this.inflight) return;
+          continue;
+        }
+        this.abortIfStale(staleAfterMs);
+        const wait = this.pendingDelay;
+        if (wait) {
+          if (!wait.honoured && !retried) {
+            retried = true;
+            this.retryNow = true;
+            wait.resolve();
+            continue;
+          }
+          if (wait.endsAt >= deadlineAt) {
+            outcome = "retrying";
+            return;
+          }
+        }
+        await this.settledOrWaiting();
+      }
+    };
+    // keepAlive: a host awaits the flush before it returns (#164's rule
+    // for a drain): an empty loop must not end the process mid-flush.
+    await raceDeadline(loop(), deadlineMs, {
+      keepAlive: true,
+      onTimeout: () => {
+        expired = true;
+      },
+    });
+    return expired ? "deadline" : outcome;
+  }
+
+  /**
+   * Abort the fetch in flight if it has been out for longer than `ms`
+   * (#171, C3): its batch is re-sent as it was (`sendBatch`). Not on a
+   * post-signal transport, whose every fetch the process deadline bounds
+   * and counts (#154).
+   */
+  private abortIfStale(ms: number): void {
+    const controller = this.inflightController;
+    if (!controller || this.immediate || this.inflightPrecounted) return;
+    if (this.inflightStartedAt === undefined || this.staleAbort === controller) return;
+    if (Date.now() - this.inflightStartedAt <= ms) return;
+    this.staleAbort = controller;
+    controller.abort();
+  }
+
+  /** Resolves once the batch in flight has settled or its next retry wait has begun (#171). */
+  private async settledOrWaiting(): Promise<void> {
+    const inflight = this.inflight;
+    if (!inflight) return;
+    let watcher: (() => void) | undefined;
+    const waitBegins = new Promise<void>((resolve) => {
+      watcher = resolve;
+      this.retryWaitWatchers.add(resolve);
+    });
+    try {
+      await Promise.race([inflight.catch(() => {}), waitBegins]);
+    } finally {
+      if (watcher) this.retryWaitWatchers.delete(watcher);
+    }
   }
 
   /**
@@ -543,8 +702,8 @@ export class HttpTransport implements Transport {
       // 401 ends the drain: delivery stopped for good, the queue is dropped.
       // So does a retry wait the deadline refused: the queue was given up
       // with the batch (`sendingOver`), nothing is fired after it.
-      while (this.buffer.length > 0 && !this.authRejected && !this.sendingOver) {
-        await this.startBatch(this.buffer.splice(0, this.maxBatchSize)).catch(() => {});
+      while (this.queued() > 0 && !this.authRejected && !this.sendingOver) {
+        await this.startBatch(this.takeBatch()).catch(() => {});
       }
       this.drained = true;
     };
@@ -623,11 +782,14 @@ export class HttpTransport implements Transport {
       return this.giveUp("failed");
     }
 
+    // Set while the attempt in flight is a flush's early retry (#171): its
+    // failure prints no retry line, the flush's `YAVIO-1208` covers it.
+    let quiet = false;
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       // One controller per fetch, aborted by whichever comes first: the
-      // fetch timeout, or the shutdown deadline (`runShutdown`). Not
-      // `AbortSignal.any`, which needs Node 20.3 while `engines` is
-      // `>=20.0.0`.
+      // fetch timeout, the shutdown deadline (`runShutdown`), or a flush
+      // that finds it stale (`abortIfStale`). Not `AbortSignal.any`, which
+      // needs Node 20.3 while `engines` is `>=20.0.0`.
       const controller = new AbortController();
       // Read before the try: the catch needs it to tell a cut by the budget
       // from the plain fetch timeout (#151).
@@ -640,6 +802,7 @@ export class HttpTransport implements Transport {
         const cutAt =
           budgetMs !== undefined && budgetMs < this.fetchTimeoutMs ? now + budgetMs : undefined;
         this.inflightCutAt = cutAt;
+        this.inflightStartedAt = now;
         const timer = setTimeout(() => {
           // The budget's timer, not the fetch timeout's (#151's rule): the
           // deadline it carries has come (#154 review round 3).
@@ -672,6 +835,7 @@ export class HttpTransport implements Transport {
           clearTimeout(timer);
           this.inflightController = null;
           this.inflightCutAt = undefined;
+          this.inflightStartedAt = undefined;
         }
 
         if (response.status === 200) {
@@ -701,9 +865,10 @@ export class HttpTransport implements Transport {
           // with one line each (#148 review round 3).
           this.authRejected = true;
           this.stopped = true;
-          const dropped = this.inflightSize + this.buffer.length;
-          this.failed += this.buffer.length;
+          const dropped = this.inflightSize + this.queued();
+          this.failed += this.queued();
           this.buffer.length = 0;
+          this.resendBatch = null;
           this.giveUp("failed");
           console.error(
             `[${ErrorCode.SDK.AUTH_REJECTED_PERMANENT}] API key rejected — stopping delivery; ${dropped} events dropped`,
@@ -720,17 +885,16 @@ export class HttpTransport implements Transport {
         if (response.status === 429) {
           if (attempt < this.maxRetries) {
             // Delay-seconds or an HTTP-date; anything else falls back to the backoff.
-            const delayMs =
-              retryAfterMs(response.headers.get("Retry-After")) ??
-              BASE_RETRY_DELAY_MS * 2 ** attempt;
-            if (
-              !(await this.waitForRetry(
-                delayMs,
-                `[${ErrorCode.SDK.FLUSH_RATE_LIMITED}] Rate limited, retrying in ${delayMs}ms`,
-              ))
-            ) {
-              return;
-            }
+            const retryAfter = retryAfterMs(response.headers.get("Retry-After"));
+            const delayMs = retryAfter ?? BASE_RETRY_DELAY_MS * 2 ** attempt;
+            const step = await this.waitForRetry(
+              delayMs,
+              `[${ErrorCode.SDK.FLUSH_RATE_LIMITED}] Rate limited, retrying in ${delayMs}ms`,
+              { quiet, honoured: retryAfter !== undefined },
+            );
+            if (step === "stop") return;
+            quiet = step === "early";
+            if (quiet) attempt--; // a flush's early retry is not an attempt (#171)
             continue;
           }
           // The last allowed attempt: the batch is given up like a 5xx on
@@ -745,14 +909,14 @@ export class HttpTransport implements Transport {
         // 5xx — retry with backoff
         if (response.status >= 500) {
           if (attempt < this.maxRetries) {
-            if (
-              !(await this.waitForRetry(
-                BASE_RETRY_DELAY_MS * 2 ** attempt,
-                `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Server error ${response.status}, retry ${attempt + 1}/${this.maxRetries}`,
-              ))
-            ) {
-              return;
-            }
+            const step = await this.waitForRetry(
+              BASE_RETRY_DELAY_MS * 2 ** attempt,
+              `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Server error ${response.status}, retry ${attempt + 1}/${this.maxRetries}`,
+              { quiet },
+            );
+            if (step === "stop") return;
+            quiet = step === "early";
+            if (quiet) attempt--;
             continue;
           }
           console.error(
@@ -764,16 +928,28 @@ export class HttpTransport implements Transport {
         // Other unexpected status codes — don't retry
         return this.giveUp("failed");
       } catch (error) {
-        // Network error (or the abort at the deadline) — retry with backoff
-        if (attempt < this.maxRetries) {
-          if (
-            !(await this.waitForRetry(
-              BASE_RETRY_DELAY_MS * 2 ** attempt,
-              `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Network error, retry ${attempt + 1}/${this.maxRetries}`,
-            ))
-          ) {
+        if (this.staleAbort === controller) {
+          this.staleAbort = null;
+          // Aborted by a flush as stale (#171, C3): the batch goes back to
+          // be sent first, as it was, and the attempt does not count — the
+          // flush that aborted it sends it again. Not once the shutdown
+          // deadline came: then it is the deadline's, as below.
+          if (!this.deadlineReached) {
+            this.resendBatch = batch;
+            this.inflightSize = 0;
             return;
           }
+        }
+        // Network error (or the abort at the deadline) — retry with backoff
+        if (attempt < this.maxRetries) {
+          const step = await this.waitForRetry(
+            BASE_RETRY_DELAY_MS * 2 ** attempt,
+            `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Network error, retry ${attempt + 1}/${this.maxRetries}`,
+            { quiet },
+          );
+          if (step === "stop") return;
+          quiet = step === "early";
+          if (quiet) attempt--;
           continue;
         }
         // A fetch the shutdown deadline cut is the deadline's loss, and so
@@ -811,11 +987,18 @@ export class HttpTransport implements Transport {
 
   /**
    * The retry step the 429, 5xx and network branches share: announce the
-   * retry and wait `delayMs`, true once the next attempt may go out. False
-   * — the batch given up to the deadline — when the deadline forbids the
-   * wait or ends it (#148 review round 5, one copy instead of three).
+   * retry and wait `delayMs`, then `next` once the next attempt may go out,
+   * or `early` when a flush ended the wait (#171): the same attempt goes
+   * out again at once, not counted, and its failure is `quiet` — no line.
+   * `stop` — the batch given up to the deadline — when the deadline forbids
+   * the wait or ends it (#148 review round 5, one copy instead of three).
+   * A `honoured` wait (a `Retry-After`) is never ended by a flush.
    */
-  private async waitForRetry(delayMs: number, message: string): Promise<boolean> {
+  private async waitForRetry(
+    delayMs: number,
+    message: string,
+    options: { quiet?: boolean; honoured?: boolean } = {},
+  ): Promise<"next" | "early" | "stop"> {
     if (!this.canWait(delayMs)) {
       // The deadline leaves no room for this wait, so it leaves none for
       // the batches behind this one either: a rate-limited or failing
@@ -825,15 +1008,17 @@ export class HttpTransport implements Transport {
       this.giveUp("deadline");
       this.dropQueue();
       this.sendingOver = true;
-      return false;
+      return "stop";
     }
-    console.warn(message);
-    await this.delay(delayMs);
+    if (!options.quiet) console.warn(message);
+    await this.delay(delayMs, options.honoured === true);
+    const early = this.retryNow;
+    this.retryNow = false;
     if (this.deadlineReached) {
       this.giveUp("deadline");
-      return false;
+      return "stop";
     }
-    return true;
+    return early ? "early" : "next";
   }
 
   /**
@@ -854,16 +1039,18 @@ export class HttpTransport implements Transport {
 
   /** Everything queued is the deadline's loss: counted, and the queue emptied so the drain loop ends. */
   private dropQueue(): void {
-    this.deadlineLost += this.buffer.length;
+    this.deadlineLost += this.queued();
     this.buffer.length = 0;
+    this.resendBatch = null;
   }
 
   /**
    * Sleep `ms`, or less: the shutdown deadline ends the wait early through
-   * `pendingDelay` (the caller then checks `deadlineReached`). One wait at
-   * a time — the retry loop is sequential.
+   * `pendingDelay` (the caller then checks `deadlineReached`), and so does
+   * a flush (#171; the caller then checks `retryNow`). One wait at a time —
+   * the retry loop is sequential.
    */
-  private delay(ms: number): Promise<void> {
+  private delay(ms: number, honoured = false): Promise<void> {
     return new Promise((resolve) => {
       const done = () => {
         clearTimeout(timer);
@@ -872,7 +1059,9 @@ export class HttpTransport implements Transport {
       };
       const timer = setTimeout(done, ms);
       unref(timer);
-      this.pendingDelay = { timer, resolve: done };
+      this.pendingDelay = { timer, resolve: done, endsAt: Date.now() + ms, honoured };
+      // A flush watching the batch in flight learns that it failed (#171).
+      for (const watcher of [...this.retryWaitWatchers]) watcher();
     });
   }
 }

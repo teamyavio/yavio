@@ -17,6 +17,7 @@ import {
   armExitHook,
   awaitBounded,
   dropHoldDeadline,
+  flushShared,
   isLiveHold,
   logOnce,
   pinShared,
@@ -187,8 +188,13 @@ function wrapServer<T extends McpServerLike>(
  * is already wrapped comes back as its existing proxy: the first wrap wins,
  * later options are ignored (`YAVIO-1108` once when any of them differs).
  *
+ * On a runtime that freezes the instance once the response is out (AWS
+ * Lambda, Vercel Functions, Cloudflare Workers, Cloud Run with
+ * request-based billing), `flush()` sends what is queued before the
+ * freeze (#171).
+ *
  * If no API key is found, `wrap()` returns every server unchanged
- * (transparent no-op) and `shutdown()` does nothing.
+ * (transparent no-op) and `shutdown()` and `flush()` do nothing.
  */
 export function createYavio(options?: WithYavioOptions): YavioClient {
   const config = resolveConfig(options);
@@ -201,6 +207,7 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
         return server;
       },
       shutdown: async () => {},
+      flush: async () => {},
     };
   }
 
@@ -259,6 +266,9 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
       // signal fixed one — before or during the call (#148).
       await awaitBounded(closing, config.shutdownTimeoutMs);
     },
+    // Keeps the hold and the transport: the next request's wrap() finds the
+    // same one, and nothing is armed for the exit (#171).
+    flush: () => flushShared(config),
   };
 }
 
