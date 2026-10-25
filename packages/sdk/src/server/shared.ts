@@ -780,9 +780,11 @@ function registryPending(): number {
  * (`signalDrain`). `draining` is not set: no signal came.
  *
  * The process may go on after it: an app's `beforeExit` listener that
- * schedules more work (AWS Lambda's Node runtime reportedly answers
- * callback-style handlers from `beforeExit` and continues), or an unref'd
- * timer or socket of the app's that fires while the drain holds the loop.
+ * schedules more work (AWS Lambda's Node 20/22 runtime client posts a
+ * callback-style handler's result from its own `beforeExit` listener and
+ * goes on to the next invocation, so this drain runs after every one of
+ * them, #171), or an unref'd timer or socket of the app's that fires while
+ * the drain holds the loop.
  * A send through a proxy it already has then re-enters the registry with
  * a fresh transport (`exitDrained`), and the next `beforeExit`, which
  * Node emits once that work has settled, drains it under a deadline of
