@@ -231,7 +231,7 @@ describe.each(STACKS)("a stdio server on MCP SDK %s", (stack: Stack) => {
         expect(run.closeMs).toBeGreaterThanOrEqual(1_450);
         expect(run.lossLines).toEqual([6]);
         expect(run.output).toContain(
-          "[YAVIO-1205] Exit deadline of 1500 ms reached — 6 events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the process ends.",
+          "[YAVIO-1205] Exit deadline of 1500 ms reached — 6 events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the event loop empties (on stdin's end or at the end of the script; a beforeExit listener is too late).",
         );
       },
     );

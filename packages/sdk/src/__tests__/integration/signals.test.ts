@@ -2440,7 +2440,7 @@ describe("the natural exit: beforeExit with events queued (#167)", () => {
       expect(lines1205()).toEqual([]);
       exitHooks()[0]?.call(process, 0);
       expect(lines1205()).toEqual([
-        `[YAVIO-1205] Exit deadline of ${boundMs} ms reached — 2 events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the process ends.`,
+        `[YAVIO-1205] Exit deadline of ${boundMs} ms reached — 2 events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the event loop empties (on stdin's end or at the end of the script; a beforeExit listener is too late).`,
       ]);
     },
   );
@@ -2483,6 +2483,23 @@ describe("the natural exit: beforeExit with events queued (#167)", () => {
     exitHooks()[0]?.call(process, 0);
     expect(lines1205()).toEqual([
       "[YAVIO-1205] Process exit with 2 events not delivered — await analytics.shutdown() before exiting, or raise shutdownTimeoutMs.",
+    ]);
+  });
+
+  it("0.5.4's workaround — an app beforeExit listener registered after createYavio() that calls shutdown() — waits only for the SDK's 1.5 s drain, whatever its own shutdownTimeoutMs; the line says a beforeExit listener is too late (review round 1)", async () => {
+    ingest.respondAfterMs = 2_500; // answers after the natural bound, within the client's own 10 s
+    const { client, raw } = build("yav_167_workaround", { shutdownTimeoutMs: 10_000 });
+    await callTool(raw, "get_price", { q: "x" });
+    const t = Date.now();
+    emitBeforeExit(); // the SDK's listener runs first: it was installed by createYavio()
+    await client.shutdown(); // the workaround's call, in the app's listener after it
+    const took = Date.now() - t;
+    expect(took).toBeGreaterThanOrEqual(1_480);
+    expect(took).toBeLessThan(2_200);
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    exitHooks()[0]?.call(process, 0);
+    expect(lines1205()).toEqual([
+      "[YAVIO-1205] Exit deadline of 1500 ms reached — 2 events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the event loop empties (on stdin's end or at the end of the script; a beforeExit listener is too late).",
     ]);
   });
 

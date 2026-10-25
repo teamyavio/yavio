@@ -714,7 +714,7 @@ function yavioReportAtExit(): void {
       : null;
   writeStderrLine(
     natural
-      ? `[YAVIO-1205] Exit deadline of ${natural.budgetMs} ms reached — ${n} events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the process ends.`
+      ? `[YAVIO-1205] Exit deadline of ${natural.budgetMs} ms reached — ${n} events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the event loop empties (on stdin's end or at the end of the script; a beforeExit listener is too late).`
       : cut
         ? `[YAVIO-1205] Shutdown deadline of ${cut.budgetMs} ms reached — ${n} ${cut.printed ? "more " : ""}events not delivered (in flight when the deadline cut it, sent in its last 100 ms or after it, or queued behind a request it cut). ${RAISE_HINT}`
         : `[YAVIO-1205] Process exit with ${n} events not delivered — await analytics.shutdown() before exiting, or raise shutdownTimeoutMs.`,
@@ -742,7 +742,10 @@ const NATURAL_EXIT_MS = 1_500;
  * arriving now would fix. A lower explicit `shutdownTimeoutMs` (option,
  * env or rc file) lowers it; a higher one does not raise it — a
  * fleet-wide 25 s would push every stdio server past its client's
- * `SIGKILL`. An app that wants to wait longer awaits `shutdown()` itself.
+ * `SIGKILL`. An app that wants to wait longer awaits `shutdown()` itself,
+ * before the loop empties: a `beforeExit` listener registered after the
+ * SDK's runs after it, and its `shutdown()` only waits for this drain
+ * (review round 1 — 0.5.4's workaround is capped at the bound on 0.5.5).
  */
 function naturalExitBudgetMs(): number {
   return Math.min(NATURAL_EXIT_MS, processBudgetMs());

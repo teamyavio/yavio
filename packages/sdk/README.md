@@ -120,7 +120,7 @@ The React widget (`useYavio()`) auto-configures from `_meta.yavio`, so it will n
 A stdio server ends when its client closes the server's stdin. A server that holds nothing else (no database pool, no file watcher, no timer of its own) then exits on its own, without a signal and without a `shutdown()` call. Since 0.5.5 the SDK sends what is still queued at that point before the process goes, within 1.5 s or a lower `shutdownTimeoutMs`, and counts what it could not deliver in one line at exit:
 
 ```text
-[YAVIO-1205] Exit deadline of 1500 ms reached — 6 events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the process ends.
+[YAVIO-1205] Exit deadline of 1500 ms reached — 6 events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the event loop empties (on stdin's end or at the end of the script; a beforeExit listener is too late).
 ```
 
 A higher `shutdownTimeoutMs` does not raise the 1.5 s: the MCP TypeScript clients send `SIGTERM` 2 s after they close stdin, and the drain ends before that. With nothing queued the exit is as fast and as quiet as without the SDK. The same holds for every process that ends on its own with events queued — a script or CLI that never calls `shutdown()`, a host that closes its server without a signal. Before 0.5.5 those events were lost without a line. `process.exit()` skips this: call it only after `await analytics.shutdown()`.
@@ -144,7 +144,7 @@ process.stdin.on("end", async () => {
 });
 ```
 
-It needs `shutdownTimeoutMs: 1_500`: with the default 4 s and a hanging ingest, the client's `SIGKILL` at 4 s comes first and no line is printed. A `withYavio()` server creates a client once at startup, for the same key and endpoint, and uses it only for `shutdown()` (as under **Graceful shutdown** below). On 0.5.4 and earlier, which lose the queue on a natural exit, the one-line workaround is `process.once("beforeExit", () => void analytics.shutdown());`.
+It needs `shutdownTimeoutMs: 1_500`: with the default 4 s and a hanging ingest, the client's `SIGKILL` at 4 s comes first and no line is printed. A `withYavio()` server creates a client once at startup, for the same key and endpoint, and uses it only for `shutdown()` (as under **Graceful shutdown** below). On 0.5.4 and earlier, which lose the queue on a natural exit, the one-line workaround is `process.once("beforeExit", () => void analytics.shutdown());`. Drop it on 0.5.5: the SDK drains on its own, and its listener, installed by `createYavio()`, runs before one registered after it, so the workaround's `shutdown()` only waits for that 1.5 s drain. To wait longer than 1.5 s, await `analytics.shutdown()` before the event loop empties — on stdin's `end` as above, or at the end of a script's main — since a `beforeExit` listener is too late.
 
 stdout is the JSON-RPC wire of a stdio server, so the SDK writes nothing there: every line it prints goes to stderr. Before 0.5.5 its informational lines (`[yavio] Server-only mode: …`, `[yavio] Intent capture enabled: …`) went to stdout, and the client reported each one as a line that is not JSON.
 
