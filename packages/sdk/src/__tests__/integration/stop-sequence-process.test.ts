@@ -277,6 +277,33 @@ describe.each(STACKS)("stop sequences against a stdio server on MCP SDK %s", (st
     );
 
     it(
+      "ingest answering 300 ms after receipt, a call still running at stdin's end that finishes during the recipe's shutdown(): it joins the stop — every event delivered, exit 0, no line (review round 1)",
+      { timeout: 30_000 },
+      async () => {
+        ingest.respondAfterMs = 300;
+        const wire = await open({ MODE: "stdin-end-with", RECIPE_SHUTDOWN_TIMEOUT_MS: "1000" });
+        await fiveCalls(wire);
+        // Running when stdin ends (v2 drops a request it has not dispatched
+        // yet); it returns 150 ms later, while the stop's batch is out.
+        const slow = wire.client
+          .callTool({ name: "slow", arguments: { ms: 150 } })
+          .catch(() => undefined);
+        await wire.stderrMatches(/\[fixture\] slow started/);
+        wire.proc.stdin?.end();
+        const exit = await wire.exited;
+        await slow;
+
+        expect(exit, wire.stderr()).toMatchObject({ code: 0, signal: null });
+        // Round 1's first version sent the late call to the fresh
+        // transport: "Process exit with 1 events not delivered — await
+        // analytics.shutdown() …" at the recipe's process.exit(0).
+        expect(lossLines(wire.stderr())).toEqual([]);
+        expect(ingest.ofType("tool_call")).toHaveLength(6);
+        expect(ingest.batches.map((b) => b.abortedAt)).toEqual(ingest.batches.map(() => undefined));
+      },
+    );
+
+    it(
       "the same without process.exit(), stdin's end only (a client with a long grace): the stop aborts the fetch at 1 000 ms and the process exits on its own within D + 1 s, not after the 30 s fetch timeout",
       { timeout: 45_000 },
       async () => {

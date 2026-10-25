@@ -167,6 +167,14 @@ interface Slot extends SharedState {
   live: Transport | null;
   /** The version the key's transports report: the fresh transport a pinned key gets at its last client's release needs it (#179). */
   sdkVersion: string;
+  /**
+   * The transport a pinned key's last release is stopping, until that stop
+   * settles (#179 review round 1). A send — a request finishing during the
+   * client's `shutdown()` — joins it while it still takes sends (its drain
+   * running, its deadline not come: `joinsShutdown`), as it would join any
+   * drain in progress, and goes to the fresh transport in `live` after.
+   */
+  stopping: HttpTransport | null;
 }
 
 /** A live transport: holders, pin, and a generation that tells it from its successors. */
@@ -1338,8 +1346,18 @@ function slotFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string) 
     ...createSharedSessions(onEvict),
     live: null,
     sdkVersion,
+    stopping: null,
     transport: {
       send: (events) => {
+        // A request finishing during the stop a pinned key's last release
+        // started joins that stop while it still takes sends: delivered with
+        // it, or counted once in its line (#179 review round 1). Before, it
+        // went to the fresh transport, outside the `shutdown()` the app
+        // awaited, and the README recipe's `process.exit(0)` lost it.
+        if (slot.stopping?.joinsShutdown()) {
+          slot.stopping.send(events);
+          return;
+        }
         // Nothing live: every holder released (the event has nowhere to go,
         // as with a stopped transport) — or a signal drained it, and a
         // request still being served sends best effort through an immediate
@@ -1542,17 +1560,25 @@ export async function releaseShared(config: Key, hold: SharedHold): Promise<void
     // `withYavio()` ended in the exit hook's "await analytics.shutdown()"
     // line, and without `process.exit()` a hanging fetch held the process
     // for the 30 s fetch timeout. A pinned key keeps its entry, its
-    // generation and its pin, and gets a fresh transport at once: the
-    // `withYavio()` proxies go on sending through it, and what they send
-    // during the stop is not part of it.
-    const live = entry.slot.live;
+    // generation and its pin, and gets a fresh transport at once, which the
+    // `withYavio()` proxies send through once the stop no longer takes
+    // sends; until then a send joins the stop (`slot.stopping`, review
+    // round 1).
+    const slot = entry.slot;
+    const live = slot.live;
     if (entry.pinned) {
-      entry.slot.live = newTransport(config, entry.slot.sdkVersion);
+      slot.live = newTransport(config, slot.sdkVersion);
+      if (live instanceof HttpTransport) slot.stopping = live;
     } else {
       registry.delete(key);
-      entry.slot.live = null;
+      slot.live = null;
     }
-    if (live) await trackStop(live, live.shutdown(boundedBy(ownMs)));
+    if (!live) return;
+    try {
+      await trackStop(live, live.shutdown(boundedBy(ownMs)));
+    } finally {
+      if (slot.stopping === live) slot.stopping = null;
+    }
   } finally {
     done();
   }

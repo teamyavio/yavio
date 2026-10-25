@@ -495,19 +495,29 @@ export class HttpTransport implements Transport {
     return this.inflightSize;
   }
 
+  /**
+   * Whether a `send()` now joins the shutdown in progress: its drain still
+   * runs, its deadline has not come, nothing ended delivery. The registry
+   * routes a pinned key's sends to the transport its last release is
+   * stopping while this holds (#179 review round 1).
+   */
+  joinsShutdown(): boolean {
+    return (
+      this.closing !== null &&
+      !this.drained &&
+      !this.deadlineReached &&
+      !this.authRejected &&
+      !this.sendingOver
+    );
+  }
+
   send(events: BaseEvent[]): void {
     if (this.stopped) {
       // A shutdown() still draining, its deadline not reached: the events
       // join the drain and go out with it — a request finishing during a
       // healthy drain is not a deadline loss (#148 review round 2; before,
       // every send after shutdown() began was counted as one).
-      const joinsDrain =
-        this.closing !== null &&
-        !this.drained &&
-        !this.deadlineReached &&
-        !this.authRejected &&
-        !this.sendingOver;
-      if (!joinsDrain) {
+      if (!this.joinsShutdown()) {
         // Refused after the deadline: the deadline's loss, counted so it is
         // reported. Stopped for good otherwise — a 401, or the drain is
         // over — and nothing will send them: a delivery failure.

@@ -3175,23 +3175,52 @@ describe("the last client's shutdown() on a key withYavio() pinned (#179)", () =
     expect(lines1205()).toHaveLength(1);
   });
 
-  it("a call through the pin during the stop goes into the fresh transport, not into this shutdown(), and the next client's shutdown() delivers it", async () => {
-    const { analytics, raw } = setup("yav_179_during", 2_000);
+  it("the README recipe: a call through the pin that finishes during the client's shutdown() joins that stop and is delivered by it, and the process.exit(0) after it has nothing to report (review round 1)", async () => {
+    const { analytics, raw } = setup("yav_179_during", 1_500);
     ingest.respondAfterMs = 200;
     await callTool(raw, "get_price", { q: "before" });
     const stopping = analytics.shutdown();
     await sleep(50); // the stop's batch is in flight
     await callTool(raw, "get_price", { q: "during" });
     await stopping;
-    // Before #179 the call joined the drain and went out with it.
-    expect(toolCallQs()).toEqual(["before"]);
+    // As before #179, when it joined the drain. Round 1's first version sent
+    // it to the fresh transport: ["before"] here, and the exit hook's
+    // "Process exit with 1 events not delivered — await analytics.shutdown() …".
+    expect(toolCallQs()).toEqual(["before", "during"]);
+    expect(ingest.responded).toBe(2);
+    exitHooks()[0]?.call(process, 0); // process.exit(0)
+    expect(lines1205()).toEqual([]);
+  });
+
+  it("against a hanging ingest, a call that joined the stop is counted once, in the stop's shutdown() line, and the exit hook adds nothing", async () => {
+    const { analytics, raw } = setup("yav_179_during_hang");
+    await callTool(raw, "get_price", { q: "before" });
+    ingest.hangEvents = true;
+    const stopping = analytics.shutdown();
+    await sleep(50);
+    await callTool(raw, "get_price", { q: "during" }); // queued behind the hanging batch
+    await stopping;
+    await vi.waitFor(() => expect(lines1205()).toHaveLength(1), { timeout: 1_000 });
+    expect(lines1205()).toEqual([
+      "[YAVIO-1205] shutdown() deadline of 300 ms reached — 3 events not delivered. Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.",
+    ]);
     expect(ingest.batches).toHaveLength(1);
+    exitHooks()[0]?.call(process, 0);
+    expect(lines1205()).toHaveLength(1);
+  });
+
+  it("once the stop is over, a call through the pin goes through the fresh transport, and the next client's shutdown() delivers it", async () => {
+    const { analytics, raw } = setup("yav_179_after", 2_000);
+    await callTool(raw, "get_price", { q: "before" });
+    await analytics.shutdown();
+    await callTool(raw, "get_price", { q: "after" });
+    expect(toolCallQs()).toEqual(["before"]); // queued on the fresh transport
     await createYavio({
-      apiKey: "yav_179_during",
+      apiKey: "yav_179_after",
       endpoint: ingest.endpoint,
       serverOnly: true,
     }).shutdown();
-    expect(toolCallQs()).toEqual(["before", "during"]);
+    expect(toolCallQs()).toEqual(["before", "after"]);
   });
 
   it("with a second client still holding the key, the first's shutdown() only drains; the second's stops the transport", async () => {
@@ -3245,15 +3274,18 @@ describe("the last client's shutdown() on a key withYavio() pinned (#179)", () =
     await callTool(raw, "get_price", { q: "before" });
     const stopping = analytics.shutdown();
     await sleep(50);
-    await callTool(raw, "get_price", { q: "during" }); // the fresh transport
+    await callTool(raw, "get_price", { q: "during" }); // joins the stop
     await analytics.flush();
     // Both answered when the flush returns: it awaited the key's stop.
     expect(ingest.responded).toBe(2);
     expect(toolCallQs()).toEqual(["before", "during"]);
     await stopping;
+    await callTool(raw, "get_price", { q: "after" }); // the fresh transport
+    await analytics.flush();
+    expect(toolCallQs()).toEqual(["before", "during", "after"]);
   });
 
-  it("a signal during the pinned stop takes it over and cuts it to the cycle's deadline, and stops the fresh transport, which carries what the pin sent meanwhile — one cycle line, no shutdown() line", async () => {
+  it("a signal during the pinned stop takes it over and cuts it to the cycle's deadline, with what the pin sent meanwhile joined to it, and stops the fresh transport too — every event once, in the cycle's one line, no shutdown() line", async () => {
     await withoutOtherListeners("SIGTERM", async () => {
       ingest.hangEvents = true;
       const { analytics, raw } = setup("yav_179_signal", 20_000);
@@ -3268,25 +3300,25 @@ describe("the last client's shutdown() on a key withYavio() pinned (#179)", () =
       const t = Date.now();
       const stopping = analytics.shutdown(); // its own 20 s
       await sleep(50);
-      await callTool(raw, "get_price", { q: "during" }); // the fresh transport
+      await callTool(raw, "get_price", { q: "during" }); // joins the stop, behind its batch
       process.emit("SIGTERM", "SIGTERM");
       await stopping;
       const took = Date.now() - t;
       expect(took).toBeGreaterThanOrEqual(1_000);
       expect(took).toBeLessThan(2_500);
-      // The stop's batch, cut at signal + D, and the fresh transport's,
-      // which the cycle stopped too. Before #179 "during" queued behind the
-      // drained batch on the same transport and never went out.
-      await vi.waitFor(() => expect(ingest.batches).toHaveLength(2));
-      await vi.waitFor(() => {
-        for (const batch of ingest.batches) expect(batch.abortedAt).toBeDefined();
-      });
-      for (const batch of ingest.batches) {
-        expect((batch.abortedAt as number) - t).toBeLessThan(2_500);
-      }
+      // The stop's batch, cut at signal + D; "during" given up with it.
+      await vi.waitFor(() => expect(ingest.batches[0]?.abortedAt).toBeDefined());
+      expect((ingest.batches[0]?.abortedAt as number) - t).toBeLessThan(2_500);
+      expect(ingest.batches).toHaveLength(1);
+      // The cycle took the registry, the fresh transport with it, and both
+      // transports have settled.
+      expect(_sharedStateCount()).toBe(0);
+      await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
       expect(lines1205()).toEqual([
         expect.stringMatching(/^\[YAVIO-1205\] Shutdown deadline of 1000 ms reached — 3 events/),
       ]);
+      exitHooks()[0]?.call(process, 0);
+      expect(lines1205()).toHaveLength(1);
     });
   });
 });

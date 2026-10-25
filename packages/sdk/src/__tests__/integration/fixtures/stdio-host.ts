@@ -83,15 +83,27 @@ if (pinnedRecipe) {
     shutdownTimeoutMs: Number(process.env.RECIPE_SHUTDOWN_TIMEOUT_MS ?? 1_500),
   });
   // Wrapped first: withYavio() tracks the tools registered through its proxy.
+  // `slow` answers after `ms`: a call still running when stdin ends, which
+  // finishes during the recipe's shutdown() (#179 review round 1). It says
+  // `[fixture] slow started` on stderr: v2 drops a request it has not
+  // dispatched yet when stdin ends, so the test ends stdin after this line.
+  const slowSchema = { description: "Echo after ms", inputSchema: { ms: z.number() } };
+  const slow = async ({ ms }: { ms: number }) => {
+    writeSync(2, "[fixture] slow started\n");
+    await new Promise((resolve) => setTimeout(resolve, ms));
+    return { content: [{ type: "text" as const, text: `slept ${ms}` }] };
+  };
   if (stack === "v2") {
     serveStdio(() => {
       const server = withYavio(new McpServerV2({ name: "child", version: "1.0.0" }), options);
       server.registerTool("echo", { description: "Echo", inputSchema: { q: z.string() } }, echo);
+      server.registerTool("slow", slowSchema, slow);
       return server;
     });
   } else {
     const server = withYavio(new McpServerV1({ name: "child", version: "1.0.0" }), options);
     server.registerTool("echo", { description: "Echo", inputSchema: { q: z.string() } }, echo);
+    server.registerTool("slow", slowSchema, slow);
     await server.connect(new StdioServerTransport());
   }
 } else if (stack === "v2") {
