@@ -200,7 +200,7 @@ describe("get_schema doc", () => {
     expect(doc).toMatch(/'per_request' \(a key-less HTTP call, on any server/);
     expect(doc).toMatch(/since SDK 0\.5\.5 a per_request session is ONE CALL/);
     expect(doc).toMatch(
-      /on SDK 0\.5\.4 a server that reuses one stateless transport put all its key-less callers into one per_request session/,
+      /on SDK 0\.5\.4 [^.;]*reuses one stateless transport[^.;]*one per_request session/,
     );
     expect(doc).not.toMatch(/only on (a )?servers? that builds? a new MCP server per request/);
   });

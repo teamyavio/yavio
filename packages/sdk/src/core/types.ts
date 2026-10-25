@@ -255,10 +255,9 @@ export interface WithYavioOptions {
   shutdownTimeoutMs?: number;
   /**
    * The conversation a call belongs to, for clients that send no session key
-   * the SDK knows (#144) — on a per-request host (a new McpServer per
-   * request, stateless Streamable HTTP) every such call would otherwise be a
-   * session of its own (`session_source: "per_request"`, not counted as a
-   * session). Called only when the call carries none of, in this order,
+   * the SDK knows (#144). Over HTTP, on any host, every such call is
+   * otherwise a session of its own (`session_source: "per_request"`, not
+   * counted as a session). Called only when the call carries none of, in this order,
    * `Mcp-Session-Id`, `_meta["openai/session"]`, `_meta["vscode.conversationId"]`
    * and the Codex CLI's `_meta.threadId`:
    *
