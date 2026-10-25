@@ -225,3 +225,31 @@ describe("identifier fields are not stripped (#90)", () => {
     expect(result[0].event_id).toContain("[PHONE_REDACTED]");
   });
 });
+
+describe("a W3C traceparent (#173)", () => {
+  // The W3C Trace Context example. Its parent id ends in ten decimal digits,
+  // which the phone pattern took for a number; about 1.9 % of random valid
+  // traceparents do. The SDK stores one as a tool_call's metadata.traceparent.
+  const W3C = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+
+  it("leaves a string that is exactly a valid traceparent unchanged, not redacted", () => {
+    expect(stripPiiFromString(W3C)).toEqual({ result: W3C, redacted: false });
+    const { result, piiDetected } = stripPii([{ metadata: { traceparent: W3C } }]);
+    expect(result[0].metadata.traceparent).toBe(W3C);
+    expect(piiDetected).toBe(false);
+  });
+
+  it.each([
+    ["text around one", `${W3C} call 555-123-4567`],
+    ["upper-case hex", W3C.toUpperCase()],
+    ["version ff", `ff${W3C.slice(2)}`],
+    ["an all-zero trace id", `00-${"0".repeat(32)}-b7ad6b7169203331-01`],
+    ["an all-zero parent id", `00-0af7651916cd43dd8448eb2155501340-${"0".repeat(16)}-01`],
+    ["a higher version's extra field", `01${W3C.slice(2)}-00`],
+    ["a trailing newline", `${W3C}\n`],
+  ])("strips %s as before: the exemption is for the exact format only", (_case, value) => {
+    const { result, redacted } = stripPiiFromString(value);
+    expect(result).toContain("[PHONE_REDACTED]");
+    expect(redacted).toBe(true);
+  });
+});

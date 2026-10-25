@@ -18,11 +18,12 @@
  *    (`codex_thread`);
  * 5. the integrator's `sessionKey` option (`custom`);
  *
- * and without any of them the connection's own session — `per_request` on an
- * HTTP request (on a per-request host that is one call), `connection` on any
- * other transport (stdio: the client process). The built-in keys apply on
- * every transport, so a VS Code stdio server gets one session per
- * conversation instead of one per client process.
+ * and without any of them, on an HTTP request, a session of its own for that
+ * one call — `per_request`, on every host, also on a long-lived server that
+ * reuses one stateless transport (#169) — and on any other transport the
+ * connection's own session, `connection` (stdio: the client process). The
+ * built-in keys apply on every transport, so a VS Code stdio server gets one
+ * session per conversation instead of one per client process.
  */
 
 import { ErrorCode } from "@yavio/shared/error-codes";

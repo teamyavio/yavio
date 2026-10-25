@@ -30,14 +30,14 @@ server.registerTool("search", { inputSchema: { query: z.string() } }, async ({ q
 });
 ```
 
-Tool calls, inputs, outputs, and timing are captured automatically. Custom events are optional.
+Tool calls, inputs, outputs, and timing are captured automatically. Custom events are optional. Events are batched and sent in the background; when the process ends — its client closes a stdio server's stdin, or a `SIGTERM`/`SIGINT` arrives — the SDK sends what is still queued first, without shutdown code of yours (see [stdio servers](#stdio-servers) and **Graceful shutdown** under [Stateless / per-request servers](#stateless--per-request-servers)). On a platform that freezes the instance once the response is out — AWS Lambda, Vercel, Cloudflare Workers, Cloud Run with request-based billing — call `analytics.flush()` or `analytics.flushWhenSent()` per request (see [Serverless and edge runtimes](#serverless-and-edge-runtimes)).
 
 ## Configuration
 
 The SDK resolves config in order:
 
 1. Options passed to `withYavio(server, options)`
-2. Environment variables `YAVIO_API_KEY`, `YAVIO_ENDPOINT` (and `YAVIO_SERVER_ONLY`, `YAVIO_INTENT`, `YAVIO_SHUTDOWN_TIMEOUT_MS`)
+2. Environment variables `YAVIO_API_KEY`, `YAVIO_ENDPOINT` (and `YAVIO_SERVER_ONLY`, `YAVIO_INTENT`, `YAVIO_SHUTDOWN_TIMEOUT_MS`, `YAVIO_FLUSH_TIMEOUT_MS`, `YAVIO_WAIT_UNTIL_TIMEOUT_MS`)
 3. `.yaviorc.json` (walks up from cwd)
 
 If no API key is found, `withYavio()` returns the original server unchanged — zero overhead, no HTTP requests.
@@ -62,6 +62,8 @@ withYavio(server, {
     "book-contract": { inputValues: false, outputValues: false, intent: false },
   },
   shutdownTimeoutMs: 4_000, // deadline for delivering queued events on shutdown: an integer in [100, 2147483647] ms (default: 4 s); on SIGTERM/SIGINT one deadline for the whole process, the smallest value set explicitly, see Stateless
+  flushTimeoutMs: 1_000,    // how long createYavio().flush() waits for ingest: an integer in [100, 2147483647] ms (default: 1 s); nothing is dropped at it, see Serverless
+  waitUntilTimeoutMs: 10_000, // how long flushWhenSent()'s flush, in waitUntil, may wait for the batch it sent (default: 10 s), see Serverless
   sessionKey: ({ headers }) => headers["x-conversation-id"], // the conversation of a call that carries no session key the SDK knows (default: none; code only), see Stateless
 });
 ```
@@ -115,6 +117,39 @@ In this mode the SDK:
 
 The React widget (`useYavio()`) auto-configures from `_meta.yavio`, so it will not connect on its own in server-only mode — pass config to the hook explicitly if you still want client-side tracking.
 
+### stdio servers
+
+A stdio server ends when its client closes the server's stdin. A server that holds nothing else (no database pool, no file watcher, no timer of its own) then exits on its own, without a signal and without a `shutdown()` call. Since 0.5.5 the SDK sends what is still queued at that point before the process goes, within 1.5 s or a lower `shutdownTimeoutMs`, and counts what it could not deliver in one line at exit:
+
+```text
+[YAVIO-1205] Exit deadline of 1500 ms reached — 6 events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the event loop empties (on stdin's end or at the end of the script; a beforeExit listener is too late).
+```
+
+A higher `shutdownTimeoutMs` does not raise the 1.5 s: the MCP TypeScript clients send `SIGTERM` 2 s after they close stdin, and the drain ends before that. With nothing queued the exit is as fast and as quiet as without the SDK. The same holds for every process that ends on its own with events queued — a script or CLI that never calls `shutdown()`, a host that closes its server without a signal. Before 0.5.5 those events were lost without a line. `process.exit()` skips this: call it only after `await analytics.shutdown()`. On AWS Lambda's Node 20/22 runtimes the drain runs after every invocation of a callback-style handler, because the runtime client answers it from its own `beforeExit` listener. Streaming handlers there wait for an empty loop as well, so their billed invocation can last until the drain's stops settle (at most the 1.5 s bound). On Lambda, use `flush()` (since 0.5.5, see [Serverless and edge runtimes](#serverless-and-edge-runtimes)).
+
+How clients end a stdio server:
+
+| Client | What it does |
+|---|---|
+| MCP TypeScript SDK `StdioClientTransport.close()`, v1 and v2 (and hosts built on it) | closes stdin; `SIGTERM` 2 s later, `SIGKILL` 2 s after that |
+| VS Code | closes stdin; a polite tree kill (`SIGTERM`, skipped on Windows) 10 s later, a forceful one 10 s after that |
+| Claude Code on macOS and Linux | `SIGINT`, `SIGTERM` 100 ms later, `SIGKILL` 500 ms after the `SIGINT` — it does not close stdin, so the signal path applies, not this one. Since 0.5.5 the SDK keeps sending until 400 ms after the `SIGINT`, before the `SIGKILL`, and counts what it could not deliver in one line (see [The deadline](#the-deadline)); before, the `SIGTERM` ended the drain after about 100 ms, and a batch on a fresh connection to a remote ingest never left the machine |
+| Claude Code on Windows | closes stdin, then kills the process tree 300 ms later: the drain completes only if ingest answers within that |
+
+A server with handles of its own does not exit when stdin ends; the client's `SIGTERM` 2 s later ends it on the signal path. To end it the stdio way, shut down when stdin ends:
+
+```typescript
+const analytics = createYavio({ serverOnly: true, shutdownTimeoutMs: 1_500 });
+process.stdin.on("end", async () => {
+  await analytics.shutdown(); // within 1.5 s: before the client's SIGTERM at 2 s
+  process.exit(0); // your own handles no longer keep the process
+});
+```
+
+It needs `shutdownTimeoutMs: 1_500`: with the default 4 s and a hanging ingest, the client's `SIGKILL` at 4 s comes first and no line is printed. Either entry point works. With `withYavio()`, create the client above once at startup, for the same key and endpoint as the `withYavio()` calls, and use it only for `shutdown()`: since 0.5.5 its `shutdown()` stops the transport those servers share like any last client's — at its deadline the fetch in flight is aborted and one `shutdown() deadline of 1500 ms reached — N events not delivered` line counts the loss — and a fresh transport takes over for them. A call that finishes during that `shutdown()` joins it and is delivered with it (or counted in its line), as on any drain. That holds for a client that never wraps a server, as here; a client that also wraps servers on the pinned key only drains it (see [Graceful shutdown](#stateless--per-request-servers)). Before 0.5.5 it only drained a key `withYavio()` uses: against a hanging ingest the recipe's `process.exit(0)` ended with `Process exit with N events not delivered — await analytics.shutdown() …`, a hint that does not fit a process that did await it, and without `process.exit()` the hanging fetch kept the process up for about 30 s; wrap with `createYavio().wrap()` there. On 0.5.4 and earlier, which lose the queue on a natural exit, the one-line workaround is `process.once("beforeExit", () => void analytics.shutdown());`. Drop it on 0.5.5: the SDK drains on its own, and its listener, installed by `createYavio()`, runs before one registered after it, so the workaround's `shutdown()` only waits for that 1.5 s drain. To wait longer than 1.5 s, await `analytics.shutdown()` before the event loop empties — on stdin's `end` as above, or at the end of a script's main — since a `beforeExit` listener is too late.
+
+stdout is the JSON-RPC wire of a stdio server, so the SDK writes nothing there: every line it prints goes to stderr. Before 0.5.5 its informational lines (`[yavio] Server-only mode: …`, `[yavio] Intent capture enabled: …`) went to stdout, and the client reported each one as a line that is not JSON.
+
 ### Stateless / per-request servers
 
 Stateless HTTP hosts build a new `McpServer` for every request (the MCP SDK's stateless Streamable HTTP pattern, v2 `createMcpHandler`, `mcp-handler`, Skybridge 2). Create the client once per process and wrap each server as it is built:
@@ -159,7 +194,7 @@ What holds across instances **and across processes** (a fleet behind a load bala
 | 3 | VS Code / Copilot Chat's `_meta["vscode.conversationId"]`, from any client | `vscode_conversation` |
 | 4 | The Codex CLI's `_meta.threadId` — only from `codex-mcp-client` (named by its envelope, its `initialize` or its User-Agent): a bare `threadId` from another client is not trusted | `codex_thread` |
 | 5 | Your `sessionKey` option | `custom` |
-| — | None of them: the connection's own session — on an HTTP request that is one request, on stdio one client process | `per_request` / `connection` |
+| — | None of them: on an HTTP request a session of its own for that one call, on every host; on stdio the client process's | `per_request` / `connection` |
 
 Keys 3 and 4 apply on stdio too, so since 0.5.4 a VS Code stdio server gets one session per conversation instead of one per client process — more sessions there, and `identify()` no longer carries from one conversation to the next. The other clients known today — Claude Code, claude.ai connectors, Cursor, Zed — send no conversation key; if your host knows the conversation (a header your gateway sets, a conversation id in your own auth layer), tell the SDK:
 
@@ -180,15 +215,15 @@ Return a **conversation** id. Funnels, paths, the step sequence and `identify()`
 - a constant — one session for everybody;
 - a per-request id (`traceparent`, a request id) — one session per call again.
 
-Every session a process sees takes an entry in its session store (1 000, least recently used first out) and in the connection-event marks (10 000): with more concurrent conversations than that, an idle one ages out, and its next call starts over with a fresh `connection` event, no identified user and the step sequence at 0.
+Every session a process sees takes an entry in its session store (1 000, least recently used first out) and in the connection-event marks (10 000): with more concurrent conversations than that, an idle one ages out, and its next call starts over with a fresh `connection` event, no identified user and the step sequence at 0. A call without a key on an HTTP request takes no entry in the session store, and its connection-event mark is one per client (below).
 
-A call without any key on an HTTP request is `session_source: "per_request"` — on a per-request host a session of one call. The dashboard does not count it as a session (the Sessions KPI says how many such calls there were), the anonymous statistics do not count it as a person, and its `connection` event is emitted once per process per client (platform, client name and version, protocol version) instead of once per call. The widget gets the session's source with its config (`_meta.yavio.sessionSource`) and stamps it on its own events, so a per-request session's widget rows are left out the same way; a widget on an SDK before 0.5.4 sends none, and its rows count as before. On MCP SDK v1 1.24 and 1.25 one stateless transport can also be reused for every request of a long-lived server; its calls then share one connection session, labelled `per_request` all the same.
+A call without any key on an HTTP request is `session_source: "per_request"` — a session of one call, on every host. The dashboard does not count it as a session (the Sessions KPI says how many such calls there were), the anonymous statistics do not count it as a person, and its `connection` event is emitted once per process per client (platform, client name and version, protocol version) instead of once per call. The widget gets the session's source with its config (`_meta.yavio.sessionSource`) and stamps it on its own events, so a per-request session's widget rows are left out the same way; a widget on an SDK before 0.5.4 sends none, and its rows count as before. Each such call is its own session on every host, also on a long-lived server that reuses one stateless transport for every request (MCP SDK v1 1.24 and 1.25 allow it; before 0.5.5 those calls shared one session, and the first identified user, platform and step count landed on every caller). Reusing a transport across requests is the pattern of the MCP SDK advisory [GHSA-345p-7cg4-v4c7](https://github.com/advisories/GHSA-345p-7cg4-v4c7) (CVE-2026-25536, a cross-client data leak in the MCP SDK itself): use MCP SDK 1.26 or later with a transport per request.
 
 `wrap()` instruments **every tool on the server**, including the ones `buildServer()` registered before the wrap. That is the one behavioural difference to `withYavio()`, which tracks only the tools registered through the proxy it returns — a tool kept on the raw server on purpose stays untracked under `withYavio()`, and the way to limit capture for a sensitive tool under either entry point is the `tools` overrides.
 
 `withYavio(server, options)` is safe for a server created per request too: the transport, the session store and the shutdown hooks are shared per API key and endpoint. It resolves the configuration (environment, `.yaviorc.json`) on every call, which `createYavio()` does once. Wrapping the same long-lived server again — with either entry point — returns the existing proxy, so a host that wraps on every request never stacks instrumentation. The first wrap wins: later options are ignored — any difference (another key or endpoint, other `capture` flags or `tools` overrides, `serverOnly`, intent, a `sessionKey` added or dropped, or a `wrap()` after a `withYavio()`) logs one `YAVIO-1108` warning and the first wrap's configuration keeps applying.
 
-**Graceful shutdown.** Events are batched, so the ones from the last seconds before a scale-down or redeploy are still in memory when the signal arrives. With no handler of your own the SDK drains them within 4 s and hands the signal back (below). With a handler, stop accepting, give the requests in flight a bounded time to finish, then await `shutdown()`, then exit — `http` is the server `app.listen(port)` returned:
+**Graceful shutdown.** Events are batched, so the ones from the last seconds before a scale-down or redeploy are still in memory when the signal arrives (a stdio server ends without a signal: see [stdio servers](#stdio-servers)). With no handler of your own the SDK drains them within 4 s and hands the signal back (below). With a handler, stop accepting, give the requests in flight a bounded time to finish, then await `shutdown()`, then exit — `http` is the server `app.listen(port)` returned:
 
 <!-- shutdown-recipe -->
 ```typescript
@@ -220,7 +255,7 @@ process.on("SIGINT", stop);
 
 Both signals, because Fly.io sends `SIGINT` by default. `stopping` makes a second signal — `npm run` forwards the terminal's Ctrl-C to a script that already got it — join the first run instead of calling `http.close()` again (`ERR_SERVER_NOT_RUNNING`) and exiting under the first close. `http.close()` alone closes the idle keep-alive sockets, but its callback waits for the socket of the request in flight at close time, which stays open after its response until the client closes it or the server's keep-alive timeout ends it (`keepAliveTimeout` plus a 1 s buffer, configurable as `keepAliveTimeoutBuffer` since Node 22.19 and 24.6: about 6 s by default on current Node, over a minute behind some load balancers), and a `Connection: close` header set once shutdown began cannot reach a response whose headers are already out — every SSE response, which is most MCP traffic today; `closeWithin` closes the idle sockets every 100 ms and cuts whatever is left at the cap, so a request that outlasts the cap is the one thing it costs.
 
-**The deadline.** On `SIGTERM`/`SIGINT` the SDK fixes one deadline for the whole process at signal + D, where D is the smallest `shutdownTimeoutMs` set explicitly (option, `YAVIO_SHUTDOWN_TIMEOUT_MS` or `.yaviorc.json`) by any `createYavio()` client, `withYavio()` call or `shutdown()` still running when the signal arrives, else 4 s; the SDK's own drain and every `shutdown()` — your handler's included, however long the close before it took — resolve by then: one called with no time left before the SDK hands the signal back resolves at once, one called after the hand-back within D of its call. A slow or unreachable ingest therefore costs events, not the exit: what is still undelivered at the deadline is dropped, the fetch in flight is aborted, no retry is scheduled past it, and one `YAVIO-1205` line gives the count (`Shutdown deadline of 4000 ms reached — 12 events not delivered …`), plus one more when the signal was handed back before the SDK's transport stops had settled (a second signal, or a stop still settling at the deadline) — at the deadline when a `shutdown()` is still waiting then, otherwise once the transport stops have settled; the platform never has to kill the process. Requests that finish after the signal still send their events at once, one attempt each, and a `shutdown()` after the deadline waits for those at most D from its own call. Outside a signal each `shutdown()` is bounded by its own client's value from its call. `shutdownTimeoutMs` takes an integer in [100, 2147483647] milliseconds; anything else logs `YAVIO-1006` once and uses the default. Rule of thumb: `shutdownTimeoutMs` = the close cap + 1 s, and both must fit the platform's grace period:
+<a id="the-deadline"></a>**The deadline.** On `SIGTERM`/`SIGINT` the SDK fixes one deadline for the whole process at signal + D, where D is the smallest `shutdownTimeoutMs` set explicitly (option, `YAVIO_SHUTDOWN_TIMEOUT_MS` or `.yaviorc.json`) by any `createYavio()` client, `withYavio()` call or `shutdown()` still running when the signal arrives, else 4 s; the SDK's own drain and every `shutdown()` — your handler's included, however long the close before it took — resolve by then: one called with no time left before the SDK hands the signal back resolves at once, one called after the hand-back within D of its call. A slow or unreachable ingest therefore costs events, not the exit: what is still undelivered at the deadline is dropped, the fetch in flight is aborted, no retry is scheduled past it, and one `YAVIO-1205` line gives the count (`Shutdown deadline of 4000 ms reached — 12 events not delivered …`), plus one more when the signal was handed back before the SDK's transport stops had settled (a second signal, or a stop still settling at the deadline) — at the deadline when a `shutdown()` is still waiting then, otherwise once the transport stops have settled; the platform never has to kill the process. Requests that finish after the signal still send their events at once, one attempt each, and a `shutdown()` after the deadline waits for those at most D from its own call. Outside a signal each `shutdown()` is bounded by its own client's value from its call. One signal order moves the deadline in: a `SIGTERM` after the `SIGINT` that started the drain — Claude Code's stop sequence for a stdio server, `SIGINT`, `SIGTERM` 100 ms later, `SIGKILL` 400 ms after that — ends it by 400 ms after the `SIGINT`, or at signal + D when that is sooner — and never later than 300 ms after the `SIGTERM`, which only decides when a busy process handled both signals late (since 0.5.5). The SDK's drain, every `shutdown()` and `flush()` waiting on it, and the fetches of requests served afterwards follow that earlier deadline, and the line names it instead of D, without the hint to raise `shutdownTimeoutMs`, which cannot extend it: `Shutdown deadline of 400 ms (SIGTERM 102 ms after SIGINT) reached — 6 events not delivered (queued, in flight or refused after the deadline). The client stops the server with SIGINT, SIGTERM and SIGKILL (Claude Code: 100 ms, then 400 ms); a higher shutdownTimeoutMs does not extend that.` A process that ends on its own with events queued — no signal, no `shutdown()` — drains within min(1.5 s, D) instead: a lower explicit `shutdownTimeoutMs` lowers that bound, a higher one does not raise it ([stdio servers](#stdio-servers)). `shutdownTimeoutMs` takes an integer in [100, 2147483647] milliseconds; anything else logs `YAVIO-1006` once and uses the default. Rule of thumb: `shutdownTimeoutMs` = the close cap + 1 s, and both must fit the platform's grace period:
 
 | Platform | Grace period after the signal | Close cap | `shutdownTimeoutMs` |
 |---|---|---|---|
@@ -228,7 +263,7 @@ Both signals, because Fly.io sends `SIGINT` by default. `stopping` makes a secon
 | Cloud Run | 10 s | 3 s, or 6 s to drain longer | 4 s (the default), or 8 s |
 | Kubernetes, ECS | 30 s | 20 s | 25 s |
 
-With a healthy ingest the delivery takes about 250 ms and none of this is reached. Fastify's server is `fastify.server`, Nest's `app.getHttpServer()`; Next.js installs its own `SIGTERM`/`SIGINT` handler, which exits with 143 after `server.close()` without waiting for the SDK — set `NEXT_MANUAL_SIG_HANDLE=true` to use the recipe. A second or concurrent `shutdown()` — a framework hook and your handler — waits for the first. The transport stops once no client with the same key holds it (a `withYavio()` call never releases). A `withYavio()` host has no client to call: create one once at startup, next to the `withYavio()` calls and for the same key and endpoint, and use it only for `shutdown()`:
+With a healthy ingest the delivery takes about 250 ms and none of this is reached. Fastify's server is `fastify.server`, Nest's `app.getHttpServer()`; Next.js installs its own `SIGTERM`/`SIGINT` handler, which exits with 143 after `server.close()` without waiting for the SDK — set `NEXT_MANUAL_SIG_HANDLE=true` to use the recipe. A second or concurrent `shutdown()` — a framework hook and your handler — waits for the first. The transport stops once no other client with the same key holds it. On a key a `withYavio()` call uses, it stops only at the `shutdown()` of a client that never wrapped a server — the shutdown-only client below, whose `shutdown()` ends the process — and then whatever other clients still hold it; a fresh transport takes over at once, so those servers keep sending (since 0.5.5; before, that `shutdown()` only drained such a key, and its deadline neither aborted the fetch nor counted the loss). A client that wraps servers only drains a key a `withYavio()` call uses, as before. Such a `shutdown()` is for the end of the process: a host that creates and shuts down never-wrapping clients per request gives up the `withYavio()` servers' queue at each of them against a failing ingest (4 of 36 calls in the 3 s outage measured below). A `withYavio()` host has no client to call: create one once at startup, next to the `withYavio()` calls and for the same key and endpoint, and use it only for `shutdown()`:
 
 ```typescript
 const analytics = createYavio({ apiKey, endpoint }); // once, at startup; shutdown() only
@@ -236,15 +271,179 @@ withYavio(server, { apiKey, endpoint });               // per server, as before
 // in the handler, as above: await analytics.shutdown();
 ```
 
-Created inside the handler instead, after the SDK handed the signal back, it would install the SDK's signal listeners again and they would stay.
+Created inside the handler instead, after the SDK handed the signal back, it would install the SDK's signal listeners again and they would stay. One client for the process is the pattern. A host that pins a key with `withYavio()` and also creates, wraps with and shuts down `createYavio()` clients per request on the same key keeps the behaviour of 0.5.4 and earlier: those clients wrap, so their `shutdown()` only drains the shared transport, and through an ingest outage the `withYavio()` servers' queue waits for the next retry (with a `withYavio()` server called every 100 ms, a per-request client every 500 ms and a 3 s outage, all 36 calls arrive once ingest is back). The cost stays as well: an app that both wraps servers and pins the same key gets a drain on its last `shutdown()`, which against a hanging ingest aborts no fetch. With `process.exit()` after it, the exit hook's `Process exit …` line counts the loss; without, the fetch can hold the process until its 30 s timeout, and the natural-exit drain's `Exit deadline of 1500 ms reached — 53 events …` comes at about 31.6 s (measured). On such a host, create the wrapping client once at startup, wrap with it per request and `await analytics.flush()` at each request's end; end the process with a shutdown-only client that never wraps, whose `shutdown()` stops the key's transport even while the wrapping client still holds it. Do not create a client per request and call `flush()` instead of its `shutdown()`: a client holds the key from its creation until its `shutdown()`, so each of them would stay registered for the life of the process.
 
-Without a handler the SDK drains everything on `SIGTERM`/`SIGINT` within the deadline, prints what it had to give up (one `YAVIO-1205` line), then hands the signal back: it removes its own listeners and, if it was the only listener when the signal arrived, re-raises the signal so Node's default exit runs (128 + the signal number: 130 after Ctrl-C, 143 after `SIGTERM`; set by hand on Windows) — an app with its own handler keeps control, and a second signal ends the wait: a different signal at once, the same signal once 250 ms have passed since the first — handed back for the signal that arrived, re-raised only if nothing else listens to it. The 250 ms window is a heuristic for one keypress delivered twice (`npm run` forwards the terminal's Ctrl-C to a script that already received it, a few milliseconds apart); it goes by the clock, so a deliberate second `SIGTERM` within 250 ms is taken for the same delivery and the drain runs on to the deadline, and a forward delayed past 250 ms on a loaded host ends the drain early with the events given up counted in the `YAVIO-1205` line — neither costs more than the deadline. An app that calls `process.exit()` before its `shutdown()` resolved gets one `YAVIO-1205` line at exit with what was still undelivered. After a `shutdown()` that returned in that cycle, once its deadline has come, what the deadline left — a late request's batch it cut in flight, the second event of a request served after the signal, a send in its last 100 ms — comes at exit in the deadline's wording (`Shutdown deadline of 4000 ms reached — 1 more events not delivered (in flight when the deadline cut it, …)`, "more" only after a line of that cycle), without the hint to await `shutdown()`. A library that also waits to be the last listener (signal-exit, used by execa and ora) does not get its turn, so an app that depends on it should handle the signal itself. A `401` from ingest stops delivery for that key process-wide (`YAVIO-1203`): every wrap sharing the key is affected, which is what an invalid key means.
+Without a handler the SDK drains everything on `SIGTERM`/`SIGINT` within the deadline, prints what it had to give up (one `YAVIO-1205` line), then hands the signal back: it removes its own listeners and, if it was the only listener when the signal arrived, re-raises the signal so Node's default exit runs (128 + the signal number: 130 after Ctrl-C, 143 after `SIGTERM`; set by hand on Windows) — an app with its own handler keeps control, and a second signal ends the wait: a different signal at once, the same signal once 250 ms have passed since the first — handed back for the signal that arrived, re-raised only if nothing else listens to it. The one exception is a `SIGTERM` after the `SIGINT`, a client's stop sequence: the wait ends by 400 ms after the `SIGINT` instead (see the deadline above), and then the `SIGTERM` is handed back; a `SIGTERM` followed by a `SIGINT` still ends it at once, and so does a third signal. The 250 ms window is a heuristic for one keypress delivered twice (`npm run` forwards the terminal's Ctrl-C to a script that already received it, a few milliseconds apart); it goes by the clock, so a deliberate second `SIGTERM` within 250 ms is taken for the same delivery and the drain runs on to the deadline, and a forward delayed past 250 ms on a loaded host ends the drain early with the events given up counted in the `YAVIO-1205` line — neither costs more than the deadline. An app that calls `process.exit()` before its `shutdown()` resolved gets one `YAVIO-1205` line at exit with what was still undelivered. A process that ends on its own with events queued gets one line at exit for what its natural-exit drain could not deliver (`Exit deadline of 1500 ms reached — 6 events not delivered (the process ended on its own with events queued; …)`), and none with nothing queued. After a `shutdown()` that returned in that cycle, once its deadline has come, what the deadline left — a late request's batch it cut in flight, the second event of a request served after the signal, a send in its last 100 ms — comes at exit in the deadline's wording (`Shutdown deadline of 4000 ms reached — 1 more events not delivered (in flight when the deadline cut it, …)`, "more" only after a line of that cycle), without the hint to await `shutdown()`. A library that also waits to be the last listener (signal-exit, used by execa and ora) does not get its turn, so an app that depends on it should handle the signal itself. A `401` from ingest stops delivery for that key process-wide (`YAVIO-1203`): every wrap sharing the key is affected, which is what an invalid key means.
 
 A value that is not an `McpServer` (no `registerTool()` / `connect()`) comes back unwrapped with one `YAVIO-1107` error per process — in no-op mode too — so a mis-wired integration keeps serving. After `SIGTERM`/`SIGINT` requests still served during the graceful-shutdown window send their events at once; a `shutdown()` after them waits for those sends too.
 
+### Serverless and edge runtimes
+
+The SDK runs on Node.js ≥ 20 hosts with the recipes below. How far each runtime has been checked differs, and the table's last column says:
+
+- **AWS Lambda:** in an emulation of its Node 20/22 runtime client and its freeze.
+- **Cloudflare Workers:** on a local workerd, with `nodejs_compat` and a compatibility date of 2025-09-15 or later, not on Cloudflare's edge.
+- **Vercel, Cloud Run and Netlify:** from their documentation only.
+
+The Vercel Edge runtime and Netlify Edge Functions cannot load the SDK, and Deno and Bun are untested.
+
+Most of these platforms freeze or throttle the instance once the response is out. A frozen process runs no timers, and the platform may recycle it without a signal the app could act on. Events wait for a 10 s interval, so before 0.5.5 the last invocations' events were lost without a line. Since 0.5.5:
+
+- `await analytics.flush()` sends what is queued at the call and waits until ingest has answered it. Events queued after the call are the next flush's. Use it where the platform has no `waitUntil`, once the response body is complete and before the handler returns.
+- `analytics.flushWhenSent(response, waitUntil)` returns the response to send instead and hands the platform's `waitUntil` a flush that starts once the body has been sent. Use it where the platform has a `waitUntil`: it adds nothing to the response time. Pass Vercel's `waitUntil` function, or a context that has one (Cloudflare's `ctx`, Netlify's `context`), not `ctx.waitUntil` on its own, which workerd rejects with "Illegal invocation".
+
+Both wait at most `flushTimeoutMs` (1 s by default; option, `YAVIO_FLUSH_TIMEOUT_MS` or `.yaviorc.json`). One exception: the flush `flushWhenSent()` hands to `waitUntil` delays no response, so when the batch it sent is still out at `flushTimeoutMs`, it keeps waiting for that answer, up to `waitUntilTimeoutMs` (10 s by default; option, `YAVIO_WAIT_UNTIL_TIMEOUT_MS` or `.yaviorc.json`). On Workers a fetch dies with its request once that flush ends, so an ingest slower than `flushTimeoutMs` needs this wait. Only the flush with a fetch of its own out waits, and no other flush takes that batch back meanwhile. Once it is answered, that flush also sends the events of concurrent requests whose flushes gave up waiting on its batch, if another round trip fits before `waitUntilTimeoutMs`. Their own flushes stop at `flushTimeoutMs`. On Vercel the function runs as long as `waitUntil` holds it, so lower the value there if an ingest that hangs must cost less. Neither rejects nor drops anything: what ingest did not take stays queued for the next flush, and one `YAVIO-1208` line says so until a flush delivers everything again, at most one a minute: a second stall within a minute of the last line is reported by the first flush after the minute if it still lasts then, and one that ends within the minute prints nothing. A flush that gives up waiting on another running flush's batch prints nothing: that flush sends its events and reports for them. A batch that waits for a retry after a failed send is retried at once by a flush, once per flush, when its last attempt is at least a second old; that attempt does not count towards the retry limit. A `Retry-After` from ingest, on a 429 or a 503, is never cut short. A send that an earlier request left in flight is taken back once it is older than `flushTimeoutMs`, and its batch re-sent unchanged. After a freeze its connection is likely dead, and on Workers it never answers once its request has ended. The bound doubles each time the same batch is taken back, and it is at least twice ingest's last round trip, so an ingest that is only slow keeps its batches. That floor is capped at four times `flushTimeoutMs`, so one slow answer does not hold the next hung fetch for long. If the first send had reached ingest after all, ingest stores both copies. ClickHouse drops the second when it makes up an insert block of its own (the dedup token over event id and timestamp). Otherwise the table's ReplacingMergeTree collapses the two at merge time, and until then a query without `FINAL` or `LIMIT 1 BY event_id` counts the event twice. Both keep the transport, so the next request's `wrap()` finds it, and a flush sends the events of every request on the instance. Concurrent flushes share the batches, so each event goes out once. With a healthy ingest a flush is one round trip, or two when another batch is in flight (about 55 ms and 85 ms against an ingest that answers in 50 ms). That holds under steady traffic too: a request every 5 ms gives a flush p50 of 85 ms. `shutdown()` is for the end of the process, not for every request.
+
+| Runtime | After the response | Recipe | Checked |
+|---|---|---|---|
+| AWS Lambda (Node 20, 22, 24), buffered | frozen until the next invocation; recycled after hours or when idle, with `SIGTERM` only when an extension is registered | `await analytics.flush()` once the body is complete | emulated: the Node 20/22 runtime client's loop and freeze |
+| Lambda response streaming | the invocation lasts until the handler's promise settles | pipe the body, then `await analytics.flush()` | docs only |
+| Lambda Managed Instances | not frozen | none: a long-lived host | docs only |
+| Vercel Functions, Node runtime | suspended until the next invocation | `flushWhenSent(response, waitUntil)`, or Next.js `after(() => analytics.flush())` | docs only; `after()` read in the Next.js 16.3 source |
+| Cloudflare Workers, `nodejs_compat`, date ≥ 2025-09-15 | timers end with the request | `flushWhenSent(response, ctx)` | local workerd: sequential and concurrent requests, also together against an ingest that stays slower than `flushTimeoutMs`; one slow answer; a failing ingest; not the edge |
+| Cloud Run, request-based billing (the default) | CPU throttled until the next request; `SIGTERM` with 10 s at the end | `await analytics.flush()` before the response is sent, or instance-based billing | docs only |
+| Netlify Functions | on AWS Lambda | `flushWhenSent(response, context)` | docs only, untested |
+| Vercel Edge runtime, Netlify Edge Functions | no `node:fs`, `node:crypto` or `node:os` | not supported | docs |
+| Deno Deploy, Bun | — | — | untested |
+
+The recipes use MCP SDK v2's `createMcpHandler`, which takes a web `Request` and returns a web `Response`. Create both once per instance, at module scope:
+
+<!-- recipe:shared -->
+```typescript
+import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
+import { createYavio } from "@yavio/sdk";
+
+export const analytics = createYavio({ serverOnly: true });
+export const mcp = createMcpHandler(() => analytics.wrap(buildServer()));
+
+function buildServer(): McpServer {
+  const server = new McpServer({ name: "example", version: "1.0.0" });
+  // server.registerTool(…) as usual
+  return server;
+}
+```
+
+**AWS Lambda.** Behind a function URL or an API Gateway HTTP API (payload format 2.0), the event turned into a web `Request` (both Lambda recipes use this):
+
+<!-- recipe:lambda-request -->
+```typescript
+export interface HttpEvent {
+  rawPath: string;
+  rawQueryString: string;
+  headers: Record<string, string>;
+  body?: string;
+  isBase64Encoded: boolean;
+  requestContext: { http: { method: string } };
+}
+
+export function toRequest(event: HttpEvent): Request {
+  const query = event.rawQueryString ? `?${event.rawQueryString}` : "";
+  const body =
+    event.body && (event.isBase64Encoded ? Buffer.from(event.body, "base64") : event.body);
+  return new Request(`https://${event.headers.host}${event.rawPath}${query}`, {
+    method: event.requestContext.http.method,
+    headers: event.headers,
+    body: body || undefined,
+  });
+}
+```
+
+Take the whole body first, so every tool call has ended and queued its event, then flush and return. The flush adds one ingest round trip to the invocation:
+
+<!-- recipe:lambda -->
+```typescript
+export const handler = async (event: HttpEvent) => {
+  const response = await mcp.fetch(toRequest(event));
+  const body = await response.text();
+  await analytics.flush();
+  return { statusCode: response.status, headers: Object.fromEntries(response.headers), body };
+};
+```
+
+Lambda's Node 20 and 22 runtimes also run the SDK's natural-exit drain after every invocation of a callback-style handler (see [stdio servers](#stdio-servers)), but only as a race with the freeze. An `await analytics.flush()` before the callback leaves that drain nothing to do.
+
+**Lambda response streaming.** The client has the whole body once it is piped; the invocation, and its billing, lasts until the flush after it has settled:
+
+<!-- recipe:lambda-streaming -->
+```typescript
+import { Writable } from "node:stream";
+
+export const handler = awslambda.streamifyResponse(async (event: HttpEvent, responseStream) => {
+  const response = await mcp.fetch(toRequest(event));
+  const stream = awslambda.HttpResponseStream.from(responseStream, {
+    statusCode: response.status,
+    headers: Object.fromEntries(response.headers),
+  });
+  if (response.body) await response.body.pipeTo(Writable.toWeb(stream));
+  else stream.end();
+  await analytics.flush();
+});
+```
+
+**Vercel.** A Next.js route handler on the Node runtime (Fluid compute). The flush runs after the response, on Vercel's `waitUntil`:
+
+<!-- recipe:vercel -->
+```typescript
+// app/mcp/route.ts
+import { waitUntil } from "@vercel/functions";
+
+export async function POST(request: Request): Promise<Response> {
+  return analytics.flushWhenSent(await mcp.fetch(request), waitUntil);
+}
+```
+
+Next.js's own `after()` (stable since Next.js 15.1) should work too. In a route handler it runs its callbacks once the response has closed, after a streamed body has been sent. That is from the Next.js 16.3 source (the route handler's `res.on("close")`); it has not been run:
+
+<!-- recipe:next-after -->
+```typescript
+import { after } from "next/server";
+
+export async function POST(request: Request): Promise<Response> {
+  after(() => analytics.flush());
+  return mcp.fetch(request);
+}
+```
+
+`waitUntil(analytics.flush())` right after `mcp.fetch()` is too early. Most clients today get the answer as a Server-Sent Events stream, and `fetch()` resolves before the tool call has ended and queued its event, so each call's event waits for the next invocation and the last one is lost.
+
+**Cloudflare Workers.** Set `compatibility_flags = ["nodejs_compat"]` and a `compatibility_date` of 2025-09-15 or later. Pass the context itself:
+
+<!-- recipe:workers -->
+```typescript
+export default {
+  async fetch(request: Request, env: unknown, ctx: ExecutionContext): Promise<Response> {
+    return analytics.flushWhenSent(await mcp.fetch(request), ctx);
+  },
+};
+```
+
+Without `waitUntil` a Worker sends nothing at all, because its timers end with the request. A fetch or a retry wait that outlives its request never settles there. `flushWhenSent()` waits for the batch it sent, up to `waitUntilTimeoutMs`, so an answer within that time arrives before the request ends. What still outlives a request — a hang longer than that, a batch another request's flush sent — is taken back and sent again by the next request's flush. If no later request comes before Cloudflare evicts the isolate, that batch is lost. With `ctx.waitUntil(analytics.flush())` instead of `flushWhenSent()`, the flush stops at `flushTimeoutMs`: set it above ingest's worst latency, or a slow ingest never gets an answer through. This was checked on a local workerd, not on Cloudflare's edge, with:
+
+- concurrent requests;
+- an ingest slower than `flushTimeoutMs`, for one request and for all of them;
+- bursts of 3 and 5 concurrent requests against such an ingest;
+- an ingest that fails twice.
+
+`createYavio()` at module scope works since 0.5.5. Before that it threw "Disallowed operation called within global scope", and every batch failed with "Illegal invocation".
+
+**Cloud Run with request-based billing.** The CPU is throttled outside requests, so a flush after the response stalls until the next request, and what is left is drained at `SIGTERM`. Flush before the response is sent, as in the Lambda recipe: take the body, `await analytics.flush()`, then write it. Alternatively, switch the service to instance-based billing, which keeps the CPU and needs neither. With a transport that writes the response itself (the Express recipe above, the Lambda Web Adapter), the app cannot flush before the response ends. There events arrive late (on a later request, or at `SIGTERM`), but they are not lost.
+
+**Netlify Functions.** `context.waitUntil` exists since March 2025. This recipe is from Netlify's documentation and has not been tested:
+
+<!-- recipe:netlify -->
+```typescript
+// netlify/functions/mcp.mts
+import type { Context } from "@netlify/functions";
+
+export default async (request: Request, context: Context): Promise<Response> =>
+  analytics.flushWhenSent(await mcp.fetch(request), context);
+```
+
+A `withYavio()` host creates one `createYavio()` client at startup for the same key and endpoint, and calls its `flush()`, as for `shutdown()` above. The SDK needs `node:async_hooks`, `node:crypto`, `node:fs` and `node:os`, so runtimes without them (Vercel Edge, Netlify Edge) cannot load it.
+
 ## Captured data
 
-Every call to a tool registered through the wrapped server produces one `tool_call` event with the tool name, latency, status and — subject to the `capture` flags — the inputs and the output.
+Every call to a tool registered through the wrapped server produces one `tool_call` event with the tool name, latency, status and — subject to the `capture` flags — the inputs and the output. That holds when the tool asks the user for input over several rounds too: the event comes from the round whose result is final (see [Tools that ask for input](#tools-that-ask-for-input)).
 
 Every event the SDK sends to `events` — `tool_call`, `connection`, `identify`, `step`, `track`, `conversion` — also carries `session_source`, how its `session_id` was derived: `mcp_session_id`, `openai_session`, `vscode_conversation`, `codex_thread`, `custom` (your `sessionKey`), `connection` (no key, not HTTP) or `per_request` (no key on an HTTP request) — see [Sessions](#stateless--per-request-servers). It names a source, never a key, and is recorded whatever the `capture` flags. The React widget stamps its server session's source on its own events too (from `_meta.yavio.sessionSource`). `tool_discovery` carries none: ingest writes it to the tool registry, which keeps no session fields. Events from SDKs before 0.5.4, server or widget, have none.
 
@@ -258,9 +457,9 @@ A call is an error when the handler **throws** or when it **returns a result wit
 | `error` | `tool_error` | The handler returned a result with `isError: true` (an expired reference, an invalid postal code, a missing field) |
 | `error` | `unknown` | The handler threw |
 | `error` | `validation` | The call failed **before** the handler ran: unknown or disabled tool, or arguments the tool's schema rejected. No `latency_ms` (nothing executed). By default the event has the names and types (`input_keys`, `input_types`) of the parameters the tool's schema declares, the `_`-prefixed request context in `input_values`, the client metadata and a value-free reason in `error_message` (McpServer's text as-is when it names only the tool — unknown, disabled — otherwise a fixed "Input validation error" reason), but **no argument values**, no key the model invented and no `output_content`. `rejectedInputValues: true` stores the raw arguments and McpServer's error text, to see what the model sent |
-| `error` | `server` | The handler returned, but its result failed the tool's own `outputSchema` — or the MCP SDK's validation of the result on the wire |
+| `error` | `server` | The handler returned, but its result failed the tool's own `outputSchema` — or the MCP SDK's validation of the result on the wire. Also a call whose handler asked for input that the MCP SDK could not get or refused: v2's 2025-era shim with no channel to the client, a capability the client did not declare, a failed or timed-out answer; on MCP 2026-07-28 an input request the client's declared capabilities do not cover; on both eras a refused `requestState`, or a tool disabled, removed or changed between the rounds (see [Tools that ask for input](#tools-that-ask-for-input)) |
 
-Only the literal boolean `true` counts as `isError`. On v1 the client sees the same shape in all four error cases (the MCP SDK converts throws and pre-handler failures into `isError` results), so the distinction is server-side only. On v2 an unknown or disabled tool is a thrown JSON-RPC error instead of an `isError` result; it is still counted as `validation`.
+Only the literal boolean `true` counts as `isError`. On v1 the client sees the same shape in all four error cases (the MCP SDK converts throws and pre-handler failures into `isError` results), so the distinction is server-side only. On v2 an unknown or disabled tool is a thrown JSON-RPC error instead of an `isError` result; it is still counted as `validation` (`server` on a 2026-07-28 retry, whose handler ran in an earlier round).
 
 Every `tools/call` request the wrapped server receives is counted, including the ones the MCP SDK rejects before your handler runs — a call to a tool name that does not exist shows up as that name with a 100 % error rate, which is the honest signal. Under `withYavio()` a tool registered on the original, unwrapped server stays untracked either way; `createYavio().wrap()` instruments every tool on the server (see [Stateless / per-request servers](#stateless--per-request-servers)).
 
@@ -268,24 +467,53 @@ Every `tools/call` request the wrapped server receives is counted, including the
 
 Before 0.4.0 only a throw counted, so **error rates rise on upgrade** — a correction of an under-count, not a regression.
 
+### Tools that ask for input
+
+A tool on MCP SDK v2 can ask the user for input (an elicitation, a sampling call, the client's roots) by returning `inputRequired(...)`, a result with `resultType: "input_required"`. The handler then runs once per round: on MCP 2026-07-28 the client answers and retries the call as a new request, on the 2025 era v2's legacy shim (on by default) asks the client itself and runs the handler again inside the same request. Either way it is **one** `tool_call` event, from the round whose result is final: that round's output and status, and a failure after it (a failed `outputSchema`) lands on that event. A round that asked for input sends no event, and its result goes to the client exactly as the handler built it — no `_meta.yavio`, also without `serverOnly`. Since 0.5.5; before, every round was an event of its own.
+
+`metadata` marks such a call (an ordinary call has none of these keys):
+
+| Key | Meaning |
+|-----|---------|
+| `input_rounds` | How many times the handler returned `input_required` inside this request before the result that went out. Exact on the 2025 shim, where every round runs inside one request. `1` also when v2 refuses a 2026-07-28 round's input request |
+| `input_retry` | `true`: the request is the client's 2026-07-28 retry. The earlier rounds were separate requests, possibly on another server instance, and are in no event |
+
+An MCP SDK v2 tool call asked for input when `input_rounds > 0` or `input_retry` is true. `latency_ms` is the handler time of the rounds inside the request, never the time the user took to answer: on the 2025 shim every round's (a 40 ms round that asks plus a 20 ms final round is 60 ms), on 2026-07-28 the final request's only.
+
+What the SDK cannot see:
+
+- **A 2026-07-28 call whose client never retries** leaves no `tool_call`: the server cannot tell an abandoned call from one not retried yet. The session's `connection` event still exists.
+- **The earlier rounds of a 2026-07-28 call:** their number and handler time are in no event, and a `yavio.track()` / `step()` / `conversion()` inside one carries that request's `trace_id`, which no `tool_call` has. On the 2025 shim every round shares the call's trace.
+- **A decline:** the tool's own final result decides the `status`, as for any call.
+
+The handler runs from the top in every round, so a `yavio.track()` / `step()` / `conversion()` placed before the input check fires once per round (two rounds, two `track` events, one `tool_call`). Put such calls in the branch that runs once, such as the one that returns the final result.
+
+If v2 cannot get the input — the shim has no channel to the client (a per-request host serving a 2025-era client), the client did not declare the capability, the answer failed or timed out, too many rounds; on 2026-07-28 an input request the request's declared capabilities do not cover — the call is one `error` / `server` event, with the handler time of the rounds that ran. The same holds, on both eras, when v2 refuses a round's `requestState` (`Invalid or expired requestState`: your `requestState.verify` hook threw, say for a signed state past its expiry). So does a tool that was disabled, removed or changed its schema between the rounds (a fleet mid-deploy): `server` on both eras, not `validation`, because the handler ran in an earlier round. On 2026-07-28 these refusals come before the handler of the retry request, so the event has no `latency_ms` and stores the retry's arguments like a rejected call's (see `rejectedInputValues`), marked `input_retry`. A URL elicitation thrown in a later shim round sends nothing, as a URL elicitation always does: the client retries the call after the URL flow, and that call is recorded.
+
 ### Inputs
 
-With `inputValues` on, `input_values` holds the tool's arguments plus a few fields from the MCP request context under `_`-prefixed keys (so they cannot collide with an argument), and the event carries the client metadata the platform relays in the request `_meta` as first-class fields: `locale`, `end_user_agent`, `subject_id` and — with `geo` on — `country_code`, plus `region` (state or province) with `geo: true` or `"region"`.
+With `inputValues` on, `input_values` holds the tool's arguments plus a few fields from the MCP request context under `_`-prefixed keys (so they cannot collide with an argument), and the event carries the client metadata the platform relays in the request `_meta` as first-class fields: `locale`, `end_user_agent`, `subject_id` and — with `geo` on — `country_code`, plus `region` (state or province) with `geo: true` or `"region"`. A valid W3C `traceparent` goes to `metadata.traceparent` under the same flag (see [Trace context](#trace-context)).
 
 | Key | Content |
 |-----|---------|
-| `_meta` | The request `_meta` verbatim. On ChatGPT that is `openai/userAgent`, `openai/locale`, `openai/userLocation` (city, region, country, timezone, **latitude and longitude**), `openai/subject` (the platform's stable pseudonymous user id), `openai/session` and the client's capabilities. ChatGPT also sends the IANA `timezone` at the top level. It intentionally duplicates the first-class `locale` / `end_user_agent` / `subject_id` / `country_code` / `region` fields. With `geo: "region"` the location object is reduced to `{ country, region }`, with `geo: "country"` to `{ country }`, and with `geo: false` it is removed entirely. In all three, the rest of `_meta` keeps only `openai/locale`, `openai/userAgent`, `openai/subject` and `openai/session`; everything else is dropped — the top-level `timezone` and `timezone_offset_minutes`, the conversation and request ids (`sessionId`, `windowId`, `callId`, `itemId`, `openai/request_id`), `traceparent`, `openai/organization`, the client capabilities, and any key the platform adds later |
-| `_metaDroppedKeys` / `_metaDroppedUnnamed` | With `geo` other than `true`: the names (never the values) of the `_meta` keys that were dropped, sorted, at most 20 — so a key the platform adds shows up in your data — and the number of dropped keys it does not name (a name with a run of 8 or more hex digits, which can carry an id, a malformed name, or one past the 20) |
+| `_meta` | The request `_meta` verbatim. On ChatGPT that is `openai/userAgent`, `openai/locale`, `openai/userLocation` (city, region, country, timezone, **latitude and longitude**), `openai/subject` (the platform's stable pseudonymous user id), `openai/session` and the client's capabilities. ChatGPT also sends the IANA `timezone` at the top level. It intentionally duplicates the first-class `locale` / `end_user_agent` / `subject_id` / `country_code` / `region` fields. With `geo: "region"` the location object is reduced to `{ country, region }`, with `geo: "country"` to `{ country }`, and with `geo: false` it is removed entirely. In all three, the rest of `_meta` keeps only `openai/locale`, `openai/userAgent`, `openai/subject` and `openai/session`; everything else is dropped — the top-level `timezone` and `timezone_offset_minutes`, the conversation and request ids (`sessionId`, `windowId`, `callId`, `itemId`, `openai/request_id`), `openai/organization`, the client capabilities, and any key the platform adds later. Under every `geo`, `true` included, the trace context never stays (since 0.5.5, before which `geo: true` kept it verbatim): the W3C keys of MCP 2026-07-28 (SEP-414) `baggage` (free-form context the client's upstream services attach, often user or tenant ids) and `tracestate` (vendor trace state), .NET's `Correlation-Context` (baggage, as .NET 8 and 9 send it) and Datadog's `_dd_trace_context` (the object its MCP instrumentation fills with Datadog's ids and tags, a `tracestate` and the baggage), each in any letter case, are dropped and only their key names recorded in `_metaDroppedKeys` (a `traceparent` that is invalid or not spelled in lower case likewise); keys that carry one baggage member each, Jaeger's `uberctx-…` and OpenTracing's `ot-baggage-…`, are dropped and only counted in `_metaDroppedUnnamed`, because their names are the members' names; a valid `traceparent` moves to `metadata.traceparent` (see [Trace context](#trace-context)) |
+| `_metaDroppedKeys` / `_metaDroppedUnnamed` | The names (never the values) of the `_meta` keys that were dropped, sorted, at most 20 — with `geo` other than `true` every key outside the allowlist, so a key the platform adds shows up in your data; with `geo: true` only the trace-context keys above (since 0.5.5) — and the number of dropped keys it does not name (a name with a run of 8 or more hex digits, which can carry an id, a malformed name, one past the 20, or a per-key baggage carrier such as `uberctx-user.id`) |
 | `_taskId` | The MCP task id, for task-based flows |
-| `_requestInfo` | The calling request's `user-agent`, `accept-language`, `x-anthropic-client`, `mcp-protocol-version` and `traceparent` headers, plus its URL without the query string. Every other header is dropped — `Authorization`, `Cookie`, `X-Api-Key` and the like never reach analytics, and no `X-Forwarded-For` means an event stays free of end-user IPs |
+| `_requestInfo` | The calling request's `user-agent`, `accept-language`, `x-anthropic-client` and `mcp-protocol-version` headers, plus its URL without the query string. A valid `traceparent` header is `metadata.traceparent` since 0.5.5; `tracestate` and `baggage` headers were never kept. Every other header is dropped — `Authorization`, `Cookie`, `X-Api-Key` and the like never reach analytics, and no `X-Forwarded-For` means an event stays free of end-user IPs |
 
-The `connection` event's `client_name` / `client_version` — captured whatever the flags, like the `initialize` clientInfo always was — come from the protocol envelope (MCP 2026-07-28), else from the `initialize` handshake, else from the first product token of the request's `User-Agent`: `name/version` with at least one digit in the version (`openai-mcp/1.0.0` → `openai-mcp`, `1.0.0`; `OpenAI/Python 1.40.0` names no client), or a bare `name` when that is the whole User-Agent (`Claude-User` → `Claude-User`, no version). The name is accepted only for a known MCP client: a vendor the SDK's platform matcher recognises (`openai-mcp`, `Claude-User`, `claude-code`, `cursor`, `gemini-cli`, …) or an allowlisted token (`mcp-inspector`, `mcp-remote`). Every other first token names no client — a bare first word followed by more (`node …`, the `Visual` of `Visual Studio Code/1.95`), a library, runtime, browser or server-framework token (`node`, `python-httpx/0.27`, `Python/3.12 aiohttp/3.9.5`, `Java-http-client/17.0.2`, `Mozilla/5.0 …`, `Nitro/2.9.0`, `Hono/4.6.0`), and a client the SDK does not know yet — so an unrecognised name never reaches the 13-month client statistics, which are not recomputed once the raw events age out. Only the parsed name and version are stored; `metadata.client_info_source` says which source it was, because a stateless host records the User-Agent's name where a long-lived one records the handshake's (Codex driven through ChatGPT is `openai-mcp` on one and `codex-mcp-client` on the other). `protocol_version` is the request's `mcp-protocol-version` header when it has the protocol's date shape (`2025-06-18`), else unset.
+The `connection` event's `client_name` / `client_version` — captured whatever the flags, like the `initialize` clientInfo always was — come from the protocol envelope (MCP 2026-07-28), else from the `initialize` handshake, else from the first product token of the request's `User-Agent`: `name/version` with at least one digit in the version (`openai-mcp/1.0.0` → `openai-mcp`, `1.0.0`; `OpenAI/Python 1.40.0` names no client), or a bare `name` when that is the whole User-Agent (`Claude-User` → `Claude-User`, no version). The name is accepted only for a known MCP client: a vendor the SDK's platform matcher recognises (`openai-mcp`, `Claude-User`, `claude-code`, `cursor`, `gemini-cli`, …) or an allowlisted token (`mcp-inspector`, `mcp-remote`). Every other first token names no client — a bare first word followed by more (`node …`, the `Visual` of `Visual Studio Code/1.95`), a library, runtime, browser or server-framework token (`node`, `python-httpx/0.27`, `Python/3.12 aiohttp/3.9.5`, `Java-http-client/17.0.2`, `Mozilla/5.0 …`, `Nitro/2.9.0`, `Hono/4.6.0`), and a client the SDK does not know yet — so an unrecognised name never reaches the 13-month client statistics, which are not recomputed once the raw events age out. Only the parsed name and version are stored; `metadata.client_info_source` says which source it was, because a stateless host records the User-Agent's name where a long-lived one records the handshake's (Codex driven through ChatGPT is `openai-mcp` on one and `codex-mcp-client` on the other). `protocol_version` comes from the MCP 2026-07-28 request envelope, else the request's `mcp-protocol-version` header, else the version the server answered `initialize` with, so stdio and in-memory connections have it too (since 0.5.5; before, it was the header alone, and unset off HTTP); only the protocol's date shape (`2025-06-18`) is stored. `metadata.client_capabilities` lists the names of the capabilities the client declared (`elicitation`, `roots`, `sampling`, `tasks`, …), never their values: from the 2026-07-28 envelope, else from the `initialize` handshake, sorted, at most 20 (since 0.5.5); a name outside the MCP key format, or with a run of 8 or more hex digits, which can carry an id, is left out, as in `_metaDroppedKeys`. It is absent when the client declared none, and on a per-request host serving a 2025-era client, whose server instance never saw `initialize`. Key-less HTTP calls send one `connection` event per process per client, so it holds the first caller's list; on an MCP SDK v1 1.24/1.25 server that reuses one stateless transport, a list from the handshake is the last client's to initialize, as is a client name from the handshake. Like the client name, both are recorded whatever the `capture` flags.
 
-**Disclose this.** With the defaults, every tool call from ChatGPT stores the user's approximate position including coordinates and the platform's stable user id. Name that collection in your privacy policy, or set `geo: "region"` (keeps the country and the state or province), `geo: "country"` (keeps only the country) or `geo: false` (no location), or `inputValues: false` (drops all of it; also per tool, see above). With `"region"`, `"country"` or `false`, the captured `_meta` holds exactly `openai/locale`, `openai/userAgent`, `openai/subject` and `openai/session` — language, device, and the platform's pseudonymous user and conversation ids — plus the location the setting allows; every other key is dropped and only its name is recorded in `_metaDroppedKeys`. The request headers stay as listed under `_requestInfo` (user agent, `accept-language`, `x-anthropic-client`, protocol version, `traceparent`). Before 0.4.1, `"country"` and `false` still kept ChatGPT's top-level `timezone` and every other `_meta` key. Note that in city-states the region *is* the city: ChatGPT reports Berlin as `State of Berlin`, and the same goes for Hamburg, Bremen, Vienna or Washington, D.C. A region name with digits or `@` is dropped, so a postal code cannot pass as one. The React widget is separate from all of this: its `widget_render` event stores the browser's time zone regardless of `capture.geo` (only when you run the widget SDK, i.e. without `serverOnly`).
+**Disclose this.** With the defaults, every tool call from ChatGPT stores the user's approximate position including coordinates and the platform's stable user id. Name that collection in your privacy policy, or set `geo: "region"` (keeps the country and the state or province), `geo: "country"` (keeps only the country) or `geo: false` (no location), or `inputValues: false` (drops all of it; also per tool, see above). With `"region"`, `"country"` or `false`, the captured `_meta` holds exactly `openai/locale`, `openai/userAgent`, `openai/subject` and `openai/session` — language, device, and the platform's pseudonymous user and conversation ids — plus the location the setting allows; every other key is dropped and only its name is recorded in `_metaDroppedKeys`. The request headers stay as listed under `_requestInfo` (user agent, `accept-language`, `x-anthropic-client`, protocol version). No `baggage`, `tracestate`, `Correlation-Context` or `_dd_trace_context` (in any letter case) and no `uberctx-…` or `ot-baggage-…` key is stored under any setting, and a valid `traceparent` is kept as `metadata.traceparent` (since 0.5.5; before, `geo: true` stored the request's `baggage` verbatim, whatever the client's upstream had put into it). Before 0.4.1, `"country"` and `false` still kept ChatGPT's top-level `timezone` and every other `_meta` key. Note that in city-states the region *is* the city: ChatGPT reports Berlin as `State of Berlin`, and the same goes for Hamburg, Bremen, Vienna or Washington, D.C. A region name with digits or `@` is dropped, so a postal code cannot pass as one. The React widget is separate from all of this: its `widget_render` event stores the browser's time zone regardless of `capture.geo` (only when you run the widget SDK, i.e. without `serverOnly`).
 
 **Rejected arguments are not stored by default.** A successful call only ever stores values its schema accepted, so a tool whose arguments are all enums stores only those fixed values. A call the schema rejects would otherwise store whatever the model put into the field, free text from the conversation included. With `rejectedInputValues: false`, the default, such a call keeps only the names and types of the parameters the tool's schema declares, plus a value-free reason. No value and no key the model invented is stored. Set `rejectedInputValues: true` (globally or per tool) only if you want to see the values the model sent, and disclose it.
 
-All captured input and output is PII-stripped before it leaves the process, but the stripper only matches emails, Luhn-valid card numbers, US Social Security numbers and US-format phone numbers.
+All captured input and output is PII-stripped before it leaves the process, but the stripper only matches emails, Luhn-valid card numbers, US Social Security numbers and US-format phone numbers. A string that is exactly a valid `traceparent` is left as it is (since 0.5.5).
+
+### Trace context
+
+A valid W3C `traceparent` is stored once, as the `tool_call`'s `metadata.traceparent`: `version-traceid-parentid-flags` in lower-case hex (2, 32, 16 and 2 digits, 55 characters in all), a version other than `ff`, neither id all zeros. It comes from the request `_meta` (MCP 2026-07-28, SEP-414; the only carrier on stdio), else from the HTTP `traceparent` header, else from Datadog's `_meta._dd_trace_context.traceparent`: the `_meta` value is what the MCP client attached to this request, a header can be any HTTP hop's. Anything else under that name is not stored: upper case, padding, a repeated header, a future version with extra fields. It is captured under `inputValues` like the client metadata (also [per tool](#per-tool-overrides)), with every `geo`, for tools without arguments too, and whatever the call's outcome, a rejected call included. Use it to join a call to your own traces: `JSONExtractString(metadata, 'traceparent')`; the trace id is its second field, `splitByChar('-', JSONExtractString(metadata, 'traceparent'))[2]`. `tracestate`, `baggage`, `Correlation-Context` and `_dd_trace_context` are never stored, only their `_meta` key names in `_metaDroppedKeys`, and the per-key baggage carriers (`uberctx-…`, `ot-baggage-…`) only as a count in `_metaDroppedUnnamed`. Other vendors' propagation keys (Sentry's `sentry-trace`, B3's `b3`, Jaeger's `uber-trace-id`) are ids, not baggage, and are treated like any other `_meta` key.
+
+Since 0.5.5. Before, the header was in `_requestInfo` (as sent, any text), `geo: true` also kept the `_meta` copy, any other `geo` dropped it (so a stdio server stored none), and the PII stripper cut about 1.9 % of them: an id ending in ten decimal digits looked like a phone number to it. The ingestion API's stripper leaves a valid one alone too; an ingest deployed before that change still cuts those 1.9 %. Rows stored before keep `input_values._meta.baggage` / `tracestate` until the 13-month TTL; nothing is backfilled.
 
 ## Tracking API
 

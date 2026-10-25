@@ -30,6 +30,20 @@ The ingestion API enforces rate limits:
 
 If you're hitting limits, the SDK retries automatically with exponential backoff (up to 5 attempts). Sustained rate limiting may indicate an event loop or misconfiguration.
 
+### Events lost when a stdio server exits
+
+A stdio server ends when its client closes stdin, without a signal. On SDK 0.5.4 and earlier the events still queued then were lost without a line; upgrade to 0.5.5, which sends them before the process exits (within 1.5 s), or, on 0.5.4, call `process.once("beforeExit", () => void analytics.shutdown())` — and drop that line on 0.5.5, where the SDK's own drain runs first and caps it at 1.5 s. To wait longer, await `analytics.shutdown()` before the event loop empties (on stdin's end, or at the end of a script). A server that calls `process.exit()` must `await analytics.shutdown()` first. See the README's "stdio servers" section.
+
+### Events arrive late or never on Lambda, Vercel, Cloudflare Workers or Cloud Run
+
+These platforms freeze or throttle the instance once the response is out, and recycle it without a signal the app can act on. The SDK sends its queue every 10 seconds, so without a flush the last invocations' events stay in memory until they are lost. Since 0.5.5, flush per request: `await analytics.flush()` where the platform has no `waitUntil` (AWS Lambda, Cloud Run with request-based billing), once the response body is complete and before the handler returns; `analytics.flushWhenSent(response, waitUntil)` where it has one (Vercel's `waitUntil`, Cloudflare's `ctx`, Netlify's `context`). `waitUntil(analytics.flush())` right after `fetch()` is too early for a streamed MCP response: `fetch()` resolves before the tool call has ended. On Cloudflare Workers, pass the context itself: `flushWhenSent(response, ctx.waitUntil)` throws "Illegal invocation" there. Set `nodejs_compat` with a compatibility date of 2025-09-15 or later. A fetch there dies with its request: `flushWhenSent()` waits for its batch up to `waitUntilTimeoutMs`, while `ctx.waitUntil(analytics.flush())` stops at `flushTimeoutMs`, so with the latter set that above ingest's worst latency. A per-request `shutdown()` delivers too, but it stops the transport every time, so the next request builds a new one; it is meant for the end of the process. The package README's "Serverless and edge runtimes" section has the recipes.
+
+If a flush cannot deliver within `flushTimeoutMs` (1 s), it leaves the events queued for the next flush and logs one `YAVIO-1208` line for the stall, at most one a minute per key. A flush that gave up waiting on another running flush's batch logs nothing: that flush reports for it.
+
+### The client reports a line on stdout that is not JSON
+
+On a stdio server stdout carries JSON-RPC only. SDK 0.5.4 and earlier wrote `[yavio] Server-only mode: …`, `[yavio] Intent capture enabled: …` and a few other informational lines there, and clients report each one (Claude Code logs it as a non-JSON line it ignores). Since 0.5.5 every SDK line goes to stderr.
+
 ### Buffer overflow
 
 If events are generated faster than they can be flushed, the SDK caps its buffer at 10,000 events. Oldest events are dropped. A `YAVIO-1206` warning is logged when this happens.
@@ -48,7 +62,7 @@ All SDK error codes are prefixed with `YAVIO-1` and logged to stderr.
 | `YAVIO-1003` | Config loaded successfully (debug) |
 | `YAVIO-1004` | `.yaviorc.json` is malformed JSON |
 | `YAVIO-1005` | Config file version is not supported |
-| `YAVIO-1006` | A capture flag has a value it does not accept (`geo`: `true`, `false`, `"country"`, `"region"`; the others: `true`, `false`) — that capture turned off. Also: `shutdownTimeoutMs` (option, `YAVIO_SHUTDOWN_TIMEOUT_MS`, `.yaviorc.json`) is not an integer in [100, 2147483647] milliseconds — the default 4 s is used. Also: `sessionKey` is not a function (a header name passed instead of a callback, `null`) — it is ignored, as if not set |
+| `YAVIO-1006` | A capture flag has a value it does not accept (`geo`: `true`, `false`, `"country"`, `"region"`; the others: `true`, `false`) — that capture turned off. Also: `shutdownTimeoutMs` (option, `YAVIO_SHUTDOWN_TIMEOUT_MS`, `.yaviorc.json`) is not an integer in [100, 2147483647] milliseconds — the default 4 s is used. Also: `flushTimeoutMs` (option, `YAVIO_FLUSH_TIMEOUT_MS`, `.yaviorc.json`) is not such an integer — the default 1 s is used. The same for `waitUntilTimeoutMs` (option, `YAVIO_WAIT_UNTIL_TIMEOUT_MS`, `.yaviorc.json`), default 10 s. Also: `sessionKey` is not a function (a header name passed instead of a callback, `null`) — it is ignored, as if not set |
 
 ### Proxy and instrumentation (1100-1199)
 
@@ -68,14 +82,15 @@ All SDK error codes are prefixed with `YAVIO-1` and logged to stderr.
 
 | Code | Description |
 |------|-------------|
-| `YAVIO-1200` | Flush failed, retrying (transient) |
+| `YAVIO-1200` | Flush failed, retrying (transient). A `flush()` that retries a batch at once prints no line for that attempt |
 | `YAVIO-1201` | Flush failed after max retries — events dropped |
 | `YAVIO-1202` | Flush rate limited (429 from ingest API) |
 | `YAVIO-1203` | Auth rejected permanently (401 — check API key); the line counts the events dropped with it |
 | `YAVIO-1204` | Partial batch rejection (207 — the invalid events are dropped, not re-sent; the line counts them) |
-| `YAVIO-1205` | The shutdown deadline gave events up — one line per signal cycle (`Shutdown deadline of 4000 ms reached — 12 events not delivered …`; one more when the signal was handed back before the transport stops had settled: at the deadline when a `shutdown()` is still waiting then, otherwise once they have settled), per `shutdown()` that timed out, or at exit when the app exited before `shutdown()` resolved (`Process exit with …`) — after a `shutdown()` that returned in that cycle, once its deadline has come, that exit line reads `Shutdown deadline of 4000 ms reached — N more events not delivered (in flight when the deadline cut it, …)` instead ("more" only after a line of that cycle), for what a request served after the signal or a send in the deadline's last 100 ms still had in flight; the count is exact. Raise `shutdownTimeoutMs` if the platform's grace period allows, or check why ingest is slow |
+| `YAVIO-1205` | The shutdown deadline gave events up — one line per signal cycle (`Shutdown deadline of 4000 ms reached — 12 events not delivered …`; one more when the signal was handed back before the transport stops had settled: at the deadline when a `shutdown()` is still waiting then, otherwise once they have settled), per `shutdown()` that timed out, or at exit when the app exited before `shutdown()` resolved (`Process exit with …`) — after a `shutdown()` that returned in that cycle, once its deadline has come, that exit line reads `Shutdown deadline of 4000 ms reached — N more events not delivered (in flight when the deadline cut it, …)` instead ("more" only after a line of that cycle), for what a request served after the signal or a send in the deadline's last 100 ms still had in flight; the count is exact. After a `SIGTERM` that followed the `SIGINT` — Claude Code's stop sequence for a stdio server — the cycle ends by 400 ms after the `SIGINT`, and its lines name that bound: `Shutdown deadline of 400 ms (SIGTERM 102 ms after SIGINT) reached — 6 events not delivered (…). The client stops the server with SIGINT, SIGTERM and SIGKILL (Claude Code: 100 ms, then 400 ms); a higher shutdownTimeoutMs does not extend that.` (since 0.5.5). The `shutdown()` of a client that never wrapped a server (the shutdown-only client next to `withYavio()`) prints its own `shutdown() deadline of … ms reached` line on a key a `withYavio()` call uses too, even while other clients hold the key (since 0.5.5; before, it only drained that key and the loss came at exit as `Process exit with …`). A client that wraps servers on such a key still only drains it, as on 0.5.4 and earlier. At exit after a process ended on its own with events queued (no signal, no `shutdown()`: a stdio server whose client closed stdin): `Exit deadline of 1500 ms reached — N events not delivered (the process ended on its own with events queued; …)`, what the natural-exit drain could not deliver within min(1.5 s, `shutdownTimeoutMs`); a higher `shutdownTimeoutMs` does not raise that bound, so to wait longer, await `analytics.shutdown()` before the event loop empties (on stdin's end or at the end of the script; a `beforeExit` listener is too late). Raise `shutdownTimeoutMs` if the platform's grace period allows, or check why ingest is slow |
 | `YAVIO-1206` | Buffer overflow — oldest events dropped |
 | `YAVIO-1207` | Beacon delivery failed (widget teardown) |
+| `YAVIO-1208` | A `flush()` left events undelivered (`flush() left N events undelivered — ingest did not answer within 1000 ms`, or `— ingest failed a batch, which waits for its retry`). Nothing is dropped: they go out with a later flush, the flush interval or `shutdown()`. Printed once per stall per endpoint and API key, again only after a flush delivered everything, and at most once a minute per key: a second stall within a minute of the last line is reported by the first flush after the minute if it still lasts then, and a stall that ends within the minute prints nothing. Not printed by a flush that gave up waiting on another running flush's batch (that flush carries its events and reports for them), nor while the process drains after a signal (since 0.5.5) |
 
 ### Validation and PII (1300-1399)
 

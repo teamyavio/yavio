@@ -1,5 +1,5 @@
 import { ErrorCode } from "@yavio/shared/error-codes";
-import { lastNoopReason, resolveConfig } from "../core/config.js";
+import { DEFAULT_WAIT_UNTIL_TIMEOUT_MS, lastNoopReason, resolveConfig } from "../core/config.js";
 import type {
   McpServerLike,
   WithYavioOptions,
@@ -17,10 +17,12 @@ import {
   armExitHook,
   awaitBounded,
   dropHoldDeadline,
+  flushShared,
   isLiveHold,
   logOnce,
   pinShared,
   releaseShared,
+  reviveHold,
   settleShared,
 } from "./shared.js";
 
@@ -75,11 +77,15 @@ function warnNoApiKey(): void {
   );
 }
 
-/** Process-level log lines, once per process whatever the host's request rate. */
+/**
+ * Process-level log lines, once per process whatever the host's request
+ * rate. On stderr, like every SDK line: on a stdio server stdout is the
+ * JSON-RPC wire, and a client reads every line there as a message (#174).
+ */
 function logModes(config: YavioConfig): void {
   if (config.serverOnly) {
     logOnce("server-only", () =>
-      console.info(
+      console.error(
         "[yavio] Server-only mode: skipping _meta.yavio injection and widget token minting. The React widget will not auto-connect.",
       ),
     );
@@ -89,13 +95,37 @@ function logModes(config: YavioConfig): void {
     // `required` is independently configurable; the log must not claim
     // "required" for a server that was explicitly configured optional.
     logOnce(`intent:${config.intent.required}`, () =>
-      console.info(
+      console.error(
         config.intent.required
           ? "[yavio] Intent capture enabled: tools advertise a 'context' parameter — required on model-facing tools, optional on widget-invoked ones (pass intent: false to disable)."
           : "[yavio] Intent capture enabled: tools advertise an optional 'context' parameter on every tool (pass intent: false to disable).",
       ),
     );
   }
+}
+
+/**
+ * The response with its body piped through an identity `TransformStream`,
+ * and a promise that resolves once the body has been sent through — read
+ * to its end by the platform — or cancelled (the client went away), for
+ * `flushWhenSent()` (#171). Status, status text and headers are the
+ * original's: the response itself is the init, which also carries what a
+ * platform adds to it (a `webSocket` on Workers). A response without a
+ * body, or whose body is already locked or read, comes back as it is, the
+ * promise resolved.
+ */
+function whenSent(response: Response): { response: Response; sent: Promise<void> } {
+  const body = response.body;
+  if (!body || body.locked || response.bodyUsed) return { response, sent: Promise.resolve() };
+  const { readable, writable } = new TransformStream();
+  let piped: Response;
+  try {
+    piped = new Response(readable, response);
+  } catch {
+    // A status that cannot carry a body: leave the response alone.
+    return { response, sent: Promise.resolve() };
+  }
+  return { response: piped, sent: body.pipeTo(writable).catch(() => {}) };
 }
 
 /** The session LRU's eviction hook: forget the conversation's connection-event mark. */
@@ -148,7 +178,7 @@ function wrapServer<T extends McpServerLike>(
       );
     } else {
       logOnce("rewrap", () =>
-        console.debug(
+        console.error(
           `[yavio] ${entry} called on a server that is already wrapped — returning the existing proxy. Shown once per process.`,
         ),
       );
@@ -182,8 +212,15 @@ function wrapServer<T extends McpServerLike>(
  * is already wrapped comes back as its existing proxy: the first wrap wins,
  * later options are ignored (`YAVIO-1108` once when any of them differs).
  *
+ * On a runtime that freezes the instance once the response is out (AWS
+ * Lambda, Vercel Functions, Cloudflare Workers, Cloud Run with
+ * request-based billing), `flush()` sends what is queued before the
+ * freeze, and `flushWhenSent(response, waitUntil)` does it once a
+ * web-standard response has been sent (#171).
+ *
  * If no API key is found, `wrap()` returns every server unchanged
- * (transparent no-op) and `shutdown()` does nothing.
+ * (transparent no-op), `shutdown()` and `flush()` do nothing, and
+ * `flushWhenSent()` returns the response it was given.
  */
 export function createYavio(options?: WithYavioOptions): YavioClient {
   const config = resolveConfig(options);
@@ -196,6 +233,8 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
         return server;
       },
       shutdown: async () => {},
+      flush: async () => {},
+      flushWhenSent: (response) => response,
     };
   }
 
@@ -211,12 +250,22 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
   // a stale hold never counts against a successor.
   const onEvict = evictionHookFor(config);
   let hold: SharedHold | null = null;
+  // Whether this client ever wrapped a server. A client that never did is
+  // the README's shutdown-only client next to withYavio(): its shutdown()
+  // ends the process, and on a pinned key it stops the transport. One that
+  // wraps — a per-request client — only drains a pinned key, as in 0.5.4,
+  // so the withYavio() servers' queue outlives it (#179 review round 2).
+  let wrapped = false;
   // Every shutdown() so far, chained: a second or concurrent call (two
   // handlers, a framework and the app) waits for the first instead of
   // resolving with the batch still on its way (#142).
   let closing: Promise<void> = Promise.resolve();
   const state = (): SharedState => {
-    if (hold && isLiveHold(config, hold)) return hold.state;
+    // A hold a natural-exit drain took is live again once its entry is
+    // back: revived, not replaced, or the entry would count it twice (#167).
+    if (hold && (isLiveHold(config, hold) || reviveHold(config, hold, SDK_VERSION))) {
+      return hold.state;
+    }
     // A stale hold is replaced, not released: its explicit value leaves the
     // live set here, or it would count towards D after this client's
     // shutdown() released the new one (#148 review round 7).
@@ -234,6 +283,7 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
         rejectUnsupported(server, "createYavio().wrap()");
         return server;
       }
+      wrapped = true;
       return wrapServer(server, config, state, true, "createYavio().wrap()");
     },
     shutdown: async () => {
@@ -243,12 +293,38 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
       // With a hold: deliver and release it. Without one (a second call, or
       // a signal drained it and nothing re-wrapped since): deliver whatever
       // the signal drain and the key's post-signal transport still carry.
-      const work = released ? releaseShared(config, released) : settleShared(config);
+      const work = released ? releaseShared(config, released, { wrapped }) : settleShared(config);
       closing = Promise.all([closing, work.catch(() => {})]).then(() => {});
       // One deadline per call, whatever the chain behind it waits for: this
       // client's own value from the call, cut to the process deadline once a
       // signal fixed one — before or during the call (#148).
       await awaitBounded(closing, config.shutdownTimeoutMs);
+    },
+    // Keeps the hold and the transport: the next request's wrap() finds the
+    // same one, and nothing is armed for the exit (#171).
+    flush: () => flushShared(config),
+    flushWhenSent: (response, waitUntil) => {
+      const { response: piped, sent } = whenSent(response);
+      // In waitUntil, after the response: it may wait for the batch it sent
+      // past flushTimeoutMs (#171 review round 2).
+      const flushed = sent.then(() =>
+        flushShared(config, config.waitUntilTimeoutMs ?? DEFAULT_WAIT_UNTIL_TIMEOUT_MS),
+      );
+      try {
+        // A context is called as its method: workerd rejects a
+        // `ctx.waitUntil` called on its own ("Illegal invocation").
+        if (typeof waitUntil === "function") waitUntil(flushed);
+        else waitUntil.waitUntil(flushed);
+      } catch (error) {
+        // The response still goes out (analytics never changes what the
+        // client gets); the flush runs, but nothing holds the instance for it.
+        logOnce("flush-when-sent", () =>
+          console.error(
+            `[yavio] flushWhenSent(): waitUntil threw (${error instanceof Error ? error.message : String(error)}) — the flush runs without it, and the platform may freeze it before it ends. Pass the context itself (flushWhenSent(response, ctx)) or a bound function. Shown once per process.`,
+          ),
+        );
+      }
+      return piped;
     },
   };
 }
@@ -265,9 +341,14 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
  * on the server before the wrap stays untracked (`createYavio().wrap()` is
  * the entry point that instruments those). Safe for a server created per
  * request on a stateless host: the transport, the session store and the
- * shutdown hooks are shared per API key and endpoint, and never stopped
- * before the process exits. Wrapping the same long-lived server again returns
- * the existing proxy.
+ * shutdown hooks are shared per API key and endpoint, and the key has a
+ * live transport whenever a send needs one: a `shutdown()` on the same
+ * key by a `createYavio()` client that never wrapped a server stops the
+ * current one, whatever other clients still hold it, and a fresh one takes
+ * over at once (#179) — a client that wraps servers only drains it, as in
+ * 0.5.4; after a signal, or after
+ * a natural-exit drain the process went on from, the next send starts one.
+ * Wrapping the same long-lived server again returns the existing proxy.
  */
 export function withYavio<T extends McpServerLike>(server: T, options?: WithYavioOptions): T {
   // Before the configuration is resolved and anything is created: an
@@ -315,6 +396,7 @@ export type {
   SessionKeyRequest,
   SessionSource,
   ToolCaptureOverride,
+  WaitUntil,
   WithYavioOptions,
   YavioClient,
   YavioContext,

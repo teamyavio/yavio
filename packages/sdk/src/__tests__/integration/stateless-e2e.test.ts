@@ -264,6 +264,82 @@ describe("client identity on the connection event (#142)", () => {
   });
 });
 
+// #173: W3C trace context on MCP SDK v1 — the HTTP header (an
+// OpenTelemetry-instrumented fetch) and `_meta` (VS Code sends a traceparent
+// there on the 2025 era) — stored once, as metadata.traceparent.
+describe("trace context on v1 stateless Streamable HTTP (#173)", () => {
+  let ingest: MockIngest;
+  let mcp: ReturnType<typeof createServer> | undefined;
+
+  beforeEach(async () => {
+    _resetGlobalState();
+    ingest = await startMockIngest();
+  });
+
+  afterEach(async () => {
+    await ingest.close();
+    if (mcp) {
+      mcp.closeAllConnections();
+      await new Promise<void>((resolve) => mcp?.close(() => resolve()));
+    }
+    mcp = undefined;
+    _resetGlobalState();
+  });
+
+  it("stores the header traceparent intact, and the _meta one first, never in _requestInfo", async () => {
+    // W3C's example: its parent id ends in ten decimal digits, which the PII
+    // stripper's phone pattern used to cut (`…-b7ad6b[PHONE_REDACTED]-01`).
+    const header = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+    const meta = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    const yavio = createYavio({
+      apiKey: "yav_e2e_trace",
+      endpoint: ingest.endpoint,
+      serverOnly: true,
+    });
+    mcp = createServer(async (req, res) => {
+      const server = yavio.wrap(new McpServer({ name: "example", version: "1.0.0" }));
+      server.registerTool("get_price", { inputSchema: { sku: z.string() } }, async ({ sku }) => ({
+        content: [{ type: "text", text: `price of ${sku}` }],
+      }));
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+        enableJsonResponse: true,
+      });
+      res.on("close", () => {
+        void transport.close();
+        void server.close();
+      });
+      await server.connect(transport);
+      await transport.handleRequest(req, res);
+    });
+    await new Promise<void>((resolve) => mcp?.listen(0, "127.0.0.1", resolve));
+    const url = new URL(`http://127.0.0.1:${(mcp.address() as AddressInfo).port}/mcp`);
+    const client = new Client({ name: "e2e-client", version: "1.0" });
+    await client.connect(
+      new StreamableHTTPClientTransport(url, { requestInit: { headers: { traceparent: header } } }),
+    );
+    await client.callTool({ name: "get_price", arguments: { sku: "A1" } });
+    await client.callTool({
+      name: "get_price",
+      arguments: { sku: "A2" },
+      _meta: { "vscode.conversationId": "conv-173", traceparent: meta, baggage: "user.id=u-1" },
+    });
+    await client.close();
+    await yavio.shutdown();
+
+    const calls = ingest.events.filter((e) => e.event_type === "tool_call");
+    expect(calls.map((e) => e.metadata)).toEqual([{ traceparent: header }, { traceparent: meta }]);
+    for (const call of calls) {
+      const inputValues = call.input_values as { _requestInfo?: { headers?: object } };
+      expect(inputValues._requestInfo?.headers).not.toHaveProperty("traceparent");
+    }
+    expect((calls[1]?.input_values as Record<string, unknown>)._meta).toEqual({
+      "vscode.conversationId": "conv-173",
+    });
+    expect(JSON.stringify(calls)).not.toContain("user.id");
+  });
+});
+
 // #144: sessionKey, the built-in client keys, per_request and its connection
 // collapse — the cases shared with the v2 file, on v1 stateless HTTP.
 perRequestSessionSuite({

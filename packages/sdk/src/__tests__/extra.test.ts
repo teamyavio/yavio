@@ -126,6 +126,79 @@ describe("readCallExtra: authInfo (#144)", () => {
   });
 });
 
+describe("readCallExtra: v2 and the multi-round-trip retry marker (#168)", () => {
+  it("marks a v2 context, and a retry by inputResponses, droppedInputResponseKeys or a requestState", () => {
+    expect(readCallExtra({ mcpReq: { id: 1 } })).toMatchObject({ v2: true });
+    expect(readCallExtra({ mcpReq: { id: 1 } }).inputRetry).toBeUndefined();
+    expect(readCallExtra({ mcpReq: { inputResponses: {} } }).inputRetry).toBe(true);
+    expect(readCallExtra({ mcpReq: { droppedInputResponseKeys: ["x"] } }).inputRetry).toBe(true);
+    expect(readCallExtra({ mcpReq: { requestState: () => "s1" } }).inputRetry).toBe(true);
+    expect(readCallExtra({ mcpReq: { requestState: () => undefined } }).inputRetry).toBeUndefined();
+    expect(readCallExtra({ _meta: {} }).v2).toBeUndefined();
+  });
+
+  it("a requestState accessor that throws costs only the marker: the rest of the context is still read", () => {
+    const extra = {
+      sessionId: "s-1",
+      mcpReq: {
+        _meta: { "openai/session": "conv-1" },
+        requestState: () => {
+          throw new Error("accessor broke");
+        },
+      },
+      http: { req: { headers: { "user-agent": "openai-mcp/1.0.0" } } },
+    };
+    const read = readCallExtra(extra);
+    expect(read.v2).toBe(true);
+    expect(read.inputRetry).toBeUndefined();
+    expect(read.meta).toEqual({ "openai/session": "conv-1" });
+    expect(read.requestHeaders).toEqual({ "user-agent": "openai-mcp/1.0.0" });
+  });
+});
+
+describe("readCallExtra: the 2026-07-28 envelope's version and capabilities (#170)", () => {
+  const ctx = (envelope: unknown) => ({ mcpReq: { id: 1, method: "tools/call", envelope } });
+
+  it("reads them from v2's ctx.mcpReq.envelope, unvalidated", () => {
+    const capabilities = { elicitation: {} };
+    const ex = readCallExtra(
+      ctx({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": capabilities,
+      }),
+    );
+    expect(ex.protocolVersion).toBe("2026-07-28");
+    expect(ex.clientCapabilities).toBe(capabilities);
+    // The date check is the caller's (proxy.ts): any string is passed on.
+    expect(
+      readCallExtra(ctx({ "io.modelcontextprotocol/protocolVersion": "latest" })).protocolVersion,
+    ).toBe("latest");
+  });
+
+  it("leaves them unset for a value of the wrong type, and without an envelope", () => {
+    const ex = readCallExtra(
+      ctx({
+        "io.modelcontextprotocol/protocolVersion": 20260728,
+        "io.modelcontextprotocol/clientCapabilities": ["elicitation"],
+      }),
+    );
+    expect(ex.protocolVersion).toBeUndefined();
+    expect(ex.clientCapabilities).toBeUndefined();
+    expect(readCallExtra({ mcpReq: { id: 1 } }).protocolVersion).toBeUndefined();
+  });
+
+  it("never reads the reserved keys from v1's _meta: v1 does not lift an envelope", () => {
+    const ex = readCallExtra({
+      _meta: {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": { elicitation: {} },
+      },
+    });
+    expect(ex.protocolVersion).toBeUndefined();
+    expect(ex.clientCapabilities).toBeUndefined();
+  });
+});
+
 describe("sessionKeyHeaders (#144): what sessionKey sees", () => {
   it("lower-cases names and joins a repeated header's values", () => {
     expect(

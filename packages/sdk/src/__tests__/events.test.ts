@@ -1,4 +1,5 @@
 import {
+  ConnectionEvent,
   ConversionEvent,
   IdentifyEvent,
   StepEvent,
@@ -9,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   type EventContext,
   MAX_ERROR_MESSAGE_LENGTH,
+  buildConnectionEvent,
   buildConversionEvent,
   buildIdentifyEvent,
   buildStepEvent,
@@ -139,6 +141,29 @@ describe("Event factories", () => {
       expect(event.error_message).toBe("Invalid room ID");
     });
 
+    // #173 next to #168: one metadata object, unset when it would be empty.
+    it("merges the traceparent into the multi-round-trip metadata, unset when neither is there", () => {
+      const traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+      const base = { toolName: "deploy", latencyMs: 5, status: "success" as const };
+      const merged = buildToolCallEvent(ctx, {
+        ...base,
+        metadata: { input_rounds: 2 },
+        clientMeta: { traceparent, locale: "de-DE" },
+      });
+      expect(merged.metadata).toEqual({ input_rounds: 2, traceparent });
+      expect(ToolCallEvent.safeParse(merged).success).toBe(true);
+      expect(buildToolCallEvent(ctx, { ...base, clientMeta: { traceparent } }).metadata).toEqual({
+        traceparent,
+      });
+      expect(
+        buildToolCallEvent(ctx, { ...base, metadata: { input_retry: true } }).metadata,
+      ).toEqual({ input_retry: true });
+      expect(
+        buildToolCallEvent(ctx, { ...base, clientMeta: { locale: "de-DE" } }).metadata,
+      ).toBeUndefined();
+      expect(buildToolCallEvent(ctx, base).metadata).toBeUndefined();
+    });
+
     it("emits tool_error as a category the shared schema accepts", () => {
       const event = buildToolCallEvent(ctx, {
         toolName: "book_room",
@@ -267,6 +292,29 @@ describe("Event factories", () => {
       const event = buildTrackEvent(ctx, "test");
       expect(event.trace_id).toBe("tr_test123");
       expect(event.session_id).toBe("ses_test456");
+    });
+  });
+
+  describe("buildConnectionEvent: client capabilities (#170)", () => {
+    it("puts the names into metadata.client_capabilities and stays a valid ConnectionEvent", () => {
+      const event = buildConnectionEvent(ctx, {
+        protocolVersion: "2026-07-28",
+        clientCapabilities: ["elicitation", "sampling"],
+        intentEnabled: true,
+      });
+      expect(ConnectionEvent.safeParse(event).success).toBe(true);
+      expect(event.protocol_version).toBe("2026-07-28");
+      expect(event.metadata).toEqual({
+        intent_enabled: true,
+        client_capabilities: ["elicitation", "sampling"],
+      });
+    });
+
+    it("leaves the key out without names", () => {
+      expect(buildConnectionEvent(ctx, { clientCapabilities: [] }).metadata).toEqual({
+        intent_enabled: false,
+      });
+      expect(buildConnectionEvent(ctx, {}).metadata).toEqual({ intent_enabled: false });
     });
   });
 });

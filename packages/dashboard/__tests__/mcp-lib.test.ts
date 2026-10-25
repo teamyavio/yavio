@@ -180,6 +180,13 @@ describe("date range + platform filters", () => {
 });
 
 describe("get_schema doc", () => {
+  it("says where protocol_version comes from and how to read the client's capabilities (#170)", () => {
+    expect(SCHEMA_DOC).toMatch(
+      /protocol_version \(the 2026-07-28 request envelope, else\s+the mcp-protocol-version header, else the version the server answered\s+initialize with/,
+    );
+    expect(SCHEMA_DOC).toContain("JSONExtract(metadata, 'client_capabilities', 'Array(String)')");
+  });
+
   // The model only queries columns it is told about. That the dashboard role
   // can read region is pinned against ClickHouse in packages/db (0020).
   it("lists the geo columns with what region holds (#128)", () => {
@@ -192,6 +199,28 @@ describe("get_schema doc", () => {
     for (const value of SESSION_SOURCES) expect(SCHEMA_DOC).toContain(`'${value}'`);
     expect(SCHEMA_DOC).toMatch(
       /uniqExactIf\(session_id,\s+ifNull\(session_source, ''\) != 'per_request'\)/,
+    );
+    // Right for the rows of both SDKs that send the label (#169): 0.5.4
+    // already labels every key-less HTTP call on any server; since 0.5.5 each
+    // is one call, where 0.5.4 shared one session across a reused transport.
+    const doc = SCHEMA_DOC.replace(/\s+/g, " ");
+    expect(doc).toMatch(/'per_request' \(a key-less HTTP call, on any server/);
+    expect(doc).toMatch(/since SDK 0\.5\.5 a per_request session is ONE CALL/);
+    expect(doc).toMatch(
+      /on SDK 0\.5\.4 [^.;]*reuses one stateless transport[^.;]*one per_request session/,
+    );
+    expect(doc).not.toMatch(/only on (a )?servers? that builds? a new MCP server per request/);
+  });
+
+  it("names the multi-round-trip metadata keys of a tool_call (#168)", () => {
+    expect(SCHEMA_DOC).toContain("JSONExtractUInt(metadata, 'input_rounds')");
+    expect(SCHEMA_DOC).toMatch(/JSONExtractBool\(metadata,\s+'input_retry'\)/);
+  });
+
+  it("names a tool_call's metadata.traceparent and how to read its trace id (#173)", () => {
+    expect(SCHEMA_DOC).toContain("JSONExtractString(metadata, 'traceparent')");
+    expect(SCHEMA_DOC).toMatch(
+      /splitByChar\('-',\s+JSONExtractString\(metadata,\s+'traceparent'\)\)\[2\]/,
     );
   });
 });

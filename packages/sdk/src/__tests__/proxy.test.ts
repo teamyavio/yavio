@@ -13,6 +13,7 @@ import {
   createProxy,
   valueFreeRejection,
 } from "../server/proxy.js";
+import { createSharedSessions } from "../server/shared.js";
 import { mintWidgetToken } from "../server/token.js";
 import type { Transport } from "../transport/types.js";
 import { registeredTool } from "./integration/helpers.js";
@@ -33,6 +34,31 @@ function createMockTransport(): Transport & { sent: BaseEvent[][] } {
     flush: vi.fn().mockResolvedValue(undefined),
     shutdown: vi.fn().mockResolvedValue(undefined),
   };
+}
+
+/**
+ * The JSON a leak check reads: the event without the values the SDK makes
+ * up — `event_id` (a random UUID), `trace_id` and `session_id` (random or a
+ * hash) and `timestamp` (the clock) — each checked for its shape first, so
+ * no captured value can hide in one. A random id holds any short string
+ * now and then: "-120" opens a UUID group in about one event in 2 000 (CI,
+ * 2026-10-25: event_id 55a56749-1205-…), "47051" sits in one in about
+ * 90 000. Everything left is fixed by the test's inputs.
+ *
+ * The shape alone would pass a leak written into `session_id` in the
+ * `ses_` + 21 characters shape, e.g. a regression that cuts the raw key
+ * instead of hashing it. Where the session comes from a known key, pass
+ * `sessionId` (what `deriveSessionId()` makes of it) and the id is pinned
+ * by value instead.
+ */
+function leakScan(event: Record<string, unknown> | undefined, sessionId?: string): string {
+  const { event_id, trace_id, session_id, timestamp, ...fixed } = event ?? {};
+  expect(event_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  expect(trace_id).toMatch(/^tr_[\w-]{21}$/);
+  if (sessionId === undefined) expect(session_id).toMatch(/^ses_[\w-]{21}$/);
+  else expect(session_id).toBe(sessionId);
+  expect(timestamp).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+  return JSON.stringify(fixed);
 }
 
 const testConfig: YavioConfig = {
@@ -1606,6 +1632,8 @@ describe("client metadata capture", () => {
     timezone: "Europe/Berlin",
     "openai/session": "v1/49A5b4dMHXWnQuVmyqIS4O",
   };
+  /** Every call with CHATGPT_META's openai/session is in this session. */
+  const CHATGPT_SESSION_ID = deriveSessionId(CHATGPT_META["openai/session"]);
 
   async function callWithMeta(config: YavioConfig, _meta: unknown) {
     const server = new McpServer({ name: "test", version: "1.0" });
@@ -1704,7 +1732,7 @@ describe("client metadata capture", () => {
     });
     const meta = (event.input_values as Record<string, unknown>)._meta as Record<string, unknown>;
     expect(meta["openai/userLocation"]).toEqual({ country: "DE" });
-    expect(JSON.stringify(event)).not.toContain("47051");
+    expect(leakScan(event, CHATGPT_SESSION_ID)).not.toContain("47051");
   });
 
   it('drops the location entirely under "country" when there is no valid country', async () => {
@@ -1796,7 +1824,7 @@ describe("client metadata capture", () => {
         country: "DE",
         region: "North Rhine-Westphalia",
       });
-      expect(JSON.stringify(event)).not.toContain("47051");
+      expect(leakScan(event, CHATGPT_SESSION_ID)).not.toContain("47051");
     });
 
     it("keeps { country } and sets no region field when the platform sent none", async () => {
@@ -1941,10 +1969,13 @@ describe("client metadata capture", () => {
           ...(geo === false ? [] : ["openai/userLocation"]),
         ].sort(),
       );
-      // Names only, sorted; values never.
-      expect(inputValues._metaDroppedKeys).toEqual([...Object.keys(dropped), "timezone"].sort());
+      // Names only, sorted; values never. The valid traceparent is moved, not
+      // dropped: metadata.traceparent (#173).
+      const { traceparent, ...lost } = dropped;
+      expect(inputValues._metaDroppedKeys).toEqual([...Object.keys(lost), "timezone"].sort());
       expect(inputValues).not.toHaveProperty("_metaDroppedUnnamed");
-      const serialized = JSON.stringify(event);
+      expect(event.metadata).toEqual({ traceparent });
+      const serialized = leakScan({ ...event, metadata: undefined }, CHATGPT_SESSION_ID);
       for (const leak of [
         "session-test-0001",
         "exec-test",
@@ -1982,7 +2013,7 @@ describe("client metadata capture", () => {
     }
     // 5 unnameable, plus the 6 named ones past the cap (extra20–24, timezone).
     expect(inputValues._metaDroppedUnnamed).toBe(11);
-    expect(JSON.stringify(event)).not.toContain("4f9c2a7b1e");
+    expect(leakScan(event, CHATGPT_SESSION_ID)).not.toContain("4f9c2a7b1e");
   });
 
   it("adds neither field when every key is kept", async () => {
@@ -2437,7 +2468,7 @@ describe("per-tool capture overrides", () => {
     expect(book?.error_category).toBe("tool_error");
     expect(book?.error_message).toBeUndefined();
     expect(book?.output_content).toBeUndefined();
-    expect(JSON.stringify(book)).not.toContain("12345");
+    expect(leakScan(book)).not.toContain("12345");
   });
 
   it("lets a tool with an override re-enable a globally disabled flag", async () => {
@@ -2545,7 +2576,7 @@ describe("input_values extra fields (_-prefixed)", () => {
     expect(Object.keys(inputValues)).toEqual(["q"]);
   });
 
-  it("keeps exactly the five allow-listed headers", async () => {
+  it("keeps exactly the four allow-listed headers; traceparent moves to metadata (#173)", async () => {
     const inputValues = await inputValuesFor({
       requestInfo: {
         headers: {
@@ -2565,10 +2596,383 @@ describe("input_values extra fields (_-prefixed)", () => {
     expect(Object.keys(headers).sort()).toEqual([
       "accept-language",
       "mcp-protocol-version",
-      "traceparent",
       "user-agent",
       "x-anthropic-client",
     ]);
+  });
+});
+
+describe("SEP-414 trace context: traceparent, tracestate, baggage (#173)", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue(null);
+    _resetGlobalState();
+  });
+
+  // W3C Trace Context's own examples. The header's parent id ends in ten
+  // decimal digits, which the PII stripper's phone pattern used to cut.
+  const META_TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+  const HEADER_TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+  // Baggage as OpenTelemetry JS writes it: values percent-encoded, so an
+  // email has no `@` for the email pattern to find.
+  const BAGGAGE = "user.id=u-48213,tenant.id=acme-gmbh,user.email=alice%40example.com";
+  const TRACESTATE = "congo=t61rcWkgMzE,rojo=00f067aa0ba902b7";
+  const CLIENT_META = {
+    "openai/locale": "de-DE",
+    "openai/session": "conv-173",
+    "openai/userLocation": { country: "DE", region: "Hesse", city: "Frankfurt" },
+  };
+
+  async function call(
+    extra: Record<string, unknown>,
+    options: {
+      geo?: CaptureConfig["geo"];
+      inputValues?: boolean;
+      schemaLess?: boolean;
+      tools?: YavioConfig["tools"];
+      outcome?: "throw" | "isError";
+    } = {},
+  ) {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const config: YavioConfig = {
+      ...testConfig,
+      capture: {
+        ...testConfig.capture,
+        geo: options.geo ?? true,
+        inputValues: options.inputValues ?? true,
+      },
+      tools: options.tools ?? {},
+    };
+    const proxy = createProxy(server, config, transport, "0.0.1");
+    const result = () => {
+      if (options.outcome === "throw") throw new Error("backend down");
+      return {
+        content: [{ type: "text" as const, text: "ok" }],
+        ...(options.outcome === "isError" ? { isError: true } : {}),
+      };
+    };
+    if (options.schemaLess) proxy.tool("tc_tool", result);
+    else proxy.tool("tc_tool", { q: z.string() }, result);
+    const base = {
+      signal: new AbortController().signal,
+      sendNotification: async () => {},
+      sendRequest: async () => ({}),
+      ...extra,
+    };
+    const handler = registeredTool(server, "tc_tool")?.handler;
+    await Promise.resolve(
+      options.schemaLess ? handler?.(base) : handler?.({ q: "hello" }, base),
+    ).catch(() => undefined);
+    return transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+      string,
+      unknown
+    >;
+  }
+  const inputValuesOf = (event: Record<string, unknown>) =>
+    (event.input_values ?? {}) as Record<string, unknown>;
+
+  it.each([true, "region", "country", false] as const)(
+    "stores no baggage and no tracestate under geo %s, only their names",
+    async (geo) => {
+      const event = await call(
+        {
+          _meta: {
+            ...CLIENT_META,
+            traceparent: META_TRACEPARENT,
+            tracestate: TRACESTATE,
+            baggage: BAGGAGE,
+          },
+        },
+        { geo },
+      );
+      const serialized = leakScan(event);
+      for (const value of ["u-48213", "acme-gmbh", "alice", "t61rcWkgMzE"]) {
+        expect(serialized, value).not.toContain(value);
+      }
+      const inputValues = inputValuesOf(event);
+      const meta = inputValues._meta as Record<string, unknown>;
+      expect(meta).not.toHaveProperty("baggage");
+      expect(meta).not.toHaveProperty("tracestate");
+      expect(meta).not.toHaveProperty("traceparent");
+      // The _meta key names only: never a baggage member's (user.id, tenant.id).
+      expect(inputValues._metaDroppedKeys).toEqual(["baggage", "tracestate"]);
+      expect(event.metadata).toEqual({ traceparent: META_TRACEPARENT });
+    },
+  );
+
+  it("keeps every other _meta key verbatim under geo: true", async () => {
+    const event = await call({
+      _meta: { ...CLIENT_META, traceparent: META_TRACEPARENT, baggage: BAGGAGE },
+    });
+    expect(inputValuesOf(event)._meta).toEqual(CLIENT_META);
+  });
+
+  it("lifts a valid traceparent from _meta, else from the header; _meta wins", async () => {
+    const headers = { traceparent: HEADER_TRACEPARENT, "user-agent": "probe/1.0" };
+    const metaOnly = await call({ _meta: { traceparent: META_TRACEPARENT } });
+    // v1 passes a header record, v2 a web Request whose headers are `Headers`.
+    const headerOnly = await call({ requestInfo: { headers } });
+    const headerOnlyV2 = await call({ http: { req: { headers: new Headers(headers) } } });
+    const both = await call({ _meta: { traceparent: META_TRACEPARENT }, requestInfo: { headers } });
+    expect(metaOnly.metadata).toEqual({ traceparent: META_TRACEPARENT });
+    expect(headerOnly.metadata).toEqual({ traceparent: HEADER_TRACEPARENT });
+    expect(headerOnlyV2.metadata).toEqual({ traceparent: HEADER_TRACEPARENT });
+    expect(both.metadata).toEqual({ traceparent: META_TRACEPARENT });
+    // Stored once: not in _requestInfo, not in _meta.
+    for (const event of [headerOnly, headerOnlyV2, both]) {
+      const requestInfo = inputValuesOf(event)._requestInfo as { headers: Record<string, string> };
+      expect(requestInfo.headers).toEqual({ "user-agent": "probe/1.0" });
+    }
+    expect(leakScan({ ...both, metadata: undefined })).not.toContain("4bf92f3577b34da6");
+  });
+
+  it.each([
+    ["one character short", META_TRACEPARENT.slice(0, -1)],
+    ["one character long", `${META_TRACEPARENT}0`],
+    ["a higher version's extra field", `01${META_TRACEPARENT.slice(2)}-00`],
+    ["version ff", `ff${META_TRACEPARENT.slice(2)}`],
+    ["an all-zero trace id", `00-${"0".repeat(32)}-00f067aa0ba902b7-01`],
+    ["an all-zero parent id", `00-4bf92f3577b34da6a3ce929d0e0e4736-${"0".repeat(16)}-01`],
+    ["upper-case hex", META_TRACEPARENT.toUpperCase()],
+    ["surrounding whitespace", ` ${META_TRACEPARENT}`],
+    ["a trailing newline", `${META_TRACEPARENT}\n`],
+    ["two joined headers", `${META_TRACEPARENT}, ${HEADER_TRACEPARENT}`],
+    ["free text", "user=alice@example.com"],
+  ])("lifts no traceparent with %s, and stores none of it", async (_case, value) => {
+    const fromMeta = await call({ _meta: { "openai/locale": "de-DE", traceparent: value } });
+    expect(fromMeta.metadata).toBeUndefined();
+    expect(inputValuesOf(fromMeta)._meta).toEqual({ "openai/locale": "de-DE" });
+    expect(inputValuesOf(fromMeta)._metaDroppedKeys).toEqual(["traceparent"]);
+    const fromHeader = await call({ requestInfo: { headers: { traceparent: value } } });
+    expect(fromHeader.metadata).toBeUndefined();
+    expect(inputValuesOf(fromHeader)).not.toHaveProperty("_requestInfo");
+  });
+
+  it("lifts a one-line header array, never two header lines", async () => {
+    // A hand-built v1 header record can hold an array; it is joined as
+    // _requestInfo joins it, so a repeated header is never read as its first line.
+    const one = await call({ requestInfo: { headers: { traceparent: [HEADER_TRACEPARENT] } } });
+    expect(one.metadata).toEqual({ traceparent: HEADER_TRACEPARENT });
+    const two = await call({
+      requestInfo: { headers: { traceparent: [HEADER_TRACEPARENT, META_TRACEPARENT] } },
+    });
+    expect(two.metadata).toBeUndefined();
+    expect(inputValuesOf(two)).not.toHaveProperty("_requestInfo");
+  });
+
+  // Review round 1, nit 2: an element whose string conversion throws used to
+  // throw out of the join and fail a successful call.
+  it.each([
+    ["a null-prototype object", () => Object.create(null) as unknown],
+    ["a symbol", () => Symbol("traceparent") as unknown],
+  ])(
+    "lifts nothing from a header array holding %s, and the call still succeeds",
+    async (_case, element) => {
+      const server = new McpServer({ name: "test", version: "1.0" });
+      const transport = createMockTransport();
+      const proxy = createProxy(server, testConfig, transport, "0.0.1");
+      const ok = { content: [{ type: "text" as const, text: "ok" }] };
+      proxy.tool("tc_tool", { q: z.string() }, () => ok);
+      const returned = await registeredTool(server, "tc_tool")?.handler(
+        { q: "hello" },
+        {
+          signal: new AbortController().signal,
+          sendNotification: async () => {},
+          sendRequest: async () => ({}),
+          requestInfo: { headers: { traceparent: [element()], "user-agent": "probe/1.0" } },
+        },
+      );
+      expect(returned).toEqual(ok);
+      const event = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+        string,
+        unknown
+      >;
+      expect(event.status).toBe("success");
+      expect(event.metadata).toBeUndefined();
+    },
+  );
+
+  // Review round 1, should-fix 1: baggage under other carriers. .NET 8/9's
+  // default propagator (LegacyPropagator, which the C# MCP SDK uses through
+  // DistributedContextPropagator.Current) writes it as `Correlation-Context`;
+  // Jaeger (`uberctx-`) and OpenTracing (`ot-baggage-`) put one baggage member
+  // per key, its name in the key. `Request-Id` is an id and is not one of them.
+  const OTHER_CARRIERS = {
+    "Correlation-Context": "user.id=u-48213,tenant.id=acme-gmbh",
+    Baggage: "user.id=u-48213",
+    TraceState: "congo=t61rcWkgMzE",
+    "uberctx-user.id": "u-48213",
+    "ot-baggage-tenant": "acme-gmbh",
+    "UberCtx-plan": "gold-tier",
+    "Request-Id": "|abc.1.",
+  };
+
+  it.each([true, "region", "country", false] as const)(
+    "stores no other baggage carrier under geo %s: names Correlation-Context, Baggage and TraceState, counts the per-key ones",
+    async (geo) => {
+      const event = await call({ _meta: { "openai/locale": "de-DE", ...OTHER_CARRIERS } }, { geo });
+      const serialized = leakScan(event);
+      for (const value of ["u-48213", "acme-gmbh", "t61rcWkgMzE", "gold-tier", "user.id", "plan"]) {
+        expect(serialized, value).not.toContain(value);
+      }
+      const inputValues = inputValuesOf(event);
+      // Request-Id is kept like any unknown key under geo true, dropped and named otherwise.
+      expect(inputValues._meta).toEqual(
+        geo === true
+          ? { "openai/locale": "de-DE", "Request-Id": "|abc.1." }
+          : { "openai/locale": "de-DE" },
+      );
+      expect(inputValues._metaDroppedKeys).toEqual(
+        geo === true
+          ? ["Baggage", "Correlation-Context", "TraceState"]
+          : ["Baggage", "Correlation-Context", "Request-Id", "TraceState"],
+      );
+      // The per-key carriers' names embed the baggage member's name: counted, never named.
+      expect(inputValues._metaDroppedUnnamed).toBe(3);
+      expect(event.metadata).toBeUndefined();
+    },
+  );
+
+  it("lifts only the lower-case traceparent key; another spelling is dropped and named", async () => {
+    const other = await call({ _meta: { Traceparent: META_TRACEPARENT } });
+    expect(other.metadata).toBeUndefined();
+    expect(inputValuesOf(other)._meta).toEqual({});
+    expect(inputValuesOf(other)._metaDroppedKeys).toEqual(["Traceparent"]);
+    const both = await call({
+      _meta: { traceparent: META_TRACEPARENT, TRACEPARENT: HEADER_TRACEPARENT },
+    });
+    expect(both.metadata).toEqual({ traceparent: META_TRACEPARENT });
+    expect(inputValuesOf(both)._metaDroppedKeys).toEqual(["TRACEPARENT"]);
+    expect(leakScan({ ...both, metadata: undefined })).not.toContain("0af7651916cd43dd");
+  });
+
+  // Review round 2: Datadog's MCP instrumentation (dd-trace-js and
+  // dd-trace-py, on by default) writes its whole text_map injection into
+  // `_meta._dd_trace_context`: its own ids, `x-datadog-tags` (which can carry
+  // `_dd.p.usr.id`, a base64 user id), and, with the default inject styles,
+  // a traceparent, a tracestate and the baggage.
+  const DD_TRACEPARENT = "00-0000000000000000a3ce929d0e0e4736-00f067aa0ba902b7-01";
+  const DD_TRACE_CONTEXT = {
+    "x-datadog-trace-id": "11803532876627986230",
+    "x-datadog-parent-id": "67667974448284343",
+    "x-datadog-sampling-priority": "1",
+    "x-datadog-tags": "_dd.p.dm=-0,_dd.p.usr.id=dXNlci00ODIxMw==",
+    traceparent: DD_TRACEPARENT,
+    tracestate: "dd=s:1;t.usr.id:dXNlci00ODIxMw==",
+    baggage: "user.id=u-48213-dd",
+  };
+
+  it.each([true, "region", "country", false] as const)(
+    "stores none of Datadog's _dd_trace_context under geo %s, names it, and falls back to its traceparent",
+    async (geo) => {
+      const event = await call(
+        { _meta: { "openai/locale": "de-DE", _dd_trace_context: DD_TRACE_CONTEXT } },
+        { geo },
+      );
+      const serialized = leakScan({ ...event, metadata: undefined });
+      for (const value of [
+        "dXNlci00ODIxMw",
+        "u-48213-dd",
+        "x-datadog",
+        "11803532876627986230",
+        "a3ce929d0e0e4736",
+      ]) {
+        expect(serialized, value).not.toContain(value);
+      }
+      const inputValues = inputValuesOf(event);
+      expect(inputValues._meta).toEqual({ "openai/locale": "de-DE" });
+      // A fixed vendor key, not data: named, although a leading `_` is not recordable.
+      expect(inputValues._metaDroppedKeys).toEqual(["_dd_trace_context"]);
+      expect(inputValues).not.toHaveProperty("_metaDroppedUnnamed");
+      expect(event.metadata).toEqual({ traceparent: DD_TRACEPARENT });
+    },
+  );
+
+  it("prefers _meta.traceparent and the header over Datadog's, and lifts no invalid one", async () => {
+    const dd = { _dd_trace_context: DD_TRACE_CONTEXT };
+    const metaFirst = await call({ _meta: { ...dd, traceparent: META_TRACEPARENT } });
+    expect(metaFirst.metadata).toEqual({ traceparent: META_TRACEPARENT });
+    const headerFirst = await call({
+      _meta: dd,
+      requestInfo: { headers: { traceparent: HEADER_TRACEPARENT } },
+    });
+    expect(headerFirst.metadata).toEqual({ traceparent: HEADER_TRACEPARENT });
+    const invalid = await call({
+      _meta: { _dd_trace_context: { ...DD_TRACE_CONTEXT, traceparent: "00-00-00-00" } },
+    });
+    expect(invalid.metadata).toBeUndefined();
+    // Any letter case is dropped and named; only the exact key is read for the fallback.
+    const upper = await call({ _meta: { _DD_TRACE_CONTEXT: DD_TRACE_CONTEXT } });
+    expect(upper.metadata).toBeUndefined();
+    expect(inputValuesOf(upper)._meta).toEqual({});
+    expect(inputValuesOf(upper)._metaDroppedKeys).toEqual(["_DD_TRACE_CONTEXT"]);
+    const notAnObject = await call({ _meta: { _dd_trace_context: DD_TRACEPARENT } });
+    expect(notAnObject.metadata).toBeUndefined();
+    expect(inputValuesOf(notAnObject)._metaDroppedKeys).toEqual(["_dd_trace_context"]);
+  });
+
+  it("lifts no traceparent that is not a string", async () => {
+    const event = await call({ _meta: { traceparent: { value: META_TRACEPARENT } } });
+    expect(event.metadata).toBeUndefined();
+    expect(inputValuesOf(event)._metaDroppedKeys).toEqual(["traceparent"]);
+  });
+
+  it("keeps the traceparent of a schema-less tool, which has no input_values", async () => {
+    const event = await call({ _meta: { traceparent: META_TRACEPARENT } }, { schemaLess: true });
+    expect(event.input_values).toBeUndefined();
+    expect(event.metadata).toEqual({ traceparent: META_TRACEPARENT });
+  });
+
+  it.each(["throw", "isError"] as const)(
+    "keeps the traceparent on a call that ends in %s",
+    async (outcome) => {
+      const event = await call({ _meta: { traceparent: META_TRACEPARENT } }, { outcome });
+      expect(event.status).toBe("error");
+      expect(event.metadata).toEqual({ traceparent: META_TRACEPARENT });
+    },
+  );
+
+  it("merges the traceparent with the multi-round-trip markers of a 2026-07-28 retry (#168)", async () => {
+    // A v2 context with inputResponses is the client's retry: input_retry.
+    const event = await call({
+      mcpReq: {
+        id: 2,
+        method: "tools/call",
+        _meta: { traceparent: META_TRACEPARENT, baggage: BAGGAGE },
+        inputResponses: { confirm: { action: "accept", content: { confirm: true } } },
+      },
+    });
+    expect(event.metadata).toEqual({ input_retry: true, traceparent: META_TRACEPARENT });
+    expect(leakScan(event)).not.toContain("u-48213");
+  });
+
+  it("stores none of it under a per-tool inputValues: false", async () => {
+    const event = await call(
+      {
+        _meta: { traceparent: META_TRACEPARENT, tracestate: TRACESTATE, baggage: BAGGAGE },
+        requestInfo: { headers: { traceparent: HEADER_TRACEPARENT } },
+      },
+      { tools: { tc_tool: { inputValues: false } } },
+    );
+    expect(event.metadata).toBeUndefined();
+    expect(event.input_values).toBeUndefined();
+    const serialized = leakScan(event);
+    for (const value of ["4bf92f3577b34da6", "0af7651916cd43dd", "u-48213", "t61rcWkgMzE"]) {
+      expect(serialized, value).not.toContain(value);
+    }
+  });
+
+  it("stores none of it under inputValues: false", async () => {
+    const event = await call(
+      {
+        _meta: { traceparent: META_TRACEPARENT, tracestate: TRACESTATE, baggage: BAGGAGE },
+        requestInfo: { headers: { traceparent: HEADER_TRACEPARENT } },
+      },
+      { inputValues: false },
+    );
+    expect(event.metadata).toBeUndefined();
+    expect(event.input_values).toBeUndefined();
   });
 });
 
@@ -2847,6 +3251,16 @@ describe("valueFreeRejection (#123): what a rejected call may keep as error_mess
     expect(valueFreeRejection(undefined, "book")).toBeUndefined();
     expect(valueFreeRejection("", "book")).toBeUndefined();
   });
+
+  it("keeps MCP SDK v2's frozen requestState refusal, and only that exact text (#168)", () => {
+    expect(valueFreeRejection("Invalid or expired requestState", "book")).toBe(
+      "Invalid or expired requestState",
+    );
+    expect(valueFreeRejection("MCP error -32602: Invalid or expired requestState", "book")).toBe(
+      "MCP error -32602: Invalid or expired requestState",
+    );
+    expect(valueFreeRejection("Invalid or expired requestState: s1", "book")).toBeUndefined();
+  });
 });
 
 describe("session keys and session_source (#144)", () => {
@@ -2901,6 +3315,288 @@ describe("session keys and session_source (#144)", () => {
       ["connection", "per_request"],
       ["tool_call", "per_request"],
     ]);
+  });
+
+  // #169: a long-lived server whose key-less HTTP calls all reach one proxy
+  // (MCP SDK v1 1.24/1.25, one stateless transport reused for every request).
+  it("two key-less HTTP calls on one proxy are two sessions: no user, traits, platform or step sequence carried over, no YAVIO-1302 (#169)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const yavio = createYavioContext();
+      const users = ["alice", "bob"];
+      const { handler, events, calls } = setup(testConfig, () => {
+        const user = users.shift() as string;
+        yavio.identify(user, { plan: `plan-${user}` });
+        yavio.step("look");
+        return { content: [{ type: "text", text: user }] };
+      });
+      await handler(http({ "user-agent": "claude-code/2.0.1" }));
+      await handler(http({ "user-agent": "cursor/1.7.0" }));
+      expect(calls().map((e) => [e.user_id, e.platform, e.session_source])).toEqual([
+        ["alice", "claude-code", "per_request"],
+        ["bob", "cursor", "per_request"],
+      ]);
+      expect(new Set(calls().map((e) => e.session_id)).size).toBe(2);
+      const identify = events().filter((e) => e.event_type === "identify");
+      expect(identify.map((e) => [e.user_id, e.user_traits])).toEqual([
+        ["alice", { plan: "plan-alice" }],
+        ["bob", { plan: "plan-bob" }],
+      ]);
+      const steps = events().filter((e) => e.event_type === "step");
+      expect(steps.map((e) => [e.user_id, e.step_sequence])).toEqual([
+        ["alice", 1],
+        ["bob", 1],
+      ]);
+      expect(warn.mock.calls.filter((args) => String(args[0]).includes("YAVIO-1302"))).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a key-less HTTP call that never identifies carries no user_id after one that did (#169)", async () => {
+    const yavio = createYavioContext();
+    let identify = true;
+    const { handler, calls } = setup(testConfig, () => {
+      if (identify) yavio.identify("alice");
+      return { content: [{ type: "text", text: "ok" }] };
+    });
+    await handler(http({ "user-agent": "cursor/1.7.0" }));
+    identify = false;
+    await handler(http({ "user-agent": "cursor/1.7.0" }));
+    expect(calls().map((e) => e.user_id)).toEqual(["alice", undefined]);
+  });
+
+  it("off HTTP (stdio, in-memory) the connection is one client: identify and the step sequence carry across its calls (#169 guard)", async () => {
+    const yavio = createYavioContext();
+    let first = true;
+    const { handler, calls, events } = setup(testConfig, () => {
+      if (first) yavio.identify("dora");
+      first = false;
+      yavio.step("look");
+      return { content: [{ type: "text", text: "ok" }] };
+    });
+    await handler(call());
+    await handler(call());
+    expect(calls().map((e) => [e.user_id, e.session_source])).toEqual([
+      ["dora", "connection"],
+      ["dora", "connection"],
+    ]);
+    expect(new Set(calls().map((e) => e.session_id)).size).toBe(1);
+    const steps = events().filter((e) => e.event_type === "step");
+    expect(steps.map((e) => e.step_sequence)).toEqual([1, 2]);
+  });
+
+  it("a wrapped handler invoked directly inside a key-less HTTP call joins that call's session; on its own it gets one of its own (#169)", async () => {
+    const yavio = createYavioContext();
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("inner", () => {
+      yavio.step("inner");
+      return { content: [{ type: "text", text: "in" }] };
+    });
+    proxy.tool("outer", async (extra: unknown) => {
+      yavio.identify("olga");
+      await registeredTool(server, "inner")?.handler(extra);
+      return { content: [{ type: "text", text: "out" }] };
+    });
+    await registeredTool(server, "outer")?.handler(http({ "user-agent": "cursor/1.7.0" }));
+    await registeredTool(server, "inner")?.handler(http({ "user-agent": "cursor/1.7.0" }));
+    const sent = transport.sent.flat() as Array<Record<string, unknown>>;
+    const calls = sent.filter((e) => e.event_type === "tool_call");
+    expect(calls.map((e) => [e.event_name, e.user_id])).toEqual([
+      ["inner", "olga"],
+      ["outer", "olga"],
+      ["inner", undefined],
+    ]);
+    expect(calls[0]?.session_id).toBe(calls[1]?.session_id);
+    expect(calls[2]?.session_id).not.toBe(calls[1]?.session_id);
+    // The nested call's step is the outer call's first; the standalone one starts its own.
+    const steps = sent.filter((e) => e.event_type === "step");
+    expect(steps.map((e) => [e.session_id, e.user_id, e.step_sequence])).toEqual([
+      [calls[1]?.session_id, "olga", 1],
+      [calls[2]?.session_id, undefined, 1],
+    ]);
+  });
+
+  // #169 review round 1: the nested call is handed a context the outer
+  // handler built itself, or none — no requestInfo, so not "an HTTP request".
+  function nestedBare() {
+    const yavio = createYavioContext();
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("inner", () => {
+      yavio.step("inner");
+      return { content: [{ type: "text", text: "in" }] };
+    });
+    proxy.tool("outer", async (extra: unknown) => {
+      const { user } = (extra as { _meta?: { user?: string } })._meta ?? {};
+      yavio.identify(user as string);
+      await registeredTool(server, "inner")?.handler({});
+      await registeredTool(server, "inner")?.handler();
+      return { content: [{ type: "text", text: "out" }] };
+    });
+    const outer = (ua: string, user: string) =>
+      registeredTool(server, "outer")?.handler(http({ "user-agent": ua }, { _meta: { user } }));
+    const sent = () => transport.sent.flat() as Array<Record<string, unknown>>;
+    return { outer, sent };
+  }
+
+  it("a wrapped handler invoked directly with a context of its own, or none, inside a key-less HTTP call joins that call (#169 review round 1)", async () => {
+    const { outer, sent } = nestedBare();
+    await outer("cursor/1.7.0", "olga");
+    const calls = sent().filter((e) => e.event_type === "tool_call");
+    expect(calls.map((e) => [e.event_name, e.user_id, e.session_source])).toEqual([
+      ["inner", "olga", "per_request"],
+      ["inner", "olga", "per_request"],
+      ["outer", "olga", "per_request"],
+    ]);
+    expect(new Set(calls.map((e) => e.session_id)).size).toBe(1);
+    const steps = sent().filter((e) => e.event_type === "step");
+    expect(steps.map((e) => [e.user_id, e.step_sequence])).toEqual([
+      ["olga", 1],
+      ["olga", 2],
+    ]);
+    // One connection event, the outer call's: a nested call that joined it
+    // adds none, although its context names no client and no protocol
+    // version (#169 review round 2; 0.5.4 added one labelled `connection`).
+    expect(
+      sent()
+        .filter((e) => e.event_type === "connection")
+        .map((e) => [e.session_source, e.session_id, e.client_name]),
+    ).toEqual([["per_request", calls[0]?.session_id, "cursor"]]);
+  });
+
+  it("several key-less HTTP callers on one proxy, each invoking a wrapped handler with a context of its own: every inner call stays with its caller (#169 review round 1)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { outer, sent } = nestedBare();
+      await outer("claude-code/2.0.1", "u1");
+      await outer("cursor/1.7.0", "u2");
+      const calls = sent().filter((e) => e.event_type === "tool_call");
+      expect(calls.map((e) => [e.event_name, e.user_id, e.platform, e.session_source])).toEqual([
+        ["inner", "u1", "claude-code", "per_request"],
+        ["inner", "u1", "claude-code", "per_request"],
+        ["outer", "u1", "claude-code", "per_request"],
+        ["inner", "u2", "cursor", "per_request"],
+        ["inner", "u2", "cursor", "per_request"],
+        ["outer", "u2", "cursor", "per_request"],
+      ]);
+      expect(calls.slice(0, 3).every((e) => e.session_id === calls[0]?.session_id)).toBe(true);
+      expect(calls.slice(3).every((e) => e.session_id === calls[3]?.session_id)).toBe(true);
+      expect(calls[3]?.session_id).not.toBe(calls[0]?.session_id);
+      const steps = sent().filter((e) => e.event_type === "step");
+      expect(steps.map((e) => [e.user_id, e.step_sequence])).toEqual([
+        ["u1", 1],
+        ["u1", 2],
+        ["u2", 1],
+        ["u2", 2],
+      ]);
+      expect(warn.mock.calls.filter((args) => String(args[0]).includes("YAVIO-1302"))).toEqual([]);
+      // One connection event per caller, none from the nested calls.
+      expect(
+        sent()
+          .filter((e) => e.event_type === "connection")
+          .map((e) => [e.session_source, e.session_id, e.client_name]),
+      ).toEqual([
+        ["per_request", calls[0]?.session_id, "claude-code"],
+        ["per_request", calls[3]?.session_id, "cursor"],
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // #169 review round 2: the join is per proxy, and only into a key-less
+  // HTTP call's own state.
+  it("a call into ANOTHER wrapped server from inside a key-less HTTP call does not join it: its own session, no user, its own connection event (#169 review round 2)", async () => {
+    const yavio = createYavioContext();
+    const serverA = new McpServer({ name: "a", version: "1.0" });
+    const serverB = new McpServer({ name: "b", version: "1.0" });
+    const transportA = createMockTransport();
+    const transportB = createMockTransport();
+    const proxyA = createProxy(serverA, testConfig, transportA, "0.0.1");
+    const proxyB = createProxy(
+      serverB,
+      { ...testConfig, apiKey: "yav_test_other" },
+      transportB,
+      "0.0.1",
+    );
+    proxyB.tool("other", () => {
+      yavio.step("other");
+      return { content: [{ type: "text", text: "b" }] };
+    });
+    proxyA.tool("outer", async (extra: unknown) => {
+      yavio.identify("olga");
+      await registeredTool(serverB, "other")?.handler(extra);
+      return { content: [{ type: "text", text: "a" }] };
+    });
+    await registeredTool(serverA, "outer")?.handler(http({ "user-agent": "cursor/1.7.0" }));
+    const eventsA = transportA.sent.flat() as Array<Record<string, unknown>>;
+    const eventsB = transportB.sent.flat() as Array<Record<string, unknown>>;
+    const callA = eventsA.find((e) => e.event_type === "tool_call");
+    const callB = eventsB.find((e) => e.event_type === "tool_call");
+    expect([callA?.event_name, callA?.user_id, callA?.session_source]).toEqual([
+      "outer",
+      "olga",
+      "per_request",
+    ]);
+    expect([callB?.event_name, callB?.user_id, callB?.session_source]).toEqual([
+      "other",
+      undefined,
+      "per_request",
+    ]);
+    expect(callB?.session_id).not.toBe(callA?.session_id);
+    expect(
+      eventsB
+        .filter((e) => e.event_type === "step")
+        .map((e) => [e.session_id, e.user_id, e.step_sequence]),
+    ).toEqual([[callB?.session_id, undefined, 1]]);
+    expect(eventsB.filter((e) => e.event_type === "connection").map((e) => e.session_id)).toEqual([
+      callB?.session_id,
+    ]);
+  });
+
+  it("a key-less call from inside a KEYED call is not joined: without request headers the connection's state, with them one of its own (#169 review round 2)", async () => {
+    const yavio = createYavioContext();
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("inner", () => {
+      yavio.step("inner");
+      return { content: [{ type: "text", text: "in" }] };
+    });
+    proxy.tool("outer", async () => {
+      yavio.identify("kim");
+      await registeredTool(server, "inner")?.handler({});
+      await registeredTool(server, "inner")?.handler(http({ "user-agent": "cursor/1.7.0" }));
+      return { content: [{ type: "text", text: "out" }] };
+    });
+    await registeredTool(server, "outer")?.handler(
+      http({ "user-agent": "cursor/1.7.0" }, { _meta: { "openai/session": "conv-k" } }),
+    );
+    const calls = (transport.sent.flat() as Array<Record<string, unknown>>).filter(
+      (e) => e.event_type === "tool_call",
+    );
+    expect(calls.map((e) => [e.event_name, e.user_id, e.session_source])).toEqual([
+      ["inner", undefined, "connection"],
+      ["inner", undefined, "per_request"],
+      ["outer", "kim", "openai_session"],
+    ]);
+    expect(new Set(calls.map((e) => e.session_id)).size).toBe(3);
+  });
+
+  it("a key-less HTTP call's session is not stored: 50 calls leave the session map empty, keyed calls fill it (#169 guard)", async () => {
+    const shared = createSharedSessions();
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const proxy = createProxy(server, testConfig, createMockTransport(), "0.0.1", shared);
+    proxy.tool("ping", () => ({ content: [{ type: "text", text: "pong" }] }));
+    const handler = registeredTool(server, "ping")?.handler;
+    for (let i = 0; i < 50; i++) await handler?.(http({ "user-agent": "cursor/1.7.0" }));
+    expect(shared.sessions.size).toBe(0);
+    await handler?.(http({ "user-agent": "cursor/1.7.0" }, { _meta: { "openai/session": "c" } }));
+    expect(shared.sessions.size).toBe(1);
   });
 
   it("labels each key it derives the session from", async () => {
@@ -3180,5 +3876,64 @@ describe("session keys and session_source (#144)", () => {
     expect(configFingerprint({ ...testConfig, sessionKey: one })).toBe(
       configFingerprint({ ...testConfig, sessionKey: other }),
     );
+  });
+});
+
+describe("multi-round-trip results (#168)", () => {
+  beforeEach(() => {
+    mockedMint.mockReset();
+    mockedMint.mockResolvedValue({ token: "jwt_mrtr", expiresAt: "2026-01-01T00:00:00Z" });
+    _resetGlobalState();
+  });
+
+  const v1Ctx = () => ({
+    signal: new AbortController().signal,
+    requestId: "req-mrtr",
+    sendNotification: async () => {},
+    sendRequest: async () => ({}),
+  });
+
+  it("v1 has no input_required: a v1 tool returning that shape is one ordinary call, as before", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool(
+      "v1_tool",
+      { q: z.string() },
+      () => ({ resultType: "input_required", requestState: "s" }) as never,
+    );
+    const returned = (await registeredTool(server, "v1_tool")?.handler(
+      { q: "x" },
+      v1Ctx(),
+    )) as Record<string, unknown>;
+    const calls = transport.sent.flat().filter((e) => e.event_type === "tool_call");
+    expect(calls).toHaveLength(1);
+    expect((calls[0] as { status?: unknown } | undefined)?.status).toBe("success");
+    expect(calls[0]?.metadata).toBeUndefined();
+    expect(returned._meta).toHaveProperty("yavio");
+  });
+
+  it("a v2 retry context (inputResponses lifted into ctx.mcpReq) marks the final round's event", async () => {
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("retry_tool", { q: z.string() }, () => ({
+      content: [{ type: "text", text: "done" }],
+    }));
+    // Called directly (no frame): the callback reads its own context.
+    await registeredTool(server, "retry_tool")?.handler(
+      { q: "x" },
+      {
+        mcpReq: {
+          id: 2,
+          method: "tools/call",
+          inputResponses: { confirm: { action: "accept" } },
+          requestState: () => undefined,
+        },
+      },
+    );
+    const calls = transport.sent.flat().filter((e) => e.event_type === "tool_call");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.metadata).toEqual({ input_retry: true });
   });
 });

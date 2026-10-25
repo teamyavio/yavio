@@ -16,13 +16,19 @@
  * alive but stdin — a stdio server's shape: the listening socket is
  * unref'd, so once the test ends stdin only the SDK can hold the loop, #164)
  * | "idle" (no SIGTERM/SIGINT handler; SIGUSR2 closes the server and nothing
- * else — no drain, no `shutdown()`: whatever the SDK still has queued must
- * not keep the process alive, #164) | "pinned-cli" (a CLI or cron shape: a
+ * else — no signal, no `shutdown()`: the loop empties, and the SDK's
+ * natural-exit drain delivers what is still queued within 1.5 s, or gives
+ * it up there with one line, #167 — nothing of the SDK's keeps the process
+ * alive past that, #164) | "pinned-cli" (a CLI or cron shape: a
  * `withYavio()` pin on the same key, and SIGUSR2 closes the server and
- * awaits `analytics.shutdown()` — no signal the SDK handles; the pin keeps
- * the transport, so the shutdown drains it, and that drain must hold the
- * process until its retry delivers; prints `shutdown resolved`, #164 review
- * round 4). Prints `ready <port>` once listening
+ * awaits `analytics.shutdown()` — no signal the SDK handles; that client
+ * also wraps every request's server, so its shutdown only drains the
+ * pinned key, as before #179 (#187 review round 2), and the drain must hold
+ * the process until its retry delivers; prints `shutdown resolved`, #164
+ * review round 4) | "pinned-cli-with" (the same, but the README's
+ * `withYavio()` host: every request's server is wrapped by `withYavio()`
+ * and the client only ever shuts down, so its shutdown stops the pinned
+ * key's transport — #179). Prints `ready <port>` once listening
  * and `started <sku>` when the `slow` tool begins, so the test can send the
  * signal with that call in flight. `slow` with `track: true` also calls
  * `yavio.track()` before it returns: a request served after the signal
@@ -51,8 +57,19 @@ const analytics = createYavio({ apiKey: "yav_child", endpoint, serverOnly: true 
 
 const started = (sku: string) => process.stdout.write(`started ${sku}\n`); // the test waits for this before it sends the signal
 
+/**
+ * How each request's server is wrapped, before its tools are registered:
+ * by the process's `createYavio()` client, or — "pinned-cli-with", the
+ * README's `withYavio()` host — by `withYavio()`, so that client only ever
+ * shuts down (review round 2 of #187).
+ */
+const wrapRequest = <T extends McpServerV1 | McpServerV2>(server: T): T =>
+  mode === "pinned-cli-with"
+    ? withYavio(server, { apiKey: "yav_child", endpoint, serverOnly: true })
+    : analytics.wrap(server);
+
 function buildV1(): McpServerV1 {
-  const server = new McpServerV1({ name: "child", version: "1.0.0" });
+  const server = wrapRequest(new McpServerV1({ name: "child", version: "1.0.0" }));
   server.registerTool(
     "get_price",
     { description: "Price of a SKU", inputSchema: { sku: z.string() } },
@@ -75,7 +92,7 @@ function buildV1(): McpServerV1 {
 }
 
 function buildV2(): McpServerV2 {
-  const server = new McpServerV2({ name: "child", version: "1.0.0" });
+  const server = wrapRequest(new McpServerV2({ name: "child", version: "1.0.0" }));
   server.registerTool(
     "get_price",
     { description: "Price of a SKU", inputSchema: { sku: z.string() } },
@@ -103,7 +120,7 @@ type Handle = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 
 const handleV1: Handle = async (req, res) => {
   // Per request: wrap, connect a stateless transport, handle, tear down.
-  const server = analytics.wrap(buildV1());
+  const server = buildV1();
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
@@ -116,7 +133,7 @@ const handleV1: Handle = async (req, res) => {
   await transport.handleRequest(req, res);
 };
 
-const handleV2: Handle = toNodeHandler(createMcpHandler(() => analytics.wrap(buildV2())));
+const handleV2: Handle = toNodeHandler(createMcpHandler(() => buildV2()));
 
 const handle = stack === "v2" ? handleV2 : handleV1;
 const http = createServer((req, res) => {
@@ -159,12 +176,14 @@ if (mode === "idle") {
     void closeWithin(http, 3_000);
   });
 }
-if (mode === "pinned-cli") {
-  withYavio(stack === "v2" ? buildV2() : buildV1(), {
-    apiKey: "yav_child",
-    endpoint,
-    serverOnly: true,
-  });
+if (mode === "pinned-cli" || mode === "pinned-cli-with") {
+  // The pin: a withYavio() call for the key, at startup.
+  withYavio(
+    stack === "v2"
+      ? new McpServerV2({ name: "pin", version: "1.0.0" })
+      : new McpServerV1({ name: "pin", version: "1.0.0" }),
+    { apiKey: "yav_child", endpoint, serverOnly: true },
+  );
   process.on("SIGUSR2", () => {
     void (async () => {
       await closeWithin(http, 3_000);

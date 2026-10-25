@@ -17,9 +17,10 @@ import {
 import { LruMap } from "../core/lru.js";
 import { detectPlatform } from "../core/platform.js";
 import { stable } from "../core/stable.js";
+import { datadogTraceparent, traceContextKey, traceparentOf } from "../core/trace-context.js";
 import type { CaptureConfig, McpServerLike, SessionState, YavioConfig } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
-import { type RequestStore, runInContext } from "./context.js";
+import { type RequestStore, getStore, runInContext } from "./context.js";
 import { clientFromUserAgent, headerValue, readCallExtra } from "./extra.js";
 import {
   type IntentContext,
@@ -34,6 +35,7 @@ import {
   type HandlerWrapper,
   currentCallFrame,
   installProtocolWrappers,
+  negotiatedProtocolVersion,
   runInCallFrame,
 } from "./protocol.js";
 import { type SessionKey, findSessionKey } from "./session-key.js";
@@ -99,6 +101,27 @@ function isToolNotFoundError(error: unknown, toolName: string): boolean {
   return text === `Tool ${toolName} not found` || text === `Tool ${toolName} disabled`;
 }
 
+/**
+ * MCP SDK v2's refusal of a multi-round-trip round's `requestState` (#168):
+ * the integrator's `requestState.verify` hook threw (a signed state past its
+ * expiry, a forged one) or the state is not a string. A thrown InvalidParams
+ * whose `data.reason` is `invalid_request_state` and whose message v2 freezes
+ * to `"Invalid or expired requestState"` (2.0.0 to 2.4.0); the hook's own
+ * reason goes to the server's `onerror` only.
+ */
+const INVALID_REQUEST_STATE_MESSAGE = "Invalid or expired requestState";
+
+function isInvalidRequestState(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { code, data } = error as { code?: unknown; data?: unknown };
+  return (
+    code === INVALID_PARAMS &&
+    typeof data === "object" &&
+    data !== null &&
+    (data as { reason?: unknown }).reason === "invalid_request_state"
+  );
+}
+
 /** A URL elicitation is a protocol flow McpServer passes to the client unwrapped, not a failure. */
 function isUrlElicitationRequired(error: unknown): boolean {
   return (
@@ -133,9 +156,9 @@ interface CallSessions {
   /** The connected MCP transport's own session id (Mcp-Session-Id), when it has one. */
   transportSessionId(): string | undefined;
   /**
-   * The conversation's session for a key, or — without one — the
-   * connection's own, labelled `per_request` on an HTTP request and
-   * `connection` otherwise.
+   * The conversation's session for a key, or — without one — a session of
+   * its own for the call on an HTTP request (`per_request`, #169) and the
+   * connection's own otherwise (`connection`).
    */
   resolve(key: SessionKey | undefined, http: boolean): SessionState;
 }
@@ -215,7 +238,13 @@ function openCallContext(
     clientName: () => clientIdentity().info?.name,
     sessionKey: config.sessionKey,
   });
+  // The state of the call this one runs inside, if any: a wrapped handler
+  // invoked directly from another's. A store exists only inside a call
+  // whose own openCallContext() already settled the connection event.
+  const enclosing = getStore()?.session;
   const session = callSessions.resolve(sessionKey, ex.requestHeaders !== undefined);
+  // Joined the enclosing call's state (#169): its connection event is settled.
+  const nested = enclosing === session;
 
   // Lazy platform detection — must run before the connection event is
   // built so the event carries the resolved platform, not "unknown", and
@@ -233,13 +262,20 @@ function openCallContext(
     }
   }
 
-  // The wire protocol version the client sends on every Streamable HTTP
-  // request (allowlisted in `_requestInfo` as well). Only a date-shaped
-  // value is stored: a Streamable HTTP transport rejects anything else,
-  // a custom one may not, and the column is not a place for free text.
-  const protocolVersion = protocolVersionHeader(
-    headerValue(ex.requestHeaders, "mcp-protocol-version"),
-  );
+  // The request's protocol version, from the first source that has one
+  // (#170): the 2026-07-28 envelope, which names it on every request and
+  // every transport; the `mcp-protocol-version` header, which a Streamable
+  // HTTP client sends on every request after `initialize` since 2025-06-18
+  // (allowlisted in `_requestInfo` as well) and which must equal the
+  // envelope's; the version the server answered `initialize` with, the only
+  // source on a 2025-era stdio or in-memory connection and for a 2025-03-26
+  // client, which sends no header. Only a date-shaped value is
+  // stored: MCP SDK transports reject anything else, a custom one may not,
+  // and the column is not a place for free text.
+  const protocolVersion =
+    datedVersion(ex.protocolVersion) ??
+    datedVersion(headerValue(ex.requestHeaders, "mcp-protocol-version")) ??
+    datedVersion(negotiatedProtocolVersion(server));
 
   // The connection event: once per session — deferred from connect() so
   // that OpenAI's per-tool-call reconnects don't spam one per tool call in
@@ -248,7 +284,9 @@ function openCallContext(
   // per client instead (#144, decision C), keyed by what the event says —
   // with the identity computed before the check, which needs it. `get`, not
   // `has`: a hit refreshes the mark's recency, so an active conversation is
-  // never aged out of the dedup by newer ones.
+  // never aged out of the dedup by newer ones. A nested call on its enclosing
+  // call's state adds none: its context may name another client or no
+  // protocol version, which would be a second per-client mark (#169).
   const connectionKey =
     session.sessionSource === "per_request"
       ? dedupKey(
@@ -261,7 +299,7 @@ function openCallContext(
           ),
         )
       : dedupKey(config.apiKey, session.sessionId);
-  if (emittedConnections.get(connectionKey) !== true) {
+  if (!nested && emittedConnections.get(connectionKey) !== true) {
     emittedConnections.set(connectionKey, true);
     const { info, source } = clientIdentity();
     const connectionEvent = buildConnectionEvent(
@@ -277,6 +315,7 @@ function openCallContext(
         clientName: info?.name,
         clientVersion: info?.version,
         clientInfoSource: info?.name ? source : undefined,
+        clientCapabilities: clientCapabilityNames(ex, server),
         intentEnabled: config.intent.enabled,
       },
     );
@@ -289,9 +328,13 @@ function openCallContext(
 /**
  * The connection-event mark of key-less HTTP calls (#144): one per
  * `(platform, client name, client version, protocol version,
- * intent_enabled)` — everything the event records — under the project's API
- * key (`dedupKey`). Cannot collide with a session's mark: session ids start
- * with `ses_`.
+ * intent_enabled)` under the project's API key (`dedupKey`). Cannot collide
+ * with a session's mark: session ids start with `ses_`. The client's
+ * capability names (#170) are left out on purpose — with them one client
+ * would count more connection events — so per process only a client's
+ * first caller's list is recorded; on a reused v1 1.24/1.25 stateless
+ * transport a list from the handshake is the last initializer's anyway, as
+ * is a client name from `initialize`.
  */
 function perRequestConnectionKey(
   platform: string,
@@ -312,8 +355,59 @@ function perRequestConnectionKey(
 /** The MCP protocol versions are dates (`2025-06-18`); anything else is not recorded (#142 review). */
 const PROTOCOL_VERSION = /^\d{4}-\d{2}-\d{2}$/;
 
-function protocolVersionHeader(value: string | undefined): string | undefined {
-  return value !== undefined && PROTOCOL_VERSION.test(value) ? value : undefined;
+function datedVersion(value: unknown): string | undefined {
+  return typeof value === "string" && PROTOCOL_VERSION.test(value) ? value : undefined;
+}
+
+/** A capability name as the protocol spells them (`elicitation`, `sampling`, `roots`, …). */
+const CAPABILITY_NAME = /^[A-Za-z][A-Za-z0-9_.\/-]{0,63}$/;
+const MAX_CAPABILITY_NAMES = 20;
+
+/**
+ * The names of the capabilities the client declared (#170), never their
+ * values: on a 2026-07-28 request the envelope's (an envelope is one when it
+ * names a protocol version, v2's own rule; ChatGPT sends a bare
+ * `clientCapabilities` key on 2025-era requests, which v2 lifts too), else
+ * the `initialize` handshake's (`getClientCapabilities()`, v1 and v2).
+ * Top-level keys whose value is an object — how MCP declares a capability —
+ * in the protocol's spelling, sorted, at most 20. A name that is not
+ * `recordable()` — outside the MCP key format, or with a run of 8 or more
+ * hex digits, which can carry an id or a token — is left out, the rule
+ * `_metaDroppedKeys` uses: these names are recorded whatever the capture
+ * flags (review round 1). Undefined when neither source has any (a
+ * 2025-era request on a per-request host, whose instance never saw
+ * `initialize`). Never throws.
+ */
+function clientCapabilityNames(
+  ex: ReturnType<typeof readCallExtra>,
+  server: McpServerLike,
+): string[] | undefined {
+  try {
+    let capabilities: unknown =
+      ex.protocolVersion !== undefined ? ex.clientCapabilities : undefined;
+    if (capabilities === undefined) {
+      const low = server.server as { getClientCapabilities?: () => unknown } | undefined;
+      capabilities = low?.getClientCapabilities?.();
+    }
+    if (!capabilities || typeof capabilities !== "object" || Array.isArray(capabilities)) {
+      return undefined;
+    }
+    const names = Object.keys(capabilities)
+      .filter((name) => {
+        const value = (capabilities as Record<string, unknown>)[name];
+        return (
+          CAPABILITY_NAME.test(name) &&
+          recordable(name) &&
+          typeof value === "object" &&
+          value !== null
+        );
+      })
+      .sort()
+      .slice(0, MAX_CAPABILITY_NAMES);
+    return names.length > 0 ? names : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -380,10 +474,28 @@ function wrapToolCallback(
       ? null
       : mintCallToken(config, store.traceId, store.session.sessionId).catch(() => null);
 
+    // A multi-round-trip call (#168): the rounds v2's 2025-era shim already
+    // ran inside this tools/call, and their handler time, so that the call's
+    // one event covers all of them; and whether the request is a 2026-07-28
+    // client retry. With a frame that is decided on the context the protocol
+    // layer received: the shim's re-entry context carries inputResponses too.
+    const priorRounds = frame?.inputRounds ?? 0;
+    const priorMs = frame?.inputMs ?? 0;
+    const inputRetry = frame ? frame.inputRetry : readCallExtra(extra).inputRetry === true;
+
     const startTime = performance.now();
     try {
       const result = await runInContext(store, () => originalCb(...cbArgs));
-      const latencyMs = Math.round(performance.now() - startTime);
+      const roundMs = performance.now() - startTime;
+      // The handler time of every round in this request, never the client's
+      // think time between them.
+      const latencyMs = Math.round(priorMs + roundMs);
+      // An interim round: the handler asked for input. On 2026-07-28 the
+      // result goes to the client, which retries as a new request; on the
+      // 2025 era v2's shim fulfils it and re-enters the handler. Either way
+      // the call is not done: no event, no widget token, and the result
+      // passes through untouched (#168).
+      const interim = isInputRequiredResult(result, extra);
 
       // A result with `isError: true` is an error — that flag is how MCP
       // reports tool failures in-band (the model sees them; a throw would
@@ -422,8 +534,19 @@ function wrapToolCallback(
           intentSignals: getCapturedIntent() ?? undefined,
           intentContext: intentContextFor(config),
           clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
+          metadata: inputMetadata(priorRounds + (interim ? 1 : 0), inputRetry),
         },
       );
+      if (interim) {
+        // Kept on the frame for a request that fails before a final round
+        // (see finalizeCallEvent); the mint started above is dropped unused.
+        if (frame) {
+          frame.inputRounds = priorRounds + 1;
+          frame.inputMs = priorMs + roundMs;
+          frame.interim = toolCallEvent;
+        }
+        return result;
+      }
       emit(toolCallEvent);
 
       if (mint && result && typeof result === "object") {
@@ -459,7 +582,7 @@ function wrapToolCallback(
       // it either.
       if (isUrlElicitationRequired(error)) throw error;
 
-      const latencyMs = Math.round(performance.now() - startTime);
+      const latencyMs = Math.round(priorMs + performance.now() - startTime);
 
       const captureInputOnError = capture.inputValues && cbArgs[0] !== extra;
       const toolCallEvent = buildToolCallEvent(
@@ -492,12 +615,48 @@ function wrapToolCallback(
           intentSignals: getCapturedIntent() ?? undefined,
           intentContext: intentContextFor(config),
           clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
+          metadata: inputMetadata(priorRounds, inputRetry),
         },
       );
       emit(toolCallEvent);
 
       throw error;
     }
+  };
+}
+
+/**
+ * An interim result of a multi-round-trip call (#168, MCP 2026-07-28
+ * `InputRequiredResult`): MCP SDK v2's own predicate, `isInputRequiredResult`
+ * (the same expression from 2.0.0 to 2.4.0), a plain object whose
+ * `resultType` is `"input_required"`, on a v2 context (`ctx.mcpReq`). Not
+ * imported: the SDK has no runtime import of either MCP package. v1 has no
+ * such results: a v1 tool returning that shape is sent to its client as an
+ * ordinary result and counted as one call.
+ */
+function isInputRequiredResult(result: unknown, extra: unknown): boolean {
+  return (
+    typeof result === "object" &&
+    result !== null &&
+    !Array.isArray(result) &&
+    (result as { resultType?: unknown }).resultType === "input_required" &&
+    readCallExtra(extra).v2 === true
+  );
+}
+
+/**
+ * The multi-round-trip markers of a tool_call's `metadata` (#168), or
+ * undefined for an ordinary call. `input_rounds`: how many times the handler
+ * returned `input_required` inside this request before the result that went
+ * out (v2's 2025-era shim, exact). `input_retry`: the request is a
+ * 2026-07-28 client retry; the earlier rounds were separate requests,
+ * possibly on another instance, and are in no event.
+ */
+function inputMetadata(rounds: number, retry: boolean): Record<string, unknown> | undefined {
+  if (rounds === 0 && !retry) return undefined;
+  return {
+    ...(rounds > 0 ? { input_rounds: rounds } : {}),
+    ...(retry ? { input_retry: true } : {}),
   };
 }
 
@@ -715,12 +874,24 @@ export function createProxy<T extends McpServerLike>(
     result: unknown,
   ): ToolCallEvent | null => {
     const { toolName, context } = frame;
+    // The interim result of a 2026-07-28 multi-round-trip call: the client
+    // retries as a new request, whose final round sends the event (#168).
+    if (isInputRequiredResult(result, extra)) return null;
     const resultError = toolResultError(result);
 
     if (frame.event) {
       return resultError
         ? postHandlerFailure(frame.event, toolName, resultError.message)
         : frame.event;
+    }
+
+    // The handler asked for input and the request ended before a final
+    // round: v2's 2025-era shim could not get the input (no channel to the
+    // client, a capability the client did not declare, a failed or timed-out
+    // leg, too many rounds) and answered with an isError result. The handler
+    // ran, so this is the interim round's event, corrected (#168).
+    if (frame.interim && resultError) {
+      return postHandlerFailure(frame.interim, toolName, resultError.message);
     }
 
     // The callback never ran. Only a failure is worth an event. (Registered
@@ -734,6 +905,15 @@ export function createProxy<T extends McpServerLike>(
     // tool's capture flags — resolved by name even when the tool is not (or
     // no longer) registered, so an override still holds for a removed tool a
     // client calls from a cached schema.
+    //
+    // A 2026-07-28 retry is `server` instead (#168): the call's handler ran in
+    // an earlier request and asked for input, and the round trip failed — the
+    // tool was disabled, removed or changed its schema between the rounds (a
+    // fleet mid-deploy), or v2 refused the retry's requestState. v2's
+    // 2025-era shim gives the same failures after an interim round in one
+    // request, and they are `server` there (the interim event, corrected), so
+    // both eras agree. The event is built as for any pre-handler failure.
+    const category = frame.inputRetry ? "server" : "validation";
     const capture = resolveToolCapture(config, toolName);
     // The VALUES of a rejected call are exactly what the schema refused:
     // whatever the model put into an enum field, free text from the
@@ -759,7 +939,7 @@ export function createProxy<T extends McpServerLike>(
       {
         toolName,
         status: "error",
-        errorCategory: "validation",
+        errorCategory: category,
         // Result-derived text, so under outputValues; McpServer's text can
         // echo the rejected value (Zod 3), so as-is only with the values.
         errorMessage: !capture.outputValues
@@ -777,6 +957,9 @@ export function createProxy<T extends McpServerLike>(
         intentSignals: getCapturedIntent() ?? undefined,
         intentContext: intentContextFor(config),
         clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
+        // A 2026-07-28 retry the MCP SDK rejects before the handler is still
+        // the client's retry (#168).
+        metadata: inputMetadata(0, frame.inputRetry),
       },
     );
   };
@@ -810,6 +993,10 @@ export function createProxy<T extends McpServerLike>(
         toolName,
         context: openCallContext(extra, callSessions, server, config, transport, sdkVersion),
         event: null,
+        inputRounds: 0,
+        inputMs: 0,
+        interim: null,
+        inputRetry: readCallExtra(extra).inputRetry === true,
       };
     } catch {
       return handler(request, extra);
@@ -834,6 +1021,26 @@ export function createProxy<T extends McpServerLike>(
       // handler — v2's wire validation of the result (`Invalid tools/call
       // result: …`), which the client sees as a JSON-RPC error. The same
       // verdict as v1's output-schema failure: status error, category server.
+      //
+      // A throw after an interim round counts the same way, on that round's
+      // event (#168): v2 refusing the handler's input request on 2026-07-28
+      // (a capability the request did not declare, neither inputRequests nor
+      // requestState), or the shim giving up on an aborted request. A URL
+      // elicitation a later shim round throws is the exception: the call is
+      // not done, and the client retries it after the URL flow as a new
+      // tools/call, which records its own event.
+      //
+      // And a 2026-07-28 retry whose requestState v2 refused before the
+      // handler ran (the integrator's verify hook threw: a signed state past
+      // its expiry, a forged one; or a non-string state). The call's handler
+      // ran in an earlier request and asked for input, and the round trip
+      // failed: `error` / `server`, as on the shim, where the same refusal
+      // comes after an interim round in the same request (the branch above).
+      // Built like a pre-handler failure — no latency (nothing ran in this
+      // request), and the retry's arguments, which nothing validated in this
+      // request, stored like a rejected call's. finalizeCallEvent gives every
+      // pre-handler failure of a retry that category, an unknown or disabled
+      // tool between the rounds included (review round 2).
       try {
         if (frame.event) {
           transport.send([
@@ -841,10 +1048,23 @@ export function createProxy<T extends McpServerLike>(
               ? frame.event
               : postHandlerFailure(frame.event, toolName, (error as Error)?.message),
           ]);
+        } else if (frame.interim) {
+          if (!isUrlElicitationRequired(error)) {
+            transport.send([
+              postHandlerFailure(frame.interim, toolName, (error as Error)?.message),
+            ]);
+          }
         } else if (isToolNotFoundError(error, toolName)) {
           const rejection = {
             isError: true,
             content: [{ type: "text", text: (error as Error).message }],
+          };
+          const event = finalizeCallEvent(frame, params?.arguments, extra, rejection);
+          if (event) transport.send([event]);
+        } else if (frame.inputRetry && isInvalidRequestState(error)) {
+          const rejection = {
+            isError: true,
+            content: [{ type: "text", text: INVALID_REQUEST_STATE_MESSAGE }],
           };
           const event = finalizeCallEvent(frame, params?.arguments, extra, rejection);
           if (event) transport.send([event]);
@@ -928,6 +1148,11 @@ export function createProxy<T extends McpServerLike>(
    * calls. Reset on connect, like the connection session.
    */
   let activeSession: SessionState | null = null;
+  /**
+   * The sessions this proxy made for key-less HTTP calls (#169). Held
+   * weakly: nothing keeps one after its call but `activeSession`.
+   */
+  const perCallSessions = new WeakSet<SessionState>();
 
   /**
    * Resolve the session for the current tool call.
@@ -938,9 +1163,16 @@ export function createProxy<T extends McpServerLike>(
    * instance processing the same key produces the same ID, and returns that
    * conversation's own state — a built-in key through `deriveSessionId()`,
    * the integrator's through the keyed `deriveCustomSessionId()`. Without
-   * one: the connection's session, labelled `per_request` on an HTTP
-   * request (on a per-request host it lives for one request) and
-   * `connection` otherwise.
+   * one, on an HTTP request: a session of its own for this one call,
+   * `per_request` (#169) — never stored, so nothing outlives the call. On a
+   * per-request host that is what the connection's session was anyway; on a
+   * long-lived server that reuses one stateless transport (MCP SDK v1
+   * 1.24/1.25 allow it) the connection's session served every caller, and
+   * the first identified user, its traits, its platform and the step
+   * sequence landed on all of them. A key-less call made from inside one
+   * of those calls (a wrapped handler invoked directly, with any context or
+   * none) joins it. Off HTTP (stdio, in-memory) the connection is one
+   * client: its session, `connection`.
    */
   const callSessions: CallSessions = {
     transportSessionId: () =>
@@ -949,7 +1181,31 @@ export function createProxy<T extends McpServerLike>(
         : undefined,
     resolve: (key, http) => {
       if (!key) {
-        session.sessionSource = http ? "per_request" : "connection";
+        // A wrapped handler invoked directly from inside a key-less HTTP call
+        // joins it, whatever context it is handed (the outer call's own, one
+        // it built, none): the request store still holds the call's state.
+        // Off HTTP the store holds the connection's, never in the set.
+        const enclosing = getStore()?.session;
+        if (enclosing && perCallSessions.has(enclosing)) {
+          activeSession = enclosing;
+          return enclosing;
+        }
+      }
+      if (!key && http) {
+        const call: SessionState = {
+          sessionId: generateSessionId(),
+          userId: null,
+          userTraits: {},
+          platform: session.platform,
+          stepSequence: 0,
+          sessionSource: "per_request",
+        };
+        perCallSessions.add(call);
+        activeSession = call;
+        return call;
+      }
+      if (!key) {
+        session.sessionSource = "connection";
         activeSession = session;
         return session;
       }
@@ -1229,7 +1485,8 @@ export function createProxy<T extends McpServerLike>(
             }),
             stepSequence: 0,
             // Derived from the transport's session: say so. A random one is
-            // labelled by the first request that falls back to it (#144).
+            // labelled by the first key-less call off HTTP (#144; a key-less
+            // HTTP call gets a session of its own, #169).
             sessionSource: sessionIdFromTransport ? "mcp_session_id" : undefined,
           };
           activeSession = null;
@@ -1397,6 +1654,9 @@ export function valueFreeRejection(
   if (text.startsWith("Input validation error:")) {
     return "Input validation error: the arguments did not match the tool's schema (values not stored, see capture.rejectedInputValues)";
   }
+  // v2's frozen refusal of a retry's requestState (#168): fixed text, the
+  // verify hook's reason never reaches it.
+  if (text === INVALID_REQUEST_STATE_MESSAGE) return message;
   return undefined;
 }
 
@@ -1439,11 +1699,21 @@ function extractInputTypes(args: unknown): Record<string, unknown> | undefined {
  *   removed from the clone — a flag named geo must not leave coordinates
  *   in; `"country"` / `"region"` replace it with a NEW `{ country }` /
  *   `{ country, region }` object; and of the rest only the known keys stay
- *   (KNOWN_META_KEYS). The clone is what makes this safe: the handler's own
- *   `_meta` is never touched.
- * - `_metaDroppedKeys` / `_metaDroppedUnnamed`: under a `geo` other than
- *   `true`, the names (never the values) of the `_meta` keys reduceMeta
- *   dropped, so a new key shows up, and the count of those it does not name.
+ *   (KNOWN_META_KEYS). Under every `geo`, `true` included, the trace
+ *   context never stays (#173, see traceContextKey): `baggage` (also as
+ *   .NET's `Correlation-Context`, or one member per `uberctx-` /
+ *   `ot-baggage-` key) is free-form application context (user and tenant
+ *   ids, flags), `tracestate` vendor state and Datadog's
+ *   `_dd_trace_context` both and more, none of use here; a valid
+ *   `traceparent` goes to `metadata.traceparent` instead (extractClientMeta).
+ *   The clone is what makes this safe: the handler's own `_meta` is never
+ *   touched.
+ * - `_metaDroppedKeys` / `_metaDroppedUnnamed`: the names (never the values)
+ *   of the `_meta` keys reduceMeta dropped, so a new key shows up, and the
+ *   count of those it does not name. Under `geo: true` only the trace-context
+ *   keys can be named there (`tracestate`, `baggage`, `correlation-context`,
+ *   `_dd_trace_context` in any letter case, an invalid or not lower-case
+ *   `traceparent`), and only the per-key baggage carriers counted.
  * - `_taskId`: MCP task id, for correlating task-based flows.
  * - `_requestInfo`: allow-listed headers and the URL sans query, see
  *   sanitizeRequestInfo.
@@ -1466,7 +1736,7 @@ function extractInputValues(
     const ex = readCallExtra(extra);
     if (ex.meta) {
       const meta = JSON.parse(JSON.stringify(ex.meta)) as unknown;
-      if (geo !== true && meta && typeof meta === "object" && !Array.isArray(meta)) {
+      if (meta && typeof meta === "object" && !Array.isArray(meta)) {
         const reduced = reduceMeta(meta as Record<string, unknown>, geo);
         clone._meta = reduced.meta;
         if (reduced.droppedKeys.length > 0) clone._metaDroppedKeys = reduced.droppedKeys;
@@ -1490,9 +1760,10 @@ function extractInputValues(
  * The top-level `_meta` keys kept under a `capture.geo` other than `true`,
  * besides `openai/userLocation`, which is rebuilt. Everything else is dropped:
  * the conversation and request ids ChatGPT sends (`sessionId`, `windowId`,
- * `callId`, `itemId`, `openai/request_id`), `traceparent`,
- * `openai/organization`, the client capabilities, the top-level `timezone`
- * and `timezone_offset_minutes`, and any key the platform adds later.
+ * `callId`, `itemId`, `openai/request_id`), `openai/organization`, the client
+ * capabilities, the top-level `timezone` and `timezone_offset_minutes`, and
+ * any key the platform adds later. The trace context never stays,
+ * under any `geo` (see reduceMeta).
  *
  * An allowlist, not a denylist (#127): ChatGPT added seven undocumented
  * top-level keys between 2026-09 and 2026-10, one of them location data, and
@@ -1524,26 +1795,43 @@ function recordable(key: string): boolean {
 }
 
 /**
- * The request `_meta` (a clone) under a `capture.geo` other than `true`.
+ * The request `_meta` (a clone) as `input_values._meta` stores it.
  *
- * - `openai/userLocation` is rebuilt from an allow-list, so a field the
- *   platform adds later cannot leak through: `{ country }` for `"country"`,
- *   `{ country, region }` for `"region"` (`{ country }` when there is no
- *   valid region), and removed for `false` or when there is no valid country.
- * - Every other key is kept only if it is in KNOWN_META_KEYS.
+ * - The trace-context keys never stay, under any `geo` (#173,
+ *   traceContextKey). A valid `traceparent` under exactly that key is not
+ *   lost — extractClientMeta sends it as `metadata.traceparent` — so it is
+ *   not named either; `tracestate`, `baggage`, `correlation-context`,
+ *   `_dd_trace_context` (any letter case) and any other `traceparent` are
+ *   dropped and named, as sent (a fixed name, never data). Only the
+ *   `_meta` key's name: never a baggage member's (`user.id`, a tenant), which
+ *   the integrator's upstream chooses and which can name a customer. That is
+ *   why a per-key carrier (`uberctx-user.id`, `ot-baggage-tenant`), whose
+ *   name is the member's, is only counted.
+ * - `geo: true`: everything else verbatim.
+ * - Any other `geo`: `openai/userLocation` is rebuilt from an allow-list, so
+ *   a field the platform adds later cannot leak through: `{ country }` for
+ *   `"country"`, `{ country, region }` for `"region"` (`{ country }` when
+ *   there is no valid region), and removed for `false` or when there is no
+ *   valid country. Every other key is kept only if it is in KNOWN_META_KEYS.
  * - `droppedKeys`: the names (never the values) of what went, sorted, at most
  *   MAX_DROPPED_KEYS; `droppedUnnamed`: how many dropped keys are not named —
  *   an id-like or malformed name, or one past the cap.
  */
 function reduceMeta(
   meta: Record<string, unknown>,
-  geo: "country" | "region" | false,
+  geo: CaptureConfig["geo"],
 ): { meta: Record<string, unknown>; droppedKeys: string[]; droppedUnnamed: number } {
   const kept: Record<string, unknown> = {};
   const named: string[] = [];
   let unnamed = 0;
   for (const [key, value] of Object.entries(meta)) {
-    if (KNOWN_META_KEYS.has(key)) kept[key] = value;
+    const traceKey = traceContextKey(key);
+    if (traceKey === "counted") unnamed++;
+    else if (traceKey === "named") {
+      // A fixed name in some letter case, never data: named as sent, also
+      // `_dd_trace_context`, which recordable() would refuse.
+      if (!(key === "traceparent" && traceparentOf(value))) named.push(key);
+    } else if (geo === true || KNOWN_META_KEYS.has(key)) kept[key] = value;
     else if (key === "openai/userLocation") continue;
     else if (recordable(key)) named.push(key);
     else unnamed++;
@@ -1573,7 +1861,7 @@ function reduceMeta(
  *
  * The first two survive because they answer questions the dashboard actually
  * asks — which client called (beyond the coarse `platform` field) and in which
- * language — and neither identifies a person. The README lists all five; keep
+ * language — and neither identifies a person. The README lists all four; keep
  * it in step.
  */
 const CAPTURED_HEADERS = new Set([
@@ -1582,10 +1870,11 @@ const CAPTURED_HEADERS = new Set([
   // Anthropic's surface marker ("ClaudeAI", "Cowork") — the trustworthy way
   // to tell Claude surfaces apart, verified in live traffic 2026-07-29.
   "x-anthropic-client",
-  // Wire protocol version and W3C trace context for log correlation.
-  // None of these carry personal data.
+  // Wire protocol version. Carries no personal data.
   "mcp-protocol-version",
-  "traceparent",
+  // Not `traceparent` since #173: a valid one is `metadata.traceparent`
+  // (extractClientMeta), stored once; the raw header was any text a caller
+  // sent. `tracestate` and `baggage` were never kept.
 ]);
 
 /**
@@ -1600,13 +1889,34 @@ const CAPTURED_HEADERS = new Set([
  * (They do travel inside the verbatim `_meta` clone in `input_values` while
  * `geo` is `true`; otherwise reduceMeta cuts that object down to the same
  * country and region, or drops it.)
+ *
+ * `traceparent` (#173): a valid W3C traceparent from `_meta` (SEP-414; the
+ * only carrier on stdio), else from the HTTP header, else from Datadog's
+ * `_meta._dd_trace_context` (review round 2), under every `geo` — the
+ * `_meta` value first, because it is what the MCP client attached to this
+ * request, while a header can come from any HTTP hop in between. Sent as
+ * `metadata.traceparent`, for joining a call to the integrator's own traces.
  */
 function extractClientMeta(
   extra: unknown,
   geo: CaptureConfig["geo"],
 ): import("../core/events.js").ClientMeta | undefined {
-  const m = readCallExtra(extra).meta;
-  if (!m) return undefined;
+  const ex = readCallExtra(extra);
+  // A repeated header (an array, from a hand-built record) is joined as
+  // sanitizeRequestInfo joins it, so two header lines are never lifted as the
+  // first one: a joined value is not a valid traceparent. Only an array of
+  // strings: joining an element whose string conversion throws (a
+  // null-prototype object, a symbol) would fail the call (#173 review round 1).
+  const header = ex.requestHeaders?.traceparent;
+  const headerText = Array.isArray(header)
+    ? header.every((v) => typeof v === "string")
+      ? header.join(", ")
+      : undefined
+    : header;
+  const traceparent =
+    traceparentOf(ex.meta?.traceparent) ?? traceparentOf(headerText) ?? datadogTraceparent(ex.meta);
+  const m = ex.meta;
+  if (!m) return traceparent ? { traceparent } : undefined;
 
   const str = (v: unknown, max: number): string | undefined =>
     typeof v === "string" && v.length > 0 ? v.slice(0, max) : undefined;
@@ -1622,8 +1932,11 @@ function extractClientMeta(
     locale: str(m["openai/locale"], 35),
     endUserAgent: str(m["openai/userAgent"], 512),
     subjectId: str(m["openai/subject"], 256),
+    traceparent,
   };
-  return out.countryCode || out.locale || out.endUserAgent || out.subjectId ? out : undefined;
+  return out.countryCode || out.locale || out.endUserAgent || out.subjectId || out.traceparent
+    ? out
+    : undefined;
 }
 
 /**

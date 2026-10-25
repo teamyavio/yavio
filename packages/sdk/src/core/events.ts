@@ -160,6 +160,13 @@ export interface ToolCallData {
    */
   intentContext?: "required" | "optional" | "none";
   clientMeta?: ClientMeta;
+  /**
+   * The event's `metadata`, besides `traceparent` (from `clientMeta`, #173).
+   * On a tool_call only the multi-round-trip markers (#168): `input_rounds`
+   * and `input_retry`, see `inputMetadata()` in server/proxy.ts. Unset on an
+   * ordinary call.
+   */
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -179,9 +186,22 @@ export interface ClientMeta {
   endUserAgent?: string;
   /** Stable pseudonymous per-user-per-app id, from `openai/subject`. */
   subjectId?: string;
+  /**
+   * A valid W3C `traceparent` (#173, see core/trace-context.ts): from `_meta`
+   * (SEP-414), else from the HTTP header. Sent as `metadata.traceparent`,
+   * not as a column.
+   */
+  traceparent?: string;
 }
 
 export function buildToolCallEvent(ctx: EventContext, data: ToolCallData): ToolCallEvent {
+  // One `metadata` object: the multi-round-trip markers (#168) and the
+  // traceparent (#173), unset when neither is there. Not run through
+  // stripPii, like the markers: the traceparent is validated
+  // (trace-context.ts). Ingest's stripper does walk `metadata` and leaves a
+  // valid traceparent alone (#173).
+  const traceparent = data.clientMeta?.traceparent;
+  const metadata = traceparent ? { ...data.metadata, traceparent } : data.metadata;
   return {
     ...baseFields(ctx, "tool_call"),
     event_type: "tool_call",
@@ -204,6 +224,7 @@ export function buildToolCallEvent(ctx: EventContext, data: ToolCallData): ToolC
     locale: data.clientMeta?.locale,
     end_user_agent: data.clientMeta?.endUserAgent,
     subject_id: data.clientMeta?.subjectId,
+    metadata,
   };
 }
 
@@ -216,6 +237,8 @@ export interface ConnectionData {
   clientVersion?: string;
   /** Set when `clientName` is: which of the three sources named the client. */
   clientInfoSource?: ClientInfoSource;
+  /** The names of the client's declared capabilities, sorted (#170). */
+  clientCapabilities?: string[];
   intentEnabled?: boolean;
 }
 
@@ -233,6 +256,9 @@ export function buildConnectionEvent(ctx: EventContext, data: ConnectionData): C
     metadata: {
       intent_enabled: data.intentEnabled ?? false,
       ...(data.clientInfoSource ? { client_info_source: data.clientInfoSource } : {}),
+      // Names only, never values (#170): which clients can answer an
+      // elicitation, a sampling request or a roots listing at all.
+      ...(data.clientCapabilities?.length ? { client_capabilities: data.clientCapabilities } : {}),
     },
   };
 }

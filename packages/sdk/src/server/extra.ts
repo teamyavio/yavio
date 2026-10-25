@@ -9,8 +9,9 @@
  *   method, _meta, envelope?, … }, http?: { authInfo, req } }` — `_meta` sits
  *   under `mcpReq`, the HTTP request is a web `Request` (its `headers` is a
  *   `Headers` object, not a record; its `url` is deliberately not read, see
- *   `requestUrl`), and on the 2026-07-28 protocol era the client identity
- *   travels per request in `mcpReq.envelope`.
+ *   `requestUrl`), and on the 2026-07-28 protocol era the client identity,
+ *   the protocol version and the client capabilities travel per request in
+ *   `mcpReq.envelope`.
  *
  * Nothing here is typed against either package: the SDK has no runtime import
  * of them, and the structural read is what makes a third shape degrade to
@@ -22,6 +23,10 @@ import { isKnownClientName } from "../core/platform.js";
 
 /** The reserved `_meta` key the 2026-07-28 envelope carries the client identity under. */
 const ENVELOPE_CLIENT_INFO_KEY = "io.modelcontextprotocol/clientInfo";
+/** The envelope's protocol revision of the request (#170), required on 2026-07-28. */
+const ENVELOPE_PROTOCOL_VERSION_KEY = "io.modelcontextprotocol/protocolVersion";
+/** The envelope's client capabilities, declared per request on 2026-07-28 (#170). */
+const ENVELOPE_CLIENT_CAPABILITIES_KEY = "io.modelcontextprotocol/clientCapabilities";
 
 export interface CallExtra {
   /** The transport's session id (`Mcp-Session-Id`), when the transport has one. */
@@ -43,11 +48,29 @@ export interface CallExtra {
   /** Client identity from the v2 per-request envelope, when present. */
   client?: { name?: string; version?: string };
   /**
+   * The protocol revision the v2 per-request envelope names (2026-07-28,
+   * #170), unvalidated: the caller keeps only a date-shaped value.
+   */
+  protocolVersion?: string;
+  /** The client capabilities the v2 per-request envelope declares (#170), unvalidated. */
+  clientCapabilities?: Record<string, unknown>;
+  /**
    * What the host's auth middleware attached as `req.auth`: v1
    * `extra.authInfo`, v2 `ctx.http.authInfo` (#144). Read only to hand it to
    * the integrator's `sessionKey`; never recorded.
    */
   authInfo?: Record<string, unknown>;
+  /** The context is MCP SDK v2's: it has `mcpReq`. v1's has none (#168). */
+  v2?: boolean;
+  /**
+   * The request carries the material of a multi-round-trip retry (#168, MCP
+   * 2026-07-28): v2 lifted `inputResponses` / `requestState` out of the
+   * params into `ctx.mcpReq.inputResponses`, `droppedInputResponseKeys` and
+   * the `requestState()` accessor. v2's 2025-era legacy shim fills the same
+   * fields on the context it re-enters the handler with, so only the context
+   * the protocol layer received tells a client retry from a shim round.
+   */
+  inputRetry?: boolean;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -73,6 +96,21 @@ function headersToRecord(headers: unknown): Record<string, unknown> | undefined 
   return isRecord(headers) ? headers : undefined;
 }
 
+/**
+ * The `requestState` a v2 context carries: `ctx.mcpReq.requestState` is an
+ * accessor, a plain getter of the lifted value (`() => value`, the same from
+ * 2.0.0 to 2.4.0); anything else is read as the value. Isolated so that an
+ * accessor that throws costs only this field. Never throws.
+ */
+function requestStateOf(mcpReq: Record<string, unknown>): unknown {
+  try {
+    const state = mcpReq.requestState;
+    return typeof state === "function" ? (state as () => unknown)() : state;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Read the parts of a handler context the SDK uses. Never throws. */
 export function readCallExtra(extra: unknown): CallExtra {
   const out: CallExtra = {};
@@ -81,6 +119,16 @@ export function readCallExtra(extra: unknown): CallExtra {
     if (typeof extra.sessionId === "string") out.sessionId = extra.sessionId;
 
     const mcpReq = isRecord(extra.mcpReq) ? extra.mcpReq : undefined;
+    if (mcpReq) {
+      out.v2 = true;
+      if (
+        mcpReq.inputResponses !== undefined ||
+        Array.isArray(mcpReq.droppedInputResponseKeys) ||
+        requestStateOf(mcpReq) !== undefined
+      ) {
+        out.inputRetry = true;
+      }
+    }
     const meta = extra._meta ?? mcpReq?._meta;
     if (isRecord(meta)) out.meta = meta;
 
@@ -106,6 +154,10 @@ export function readCallExtra(extra: unknown): CallExtra {
         version: typeof clientInfo.version === "string" ? clientInfo.version : undefined,
       };
     }
+    const protocolVersion = envelope?.[ENVELOPE_PROTOCOL_VERSION_KEY];
+    if (typeof protocolVersion === "string") out.protocolVersion = protocolVersion;
+    const capabilities = envelope?.[ENVELOPE_CLIENT_CAPABILITIES_KEY];
+    if (isRecord(capabilities)) out.clientCapabilities = capabilities;
   } catch {
     // A context of an unexpected shape yields what was read so far.
   }
