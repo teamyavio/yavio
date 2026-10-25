@@ -193,5 +193,11 @@ describe("get_schema doc", () => {
     expect(SCHEMA_DOC).toMatch(
       /uniqExactIf\(session_id,\s+ifNull\(session_source, ''\) != 'per_request'\)/,
     );
+    // Right for both SDK eras (#169): every key-less HTTP call since 0.5.5,
+    // a per-request host's call (or a reused transport's shared one) before.
+    const doc = SCHEMA_DOC.replace(/\s+/g, " ");
+    expect(doc).toContain(
+      `'per_request' (a key-less HTTP call: this "session" is ONE CALL, not a conversation — on any server since SDK 0.5.5; before 0.5.5 only on servers that build a new MCP server per request`,
+    );
   });
 });

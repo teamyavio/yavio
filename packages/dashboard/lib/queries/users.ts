@@ -34,12 +34,12 @@ interface QueryContext {
  *   identify never re-attributes history. Only identify rows are read — a
  *   primary-key range, a few percent of the events. An event without a
  *   session never maps to anyone, nor does a `per_request` session (#144):
- *   it is one call, and a long-lived MCP SDK v1 1.24/1.25 server that reuses
- *   one stateless transport puts every key-less caller into one such
- *   session, so one caller's identify would key everybody's rows. Every
- *   copy of this map — querySessionUsers() in session-users.ts, USER_KEY_SQL
- *   in lib/mcp/schema-doc.ts, the statistics prelude in packages/ingest —
- *   has the same rule.
+ *   it is one call, and up to SDK 0.5.4 a long-lived MCP SDK v1 1.24/1.25
+ *   server that reused one stateless transport put every key-less caller
+ *   into one such session (#169), so one caller's identify would key
+ *   everybody's rows. Every copy of this map — querySessionUsers() in
+ *   session-users.ts, USER_KEY_SQL in lib/mcp/schema-doc.ts, the statistics
+ *   prelude in packages/ingest — has the same rule.
  * - subject_id: the platform's stable pseudonymous per-user-per-app id
  *   (ChatGPT's openai/subject), so apps that never call identify() still have
  *   user metrics.
@@ -85,11 +85,13 @@ const bound = (column: string, window?: TimeWindow): string =>
 
 /**
  * The rows whose session counts as a session (#144). A session the SDK
- * labelled `per_request` is one call: a client that sends no session key on
- * a per-request host has a new session per request; its widget rows carry
- * the label too (0.5.4 widgets). NULL (an SDK before 0.5.4, server or
- * widget) counts as before. Used by the Sessions KPI and the
- * users list's totalSessions; users themselves are never keyed by session.
+ * labelled `per_request` is a key-less HTTP call: one call on any host since
+ * SDK 0.5.5 (#169), before only on a per-request host (a long-lived server
+ * reusing one stateless transport put every key-less caller into one); its
+ * widget rows carry the label too (0.5.4 widgets). NULL (an SDK before
+ * 0.5.4, server or widget) counts as before. Used by the Sessions KPI and
+ * the users list's totalSessions; users themselves are never keyed by
+ * session.
  */
 export const COUNTED_SESSION = "ifNull(session_source, '') != 'per_request'";
 
