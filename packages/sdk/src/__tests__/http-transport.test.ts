@@ -2013,4 +2013,30 @@ describe("HttpTransport.flushQueued() and a send another request left behind (#1
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(transport.deliveredEvents()).toBe(1);
   });
+
+  it("a drain() waiting on a send that a flush takes back from its retry wait resolves once the batch is delivered, not at its own deadline (#171 review round 2)", async () => {
+    let calls = 0;
+    const fetch = vi.fn().mockImplementation(() => {
+      calls++;
+      return Promise.resolve(answer(calls <= 2 ? 503 : 200));
+    });
+    const transport = new HttpTransport({ ...base, flushIntervalMs: 3_600_000, fetch });
+    transport.send([fakeEvent()]);
+    const t0 = Date.now();
+    let drainedAt: number | undefined;
+    // Another holder's shutdown() while this client's flushes go on.
+    const draining = transport.drain(4_000).then(() => {
+      drainedAt = Date.now() - t0;
+    });
+    await vi.advanceTimersByTimeAsync(1_000); // 503 at 0, the backoff's retry at 1 s: 503, a 2 s wait
+    await vi.advanceTimersByTimeAsync(1_000); // the attempt is a second old
+    const flushing = transport.flushQueued(500); // an early retry: 200
+    await vi.advanceTimersByTimeAsync(10);
+    expect(await flushing).toBe("done");
+    expect(transport.deliveredEvents()).toBe(1);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(drainedAt).toBeDefined();
+    expect(drainedAt).toBeLessThan(2_200);
+    await draining;
+  });
 });

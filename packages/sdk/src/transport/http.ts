@@ -282,6 +282,8 @@ export class HttpTransport implements Transport {
   } | null = null;
   /** Called when a retry wait begins: how a flush watching the batch in flight learns that it failed (#171). */
   private readonly retryWaitWatchers = new Set<() => void>();
+  /** Called when a flush takes the send in flight's batch back: how a `drain()` waiting on it learns (#171). */
+  private readonly slotWatchers = new Set<() => void>();
   /** How long ingest took to answer the last fetch it answered, in ms; 0 before any answer (#171, C3). */
   private lastRoundTripMs = 0;
   /**
@@ -562,6 +564,7 @@ export class HttpTransport implements Transport {
     // Defensive: one send at a time, so nothing is waiting to be re-sent here.
     if (this.resend) this.buffer.unshift(...this.resend.batch);
     this.resend = { batch: send.batch, ...next };
+    for (const watcher of [...this.slotWatchers]) watcher();
   }
 
   /**
@@ -576,6 +579,7 @@ export class HttpTransport implements Transport {
    */
   async drain(deadlineMs: number = this.shutdownTimeoutMs): Promise<void> {
     let expired = false;
+    const waits = new Set<() => void>();
     const loop = async () => {
       const rounds = Math.ceil(this.maxBufferSize / this.maxBatchSize) + 1;
       for (let i = 0; i < rounds && !expired; i++) {
@@ -587,24 +591,50 @@ export class HttpTransport implements Transport {
         }
         if (this.stopped) return;
         if (this.inflight) {
-          await this.inflight.catch(() => {});
+          // Until the send settles or a flush takes its batch back: a send
+          // taken back from its retry wait never settles (#171 review
+          // round 2 — a drain then waited for its whole deadline).
+          await this.slotChange(waits);
           continue;
         }
         if (this.queued() === 0) return;
-        try {
-          await this.flush();
-        } catch {
-          // sendBatch has already logged; the next batch still goes out.
-        }
+        // Started, then waited for through the slot like any send: its own
+        // promise never settles if a flush takes the batch back (#171).
+        // sendBatch never rejects; should it, the next batch still goes out.
+        this.flush().catch(() => {});
+        if (!this.inflight) return;
       }
     };
     // keepAlive: a drain is a `shutdown()` call's — its retry waits must
     // not let Node exit before it is done or its deadline came (#164).
-    await raceDeadline(loop(), deadlineMs, {
-      keepAlive: true,
-      onTimeout: () => {
-        expired = true;
-      },
+    try {
+      await raceDeadline(loop(), deadlineMs, {
+        keepAlive: true,
+        onTimeout: () => {
+          expired = true;
+        },
+      });
+    } finally {
+      for (const end of [...waits]) end();
+    }
+  }
+
+  /** Resolves once the send in flight settles or a flush takes its batch back (#171). */
+  private slotChange(waits: Set<() => void>): Promise<void> {
+    const inflight = this.inflight;
+    if (!inflight) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let ended = false;
+      const end = () => {
+        if (ended) return;
+        ended = true;
+        this.slotWatchers.delete(end);
+        waits.delete(end);
+        resolve();
+      };
+      this.slotWatchers.add(end);
+      waits.add(end);
+      inflight.then(end, end);
     });
   }
 
