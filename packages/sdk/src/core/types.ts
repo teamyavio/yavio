@@ -266,7 +266,8 @@ export interface WithYavioOptions {
    * `SIGTERM` after the `SIGINT` that started the drain — Claude Code's stop
    * sequence for a stdio server — moves that deadline in to SIGINT +
    * 400 ms (never later than 300 ms after the `SIGTERM`) when that is
-   * sooner, and a higher value does not extend it (#175, 0.5.6). A participant that sets none does not lower D; `YAVIO_SHUTDOWN_TIMEOUT_MS`
+   * sooner, and a higher value does not extend it (#175, 0.5.6). A
+   * participant that sets none does not lower D; `YAVIO_SHUTDOWN_TIMEOUT_MS`
    * counts even with no participant live. Rule of thumb: the close cap of
    * your handler + 1 s, and both inside the platform's grace period (Fly.io
    * 5 s, Cloud Run 10 s, Kubernetes and ECS 30 s). A process that ends on
@@ -382,10 +383,14 @@ export interface YavioClient {
    * the signal was handed back before the transport stops had settled: at
    * the deadline when a `shutdown()` is still waiting then, otherwise once
    * they have settled). The transport stops once no other client with the
-   * same configuration holds it — on a key a `withYavio()` call pinned too,
-   * where a fresh transport takes over at once so those servers keep
-   * sending (#179, 0.5.6; before, that release only drained); a later wrap
-   * by this client holds it again, or starts a fresh one. A call made while the SDK's natural-exit drain runs (from an
+   * same configuration holds it — on a key a `withYavio()` call pinned too
+   * when this client never wrapped a server (the shutdown-only client next
+   * to `withYavio()`), where a fresh transport takes over at once so those
+   * servers keep sending (#179, 0.5.6; before, that release only drained).
+   * A client that wraps servers only drains a pinned key, as in 0.5.5: on
+   * such a host, `flush()` at each request's end. A later wrap by this
+   * client holds it again, or starts a fresh one. A call made while the
+   * SDK's natural-exit drain runs (from an
    * app `beforeExit` listener registered after the SDK's) waits for that
    * drain, which ends within min(1.5 s, D) whatever this client's own
    * value (#167): to wait longer, call it before the event loop empties.
