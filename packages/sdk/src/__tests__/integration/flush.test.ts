@@ -321,6 +321,17 @@ describe("flush() (#171)", () => {
       "[YAVIO-1006] flushTimeoutMs must be an integer between 100 and 2147483647 milliseconds, got 5 — using 1000. Shown once per process.",
     ]);
   });
+
+  it("waitUntilTimeoutMs takes the same range; anything else is one YAVIO-1006 and the 10 s default (#171 review round 2)", async () => {
+    _resetConfigWarnings();
+    createYavio({ apiKey: "yav_f10", endpoint: ingest.endpoint, waitUntilTimeoutMs: 0 });
+    const invalid = lines().filter(
+      (l) => l.includes("YAVIO-1006") && l.includes("waitUntilTimeoutMs"),
+    );
+    expect(invalid).toEqual([
+      "[YAVIO-1006] waitUntilTimeoutMs must be an integer between 100 and 2147483647 milliseconds, got 0 — using 10000. Shown once per process.",
+    ]);
+  });
 });
 
 describe("flushWhenSent() (#171)", () => {
@@ -496,4 +507,102 @@ describe("flushWhenSent() (#171)", () => {
     expect(analytics.flushWhenSent(original, waitUntil)).toBe(original);
     expect(waitUntil).not.toHaveBeenCalled();
   });
+
+  /**
+   * Cloudflare Workers' rule, emulated (#171 review round 2): a fetch
+   * belongs to its request, and the request ends once what `waitUntil`
+   * holds has settled — an answer that arrives after that is never seen.
+   * Here ingest answers in 1.5 s, slower than `flushTimeoutMs`.
+   */
+  function workersFetch(answerAfterMs: number) {
+    const state = { alive: true, answered: 0, calls: 0 };
+    const fetch = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          state.calls++;
+          setTimeout(() => {
+            if (!state.alive) return; // the request has ended: no answer, ever
+            state.answered++;
+            resolve(new Response("{}", { status: 200 }));
+          }, answerAfterMs);
+        }),
+    );
+    return { fetch, state };
+  }
+
+  it("on Workers, against an ingest slower than flushTimeoutMs: flushWhenSent's flush keeps waiting for the batch it sent, within waitUntilTimeoutMs, so it is answered before the request ends (#171 review round 2)", async () => {
+    const { fetch, state } = workersFetch(1_500);
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const analytics = createYavio({
+        apiKey: "yav_wu1",
+        endpoint: "http://ingest.test/v1/events",
+        serverOnly: true,
+      });
+      await invoke(analytics);
+      let held: Promise<unknown> | undefined;
+      const t0 = Date.now();
+      const response = analytics.flushWhenSent(new Response("x"), (promise) => {
+        held = promise;
+      });
+      expect(await response.text()).toBe("x"); // the response is not held up
+      await held;
+      state.alive = false; // what waitUntil held has settled: the request ends
+      expect(Date.now() - t0).toBeGreaterThanOrEqual(1_400);
+      expect(Date.now() - t0).toBeLessThan(5_000);
+      expect(state.answered).toBe(1);
+      expect(flushLines()).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }, 15_000);
+
+  it("plain flush() keeps flushTimeoutMs: it does not wait past it for the batch it sent (#171 review round 2)", async () => {
+    const { fetch, state } = workersFetch(1_500);
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const analytics = createYavio({
+        apiKey: "yav_wu2",
+        endpoint: "http://ingest.test/v1/events",
+        serverOnly: true,
+      });
+      await invoke(analytics);
+      const t0 = Date.now();
+      await analytics.flush();
+      state.alive = false;
+      expect(Date.now() - t0).toBeLessThan(1_400);
+      expect(state.answered).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }, 15_000);
+
+  it("waitUntilTimeoutMs bounds that wait: a hanging ingest holds the waitUntil promise no longer, and the batch stays queued", async () => {
+    const { fetch, state } = workersFetch(60_000);
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const analytics = createYavio({
+        apiKey: "yav_wu3",
+        endpoint: "http://ingest.test/v1/events",
+        serverOnly: true,
+        waitUntilTimeoutMs: 1_500,
+      });
+      await invoke(analytics);
+      let held: Promise<unknown> | undefined;
+      const t0 = Date.now();
+      await analytics
+        .flushWhenSent(new Response("x"), (promise) => {
+          held = promise;
+        })
+        .text();
+      await held;
+      state.alive = false;
+      expect(Date.now() - t0).toBeGreaterThanOrEqual(1_400);
+      expect(Date.now() - t0).toBeLessThan(3_000);
+      expect(state.calls).toBe(1);
+      expect(flushLines()).toHaveLength(1); // the stall, once
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }, 15_000);
 });

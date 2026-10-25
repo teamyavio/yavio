@@ -652,8 +652,21 @@ export class HttpTransport implements Transport {
    * never depends on a promise or timer of another request's send, and it
    * resolves none. A shutdown that takes over is what it then waits for.
    * Concurrent flushes share the batches: each event goes out once.
+   *
+   * `holdMs`, when longer than `deadlineMs`: at the deadline, a fetch this
+   * flush started (or re-sent) that is still out is waited for until it
+   * answers, up to `holdMs` from the call — nothing new is started or
+   * taken back then (#171 review round 2). For `flushWhenSent()`, whose
+   * flush runs in `waitUntil` and delays no response: on Workers a fetch
+   * dies with the request whose `waitUntil` has settled, so against an
+   * ingest that stays slower than `flushTimeoutMs` every flush's fetch
+   * died and only the head batch was ever sent, again and again.
    */
-  async flushQueued(deadlineMs: number, staleAfterMs: number = deadlineMs): Promise<FlushOutcome> {
+  async flushQueued(
+    deadlineMs: number,
+    staleAfterMs: number = deadlineMs,
+    holdMs: number = deadlineMs,
+  ): Promise<FlushOutcome> {
     const deadlineAt = Date.now() + deadlineMs;
     let expired = false;
     let outcome: FlushOutcome = "done";
@@ -731,6 +744,7 @@ export class HttpTransport implements Transport {
     };
     // keepAlive: a host awaits the flush before it returns (#164's rule
     // for a drain): an empty loop must not end the process mid-flush.
+    const holdAt = deadlineAt + Math.max(0, holdMs - deadlineMs);
     try {
       const work = loop();
       // From the absolute deadline: starting the first fetch takes time.
@@ -740,12 +754,49 @@ export class HttpTransport implements Transport {
           expired = true;
         },
       });
+      if (expired && holdAt > Date.now() && this.holdsOwnFetch(own)) {
+        let held = false;
+        await raceDeadline(this.hold(own, holdAt, watches), holdAt - Date.now(), {
+          keepAlive: true,
+          onTimeout: () => {
+            held = true;
+          },
+        });
+        // Its own send answered (or failed and waits for its retry): what
+        // is still queued is newer requests' and goes with their flushes.
+        if (!held) outcome = this.pendingDelay ? "retrying" : "done";
+        expired = held;
+      }
     } finally {
       // From this flush's own context, while it is still alive: nothing of
       // another request resolves its promises later.
       for (const end of [...watches]) end();
     }
     return expired ? "deadline" : outcome;
+  }
+
+  /** Whether the send in flight is one of `own`, its fetch out (#171 review round 2). */
+  private holdsOwnFetch(own: Set<Send>): boolean {
+    const send = this.current;
+    return send !== null && own.has(send) && send.fetchStartedAt !== undefined;
+  }
+
+  /**
+   * Wait, until `holdAt`, for the fetch of the send in flight while it is
+   * one of `own`: through its answer, not into a retry wait, a newer batch
+   * or a shutdown (#171 review round 2).
+   */
+  private async hold(own: Set<Send>, holdAt: number, watches: Set<() => void>): Promise<void> {
+    for (let i = 0; i < 1_000; i++) {
+      const send = this.current;
+      if (!send || !own.has(send) || this.closing || this.stopped) return;
+      if (send.fetchStartedAt === undefined) {
+        if (this.pendingDelay?.send === send) return;
+        await this.watch(send, Math.min(holdAt, Date.now() + 10), watches);
+        continue;
+      }
+      await this.watch(send, holdAt, watches);
+    }
   }
 
   /**

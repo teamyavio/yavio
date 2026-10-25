@@ -1,5 +1,5 @@
 import { ErrorCode } from "@yavio/shared/error-codes";
-import { lastNoopReason, resolveConfig } from "../core/config.js";
+import { DEFAULT_WAIT_UNTIL_TIMEOUT_MS, lastNoopReason, resolveConfig } from "../core/config.js";
 import type {
   McpServerLike,
   WithYavioOptions,
@@ -298,7 +298,11 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
     flush: () => flushShared(config),
     flushWhenSent: (response, waitUntil) => {
       const { response: piped, sent } = whenSent(response);
-      const flushed = sent.then(() => flushShared(config));
+      // In waitUntil, after the response: it may wait for the batch it sent
+      // past flushTimeoutMs (#171 review round 2).
+      const flushed = sent.then(() =>
+        flushShared(config, config.waitUntilTimeoutMs ?? DEFAULT_WAIT_UNTIL_TIMEOUT_MS),
+      );
       try {
         // A context is called as its method: workerd rejects a
         // `ctx.waitUntil` called on its own ("Illegal invocation").

@@ -91,6 +91,17 @@ export const MAX_SHUTDOWN_TIMEOUT_MS = 2_147_483_647;
  * range as `shutdownTimeoutMs`.
  */
 export const DEFAULT_FLUSH_TIMEOUT_MS = 1_000;
+/**
+ * How long the flush `flushWhenSent()` hands to `waitUntil` may keep
+ * waiting for the batch it sent, when nothing configures it (#171 review
+ * round 2): it delays no response, and on Cloudflare Workers a fetch dies
+ * with its request once that flush ends, so an ingest slower than
+ * `flushTimeoutMs` needs the wait. 10 s is well inside the 30 s Workers
+ * allow after the response, and on Vercel, where a longer `waitUntil` keeps
+ * the function running, it is paid only while ingest hangs, by the one
+ * request whose flush has a fetch out.
+ */
+export const DEFAULT_WAIT_UNTIL_TIMEOUT_MS = 10_000;
 
 interface ConfigFile {
   apiKey?: string;
@@ -101,6 +112,7 @@ interface ConfigFile {
   tools?: Record<string, ToolCaptureOverride>;
   shutdownTimeoutMs?: number;
   flushTimeoutMs?: number;
+  waitUntilTimeoutMs?: number;
 }
 
 const TOOL_OVERRIDE_KEYS = [
@@ -404,6 +416,16 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
     ["file", fileConfig?.flushTimeoutMs],
   ]);
 
+  const { ms: waitUntilTimeoutMs } = resolveTimeout(
+    "waitUntilTimeoutMs",
+    DEFAULT_WAIT_UNTIL_TIMEOUT_MS,
+    [
+      ["option", options?.waitUntilTimeoutMs],
+      ["env", process.env.YAVIO_WAIT_UNTIL_TIMEOUT_MS],
+      ["file", fileConfig?.waitUntilTimeoutMs],
+    ],
+  );
+
   const sessionKey = resolveSessionKeyOption(options?.sessionKey);
 
   return {
@@ -416,6 +438,7 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
     shutdownTimeoutMs,
     shutdownTimeoutMsSource,
     flushTimeoutMs,
+    waitUntilTimeoutMs,
     ...(sessionKey ? { sessionKey } : {}),
   };
 }

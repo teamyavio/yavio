@@ -1461,13 +1461,21 @@ export async function settleShared(config: Key): Promise<void> {
  * (#164's rule): an `await analytics.flush()` with nothing else alive —
  * the end of a script, a Lambda handler — must not be cut short by Node
  * exiting on an empty loop. Never rejects. Not counted towards D.
+ *
+ * `holdMs` (`flushWhenSent()`, review round 2): past `flushTimeoutMs`, the
+ * flush keeps waiting, up to `holdMs` from the call, for the fetch it
+ * started or re-sent itself — it runs in `waitUntil` and delays no
+ * response, and on Workers that fetch dies with the request once the flush
+ * ends. Cut by a signal cycle like `flushTimeoutMs`.
  */
 export async function flushShared(
   config: Key & Pick<YavioConfig, "flushTimeoutMs">,
+  holdMs?: number,
 ): Promise<void> {
   const key = keyOf(config);
   const ms = boundedBy(config.flushTimeoutMs ?? DEFAULT_FLUSH_TIMEOUT_MS);
   if (ms <= 0) return; // a signal cycle with no time left
+  const total = Math.max(ms, boundedBy(holdMs ?? ms));
   const deadlineAt = Date.now() + ms;
   const left = () => Math.max(1, deadlineAt - Date.now());
   let outcome: FlushOutcome | undefined;
@@ -1479,7 +1487,10 @@ export async function flushShared(
     }
     if (stops.length > 0) await Promise.all(stops);
     const live = slots.get(key)?.live ?? null;
-    if (live instanceof HttpTransport) return live.flushQueued(left(), ms);
+    if (live instanceof HttpTransport) {
+      const deadline = left();
+      return live.flushQueued(deadline, ms, deadline + (total - ms));
+    }
     await drainTransport(live, left());
     return "done";
   })().then(
@@ -1490,7 +1501,7 @@ export async function flushShared(
       outcome = "done"; // nothing above rejects; should it ever, the flush still resolves
     },
   );
-  await raceDeadline(work, ms, { keepAlive: true, waiters: deadlineWaiters });
+  await raceDeadline(work, total, { keepAlive: true, waiters: deadlineWaiters });
   reportFlush(key, ms, outcome ?? "deadline");
 }
 

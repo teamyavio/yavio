@@ -44,6 +44,13 @@ export interface YavioConfig {
    */
   flushTimeoutMs?: number;
   /**
+   * How long the flush `flushWhenSent()` hands to `waitUntil` may keep
+   * waiting for the batch it sent, in milliseconds (#171 review round 2):
+   * the option, `YAVIO_WAIT_UNTIL_TIMEOUT_MS` or `.yaviorc.json`, else
+   * 10 s. Optional like `flushTimeoutMs`; not in `configFingerprint()`.
+   */
+  waitUntilTimeoutMs?: number;
+  /**
    * The integrator's session key for calls that carry no key the SDK knows
    * (#144), when one was given and is a function. Code option only.
    */
@@ -277,6 +284,22 @@ export interface WithYavioOptions {
    * ends by the process deadline instead, when that comes first (#171).
    */
   flushTimeoutMs?: number;
+  /**
+   * How long the flush `flushWhenSent()` hands to the platform's
+   * `waitUntil` may keep waiting for the batch it sent, past
+   * `flushTimeoutMs`: an integer number of milliseconds in [100,
+   * 2147483647] (default 10 000; env `YAVIO_WAIT_UNTIL_TIMEOUT_MS`;
+   * anything else logs `YAVIO-1006` once and uses the default). That flush
+   * delays no response, and on Cloudflare Workers a fetch dies with its
+   * request once the flush ends, so an ingest slower than
+   * `flushTimeoutMs` would never have its batches answered. Only the
+   * flush with a fetch of its own out waits; nothing new is sent or taken
+   * back in that time, and a fetch gives up at its 30 s timeout anyway.
+   * Workers allow 30 s of `waitUntil` after the response; on Vercel the
+   * function runs as long as it waits, so lower it there if an ingest that
+   * hangs must not cost more (#171 review round 2).
+   */
+  waitUntilTimeoutMs?: number;
   /**
    * The conversation a call belongs to, for clients that send no session key
    * the SDK knows (#144). Over HTTP, on any host, every such call is
