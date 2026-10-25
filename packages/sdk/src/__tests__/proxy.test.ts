@@ -13,6 +13,7 @@ import {
   createProxy,
   valueFreeRejection,
 } from "../server/proxy.js";
+import { createSharedSessions } from "../server/shared.js";
 import { mintWidgetToken } from "../server/token.js";
 import type { Transport } from "../transport/types.js";
 import { registeredTool } from "./integration/helpers.js";
@@ -2888,6 +2889,288 @@ describe("session keys and session_source (#144)", () => {
       ["connection", "per_request"],
       ["tool_call", "per_request"],
     ]);
+  });
+
+  // #169: a long-lived server whose key-less HTTP calls all reach one proxy
+  // (MCP SDK v1 1.24/1.25, one stateless transport reused for every request).
+  it("two key-less HTTP calls on one proxy are two sessions: no user, traits, platform or step sequence carried over, no YAVIO-1302 (#169)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const yavio = createYavioContext();
+      const users = ["alice", "bob"];
+      const { handler, events, calls } = setup(testConfig, () => {
+        const user = users.shift() as string;
+        yavio.identify(user, { plan: `plan-${user}` });
+        yavio.step("look");
+        return { content: [{ type: "text", text: user }] };
+      });
+      await handler(http({ "user-agent": "claude-code/2.0.1" }));
+      await handler(http({ "user-agent": "cursor/1.7.0" }));
+      expect(calls().map((e) => [e.user_id, e.platform, e.session_source])).toEqual([
+        ["alice", "claude-code", "per_request"],
+        ["bob", "cursor", "per_request"],
+      ]);
+      expect(new Set(calls().map((e) => e.session_id)).size).toBe(2);
+      const identify = events().filter((e) => e.event_type === "identify");
+      expect(identify.map((e) => [e.user_id, e.user_traits])).toEqual([
+        ["alice", { plan: "plan-alice" }],
+        ["bob", { plan: "plan-bob" }],
+      ]);
+      const steps = events().filter((e) => e.event_type === "step");
+      expect(steps.map((e) => [e.user_id, e.step_sequence])).toEqual([
+        ["alice", 1],
+        ["bob", 1],
+      ]);
+      expect(warn.mock.calls.filter((args) => String(args[0]).includes("YAVIO-1302"))).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a key-less HTTP call that never identifies carries no user_id after one that did (#169)", async () => {
+    const yavio = createYavioContext();
+    let identify = true;
+    const { handler, calls } = setup(testConfig, () => {
+      if (identify) yavio.identify("alice");
+      return { content: [{ type: "text", text: "ok" }] };
+    });
+    await handler(http({ "user-agent": "cursor/1.7.0" }));
+    identify = false;
+    await handler(http({ "user-agent": "cursor/1.7.0" }));
+    expect(calls().map((e) => e.user_id)).toEqual(["alice", undefined]);
+  });
+
+  it("off HTTP (stdio, in-memory) the connection is one client: identify and the step sequence carry across its calls (#169 guard)", async () => {
+    const yavio = createYavioContext();
+    let first = true;
+    const { handler, calls, events } = setup(testConfig, () => {
+      if (first) yavio.identify("dora");
+      first = false;
+      yavio.step("look");
+      return { content: [{ type: "text", text: "ok" }] };
+    });
+    await handler(call());
+    await handler(call());
+    expect(calls().map((e) => [e.user_id, e.session_source])).toEqual([
+      ["dora", "connection"],
+      ["dora", "connection"],
+    ]);
+    expect(new Set(calls().map((e) => e.session_id)).size).toBe(1);
+    const steps = events().filter((e) => e.event_type === "step");
+    expect(steps.map((e) => e.step_sequence)).toEqual([1, 2]);
+  });
+
+  it("a wrapped handler invoked directly inside a key-less HTTP call joins that call's session; on its own it gets one of its own (#169)", async () => {
+    const yavio = createYavioContext();
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("inner", () => {
+      yavio.step("inner");
+      return { content: [{ type: "text", text: "in" }] };
+    });
+    proxy.tool("outer", async (extra: unknown) => {
+      yavio.identify("olga");
+      await registeredTool(server, "inner")?.handler(extra);
+      return { content: [{ type: "text", text: "out" }] };
+    });
+    await registeredTool(server, "outer")?.handler(http({ "user-agent": "cursor/1.7.0" }));
+    await registeredTool(server, "inner")?.handler(http({ "user-agent": "cursor/1.7.0" }));
+    const sent = transport.sent.flat() as Array<Record<string, unknown>>;
+    const calls = sent.filter((e) => e.event_type === "tool_call");
+    expect(calls.map((e) => [e.event_name, e.user_id])).toEqual([
+      ["inner", "olga"],
+      ["outer", "olga"],
+      ["inner", undefined],
+    ]);
+    expect(calls[0]?.session_id).toBe(calls[1]?.session_id);
+    expect(calls[2]?.session_id).not.toBe(calls[1]?.session_id);
+    // The nested call's step is the outer call's first; the standalone one starts its own.
+    const steps = sent.filter((e) => e.event_type === "step");
+    expect(steps.map((e) => [e.session_id, e.user_id, e.step_sequence])).toEqual([
+      [calls[1]?.session_id, "olga", 1],
+      [calls[2]?.session_id, undefined, 1],
+    ]);
+  });
+
+  // #169 review round 1: the nested call is handed a context the outer
+  // handler built itself, or none — no requestInfo, so not "an HTTP request".
+  function nestedBare() {
+    const yavio = createYavioContext();
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("inner", () => {
+      yavio.step("inner");
+      return { content: [{ type: "text", text: "in" }] };
+    });
+    proxy.tool("outer", async (extra: unknown) => {
+      const { user } = (extra as { _meta?: { user?: string } })._meta ?? {};
+      yavio.identify(user as string);
+      await registeredTool(server, "inner")?.handler({});
+      await registeredTool(server, "inner")?.handler();
+      return { content: [{ type: "text", text: "out" }] };
+    });
+    const outer = (ua: string, user: string) =>
+      registeredTool(server, "outer")?.handler(http({ "user-agent": ua }, { _meta: { user } }));
+    const sent = () => transport.sent.flat() as Array<Record<string, unknown>>;
+    return { outer, sent };
+  }
+
+  it("a wrapped handler invoked directly with a context of its own, or none, inside a key-less HTTP call joins that call (#169 review round 1)", async () => {
+    const { outer, sent } = nestedBare();
+    await outer("cursor/1.7.0", "olga");
+    const calls = sent().filter((e) => e.event_type === "tool_call");
+    expect(calls.map((e) => [e.event_name, e.user_id, e.session_source])).toEqual([
+      ["inner", "olga", "per_request"],
+      ["inner", "olga", "per_request"],
+      ["outer", "olga", "per_request"],
+    ]);
+    expect(new Set(calls.map((e) => e.session_id)).size).toBe(1);
+    const steps = sent().filter((e) => e.event_type === "step");
+    expect(steps.map((e) => [e.user_id, e.step_sequence])).toEqual([
+      ["olga", 1],
+      ["olga", 2],
+    ]);
+    // One connection event, the outer call's: a nested call that joined it
+    // adds none, although its context names no client and no protocol
+    // version (#169 review round 2; 0.5.4 added one labelled `connection`).
+    expect(
+      sent()
+        .filter((e) => e.event_type === "connection")
+        .map((e) => [e.session_source, e.session_id, e.client_name]),
+    ).toEqual([["per_request", calls[0]?.session_id, "cursor"]]);
+  });
+
+  it("several key-less HTTP callers on one proxy, each invoking a wrapped handler with a context of its own: every inner call stays with its caller (#169 review round 1)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { outer, sent } = nestedBare();
+      await outer("claude-code/2.0.1", "u1");
+      await outer("cursor/1.7.0", "u2");
+      const calls = sent().filter((e) => e.event_type === "tool_call");
+      expect(calls.map((e) => [e.event_name, e.user_id, e.platform, e.session_source])).toEqual([
+        ["inner", "u1", "claude-code", "per_request"],
+        ["inner", "u1", "claude-code", "per_request"],
+        ["outer", "u1", "claude-code", "per_request"],
+        ["inner", "u2", "cursor", "per_request"],
+        ["inner", "u2", "cursor", "per_request"],
+        ["outer", "u2", "cursor", "per_request"],
+      ]);
+      expect(calls.slice(0, 3).every((e) => e.session_id === calls[0]?.session_id)).toBe(true);
+      expect(calls.slice(3).every((e) => e.session_id === calls[3]?.session_id)).toBe(true);
+      expect(calls[3]?.session_id).not.toBe(calls[0]?.session_id);
+      const steps = sent().filter((e) => e.event_type === "step");
+      expect(steps.map((e) => [e.user_id, e.step_sequence])).toEqual([
+        ["u1", 1],
+        ["u1", 2],
+        ["u2", 1],
+        ["u2", 2],
+      ]);
+      expect(warn.mock.calls.filter((args) => String(args[0]).includes("YAVIO-1302"))).toEqual([]);
+      // One connection event per caller, none from the nested calls.
+      expect(
+        sent()
+          .filter((e) => e.event_type === "connection")
+          .map((e) => [e.session_source, e.session_id, e.client_name]),
+      ).toEqual([
+        ["per_request", calls[0]?.session_id, "claude-code"],
+        ["per_request", calls[3]?.session_id, "cursor"],
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // #169 review round 2: the join is per proxy, and only into a key-less
+  // HTTP call's own state.
+  it("a call into ANOTHER wrapped server from inside a key-less HTTP call does not join it: its own session, no user, its own connection event (#169 review round 2)", async () => {
+    const yavio = createYavioContext();
+    const serverA = new McpServer({ name: "a", version: "1.0" });
+    const serverB = new McpServer({ name: "b", version: "1.0" });
+    const transportA = createMockTransport();
+    const transportB = createMockTransport();
+    const proxyA = createProxy(serverA, testConfig, transportA, "0.0.1");
+    const proxyB = createProxy(
+      serverB,
+      { ...testConfig, apiKey: "yav_test_other" },
+      transportB,
+      "0.0.1",
+    );
+    proxyB.tool("other", () => {
+      yavio.step("other");
+      return { content: [{ type: "text", text: "b" }] };
+    });
+    proxyA.tool("outer", async (extra: unknown) => {
+      yavio.identify("olga");
+      await registeredTool(serverB, "other")?.handler(extra);
+      return { content: [{ type: "text", text: "a" }] };
+    });
+    await registeredTool(serverA, "outer")?.handler(http({ "user-agent": "cursor/1.7.0" }));
+    const eventsA = transportA.sent.flat() as Array<Record<string, unknown>>;
+    const eventsB = transportB.sent.flat() as Array<Record<string, unknown>>;
+    const callA = eventsA.find((e) => e.event_type === "tool_call");
+    const callB = eventsB.find((e) => e.event_type === "tool_call");
+    expect([callA?.event_name, callA?.user_id, callA?.session_source]).toEqual([
+      "outer",
+      "olga",
+      "per_request",
+    ]);
+    expect([callB?.event_name, callB?.user_id, callB?.session_source]).toEqual([
+      "other",
+      undefined,
+      "per_request",
+    ]);
+    expect(callB?.session_id).not.toBe(callA?.session_id);
+    expect(
+      eventsB
+        .filter((e) => e.event_type === "step")
+        .map((e) => [e.session_id, e.user_id, e.step_sequence]),
+    ).toEqual([[callB?.session_id, undefined, 1]]);
+    expect(eventsB.filter((e) => e.event_type === "connection").map((e) => e.session_id)).toEqual([
+      callB?.session_id,
+    ]);
+  });
+
+  it("a key-less call from inside a KEYED call is not joined: without request headers the connection's state, with them one of its own (#169 review round 2)", async () => {
+    const yavio = createYavioContext();
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("inner", () => {
+      yavio.step("inner");
+      return { content: [{ type: "text", text: "in" }] };
+    });
+    proxy.tool("outer", async () => {
+      yavio.identify("kim");
+      await registeredTool(server, "inner")?.handler({});
+      await registeredTool(server, "inner")?.handler(http({ "user-agent": "cursor/1.7.0" }));
+      return { content: [{ type: "text", text: "out" }] };
+    });
+    await registeredTool(server, "outer")?.handler(
+      http({ "user-agent": "cursor/1.7.0" }, { _meta: { "openai/session": "conv-k" } }),
+    );
+    const calls = (transport.sent.flat() as Array<Record<string, unknown>>).filter(
+      (e) => e.event_type === "tool_call",
+    );
+    expect(calls.map((e) => [e.event_name, e.user_id, e.session_source])).toEqual([
+      ["inner", undefined, "connection"],
+      ["inner", undefined, "per_request"],
+      ["outer", "kim", "openai_session"],
+    ]);
+    expect(new Set(calls.map((e) => e.session_id)).size).toBe(3);
+  });
+
+  it("a key-less HTTP call's session is not stored: 50 calls leave the session map empty, keyed calls fill it (#169 guard)", async () => {
+    const shared = createSharedSessions();
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const proxy = createProxy(server, testConfig, createMockTransport(), "0.0.1", shared);
+    proxy.tool("ping", () => ({ content: [{ type: "text", text: "pong" }] }));
+    const handler = registeredTool(server, "ping")?.handler;
+    for (let i = 0; i < 50; i++) await handler?.(http({ "user-agent": "cursor/1.7.0" }));
+    expect(shared.sessions.size).toBe(0);
+    await handler?.(http({ "user-agent": "cursor/1.7.0" }, { _meta: { "openai/session": "c" } }));
+    expect(shared.sessions.size).toBe(1);
   });
 
   it("labels each key it derives the session from", async () => {

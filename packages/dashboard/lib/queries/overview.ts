@@ -32,9 +32,9 @@ function platformParams(platform?: string[]): Record<string, unknown> {
 }
 
 /**
- * The Sessions KPI's note on what it leaves out (#144): the calls whose
- * session was one request (`per_request`, see COUNTED_SESSION), or undefined
- * when there were none.
+ * The Sessions KPI's note on what it leaves out (#144): the key-less HTTP
+ * calls (`per_request`, see COUNTED_SESSION), or undefined when there were
+ * none.
  */
 export function perRequestCallsHint(calls: number): string | undefined {
   if (!(calls > 0)) return undefined;

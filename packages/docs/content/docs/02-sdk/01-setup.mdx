@@ -26,7 +26,7 @@ A per-request server has no session of its own: a stateless transport never issu
 | 3 | VS Code / Copilot Chat's `_meta["vscode.conversationId"]`, from any client | `vscode_conversation` |
 | 4 | The Codex CLI's `_meta.threadId`, only from `codex-mcp-client` (envelope, `initialize` or User-Agent) | `codex_thread` |
 | 5 | Your [`sessionKey`](/docs/02-sdk/03-configuration#session-key) option | `custom` |
-| — | None: the connection's own session — one request over HTTP, one client process on stdio | `per_request` / `connection` |
+| — | None: over HTTP a session of its own for that one call, on every host; on stdio the client process's | `per_request` / `connection` |
 
 Keys 3 and 4 apply on stdio too: a VS Code stdio server gets one session per conversation since 0.5.4 instead of one per client process — more sessions, and `identify()` no longer carries across its conversations. Claude Code, claude.ai connectors, Cursor and Zed send no conversation key; if your host knows the conversation, return its id from `sessionKey` — a conversation id, never a per-user id on its own (see [Configuration](/docs/02-sdk/03-configuration#session-key)). A key-less HTTP call (`per_request`) is not counted as a session on the dashboard — the Sessions KPI says how many such calls there were — and its `connection` event is emitted once per process per client instead of once per call.
 
@@ -96,7 +96,7 @@ A tool on MCP SDK v2 that asks the user for input (`inputRequired()`, over sever
 With the first tool call of a session (not on connect; there is no disconnect event):
 
 - **Event type:** `connection`
-- **Session ID** from the call's session key, else the connection's own (see [Sessions on per-request servers](#sessions-on-per-request-servers)), with its `session_source`
+- **Session ID** from the call's session key, else a session of the call's own over HTTP and the connection's own on stdio (see [Sessions on per-request servers](#sessions-on-per-request-servers)), with its `session_source`
 - **Platform** detected from client signals
 - **Client name and version** from the protocol envelope (MCP 2026-07-28), else the `initialize` handshake, else the first product token of the request's `User-Agent`: `name/version` with a digit in the version, or a bare `name` when that is the whole User-Agent, and only when the name is a known MCP client: a vendor the platform matcher recognises (`openai-mcp`, `Claude-User`, `claude-code`, `cursor`, …) or an allowlisted token (`mcp-inspector`, `mcp-remote`). So a stateless host, whose instance never saw `initialize`, still records `openai-mcp` / `1.0.0`, or `Claude-User` with no version, while a runtime token such as `node`, a library or server-framework token such as `Python/3.12 aiohttp/3.9.5` or `Nitro/2.9.0`, a client the SDK does not know yet, a bare first word of a longer string such as the `Visual` of `Visual Studio Code/1.95`, or a version without a digit such as `OpenAI/Python 1.40.0` names no client and the connection stays without one; `metadata.client_info_source` says which. `protocol_version` is the request's `mcp-protocol-version` header when it has the protocol's date shape (`2025-06-18`)
 - Emitted at least once per session **per process**: a conversation served by several instances has one connection event per instance. A key-less HTTP call (`per_request`) emits one per process per client (platform, client name and version, protocol version), not one per call. Sessions are counted as distinct `session_id`s, never as connection events
