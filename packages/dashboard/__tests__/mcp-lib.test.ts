@@ -180,6 +180,13 @@ describe("date range + platform filters", () => {
 });
 
 describe("get_schema doc", () => {
+  it("says where protocol_version comes from and how to read the client's capabilities (#170)", () => {
+    expect(SCHEMA_DOC).toMatch(
+      /protocol_version \(the 2026-07-28 request envelope, else\s+the mcp-protocol-version header, else the version the server answered\s+initialize with/,
+    );
+    expect(SCHEMA_DOC).toContain("JSONExtract(metadata, 'client_capabilities', 'Array(String)')");
+  });
+
   // The model only queries columns it is told about. That the dashboard role
   // can read region is pinned against ClickHouse in packages/db (0020).
   it("lists the geo columns with what region holds (#128)", () => {

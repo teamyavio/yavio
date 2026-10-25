@@ -9,8 +9,9 @@
  *   method, _meta, envelope?, … }, http?: { authInfo, req } }` — `_meta` sits
  *   under `mcpReq`, the HTTP request is a web `Request` (its `headers` is a
  *   `Headers` object, not a record; its `url` is deliberately not read, see
- *   `requestUrl`), and on the 2026-07-28 protocol era the client identity
- *   travels per request in `mcpReq.envelope`.
+ *   `requestUrl`), and on the 2026-07-28 protocol era the client identity,
+ *   the protocol version and the client capabilities travel per request in
+ *   `mcpReq.envelope`.
  *
  * Nothing here is typed against either package: the SDK has no runtime import
  * of them, and the structural read is what makes a third shape degrade to
@@ -22,6 +23,10 @@ import { isKnownClientName } from "../core/platform.js";
 
 /** The reserved `_meta` key the 2026-07-28 envelope carries the client identity under. */
 const ENVELOPE_CLIENT_INFO_KEY = "io.modelcontextprotocol/clientInfo";
+/** The envelope's protocol revision of the request (#170), required on 2026-07-28. */
+const ENVELOPE_PROTOCOL_VERSION_KEY = "io.modelcontextprotocol/protocolVersion";
+/** The envelope's client capabilities, declared per request on 2026-07-28 (#170). */
+const ENVELOPE_CLIENT_CAPABILITIES_KEY = "io.modelcontextprotocol/clientCapabilities";
 
 export interface CallExtra {
   /** The transport's session id (`Mcp-Session-Id`), when the transport has one. */
@@ -42,6 +47,13 @@ export interface CallExtra {
   taskId?: string;
   /** Client identity from the v2 per-request envelope, when present. */
   client?: { name?: string; version?: string };
+  /**
+   * The protocol revision the v2 per-request envelope names (2026-07-28,
+   * #170), unvalidated: the caller keeps only a date-shaped value.
+   */
+  protocolVersion?: string;
+  /** The client capabilities the v2 per-request envelope declares (#170), unvalidated. */
+  clientCapabilities?: Record<string, unknown>;
   /**
    * What the host's auth middleware attached as `req.auth`: v1
    * `extra.authInfo`, v2 `ctx.http.authInfo` (#144). Read only to hand it to
@@ -142,6 +154,10 @@ export function readCallExtra(extra: unknown): CallExtra {
         version: typeof clientInfo.version === "string" ? clientInfo.version : undefined,
       };
     }
+    const protocolVersion = envelope?.[ENVELOPE_PROTOCOL_VERSION_KEY];
+    if (typeof protocolVersion === "string") out.protocolVersion = protocolVersion;
+    const capabilities = envelope?.[ENVELOPE_CLIENT_CAPABILITIES_KEY];
+    if (isRecord(capabilities)) out.clientCapabilities = capabilities;
   } catch {
     // A context of an unexpected shape yields what was read so far.
   }

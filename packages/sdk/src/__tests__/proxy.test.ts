@@ -36,6 +36,31 @@ function createMockTransport(): Transport & { sent: BaseEvent[][] } {
   };
 }
 
+/**
+ * The JSON a leak check reads: the event without the values the SDK makes
+ * up — `event_id` (a random UUID), `trace_id` and `session_id` (random or a
+ * hash) and `timestamp` (the clock) — each checked for its shape first, so
+ * no captured value can hide in one. A random id holds any short string
+ * now and then: "-120" opens a UUID group in about one event in 2 000 (CI,
+ * 2026-10-25: event_id 55a56749-1205-…), "47051" sits in one in about
+ * 90 000. Everything left is fixed by the test's inputs.
+ *
+ * The shape alone would pass a leak written into `session_id` in the
+ * `ses_` + 21 characters shape, e.g. a regression that cuts the raw key
+ * instead of hashing it. Where the session comes from a known key, pass
+ * `sessionId` (what `deriveSessionId()` makes of it) and the id is pinned
+ * by value instead.
+ */
+function leakScan(event: Record<string, unknown> | undefined, sessionId?: string): string {
+  const { event_id, trace_id, session_id, timestamp, ...fixed } = event ?? {};
+  expect(event_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  expect(trace_id).toMatch(/^tr_[\w-]{21}$/);
+  if (sessionId === undefined) expect(session_id).toMatch(/^ses_[\w-]{21}$/);
+  else expect(session_id).toBe(sessionId);
+  expect(timestamp).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+  return JSON.stringify(fixed);
+}
+
 const testConfig: YavioConfig = {
   apiKey: "yav_test",
   endpoint: "http://localhost:3001/v1/events",
@@ -1607,6 +1632,8 @@ describe("client metadata capture", () => {
     timezone: "Europe/Berlin",
     "openai/session": "v1/49A5b4dMHXWnQuVmyqIS4O",
   };
+  /** Every call with CHATGPT_META's openai/session is in this session. */
+  const CHATGPT_SESSION_ID = deriveSessionId(CHATGPT_META["openai/session"]);
 
   async function callWithMeta(config: YavioConfig, _meta: unknown) {
     const server = new McpServer({ name: "test", version: "1.0" });
@@ -1705,7 +1732,7 @@ describe("client metadata capture", () => {
     });
     const meta = (event.input_values as Record<string, unknown>)._meta as Record<string, unknown>;
     expect(meta["openai/userLocation"]).toEqual({ country: "DE" });
-    expect(JSON.stringify(event)).not.toContain("47051");
+    expect(leakScan(event, CHATGPT_SESSION_ID)).not.toContain("47051");
   });
 
   it('drops the location entirely under "country" when there is no valid country', async () => {
@@ -1797,7 +1824,7 @@ describe("client metadata capture", () => {
         country: "DE",
         region: "North Rhine-Westphalia",
       });
-      expect(JSON.stringify(event)).not.toContain("47051");
+      expect(leakScan(event, CHATGPT_SESSION_ID)).not.toContain("47051");
     });
 
     it("keeps { country } and sets no region field when the platform sent none", async () => {
@@ -1945,7 +1972,7 @@ describe("client metadata capture", () => {
       // Names only, sorted; values never.
       expect(inputValues._metaDroppedKeys).toEqual([...Object.keys(dropped), "timezone"].sort());
       expect(inputValues).not.toHaveProperty("_metaDroppedUnnamed");
-      const serialized = JSON.stringify(event);
+      const serialized = leakScan(event, CHATGPT_SESSION_ID);
       for (const leak of [
         "session-test-0001",
         "exec-test",
@@ -1983,7 +2010,7 @@ describe("client metadata capture", () => {
     }
     // 5 unnameable, plus the 6 named ones past the cap (extra20–24, timezone).
     expect(inputValues._metaDroppedUnnamed).toBe(11);
-    expect(JSON.stringify(event)).not.toContain("4f9c2a7b1e");
+    expect(leakScan(event, CHATGPT_SESSION_ID)).not.toContain("4f9c2a7b1e");
   });
 
   it("adds neither field when every key is kept", async () => {
@@ -2438,7 +2465,7 @@ describe("per-tool capture overrides", () => {
     expect(book?.error_category).toBe("tool_error");
     expect(book?.error_message).toBeUndefined();
     expect(book?.output_content).toBeUndefined();
-    expect(JSON.stringify(book)).not.toContain("12345");
+    expect(leakScan(book)).not.toContain("12345");
   });
 
   it("lets a tool with an override re-enable a globally disabled flag", async () => {
