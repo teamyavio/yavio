@@ -2738,7 +2738,10 @@ describe("one proxy, many conversations", () => {
     // enough (#180).
     const server = new McpServer({ name: "test", version: "1.0" });
     const transport = createMockTransport();
-    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    // serverOnly: the test is about connection events, and without it every
+    // call mints a widget token, 10,202 calls into the file's token mock (a
+    // mock, so never a request) whose state is whatever an earlier test left.
+    const proxy = createProxy(server, { ...testConfig, serverOnly: true }, transport, "0.0.1");
     proxy.tool("ping", () => ({ content: [{ type: "text", text: "ok" }] }));
     const handler = registeredTool(server, "ping")?.handler;
     const keyless = (requestId: string) => ({
