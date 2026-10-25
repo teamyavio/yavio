@@ -1,4 +1,5 @@
 import {
+  ConnectionEvent,
   ConversionEvent,
   IdentifyEvent,
   StepEvent,
@@ -9,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   type EventContext,
   MAX_ERROR_MESSAGE_LENGTH,
+  buildConnectionEvent,
   buildConversionEvent,
   buildIdentifyEvent,
   buildStepEvent,
@@ -267,6 +269,29 @@ describe("Event factories", () => {
       const event = buildTrackEvent(ctx, "test");
       expect(event.trace_id).toBe("tr_test123");
       expect(event.session_id).toBe("ses_test456");
+    });
+  });
+
+  describe("buildConnectionEvent: client capabilities (#170)", () => {
+    it("puts the names into metadata.client_capabilities and stays a valid ConnectionEvent", () => {
+      const event = buildConnectionEvent(ctx, {
+        protocolVersion: "2026-07-28",
+        clientCapabilities: ["elicitation", "sampling"],
+        intentEnabled: true,
+      });
+      expect(ConnectionEvent.safeParse(event).success).toBe(true);
+      expect(event.protocol_version).toBe("2026-07-28");
+      expect(event.metadata).toEqual({
+        intent_enabled: true,
+        client_capabilities: ["elicitation", "sampling"],
+      });
+    });
+
+    it("leaves the key out without names", () => {
+      expect(buildConnectionEvent(ctx, { clientCapabilities: [] }).metadata).toEqual({
+        intent_enabled: false,
+      });
+      expect(buildConnectionEvent(ctx, {}).metadata).toEqual({ intent_enabled: false });
     });
   });
 });

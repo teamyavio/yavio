@@ -126,6 +126,49 @@ describe("readCallExtra: authInfo (#144)", () => {
   });
 });
 
+describe("readCallExtra: the 2026-07-28 envelope's version and capabilities (#170)", () => {
+  const ctx = (envelope: unknown) => ({ mcpReq: { id: 1, method: "tools/call", envelope } });
+
+  it("reads them from v2's ctx.mcpReq.envelope, unvalidated", () => {
+    const capabilities = { elicitation: {} };
+    const ex = readCallExtra(
+      ctx({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": capabilities,
+      }),
+    );
+    expect(ex.protocolVersion).toBe("2026-07-28");
+    expect(ex.clientCapabilities).toBe(capabilities);
+    // The date check is the caller's (proxy.ts): any string is passed on.
+    expect(
+      readCallExtra(ctx({ "io.modelcontextprotocol/protocolVersion": "latest" })).protocolVersion,
+    ).toBe("latest");
+  });
+
+  it("leaves them unset for a value of the wrong type, and without an envelope", () => {
+    const ex = readCallExtra(
+      ctx({
+        "io.modelcontextprotocol/protocolVersion": 20260728,
+        "io.modelcontextprotocol/clientCapabilities": ["elicitation"],
+      }),
+    );
+    expect(ex.protocolVersion).toBeUndefined();
+    expect(ex.clientCapabilities).toBeUndefined();
+    expect(readCallExtra({ mcpReq: { id: 1 } }).protocolVersion).toBeUndefined();
+  });
+
+  it("never reads the reserved keys from v1's _meta: v1 does not lift an envelope", () => {
+    const ex = readCallExtra({
+      _meta: {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": { elicitation: {} },
+      },
+    });
+    expect(ex.protocolVersion).toBeUndefined();
+    expect(ex.clientCapabilities).toBeUndefined();
+  });
+});
+
 describe("sessionKeyHeaders (#144): what sessionKey sees", () => {
   it("lower-cases names and joins a repeated header's values", () => {
     expect(
