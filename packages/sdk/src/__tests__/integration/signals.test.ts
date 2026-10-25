@@ -2898,6 +2898,50 @@ describe("a SIGTERM after the cycle's SIGINT: a client's stop sequence (#175)", 
     });
   });
 
+  it("an app that handles only SIGTERM: the escalated SIGTERM is handed back with its own decision — the SIGINT found the SDK alone, the SIGTERM does not — so nothing is re-raised at the bound and the app keeps control (#148 review round 4)", async () => {
+    await alone(async () => {
+      const app = vi.fn();
+      process.on("SIGTERM", app);
+      try {
+        ingest.hangEvents = true;
+        await pinned("yav_175_sigterm_app");
+        t0 = Date.now();
+        process.emit("SIGINT", "SIGINT"); // the SDK alone: Node's default would end the process
+        await sleep(100);
+        process.emit("SIGTERM", "SIGTERM"); // the app's own signal
+        expect(app).toHaveBeenCalledTimes(1);
+        await vi.waitFor(() => expect(lines1205()).toHaveLength(1), { timeout: 2_000 }); // the bound came
+        await sleep(50);
+        // With the SIGINT's decision kept, the SIGTERM was re-raised here and
+        // its default action killed the app in the middle of its shutdown.
+        expect(reraised).toEqual([]);
+        expect(lines1205()[0]).toMatch(BOUND_LINE);
+      } finally {
+        process.off("SIGTERM", app);
+      }
+    });
+  });
+
+  it("an app that handles only SIGINT: the escalated SIGTERM, which only the SDK listens to, is re-raised at the bound", async () => {
+    await alone(async () => {
+      const app = vi.fn();
+      process.on("SIGINT", app);
+      try {
+        ingest.hangEvents = true;
+        await pinned("yav_175_sigint_app");
+        t0 = Date.now();
+        process.emit("SIGINT", "SIGINT"); // the app's own signal: no re-raise for it
+        await sleep(100);
+        process.emit("SIGTERM", "SIGTERM"); // nothing else listens: Node's default must run
+        await vi.waitFor(() => expect(reraised).toHaveLength(1), { timeout: 2_000 });
+        expect(reraised[0]?.signal).toBe("SIGTERM");
+        expect(reraised[0]?.at).toBeGreaterThanOrEqual(395);
+      } finally {
+        process.off("SIGINT", app);
+      }
+    });
+  });
+
   it("a lower explicit shutdownTimeoutMs is not extended: D = 250 ms hands the SIGTERM back at SIGINT + 250 ms, with D's wording and hint", async () => {
     await alone(async () => {
       ingest.hangEvents = true;
