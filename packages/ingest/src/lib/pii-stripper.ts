@@ -113,9 +113,32 @@ const PII_PATTERNS: Array<{
 ];
 
 /**
- * Strip PII patterns from a single string value.
+ * A valid W3C traceparent (#173), as the SDK stores it in a tool_call's
+ * `metadata.traceparent`: `version-traceid-parentid-flags`, lower-case hex,
+ * exactly 55 characters, version not `ff`, neither id all zeros. Random hex
+ * in a fixed layout, no room for PII, but its ids end in ten decimal digits
+ * often enough (~1.9 %, the W3C example among them) for the phone pattern to
+ * cut them (`…-b7ad6b[PHONE_REDACTED]-01`). Exactly the format, never a
+ * string that merely contains one. Mirrors the SDK's `traceparentOf()`
+ * (packages/sdk/src/core/trace-context.ts).
+ */
+const TRACEPARENT = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/;
+const ZERO_TRACE_ID = "0".repeat(32);
+const ZERO_PARENT_ID = "0".repeat(16);
+
+function isTraceparent(value: string): boolean {
+  const match = TRACEPARENT.exec(value);
+  return (
+    match !== null && match[1] !== "ff" && match[2] !== ZERO_TRACE_ID && match[3] !== ZERO_PARENT_ID
+  );
+}
+
+/**
+ * Strip PII patterns from a single string value. A valid traceparent is
+ * returned unchanged (see isTraceparent).
  */
 export function stripPiiFromString(value: string): { result: string; redacted: boolean } {
+  if (isTraceparent(value)) return { result: value, redacted: false };
   let result = value;
   let redacted = false;
 

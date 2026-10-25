@@ -189,6 +189,49 @@ describe("POST /v1/events — processing scenarios", () => {
     expect(metadata.email).toBe("[EMAIL_REDACTED]");
   });
 
+  // #173: the SDK stores a validated traceparent as a tool_call's
+  // metadata.traceparent. The W3C example's parent id ends in ten decimal
+  // digits, which the phone pattern cut (…-b7ad6b[PHONE_REDACTED]-01).
+  it("stores a tool_call's metadata.traceparent intact, and still strips the rest of metadata", async () => {
+    const traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+    const enqueuedEvents: unknown[] = [];
+    const bw = mockBatchWriter({
+      enqueue: (events: unknown[]) => {
+        enqueuedEvents.push(...events);
+        return false;
+      },
+    });
+    await buildApp(bw);
+
+    const r = await app.inject({
+      method: "POST",
+      url: "/v1/events",
+      headers: auth,
+      payload: {
+        events: [
+          makeEvent({
+            event_type: "tool_call",
+            event_name: "get_price",
+            status: "success",
+            latency_ms: 12,
+            metadata: { input_rounds: 1, traceparent, note: `${traceparent} call 555-123-4567` },
+          }),
+        ],
+      },
+    });
+    expect(r.statusCode).toBe(200);
+
+    const event = enqueuedEvents[0] as Record<string, unknown>;
+    expect(event.event_type).toBe("tool_call");
+    const metadata = JSON.parse(event.metadata as string);
+    expect(metadata.traceparent).toBe(traceparent);
+    expect(metadata.input_rounds).toBe(1);
+    // Only the exact format is left alone: text around one is stripped as before.
+    expect(metadata.note).toBe(
+      "00-0af7651916cd43dd8448eb211c80319c-b7ad6b[PHONE_REDACTED]-01 call [PHONE_REDACTED]",
+    );
+  });
+
   it("enriches events with workspace and project IDs", async () => {
     const enqueuedEvents: unknown[] = [];
     const bw = mockBatchWriter({

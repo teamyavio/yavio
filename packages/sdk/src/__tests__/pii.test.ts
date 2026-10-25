@@ -112,3 +112,29 @@ describe("IBAN (#90)", () => {
     });
   });
 });
+
+describe("a W3C traceparent (#173)", () => {
+  // The W3C example's parent id ends in ten decimal digits, which the
+  // phone pattern took for a number (`…-b7ad6b[PHONE_REDACTED]-01`); about
+  // 1.9 % of random traceparents do.
+  it("leaves a valid W3C traceparent alone", () => {
+    const traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+    expect(stripPii({ traceparent })).toEqual({ traceparent });
+  });
+
+  it("strips a string that merely contains a traceparent, or an invalid one, as before", () => {
+    // The exemption is for the exact format, not for text around one.
+    const text = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01 call 555-123-4567";
+    expect(stripPii(text)).toBe(
+      "00-0af7651916cd43dd8448eb211c80319c-b7ad6b[PHONE_REDACTED]-01 call [PHONE_REDACTED]",
+    );
+    // Upper-case hex is not a valid traceparent (W3C §3.2.2).
+    expect(stripPii("00-0AF7651916CD43DD8448EB211C80319C-B7AD6B7169203331-01")).toContain(
+      "[PHONE_REDACTED]",
+    );
+    // Version ff is invalid (§3.2.2.1).
+    expect(stripPii("ff-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")).toContain(
+      "[PHONE_REDACTED]",
+    );
+  });
+});

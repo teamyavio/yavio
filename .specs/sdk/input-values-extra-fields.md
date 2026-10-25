@@ -1,6 +1,6 @@
 # `input_values` Extra Fields (`_`-prefixed)
 
-**Status:** Implemented 2026-09-03 (#76; proposed 2026-08-26, reviewed 2026-08-26 with corrections folded in, geo gating decided 2026-09-03; `geo: "country"` added 2026-10-13, #82) · **Packages:** sdk, docs · **Version:** patch
+**Status:** Implemented 2026-09-03 (#76; proposed 2026-08-26, reviewed 2026-08-26 with corrections folded in, geo gating decided 2026-09-03; `geo: "country"` added 2026-10-13, #82; SEP-414 trace context 2026-10-25, #173) · **Packages:** sdk, docs · **Version:** patch
 
 ## Current Behaviour
 
@@ -9,11 +9,11 @@
 | Key | Source | Content | Analytical value |
 |-----|--------|---------|------------------|
 | `_meta` | `extra._meta` (verbatim clone) | ChatGPT: `openai/userAgent`, `openai/locale`, `openai/userLocation` (city, region, country, timezone, **latitude, longitude**), `openai/subject`, `openai/session`, `openai/organization`, client capabilities | Richest client context available; overlaps with the first-class columns `locale`, `end_user_agent`, `subject_id`, `country_code` |
-| `_sessionId` | `extra.sessionId` | the **raw** `Mcp-Session-Id` (stateful transports only) | None in practice: 0 occurrences fleet-wide (0 of ~5 100 calls on 2026-08-26, 0 of ~1 200 in the July analysis — every app runs a stateless transport); log correlation is served by the hashed `session_id` column plus the `traceparent` header in `_requestInfo` |
+| `_sessionId` | `extra.sessionId` | the **raw** `Mcp-Session-Id` (stateful transports only) | None in practice: 0 occurrences fleet-wide (0 of ~5 100 calls on 2026-08-26, 0 of ~1 200 in the July analysis — every app runs a stateless transport); log correlation is served by the hashed `session_id` column plus the traceparent (the `traceparent` header in `_requestInfo` until 0.5.5; `metadata.traceparent` since, #173) |
 | `_requestId` | `extra.requestId` | JSON-RPC request id — a per-connection counter; ChatGPT reconnects per call, so it is almost always a small integer | None |
 | `_taskId` | `extra.taskId` | MCP task id (task-based flows) | Correlation for task flows |
 | `_taskRequestedTtl` | `extra.taskRequestedTtl` | requested TTL of a task | None |
-| `_requestInfo` | `extra.requestInfo` via `sanitizeRequestInfo()` | allow-listed headers (`user-agent`, `accept-language`, `x-anthropic-client`, `mcp-protocol-version`, `traceparent`) + URL without query | Which client/protocol called; `traceparent` for log correlation |
+| `_requestInfo` | `extra.requestInfo` via `sanitizeRequestInfo()` | allow-listed headers (`user-agent`, `accept-language`, `x-anthropic-client`, `mcp-protocol-version`; `traceparent` too until 0.5.5, now `metadata.traceparent`, #173) + URL without query | Which client/protocol called |
 
 The README documents only `_requestInfo` (and understates it — it lists two headers, the code keeps five). `.specs/metrics/events.md` does not mention the extra fields at all.
 
@@ -71,6 +71,34 @@ Live counts, tool_call events, 2026-08-26: `_requestId` on 497/497 (an integrati
 - **Use sites compare exact values** (`geo === "country" || geo === "region"`), never truthiness, so a geo that skipped `resolveGeo` fails closed there too.
 - Still coupled to `inputValues` like every client-metadata field (see per-tool-capture.md).
 
+## Decided: SEP-414 trace context (#173)
+
+**Decided 2026-10-25 (the issue's recommended defaults); ships with 0.5.5.** SEP-414 (MCP 2026-07-28) puts W3C trace context into the request `_meta`: `traceparent`, `tracestate` and `baggage` (the v2 packages export the key names from 2.0.0 on; neither MCP SDK reads or sets them). Over HTTP a client may also send a `traceparent` header. Until 0.5.5, `geo: true`, the default, kept all three verbatim in `_meta`. Baggage is application context (`user.id=…,tenant.id=…`) that OpenTelemetry's default propagators send whenever any is active, with values percent-encoded, so an email in it has no `@` for the email pattern. The header was in `_requestInfo` as sent, and the other `geo` values dropped the `_meta` copy, so a stdio server stored no trace context at all.
+
+| `_meta` key | `geo: true` | `"region"` / `"country"` / `false` |
+|---|---|---|
+| `baggage` | dropped, name in `_metaDroppedKeys` (was verbatim) | dropped, named (unchanged) |
+| `tracestate` | dropped, named (was verbatim) | dropped, named (unchanged) |
+| a valid `traceparent` | moved to `metadata.traceparent`, not named (was verbatim) | moved to `metadata.traceparent`, not named (was dropped and named) |
+| an invalid `traceparent`, or one under another spelling (`Traceparent`) | dropped, named (was verbatim) | dropped, named (unchanged) |
+| `Correlation-Context` (review round 1) | dropped, named (was verbatim) | dropped, named (unchanged) |
+| `_dd_trace_context` (review round 2) | dropped, named (was verbatim) | dropped, named (was counted: a leading `_` is not recordable) |
+| `uberctx-…`, `ot-baggage-…` (review round 1) | dropped, counted in `_metaDroppedUnnamed` (was verbatim) | dropped, counted (was named: the member's name) |
+| every other key, `Request-Id` included | verbatim (unchanged) | known keys only (unchanged) |
+
+All names are matched in any letter case (`Baggage`, `TraceState`); only the exact key `traceparent` is lifted, else the one at exactly `_dd_trace_context.traceparent`.
+
+- **Other baggage carriers (review round 1).** The C# MCP SDK propagates through `DistributedContextPropagator.Current`, whose default on .NET 8 and 9 (`LegacyPropagator`) writes baggage as `Correlation-Context` (and an id as `Request-Id`); .NET 10 switched to W3C, but .NET 8 is LTS. Jaeger (`uberctx-<member>`) and OpenTracing (`ot-baggage-<member>`) carry one member per key, the member's name in the key, so those keys are counted, not named. Other vendors' keys (`sentry-trace`, `b3`, `uber-trace-id`) are ids and stay like any other key; a vendor's own baggage format under another key is not recognised.
+- **Datadog (review round 2).** Datadog's MCP instrumentation, on by default in dd-trace-js (`datadog-instrumentations/src/modelcontextprotocol-sdk.js`, `DISTRIBUTED_TRACE_META_KEY = '_dd_trace_context'`) and dd-trace-py (`contrib/internal/mcp/patch.py`), injects its whole text map into one `_meta` object: `x-datadog-trace-id`, `-parent-id`, `-sampling-priority`, `x-datadog-tags` (which can carry `_dd.p.usr.id`, a base64 user id) and, with the default inject styles `datadog, tracecontext, baggage`, a `traceparent`, a `tracestate` and the baggage. The key is dropped under every `geo` and named: it is a fixed vendor key, not data, like `baggage`, and its name says which clients send Datadog context, which a count would not (so the `recordable()` check, which refuses its leading `_`, is skipped for the fixed trace-context names). A valid `traceparent` at exactly `_dd_trace_context.traceparent` is the last source, after `_meta.traceparent` and the header.
+- **Names only.** `_metaDroppedKeys` thus also appears under `geo: true`, for the trace-context keys only. Only the `_meta` key's name is recorded, never a baggage member's (`user.id`, `tenant.id`): the integrator's upstream services pick those, a key can name a customer or a cohort, and Yavio has no use for them.
+- **Valid** (`traceparentOf()`, `core/trace-context.ts`): exactly `^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$` (55 characters), version not `ff`, neither id all zeros (W3C Trace Context §3.2.2). Not lifted: a non-string, upper case, padding or a trailing newline, a joined or repeated header, a future version with extra fields (§3.2.4).
+- **Source:** `_meta.traceparent` first, because it is what the MCP client attached and the only carrier on stdio; else the HTTP header, which any hop on the way can set; else Datadog's `_meta._dd_trace_context.traceparent` (review round 2). `traceparent` left `CAPTURED_HEADERS`, so `_requestInfo` keeps four headers. Stored once.
+- **Where:** `metadata.traceparent` on the `tool_call`, one object with #168's `input_rounds` / `input_retry`. Rejected: `input_values._traceparent` (missing for a tool without arguments, which has no `input_values`, and lost with the rest when `input_values` exceeds 10 KB) and a column (migration, shared schema, ingest and dashboard; worth it once a read-side feature filters or links by trace id). Query: `JSONExtractString(metadata, 'traceparent')`; the trace id is its second field.
+- **When:** under `capture.inputValues` like the client metadata, per-tool overrides included; under every `geo`; for tools without arguments too; on successful, thrown, `isError` and rejected (`validation`) calls. New under `"region"`, `"country"` and `false`: a traceparent that arrives only in `_meta` (stdio, VS Code) is now stored. It is a random id, and these settings already stored it for HTTP clients.
+- **`tracestate` is dropped under `geo: true` too:** vendor-opaque, up to 32 members of 256 characters, meaningless without that vendor's backend, and correlation needs only `traceparent`. W3C §6.2 asks vendors to keep PII out of it, which is a rule for vendors, not a guarantee to the receiver.
+- **PII stripper:** both strippers (SDK `core/pii.ts`, ingest `lib/pii-stripper.ts`) return a string that is exactly a valid traceparent unchanged. Their phone pattern (ten decimal digits and a word boundary) cut ~1.9 % of valid ones: a 32- or 16-digit hex id ends in ten decimal digits with probability (10/16)^10 each, and the W3C example `…-b7ad6b7169203331-01` is among them. A path exemption for `metadata.traceparent` alone was rejected: it would let any text under that key past the stripper. The same false positive on UUIDs and other hex ids in `input_values` and `output_content` is #182. The ingest half ships with the next ingest deploy, no migration.
+- Rows stored before keep `input_values._meta.baggage` / `tracestate` until the 13-month TTL; nothing is backfilled.
+
 ## Changes
 
 | Package | Change |
@@ -80,7 +108,9 @@ Live counts, tool_call events, 2026-08-26: `_requestId` on 497/497 (an integrati
 
 ## Tests
 
-`proxy.test.ts` `extractInputValues`: `_requestId`/`_taskRequestedTtl`/`_sessionId` absent; `_meta`, `_taskId`, `_requestInfo` present; header allow-list unchanged (five headers); `geo:false` → no `openai/userLocation` at all.
+`proxy.test.ts` `extractInputValues`: `_requestId`/`_taskRequestedTtl`/`_sessionId` absent; `_meta`, `_taskId`, `_requestInfo` present; header allow-list unchanged (five headers; four since #173); `geo:false` → no `openai/userLocation` at all.
+
+#173: `proxy.test.ts` "SEP-414 trace context (#173)" (every `geo`, the lift and its sources, eleven invalid values, a schema-less tool, thrown / `isError` / retried calls, `inputValues: false` global and per tool), `events.test.ts` (the `metadata` merge), `pii.test.ts`, `mcp-v2.test.ts` (2026-07-28 per-request and `serveStdio`, with v2's own key constants), `stateless-e2e.test.ts` (v1 stateless HTTP); ingest `pii-stripper.test.ts` and `api/events-processing.test.ts`.
 
 ## Compatibility
 

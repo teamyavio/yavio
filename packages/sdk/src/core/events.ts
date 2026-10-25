@@ -161,9 +161,10 @@ export interface ToolCallData {
   intentContext?: "required" | "optional" | "none";
   clientMeta?: ClientMeta;
   /**
-   * The event's `metadata`. On a tool_call only the multi-round-trip markers
-   * (#168): `input_rounds` and `input_retry`, see `inputMetadata()` in
-   * server/proxy.ts. Unset on an ordinary call.
+   * The event's `metadata`, besides `traceparent` (from `clientMeta`, #173).
+   * On a tool_call only the multi-round-trip markers (#168): `input_rounds`
+   * and `input_retry`, see `inputMetadata()` in server/proxy.ts. Unset on an
+   * ordinary call.
    */
   metadata?: Record<string, unknown>;
 }
@@ -185,9 +186,22 @@ export interface ClientMeta {
   endUserAgent?: string;
   /** Stable pseudonymous per-user-per-app id, from `openai/subject`. */
   subjectId?: string;
+  /**
+   * A valid W3C `traceparent` (#173, see core/trace-context.ts): from `_meta`
+   * (SEP-414), else from the HTTP header. Sent as `metadata.traceparent`,
+   * not as a column.
+   */
+  traceparent?: string;
 }
 
 export function buildToolCallEvent(ctx: EventContext, data: ToolCallData): ToolCallEvent {
+  // One `metadata` object: the multi-round-trip markers (#168) and the
+  // traceparent (#173), unset when neither is there. Not run through
+  // stripPii, like the markers: the traceparent is validated
+  // (trace-context.ts). Ingest's stripper does walk `metadata` and leaves a
+  // valid traceparent alone (#173).
+  const traceparent = data.clientMeta?.traceparent;
+  const metadata = traceparent ? { ...data.metadata, traceparent } : data.metadata;
   return {
     ...baseFields(ctx, "tool_call"),
     event_type: "tool_call",
@@ -210,7 +224,7 @@ export function buildToolCallEvent(ctx: EventContext, data: ToolCallData): ToolC
     locale: data.clientMeta?.locale,
     end_user_agent: data.clientMeta?.endUserAgent,
     subject_id: data.clientMeta?.subjectId,
-    metadata: data.metadata,
+    metadata,
   };
 }
 

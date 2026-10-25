@@ -216,4 +216,11 @@ describe("get_schema doc", () => {
     expect(SCHEMA_DOC).toContain("JSONExtractUInt(metadata, 'input_rounds')");
     expect(SCHEMA_DOC).toMatch(/JSONExtractBool\(metadata,\s+'input_retry'\)/);
   });
+
+  it("names a tool_call's metadata.traceparent and how to read its trace id (#173)", () => {
+    expect(SCHEMA_DOC).toContain("JSONExtractString(metadata, 'traceparent')");
+    expect(SCHEMA_DOC).toMatch(
+      /splitByChar\('-',\s+JSONExtractString\(metadata,\s+'traceparent'\)\)\[2\]/,
+    );
+  });
 });
