@@ -298,9 +298,13 @@ function openCallContext(
 /**
  * The connection-event mark of key-less HTTP calls (#144): one per
  * `(platform, client name, client version, protocol version,
- * intent_enabled)` — everything the event records — under the project's API
- * key (`dedupKey`). Cannot collide with a session's mark: session ids start
- * with `ses_`.
+ * intent_enabled)` under the project's API key (`dedupKey`). Cannot collide
+ * with a session's mark: session ids start with `ses_`. The client's
+ * capability names (#170) are left out on purpose — with them one client
+ * would count more connection events — so per process only a client's
+ * first caller's list is recorded; on a reused v1 1.24/1.25 stateless
+ * transport a list from the handshake is the last initializer's anyway, as
+ * is a client name from `initialize`.
  */
 function perRequestConnectionKey(
   platform: string,
