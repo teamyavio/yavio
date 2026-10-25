@@ -157,6 +157,45 @@ describe("flush() (#171)", () => {
     expect(flushLines()).toHaveLength(2);
   });
 
+  it("a second stall within a minute of the last line is reported once the minute has passed, and only once (#171 review round 5)", async () => {
+    let offset = 0;
+    const realNow = Date.now.bind(Date);
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    const analytics = createYavio({
+      apiKey: "yav_flap",
+      endpoint: ingest.endpoint,
+      serverOnly: true,
+      flushTimeoutMs: 200,
+    });
+    ingest.hangEvents = true;
+    await invoke(analytics);
+    await analytics.flush(); // stall 1: its line
+    expect(flushLines()).toHaveLength(1);
+    ingest.hangEvents = false;
+    await ingest.answerHung();
+    await sleep(50);
+    await invoke(analytics);
+    await analytics.flush(); // delivered: stall 1 is over
+    offset += 5_000;
+    ingest.hangEvents = true; // stall 2, 5 s after the recovery
+    const seen: number[] = [];
+    for (const step of [0, 20_000, 20_000, 30_000, 60_000, 60_000]) {
+      offset += step;
+      await invoke(analytics);
+      await analytics.flush();
+      seen.push(flushLines().length);
+    }
+    // 5 s, 25 s, 45 s after the first line: within its minute, silent; 75 s: the
+    // line; later flushes in the same stall: nothing more.
+    expect(seen).toEqual([1, 1, 1, 2, 2, 2]);
+    // Deliver the backlog and stop: nothing of this test's transport may run
+    // into the next one (its flush interval against the closed ingest).
+    ingest.hangEvents = false;
+    await ingest.answerHung();
+    await analytics.shutdown();
+    expect(new Set(ingest.ofType("tool_call").map((e) => e.event_id)).size).toBe(8);
+  }, 30_000);
+
   it("a refusing ingest: a flush never waits out a backoff that ends past its deadline, and retries early only once the last attempt is a second old", async () => {
     const analytics = createYavio({
       apiKey: "yav_f4",

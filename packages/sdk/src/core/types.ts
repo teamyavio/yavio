@@ -408,7 +408,8 @@ export interface YavioClient {
    * (1 s by default) from the call. Never rejects and never drops: what it
    * could not deliver stays queued for the next flush, the flush interval
    * or `shutdown()`, with one `YAVIO-1208` line until a flush delivers
-   * everything again, at most one a minute; not from a flush that gave up
+   * everything again, at most one a minute (a second stall within it is
+   * reported once the minute has passed); not from a flush that gave up
    * waiting on another running flush's batch, which reports for it. Events
    * queued after the call are the next flush's. A fetch an earlier request left in flight, older
    * than `flushTimeoutMs` (twice that each time the batch is taken back,
