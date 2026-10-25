@@ -278,26 +278,32 @@ A value that is not an `McpServer` (no `registerTool()` / `connect()`) comes bac
 
 ### Serverless and edge runtimes
 
-The SDK runs on Node.js ≥ 20 hosts, AWS Lambda, Vercel's Node runtime, Cloud Run and Netlify Functions included, with the recipes below. Cloudflare Workers work with `nodejs_compat` and a compatibility date of 2025-09-15 or later; that is tested on workerd, not on Cloudflare's edge. The Vercel Edge runtime is not supported, and Deno and Bun are untested.
+The SDK runs on Node.js ≥ 20 hosts with the recipes below. How far each runtime has been checked differs, and the table's last column says:
+
+- **AWS Lambda:** in an emulation of its Node 20/22 runtime client and its freeze.
+- **Cloudflare Workers:** on a local workerd, with `nodejs_compat` and a compatibility date of 2025-09-15 or later, not on Cloudflare's edge.
+- **Vercel, Cloud Run and Netlify:** from their documentation only.
+
+The Vercel Edge runtime and Netlify Edge Functions cannot load the SDK, and Deno and Bun are untested.
 
 Most of these platforms freeze or throttle the instance once the response is out. A frozen process runs no timers, and the platform may recycle it without a signal the app could act on. Events wait for a 10 s interval, so before 0.5.6 the last invocations' events were lost without a line. Since 0.5.6:
 
 - `await analytics.flush()` sends what is queued and waits until ingest has answered. Use it where the platform has no `waitUntil`, once the response body is complete and before the handler returns.
 - `analytics.flushWhenSent(response, waitUntil)` returns the response to send instead and hands the platform's `waitUntil` a flush that starts once the body has been sent. Use it where the platform has a `waitUntil`: it adds nothing to the response time. Pass Vercel's `waitUntil` function, or a context that has one (Cloudflare's `ctx`, Netlify's `context`), not `ctx.waitUntil` on its own, which workerd rejects with "Illegal invocation".
 
-Both wait at most `flushTimeoutMs` (1 s by default; option, `YAVIO_FLUSH_TIMEOUT_MS` or `.yaviorc.json`). Neither rejects nor drops anything: what ingest did not take stays queued for the next flush, and one `YAVIO-1208` line says so until a flush delivers everything again. A batch that waits for a retry after a failed send is retried at once, once per flush, and that attempt does not count towards the retry limit; a `Retry-After` from ingest is honoured. A send still in flight from before is aborted when it is older than `flushTimeoutMs`, because its connection likely died in a freeze, and its batch is re-sent unchanged; ingest drops the duplicate. Both keep the transport, so the next request's `wrap()` finds it, and a flush sends the events of every request on the instance. Concurrent flushes share the batches, so each event goes out once. With a healthy ingest a flush is one round trip (about 55 ms against an ingest that answers in 50 ms). `shutdown()` is for the end of the process, not for every request.
+Both wait at most `flushTimeoutMs` (1 s by default; option, `YAVIO_FLUSH_TIMEOUT_MS` or `.yaviorc.json`). Neither rejects nor drops anything: what ingest did not take stays queued for the next flush, and one `YAVIO-1208` line says so until a flush delivers everything again. A batch that waits for a retry after a failed send is retried at once by a flush, once per flush, when its last attempt is at least a second old; that attempt does not count towards the retry limit. A `Retry-After` from ingest, on a 429 or a 503, is never cut short. A send that an earlier request left in flight is taken back once it is older than `flushTimeoutMs`, and its batch re-sent unchanged. After a freeze its connection is likely dead, and on Workers it never answers once its request has ended. The bound doubles each time the same batch is taken back, and it is at least twice ingest's last round trip, so an ingest that is only slow keeps its batches. If the first send had reached ingest after all, ingest stores both copies. ClickHouse drops the second when it makes up an insert block of its own (the dedup token over event id and timestamp). Otherwise the table's ReplacingMergeTree collapses the two at merge time, and until then a query without `FINAL` or `LIMIT 1 BY event_id` counts the event twice. Both keep the transport, so the next request's `wrap()` finds it, and a flush sends the events of every request on the instance. Concurrent flushes share the batches, so each event goes out once. With a healthy ingest a flush is one round trip (about 55 ms against an ingest that answers in 50 ms). `shutdown()` is for the end of the process, not for every request.
 
-| Runtime | After the response | Recipe |
-|---|---|---|
-| AWS Lambda (Node 20, 22, 24), buffered | frozen until the next invocation; recycled after hours or when idle, with `SIGTERM` only when an extension is registered | `await analytics.flush()` once the body is complete |
-| Lambda response streaming | the invocation lasts until the handler's promise settles | pipe the body, then `await analytics.flush()` |
-| Lambda Managed Instances | not frozen | none: a long-lived host |
-| Vercel Functions, Node runtime | suspended until the next invocation | `flushWhenSent(response, waitUntil)`, or Next.js `after(() => analytics.flush())` |
-| Cloudflare Workers, `nodejs_compat`, date ≥ 2025-09-15 | timers end with the request | `flushWhenSent(response, ctx)` |
-| Cloud Run, request-based billing (the default) | CPU throttled until the next request; `SIGTERM` with 10 s at the end | `await analytics.flush()` before the response is sent, or instance-based billing |
-| Netlify Functions | on AWS Lambda | `flushWhenSent(response, context)` |
-| Vercel Edge runtime, Netlify Edge Functions | no `node:fs`, `node:crypto` or `node:os` | not supported |
-| Deno Deploy, Bun | — | untested |
+| Runtime | After the response | Recipe | Checked |
+|---|---|---|---|
+| AWS Lambda (Node 20, 22, 24), buffered | frozen until the next invocation; recycled after hours or when idle, with `SIGTERM` only when an extension is registered | `await analytics.flush()` once the body is complete | emulated: the Node 20/22 runtime client's loop and freeze |
+| Lambda response streaming | the invocation lasts until the handler's promise settles | pipe the body, then `await analytics.flush()` | docs only |
+| Lambda Managed Instances | not frozen | none: a long-lived host | docs only |
+| Vercel Functions, Node runtime | suspended until the next invocation | `flushWhenSent(response, waitUntil)`, or Next.js `after(() => analytics.flush())` | docs only; `after()` read in the Next.js 16.3 source |
+| Cloudflare Workers, `nodejs_compat`, date ≥ 2025-09-15 | timers end with the request | `flushWhenSent(response, ctx)` | local workerd: sequential and concurrent requests, a slow ingest, a failing one; not the edge |
+| Cloud Run, request-based billing (the default) | CPU throttled until the next request; `SIGTERM` with 10 s at the end | `await analytics.flush()` before the response is sent, or instance-based billing | docs only |
+| Netlify Functions | on AWS Lambda | `flushWhenSent(response, context)` | docs only, untested |
+| Vercel Edge runtime, Netlify Edge Functions | no `node:fs`, `node:crypto` or `node:os` | not supported | docs |
+| Deno Deploy, Bun | — | — | untested |
 
 The recipes use MCP SDK v2's `createMcpHandler`, which takes a web `Request` and returns a web `Response`. Create both once per instance, at module scope:
 
@@ -385,7 +391,7 @@ export async function POST(request: Request): Promise<Response> {
 }
 ```
 
-Next.js's own `after()` (stable since Next.js 15.1) works too. In a route handler it runs its callbacks once the response has closed, after a streamed body has been sent:
+Next.js's own `after()` (stable since Next.js 15.1) should work too. In a route handler it runs its callbacks once the response has closed, after a streamed body has been sent. That is from the Next.js 16.3 source (the route handler's `res.on("close")`); it has not been run:
 
 <!-- recipe:next-after -->
 ```typescript
@@ -410,11 +416,11 @@ export default {
 };
 ```
 
-Without `waitUntil` a Worker sends nothing at all, because its timers end with the request. `createYavio()` at module scope works since 0.5.6. Before that it threw "Disallowed operation called within global scope", and every batch failed with "Illegal invocation".
+Without `waitUntil` a Worker sends nothing at all, because its timers end with the request. A fetch or a retry wait that outlives its request never settles there. The next request's flush takes the batch back and sends it again, so nothing stays stuck. This was checked on a local workerd with concurrent requests, an ingest slower than `flushTimeoutMs` and one that fails twice, not on Cloudflare's edge. `createYavio()` at module scope works since 0.5.6. Before that it threw "Disallowed operation called within global scope", and every batch failed with "Illegal invocation".
 
 **Cloud Run with request-based billing.** The CPU is throttled outside requests, so a flush after the response stalls until the next request, and what is left is drained at `SIGTERM`. Flush before the response is sent, as in the Lambda recipe: take the body, `await analytics.flush()`, then write it. Alternatively, switch the service to instance-based billing, which keeps the CPU and needs neither. With a transport that writes the response itself (the Express recipe above, the Lambda Web Adapter), the app cannot flush before the response ends. There events arrive late (on a later request, or at `SIGTERM`), but they are not lost.
 
-**Netlify Functions.** `context.waitUntil` exists since March 2025:
+**Netlify Functions.** `context.waitUntil` exists since March 2025. This recipe is from Netlify's documentation and has not been tested:
 
 <!-- recipe:netlify -->
 ```typescript

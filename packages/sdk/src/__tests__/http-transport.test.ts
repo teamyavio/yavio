@@ -1650,9 +1650,10 @@ describe("HttpTransport on Cloudflare Workers (#171)", () => {
 /**
  * `flushQueued()`, what `client.flush()` runs on the key's transport (#171):
  * C1 nothing dropped or aborted at its deadline; C2 a batch waiting for its
- * retry retried at once, once per flush, not counted towards `maxRetries`
- * and without a retry line, a `Retry-After` never cut; C3 a fetch older than
- * the flush's budget aborted and its batch re-sent unchanged, first.
+ * retry retried at once when its last attempt is a second old, once per
+ * flush, not counted towards `maxRetries` and without a retry line, a
+ * `Retry-After` (429 or 5xx) never cut; C3 a fetch an earlier flush left
+ * older than the bound taken back and its batch re-sent unchanged, first.
  */
 describe("HttpTransport.flushQueued() (#171)", () => {
   const base = { endpoint: "http://test/v1/events", apiKey: "yav_test", sdkVersion: "0.0.1" };

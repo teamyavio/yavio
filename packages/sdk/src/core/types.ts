@@ -376,14 +376,22 @@ export interface YavioClient {
    *
    * Resolves once nothing that was queued or in flight at the call is
    * left; or once a batch failed and waits for a retry that ends past the
-   * deadline — a failed batch is retried at once, once per flush, and the
-   * retry after that goes on in the background; or at `flushTimeoutMs`
+   * deadline — a batch waiting for its retry is retried at once when its
+   * last attempt is at least a second old, once per flush, a `Retry-After`
+   * is never cut, and the retry after that goes on in the background; or
+   * at `flushTimeoutMs`
    * (1 s by default) from the call. Never rejects and never drops: what it
    * could not deliver stays queued for the next flush, the flush interval
    * or `shutdown()`, with one `YAVIO-1208` line until a flush delivers
-   * everything again. A fetch still out from before, older than
-   * `flushTimeoutMs` — its connection likely died in a freeze — is aborted
-   * and its batch re-sent unchanged; ingest drops the duplicate.
+   * everything again. A fetch an earlier request left in flight, older
+   * than `flushTimeoutMs` (twice that each time the batch is taken back,
+   * and at least twice ingest's last round trip) — after a freeze its
+   * connection is likely dead, on Cloudflare Workers it never settles once
+   * its request has ended — is taken back and its batch re-sent unchanged.
+   * If the first copy reached ingest after all, ingest stores both:
+   * ClickHouse drops the second when it makes up an insert block of its
+   * own, otherwise the ReplacingMergeTree collapses them at merge time,
+   * and until then a query without `FINAL` counts the event twice.
    *
    * Keeps this client's hold, the transport and its timer, so the next
    * request's `wrap()` finds the same transport, and arms no exit report.
