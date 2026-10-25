@@ -137,7 +137,7 @@ Tool names are not validated — tools register after `withYavio()` runs — so 
 
 ## Session key
 
-`sessionKey` tells the SDK which conversation a call belongs to when the call carries no session key the SDK knows — on a per-request server (a new `McpServer` per request, stateless Streamable HTTP) every such call would otherwise be a session of its own, which the dashboard does not count (`session_source: "per_request"`). Code option only, on `createYavio()` and `withYavio()`:
+`sessionKey` tells the SDK which conversation a call belongs to when the call carries no session key the SDK knows — over HTTP every such call would otherwise be a session of its own, on any host, which the dashboard does not count (`session_source: "per_request"`). Code option only, on `createYavio()` and `withYavio()`:
 
 ```ts
 const analytics = createYavio({

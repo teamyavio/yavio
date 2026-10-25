@@ -70,7 +70,7 @@ All metrics computed at query time from captured events. Nothing in this file is
 
 ## Session Aggregates
 
-Computed from `events` at query time, grouped by `session_id` (the `sessions_mv` materialized view was dropped, #89). There is no explicit "session close" event — sessions are implicit aggregates over all events sharing the same `session_id`. A session is one conversation, keyed by the first conversation key a call carries; a `per_request` session (a key-less client on a per-request host, one call) is not counted as a session (#144; see [server-sdk.md Section 3.7](../sdk/server-sdk.md#37-session-lifecycle)).
+Computed from `events` at query time, grouped by `session_id` (the `sessions_mv` materialized view was dropped, #89). There is no explicit "session close" event — sessions are implicit aggregates over all events sharing the same `session_id`. A session is one conversation, keyed by the first conversation key a call carries; a `per_request` session (a key-less HTTP call, one call on any host since SDK 0.5.5, #169) is not counted as a session (#144; see [server-sdk.md Section 3.7](../sdk/server-sdk.md#37-session-lifecycle)).
 
 | Field | Computation |
 |-------|-------------|
