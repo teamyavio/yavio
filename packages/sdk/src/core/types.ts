@@ -35,6 +35,22 @@ export interface YavioConfig {
    */
   shutdownTimeoutMsSource: ShutdownTimeoutSource;
   /**
+   * How long a `flush()` waits for ingest, in milliseconds (#171): the
+   * option, `YAVIO_FLUSH_TIMEOUT_MS` or `.yaviorc.json`, else 1 s. Always
+   * set by `resolveConfig()`; optional for configs built by hand (tests),
+   * which get the default. Not part of the process deadline a signal
+   * fixes, and not part of `configFingerprint()`: a flush is not a
+   * shutdown, and the bound is per client.
+   */
+  flushTimeoutMs?: number;
+  /**
+   * How long the flush `flushWhenSent()` hands to `waitUntil` may keep
+   * waiting for the batch it sent, in milliseconds (#171 review round 2):
+   * the option, `YAVIO_WAIT_UNTIL_TIMEOUT_MS` or `.yaviorc.json`, else
+   * 10 s. Optional like `flushTimeoutMs`; not in `configFingerprint()`.
+   */
+  waitUntilTimeoutMs?: number;
+  /**
    * The integrator's session key for calls that carry no key the SDK knows
    * (#144), when one was given and is a function. Code option only.
    */
@@ -257,6 +273,36 @@ export interface WithYavioOptions {
    */
   shutdownTimeoutMs?: number;
   /**
+   * How long `flush()` (and `flushWhenSent()`) waits for ingest: an
+   * integer number of milliseconds in [100, 2147483647] (default 1 000;
+   * env `YAVIO_FLUSH_TIMEOUT_MS`; anything else logs `YAVIO-1006` once and
+   * uses the default). Keep it well inside the function's own timeout
+   * when you `await` the flush before returning — AWS Lambda's default is
+   * 3 s: a slow or unreachable ingest costs at most this much per
+   * invocation. Nothing is dropped at this deadline: what is undelivered
+   * stays queued for the next flush. During a `SIGTERM`/`SIGINT` the flush
+   * ends by the process deadline instead, when that comes first (#171).
+   */
+  flushTimeoutMs?: number;
+  /**
+   * How long the flush `flushWhenSent()` hands to the platform's
+   * `waitUntil` may keep waiting for the batch it sent, past
+   * `flushTimeoutMs`: an integer number of milliseconds in [100,
+   * 2147483647] (default 10 000; env `YAVIO_WAIT_UNTIL_TIMEOUT_MS`;
+   * anything else logs `YAVIO-1006` once and uses the default). That flush
+   * delays no response, and on Cloudflare Workers a fetch dies with its
+   * request once the flush ends, so an ingest slower than
+   * `flushTimeoutMs` would never have its batches answered. Only the
+   * flush with a fetch of its own out waits, and no other flush takes that
+   * batch back meanwhile; once it is answered, the flush also sends the
+   * events of concurrent requests whose flushes gave up waiting on it,
+   * while a round trip still fits (review rounds 3 and 4). A fetch gives up at its 30 s timeout anyway.
+   * Workers allow 30 s of `waitUntil` after the response; on Vercel the
+   * function runs as long as it waits, so lower it there if an ingest that
+   * hangs must not cost more (#171 review round 2).
+   */
+  waitUntilTimeoutMs?: number;
+  /**
    * The conversation a call belongs to, for clients that send no session key
    * the SDK knows (#144). Over HTTP, on any host, every such call is
    * otherwise a session of its own (`session_source: "per_request"`, not
@@ -339,9 +385,89 @@ export interface YavioClient {
    * app `beforeExit` listener registered after the SDK's) waits for that
    * drain, which ends within min(1.5 s, D) whatever this client's own
    * value (#167): to wait longer, call it before the event loop empties.
+   * It is for the end of the process, not for every request: on a host
+   * that freezes the instance after the response, use `flush()`.
    */
   shutdown(): Promise<void>;
+  /**
+   * Send everything queued now and wait until ingest has answered, for
+   * runtimes that freeze or throttle the instance once the response is
+   * out: AWS Lambda, Vercel Functions, Cloudflare Workers, Cloud Run with
+   * request-based billing, Netlify Functions (#171). Where the platform has
+   * a `waitUntil`, hand it the flush once the response body has been sent
+   * — `flushWhenSent()` does that for a web-standard response; where it
+   * has none, `await analytics.flush()` once the response body is complete
+   * and before the handler returns.
+   *
+   * Resolves once nothing that was queued or in flight at the call is
+   * left; or once a batch failed and waits for a retry that ends past the
+   * deadline — a batch waiting for its retry is retried at once when its
+   * last attempt is at least a second old, once per flush, a `Retry-After`
+   * is never cut, and the retry after that goes on in the background; or
+   * at `flushTimeoutMs`
+   * (1 s by default) from the call. Never rejects and never drops: what it
+   * could not deliver stays queued for the next flush, the flush interval
+   * or `shutdown()`, with one `YAVIO-1208` line until a flush delivers
+   * everything again, at most one a minute (a second stall within it is
+   * reported by the first flush after the minute if it still lasts then;
+   * one that ends within the minute prints nothing); not from a flush that
+   * gave up waiting on another running flush's batch, which reports for it.
+   * Events queued after the call are the next flush's. A fetch an earlier
+   * request left in flight, older
+   * than `flushTimeoutMs` (twice that each time the batch is taken back,
+   * and at least twice ingest's last round trip) — after a freeze its
+   * connection is likely dead, on Cloudflare Workers it never settles once
+   * its request has ended — is taken back and its batch re-sent unchanged.
+   * If the first copy reached ingest after all, ingest stores both:
+   * ClickHouse drops the second when it makes up an insert block of its
+   * own, otherwise the ReplacingMergeTree collapses them at merge time,
+   * and until then a query without `FINAL` counts the event twice.
+   *
+   * Keeps this client's hold, the transport and its timer, so the next
+   * request's `wrap()` finds the same transport, and arms no exit report.
+   * The transport is shared per endpoint and API key: a flush sends the
+   * events of every request and client on that key, and concurrent flushes
+   * share the batches — each event goes out once. During a signal cycle it
+   * ends by the process deadline when that comes first. In no-op mode it
+   * resolves at once.
+   */
+  flush(): Promise<void>;
+  /**
+   * `flush()` once a web-standard response has been sent, handed to the
+   * platform's `waitUntil` (#171): Vercel's `waitUntil` from
+   * `@vercel/functions` (or Next.js's `after`), or a context that has one
+   * — Cloudflare's `ctx`, Netlify's `context` — passed as the object, so
+   * its `waitUntil` is called as its method (workerd throws "Illegal
+   * invocation" for a `ctx.waitUntil` called on its own; a bound function
+   * works too). Returns the response to send instead of
+   * `response`: the same status, status text and headers, its body piped
+   * through, so the flush starts once the body has been read to its end
+   * — or cancelled, the client gone. A streamed MCP response (Server-Sent
+   * Events, what most clients get from MCP SDK v2's `createMcpHandler`)
+   * resolves `handler.fetch()` before the tool call has ended and queued
+   * its event, so a `waitUntil(analytics.flush())` right after `fetch()`
+   * flushes too early and every call's event waits for the next
+   * invocation. A response without a body (or one already read) is
+   * returned as it is and flushed at once. Past `flushTimeoutMs`, the
+   * flush keeps waiting for the batch it sent, up to `waitUntilTimeoutMs`
+   * (10 s): it delays no response, and on Workers a fetch dies with its
+   * request once the flush ends. `waitUntil` is called once,
+   * synchronously, with a promise that never rejects; if it throws, the
+   * response is still returned and the flush runs without it (one line).
+   * In no-op mode it returns `response` untouched.
+   */
+  flushWhenSent(response: Response, waitUntil: WaitUntil): Response;
 }
+
+/**
+ * Where `flushWhenSent()` hands its flush (#171): a `waitUntil` function
+ * (Vercel's from `@vercel/functions`, Next.js's `after`), or a context
+ * object whose `waitUntil` method is called on it (Cloudflare Workers'
+ * `ctx`, Netlify's `context`).
+ */
+export type WaitUntil =
+  | ((promise: Promise<unknown>) => void)
+  | { waitUntil(promise: Promise<unknown>): void };
 
 /** The tracking context available via the `yavio` singleton. */
 export interface YavioContext {

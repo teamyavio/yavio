@@ -1,10 +1,15 @@
 import fs from "node:fs";
 import os from "node:os";
-import { DEFAULT_SHUTDOWN_TIMEOUT_MS, shutdownTimeoutFromEnv } from "../core/config.js";
+import { ErrorCode } from "@yavio/shared/error-codes";
+import {
+  DEFAULT_FLUSH_TIMEOUT_MS,
+  DEFAULT_SHUTDOWN_TIMEOUT_MS,
+  shutdownTimeoutFromEnv,
+} from "../core/config.js";
 import { LruMap } from "../core/lru.js";
 import { raceDeadline, unref } from "../core/timers.js";
 import type { SessionState, YavioConfig } from "../core/types.js";
-import { HttpTransport } from "../transport/http.js";
+import { type FlushOutcome, HttpTransport } from "../transport/http.js";
 import type { Transport } from "../transport/types.js";
 
 /**
@@ -99,6 +104,17 @@ import type { Transport } from "../transport/types.js";
  * `process.exit()`, a signal's default exit and an uncaught
  * exception emit no `beforeExit`: those paths are unchanged. Before #167
  * the queue went with the process, without a line.
+ *
+ * Freeze after the response (#171). AWS Lambda, Vercel Functions, Cloud
+ * Run with request-based billing, Netlify Functions and Cloudflare Workers
+ * suspend the instance once the response is out: no timer runs, and the
+ * instance may be recycled without a signal the app can act on, so the
+ * 10 s interval held the last invocations' events until they were lost.
+ * `client.flush()` (`flushShared`) sends the key's queue now and waits for
+ * ingest, bounded by `flushTimeoutMs` — or by what a signal cycle leaves —
+ * and touches no hold, stops nothing and arms no exit report, so the next
+ * request finds the same transport. What it could not deliver stays
+ * queued, with one `YAVIO-1208` line per stall.
  */
 
 export interface SharedSessions {
@@ -211,6 +227,22 @@ type Key = Pick<
 >;
 
 const keyOf = (config: Key): string => `${config.endpoint}\n${config.apiKey}`;
+
+/** The key each transport was created for: a `flush()` awaits only its own key's stops in progress (#171). */
+const transportKeys = new WeakMap<Transport, string>();
+/**
+ * Keys whose current stall has had its `YAVIO-1208` line (#171): a later
+ * flush that leaves events undelivered prints nothing while the key is
+ * here, so an ingest outage on a host that flushes after every request is
+ * one line, not one per request. A stall the once-a-minute limit silenced
+ * is not added, so the first flush after the minute that still leaves
+ * events undelivered reports it (review round 5). Cleared by the next flush
+ * that delivers everything.
+ */
+const stalledFlushes = new Set<string>();
+/** When each key's last `YAVIO-1208` line was printed: at most one per key per `STALL_LINE_INTERVAL_MS` (#171 review round 4). */
+const stallLineAt = new Map<string, number>();
+const STALL_LINE_INTERVAL_MS = 60_000;
 
 /**
  * The deadline a config registers for the signal drain: its
@@ -1180,6 +1212,7 @@ function newTransport(config: Key, sdkVersion: string): HttpTransport {
     ...(draining ? { maxRetries: 0, fetchBudgetMs: lateFetchBudgetMs } : {}),
   });
   transports.add(transport);
+  transportKeys.set(transport, keyOf(config));
   if (draining) noteDraining();
   else transport.start();
   return transport;
@@ -1420,6 +1453,117 @@ export async function settleShared(config: Key): Promise<void> {
   }
 }
 
+/**
+ * `client.flush()` (#171): everything queued for the config's key at the
+ * call, sent now and answered — what is queued later is the next flush's
+ * (decision A, review round 4) — without releasing, stopping or arming
+ * anything. First what
+ * a signal or natural-exit drain is still sending (`signalDrain`) and the
+ * key's own stops in progress (a last holder's release): events queued
+ * before the call may be on their way out there. Then the key's live
+ * transport, through `flushQueued()` — one early retry per flush, a stale
+ * fetch re-sent, nothing dropped at the deadline (decision C). Bounded by
+ * `flushTimeoutMs` from the call, cut to what a signal cycle leaves (or to
+ * D after a hand-back) and released by the cycle's deadline timer
+ * (`deadlineWaiters`). The deadline timer is ref'd while the flush runs
+ * (#164's rule): an `await analytics.flush()` with nothing else alive —
+ * the end of a script, a Lambda handler — must not be cut short by Node
+ * exiting on an empty loop. Never rejects. Not counted towards D.
+ *
+ * `holdMs` (`flushWhenSent()`, review round 2): past `flushTimeoutMs`, the
+ * flush keeps waiting, up to `holdMs` from the call, for the fetch it
+ * started or re-sent itself — it runs in `waitUntil` and delays no
+ * response, and on Workers that fetch dies with the request once the flush
+ * ends. Cut by a signal cycle like `flushTimeoutMs`.
+ */
+export async function flushShared(
+  config: Key & Pick<YavioConfig, "flushTimeoutMs">,
+  holdMs?: number,
+): Promise<void> {
+  const key = keyOf(config);
+  const ms = boundedBy(config.flushTimeoutMs ?? DEFAULT_FLUSH_TIMEOUT_MS);
+  if (ms <= 0) return; // a signal cycle with no time left
+  const total = Math.max(ms, boundedBy(holdMs ?? ms));
+  const deadlineAt = Date.now() + ms;
+  const left = () => Math.max(1, deadlineAt - Date.now());
+  let outcome: FlushOutcome | undefined;
+  const work = (async (): Promise<FlushOutcome> => {
+    if (signalDrain) await signalDrain;
+    const stops: Promise<void>[] = [];
+    for (const [stop, transport] of stopsInProgress) {
+      if (transportKeys.get(transport) === key) stops.push(stop);
+    }
+    if (stops.length > 0) await Promise.all(stops);
+    const live = slots.get(key)?.live ?? null;
+    if (live instanceof HttpTransport) {
+      const deadline = left();
+      return live.flushQueued(deadline, ms, deadline + (total - ms));
+    }
+    await drainTransport(live, left());
+    return "done";
+  })().then(
+    (result) => {
+      outcome = result;
+    },
+    () => {
+      outcome = "done"; // nothing above rejects; should it ever, the flush still resolves
+    },
+  );
+  // The transport's flush bounds itself by the same deadline, and must end
+  // first: its watches are removed in its own finally, from its own request
+  // context. Came the two due in the same millisecond, this race (set
+  // first) won, and on Workers the request ended with a watch left behind,
+  // which a later request's flush then resolved (#171 review round 3).
+  await raceDeadline(work, total + FLUSH_RACE_MARGIN_MS, {
+    keepAlive: true,
+    waiters: deadlineWaiters,
+  });
+  reportFlush(key, ms, outcome ?? "deadline");
+}
+
+/** How much later than the transport's own deadline `flushShared()`'s safety race comes due (#171 review round 3). */
+const FLUSH_RACE_MARGIN_MS = 25;
+
+/**
+ * One `YAVIO-1208` line per stall per key (#171): printed by the first
+ * flush that leaves events undelivered after one that delivered everything
+ * (or after none), then nothing until a flush delivers everything again.
+ * Nothing while the process drains after a signal: the cycle's `YAVIO-1205`
+ * line counts what is not delivered then. A flush that deferred to another
+ * running flush's send neither prints nor clears: that flush carries its
+ * events and reports for them. And at most one line per key per minute, so
+ * a stall that clears and comes back is not a line a second (review round
+ * 4); such a stall is reported by the first flush after the minute that
+ * still leaves events undelivered, and one that ends within the minute
+ * prints nothing (round 5).
+ */
+function reportFlush(key: string, ms: number, outcome: FlushOutcome): void {
+  if (draining || outcome === "deferred") return;
+  const live = slots.get(key)?.live;
+  const pending = live instanceof HttpTransport ? live.pendingEvents() : 0;
+  if (outcome === "done" || pending === 0) {
+    stalledFlushes.delete(key);
+    return;
+  }
+  if (stalledFlushes.has(key)) return;
+  // Marked only when its line is printed: a stall the minute's limit
+  // silenced is reported by the first flush after the minute that still
+  // leaves events undelivered, not never (#171 review round 5: a flapping
+  // ingest's second stall stayed unreported for its ten minutes).
+  const now = Date.now();
+  const last = stallLineAt.get(key);
+  if (last !== undefined && now - last < STALL_LINE_INTERVAL_MS) return;
+  stalledFlushes.add(key);
+  stallLineAt.set(key, now);
+  const why =
+    outcome === "retrying"
+      ? "ingest failed a batch, which waits for its retry"
+      : `ingest did not answer within ${ms} ms`;
+  console.warn(
+    `[${ErrorCode.SDK.FLUSH_INCOMPLETE}] flush() left ${pending} events undelivered — ${why}. They stay queued and go out with a later flush(), the flush interval or shutdown() — on a host that freezes after the response, with the next invocation's flush(). Shown once until a flush() delivers everything again.`,
+  );
+}
+
 /** Count a `shutdown()` call's explicit deadline towards D until the returned function runs. */
 function noteInProgress(config: Key): () => void {
   const ms = explicitDeadline(config);
@@ -1575,5 +1719,7 @@ export function _resetSharedState(): void {
   exitReported = false;
   _setSignalReraise(null);
   loggedOnce.clear();
+  stalledFlushes.clear();
+  stallLineAt.clear();
   removeSignalHandlers();
 }

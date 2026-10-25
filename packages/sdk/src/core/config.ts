@@ -81,6 +81,27 @@ export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 4_000;
  */
 export const MIN_SHUTDOWN_TIMEOUT_MS = 100;
 export const MAX_SHUTDOWN_TIMEOUT_MS = 2_147_483_647;
+/**
+ * How long `flush()` waits for ingest when nothing configures it (#171):
+ * one cold TLS round trip to a single-region ingest from another continent
+ * fits, and an `await analytics.flush()` before an AWS Lambda handler
+ * returns stays well inside Lambda's default 3 s timeout when ingest
+ * hangs. Not `shutdownTimeoutMs`: its 4 s default is longer than that
+ * timeout, and it means a grace period after a signal, not this. Same
+ * range as `shutdownTimeoutMs`.
+ */
+export const DEFAULT_FLUSH_TIMEOUT_MS = 1_000;
+/**
+ * How long the flush `flushWhenSent()` hands to `waitUntil` may keep
+ * waiting for the batch it sent, when nothing configures it (#171 review
+ * round 2): it delays no response, and on Cloudflare Workers a fetch dies
+ * with its request once that flush ends, so an ingest slower than
+ * `flushTimeoutMs` needs the wait. 10 s is well inside the 30 s Workers
+ * allow after the response, and on Vercel, where a longer `waitUntil` keeps
+ * the function running, it is paid only while ingest hangs, by the one
+ * request whose flush has a fetch out.
+ */
+export const DEFAULT_WAIT_UNTIL_TIMEOUT_MS = 10_000;
 
 interface ConfigFile {
   apiKey?: string;
@@ -90,6 +111,8 @@ interface ConfigFile {
   intent?: boolean;
   tools?: Record<string, ToolCaptureOverride>;
   shutdownTimeoutMs?: number;
+  flushTimeoutMs?: number;
+  waitUntilTimeoutMs?: number;
 }
 
 const TOOL_OVERRIDE_KEYS = [
@@ -226,6 +249,19 @@ function resolveBooleanFlag(path: string, value: unknown): boolean {
 function resolveShutdownTimeout(
   sources: ReadonlyArray<readonly [Exclude<ShutdownTimeoutSource, "default">, unknown]>,
 ): { ms: number; source: ShutdownTimeoutSource } {
+  return resolveTimeout("shutdownTimeoutMs", DEFAULT_SHUTDOWN_TIMEOUT_MS, sources);
+}
+
+/**
+ * The rules above for any millisecond option — `shutdownTimeoutMs`, and
+ * `flushTimeoutMs` (#171) — under its own name and default: one
+ * `YAVIO-1006` warning per option per process.
+ */
+function resolveTimeout(
+  name: string,
+  fallback: number,
+  sources: ReadonlyArray<readonly [Exclude<ShutdownTimeoutSource, "default">, unknown]>,
+): { ms: number; source: ShutdownTimeoutSource } {
   for (const [source, value] of sources) {
     if (value === undefined || value === null) continue;
     if (typeof value === "string" && value.trim() === "") continue;
@@ -238,15 +274,15 @@ function resolveShutdownTimeout(
     if (Number.isInteger(ms) && ms >= MIN_SHUTDOWN_TIMEOUT_MS && ms <= MAX_SHUTDOWN_TIMEOUT_MS) {
       return { ms, source };
     }
-    if (!warnedInvalidFlags.has("shutdownTimeoutMs")) {
-      warnedInvalidFlags.add("shutdownTimeoutMs");
+    if (!warnedInvalidFlags.has(name)) {
+      warnedInvalidFlags.add(name);
       console.warn(
-        `[${ErrorCode.SDK.INVALID_CAPTURE_OPTION}] shutdownTimeoutMs must be an integer between ${MIN_SHUTDOWN_TIMEOUT_MS} and ${MAX_SHUTDOWN_TIMEOUT_MS} milliseconds, got ${JSON.stringify(value)} — using ${DEFAULT_SHUTDOWN_TIMEOUT_MS}. Shown once per process.`,
+        `[${ErrorCode.SDK.INVALID_CAPTURE_OPTION}] ${name} must be an integer between ${MIN_SHUTDOWN_TIMEOUT_MS} and ${MAX_SHUTDOWN_TIMEOUT_MS} milliseconds, got ${JSON.stringify(value)} — using ${fallback}. Shown once per process.`,
       );
     }
-    return { ms: DEFAULT_SHUTDOWN_TIMEOUT_MS, source: "default" };
+    return { ms: fallback, source: "default" };
   }
-  return { ms: DEFAULT_SHUTDOWN_TIMEOUT_MS, source: "default" };
+  return { ms: fallback, source: "default" };
 }
 
 /**
@@ -374,6 +410,22 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
     ["file", fileConfig?.shutdownTimeoutMs],
   ]);
 
+  const { ms: flushTimeoutMs } = resolveTimeout("flushTimeoutMs", DEFAULT_FLUSH_TIMEOUT_MS, [
+    ["option", options?.flushTimeoutMs],
+    ["env", process.env.YAVIO_FLUSH_TIMEOUT_MS],
+    ["file", fileConfig?.flushTimeoutMs],
+  ]);
+
+  const { ms: waitUntilTimeoutMs } = resolveTimeout(
+    "waitUntilTimeoutMs",
+    DEFAULT_WAIT_UNTIL_TIMEOUT_MS,
+    [
+      ["option", options?.waitUntilTimeoutMs],
+      ["env", process.env.YAVIO_WAIT_UNTIL_TIMEOUT_MS],
+      ["file", fileConfig?.waitUntilTimeoutMs],
+    ],
+  );
+
   const sessionKey = resolveSessionKeyOption(options?.sessionKey);
 
   return {
@@ -385,6 +437,8 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
     tools,
     shutdownTimeoutMs,
     shutdownTimeoutMsSource,
+    flushTimeoutMs,
+    waitUntilTimeoutMs,
     ...(sessionKey ? { sessionKey } : {}),
   };
 }

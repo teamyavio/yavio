@@ -44,6 +44,22 @@ const instrumented = withYavio(server, {
   // unset participants do not lower it; with nothing set, 4 s.
   shutdownTimeoutMs: 4_000,
 
+  // Optional (#171, 0.5.5): how long createYavio().flush() and
+  // flushWhenSent() wait for ingest. An integer in [100, 2147483647] ms,
+  // default 1 s; env YAVIO_FLUSH_TIMEOUT_MS; also readable from
+  // .yaviorc.json; anything else is one YAVIO-1006 warning and the default.
+  // Cut to what a signal cycle leaves; not counted towards D; nothing is
+  // dropped at it. Past it, flushWhenSent()'s flush still waits for the
+  // batch it sent, up to waitUntilTimeoutMs (below).
+  flushTimeoutMs: 1_000,
+
+  // Optional (#171 review round 2): how long the flush flushWhenSent() hands
+  // to waitUntil may keep waiting, past flushTimeoutMs, for the batch it
+  // sent: it delays no response, and on Workers a fetch dies with its
+  // request once that flush ends. Default 10 s; env
+  // YAVIO_WAIT_UNTIL_TIMEOUT_MS; .yaviorc.json; YAVIO-1006 as above.
+  waitUntilTimeoutMs: 10_000,
+
   // Optional (#144, 0.5.4): the conversation of a call that carries no
   // session key the SDK knows (see 3.7.1). Code only; synchronous; returns a
   // conversation id (never a per-user id alone, the OAuth clientId, the
@@ -52,6 +68,25 @@ const instrumented = withYavio(server, {
   sessionKey: ({ headers }) => headers["x-conversation-id"],
 });
 ```
+
+`createYavio(options)` takes the same options and returns a client: `wrap(server)` per request, `shutdown()` at the end of the process, and — for runtimes that freeze or throttle the instance once the response is out (AWS Lambda, Vercel Functions, Cloudflare Workers, Cloud Run with request-based billing, Netlify Functions; #171, 0.5.5) — `flush()` and `flushWhenSent()`:
+
+```typescript
+const analytics = createYavio({ serverOnly: true });
+const mcp = createMcpHandler(() => analytics.wrap(buildServer()));
+
+// No waitUntil (AWS Lambda, Cloud Run with request-based billing): flush
+// once the body is complete, before the handler returns.
+const response = await mcp.fetch(request);
+const body = await response.text();
+await analytics.flush();
+
+// A waitUntil (Vercel, Cloudflare Workers, Netlify): flush once the body
+// has been sent — a function, or a context whose waitUntil is called on it.
+return analytics.flushWhenSent(await mcp.fetch(request), ctx);
+```
+
+`flush(): Promise<void>` sends everything queued for the client's endpoint and API key at the call — every request's and every client's on that key — and resolves once ingest has answered what was queued or in flight at the call (what is queued later is the next flush's, review round 4), once a batch waits for a retry that ends past the deadline, or at `flushTimeoutMs`. It never rejects and never drops, keeps the hold and the transport, arms no exit report, and prints one `YAVIO-1208` per stall, at most one per key a minute (a second stall within it is reported by the first flush after the minute that still leaves events undelivered and does not defer; one that ends within the minute prints nothing), and none from a flush that ended `deferred` to another running flush's send. `flushWhenSent(response, waitUntil): Response` returns the response with its body piped through and hands `waitUntil` a flush that starts once the body has been read to its end or cancelled: a streamed MCP response resolves `fetch()` before the tool call has ended and queued its event. Both resolve at once in no-op mode (`flushWhenSent` returns the response untouched). The README's "Serverless and edge runtimes" section has the per-platform recipes; [per-request-servers.md](./per-request-servers.md) has the measurements.
 
 ### 3.1.2 Config Discovery
 
@@ -176,7 +211,7 @@ The SDK buffers events in memory and flushes them to the Yavio ingestion API in 
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| Flush interval | 10 seconds | Balances delivery latency with batch efficiency |
+| Flush interval | 10 seconds, armed by the first `send()` after `start()` (since 0.5.5, #171) | Balances delivery latency with batch efficiency. Armed lazily because Cloudflare Workers forbid timers outside a request: a module-scope `createYavio()` failed to load there; in Node only the phase changes |
 | Max batch size | 100 events | Triggers early flush if buffer fills before interval |
 | Max buffer size | 10,000 events | Prevents memory exhaustion under extreme load. Oldest dropped with warning. |
 | Retry strategy | Exponential backoff: 1s, 2s, 4s, 8s, 16s (max 5 retries) | Handles transient network/ingestion failures |
@@ -184,6 +219,8 @@ The SDK buffers events in memory and flushes them to the Yavio ingestion API in 
 | Natural exit | On `beforeExit` with events queued — no signal, no `shutdown()`: a stdio server whose client closed stdin, a script or CLI, a host that closed its server without a signal — stop every live transport within min(1.5 s, D) and print what that deadline gave up in one `YAVIO-1205` line at exit (`Exit deadline of 1500 ms reached — N events not delivered …`) | One listener per process, installed with the first transport. A lower explicit `shutdownTimeoutMs` lowers the bound, a higher one does not raise it (the MCP TypeScript clients send `SIGTERM` 2 s after closing stdin). With nothing queued it returns at once: no delay, no line. A signal during the drain takes its stops over without extending them; an app's `shutdown()` called meanwhile waits for it. `process.exit()`, a signal's default exit and an uncaught exception emit no `beforeExit` and are unchanged. Before 0.5.5 the queue went with the process, without a line (#167) |
 | Log lines | Every SDK line goes to stderr (`console.warn`, `console.error`, `writeStderrLine`), the informational ones included | On a stdio server stdout is the JSON-RPC wire; before 0.5.5 the `Server-only mode`, `Intent capture enabled`, widget-override, re-wrap, signal and 207 notes went to stdout through `console.info`/`console.debug`, and the client got a parse error for each (#174) |
 | `client.shutdown()` | Delivers everything queued before the call, then releases the client's hold; resolves once ingest answered or at the client's own `shutdownTimeoutMs` | Awaits the signal drain already running and the transport a request finishing after the signal sent through, so the app handler `await http.close(cb); await shutdown(); process.exit(0)` exits with nothing in flight; a second or concurrent call waits for the first; `HttpTransport.shutdown()` is idempotent (#142). Outside a signal the deadline is per call: `HttpTransport.shutdown(deadlineMs)` / `drain(deadlineMs)` take the calling client's value, whichever client or `withYavio()` call created the shared transport (review round 1). The drain the SDK starts on `SIGTERM`/`SIGINT` is bounded by the smallest value set explicitly (option, `YAVIO_SHUTDOWN_TIMEOUT_MS` or `.yaviorc.json`) by any client or `withYavio()` call for the key; unset participants do not lower it (`resolveConfig()` reports `shutdownTimeoutMsSource`, and the registry ignores `"default"`, review round 3); with nothing set, the default. Since 0.5.3 (#148) that bound is one process deadline at signal + D, taken across every key, hold, pin and `shutdown()` in progress (the env var counts even with none live), else 4 s: the drain, every release drain and every `shutdown()` at or after the signal resolve by it, one with no time left at once, one after the hand-back within D of its call; at the deadline the transport aborts its fetch, schedules no wait past it and counts the loss (one `YAVIO-1205` line per cycle, before the re-raise; one at exit for an app that exits early). The grace period is per process, so the strictest bound wins; `YAVIO_SHUTDOWN_TIMEOUT_MS` counts as explicit for every participant in the process, so it sets one value for all of them (review round 2) |
+| `client.flush()` | Sends what is queued for the key at the call and waits for ingest to answer it, bounded by `flushTimeoutMs` (1 s by default; cut to what a signal cycle leaves, released by its deadline timer) | For hosts that freeze after the response (#171, 0.5.5). `HttpTransport.flushQueued(deadlineMs, staleAfterMs)`, next to `drain()`: C1 batches one at a time, nothing dropped or aborted at the deadline; C2 a batch waiting for its retry (5xx, network error, 429 without `Retry-After`) retried at once when its last attempt is at least `BASE_RETRY_DELAY_MS` old, once per flush, not counted towards `maxRetries`, its failure without a `YAVIO-1200` line; a `Retry-After` (429 or 5xx) never cut; a wait whose end passed without its timer running sent now and counted; a later retry wait watched only if it ends before the deadline; C3 a fetch an earlier flush left in flight for longer than `staleAfter()` — the budget × 2^(times the batch was taken back), at least twice the last round trip, capped at the fetch timeout — taken back and its batch re-sent first and unchanged (`resend`), not counted. Taking a batch back (`abandon()`) marks the send abandoned and clears the in-flight slot without waiting for anything the send created: on Cloudflare Workers a fetch or timer of a request that has ended never settles, and a promise it created that another request resolves has its continuations cancelled (review round 1). A flush's waits are bounded by timers of its own (`watch`). `flushShared()` first awaits `signalDrain` and the key's stops in progress; its deadline timers are ref'd while it runs (#164's rule). One `YAVIO-1208` per stall per key (`stalledFlushes`), none while draining after a signal. Keeps the hold and the transport, arms no exit report, not counted towards D. `flushWhenSent(response, waitUntil)` runs it once the body has been sent, and past `flushTimeoutMs` keeps waiting for the fetch it started or re-sent itself, up to `waitUntilTimeoutMs` (`flushQueued`'s `holdMs`, review round 2). No other flush takes back a send whose flush still runs (`owned`, round 3). Once its batch is answered, the holding flush sends what is queued next, while a round trip as long as the last one still fits. It returns `deadline` if it ends with events queued. A hold is armed only when `holdMs > deadlineMs` and more than 5 ms are left. `flushShared()`'s own race comes due 25 ms after the transport's deadline. The stale bound's round-trip floor is at most four budgets, and a round trip longer than the fetch timeout (a freeze) is not sampled. `drain()` waits for the in-flight slot (`slotChange`), not for the send's promise, which never settles once a flush takes the batch back. It is bounded by the batches it starts, not by its rounds (round 3) |
+| Fetch | `globalThis.fetch.bind(globalThis)` unless the `fetch` option is given (since 0.5.5, #171) | Cloudflare's workerd rejects a fetch called with another `this` ("Illegal invocation"); called as `this._fetch(…)`, every batch failed there |
 | Authentication | `Authorization: Bearer <projectApiKey>` header | Stateless, validated by ingestion API against PostgreSQL. Server SDK always uses the project API key directly (JWTs are only for widget-side auth). |
 
 ### 3.3.2 Request Format

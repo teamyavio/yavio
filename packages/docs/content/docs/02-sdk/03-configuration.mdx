@@ -13,10 +13,10 @@ The SDK resolves configuration from multiple sources with a clear precedence ord
 Code options → Environment variables → .yaviorc.json → Defaults → No-op
 ```
 
-1. **Code options** — passed directly to `withYavio(server, { apiKey, endpoint, capture, shutdownTimeoutMs, sessionKey })` or `createYavio({ … })`; `sessionKey` exists only here (a function)
-2. **Environment variables** — `YAVIO_API_KEY`, `YAVIO_ENDPOINT`, `YAVIO_SERVER_ONLY`, `YAVIO_INTENT` and `YAVIO_SHUTDOWN_TIMEOUT_MS`
+1. **Code options** — passed directly to `withYavio(server, { apiKey, endpoint, capture, shutdownTimeoutMs, flushTimeoutMs, waitUntilTimeoutMs, sessionKey })` or `createYavio({ … })`; `sessionKey` exists only here (a function)
+2. **Environment variables** — `YAVIO_API_KEY`, `YAVIO_ENDPOINT`, `YAVIO_SERVER_ONLY`, `YAVIO_INTENT`, `YAVIO_SHUTDOWN_TIMEOUT_MS`, `YAVIO_FLUSH_TIMEOUT_MS` and `YAVIO_WAIT_UNTIL_TIMEOUT_MS`
 3. **Config file** — `.yaviorc.json` found by walking up from `process.cwd()`
-4. **Defaults** — built-in defaults for `endpoint`, `capture` and `shutdownTimeoutMs`
+4. **Defaults** — built-in defaults for `endpoint`, `capture`, `shutdownTimeoutMs`, `flushTimeoutMs` and `waitUntilTimeoutMs`
 5. **No-op** — if no API key is found from any source, the SDK is disabled
 
 ## Environment variables
@@ -26,6 +26,8 @@ Code options → Environment variables → .yaviorc.json → Defaults → No-op
 | `YAVIO_API_KEY` | Project API key | `yav_abc123...` |
 | `YAVIO_ENDPOINT` | Ingestion API URL. Defaults to `https://ingest.yavio.ai/v1/events`; only set it to point at a self-hosted ingest. Empty counts as unset. A value that is not an `http(s)://` URL (a missing scheme, a typo) puts the SDK in no-op mode with one `YAVIO-1002` error — it never falls back to the hosted endpoint. | `https://ingest.yavio.ai/v1/events` |
 | `YAVIO_SHUTDOWN_TIMEOUT_MS` | Deadline for delivering queued events on shutdown, an integer number of milliseconds in [100, 2147483647]. Empty counts as unset. Anything else logs `YAVIO-1006` once and the default 4 s applies. The code option `shutdownTimeoutMs` wins over it, the file's `shutdownTimeoutMs` comes after it. The way to set one value for the whole process: on `SIGTERM`/`SIGINT` the SDK fixes one deadline at signal + D, where D is the smallest value set explicitly (option, this env var or `.yaviorc.json`) by any client, `withYavio()` call or `shutdown()` in progress, and the env var counts even when no client is live; participants that set none do not lower it, and with nothing set it is 4 s. It also lowers the 1.5 s bound of a natural exit (a process that ends on its own with events queued, such as a stdio server whose client closed stdin); a higher value does not raise that bound. Rule of thumb: your close cap + 1 s. See [Setup](/docs/02-sdk/01-setup#options) for what it bounds. | `5000` |
+| `YAVIO_FLUSH_TIMEOUT_MS` | How long `createYavio().flush()` and `flushWhenSent()` wait for ingest, an integer number of milliseconds in [100, 2147483647]. Past it, `flushWhenSent()`'s flush still waits for the batch it sent, up to `YAVIO_WAIT_UNTIL_TIMEOUT_MS`. Empty counts as unset. Anything else logs `YAVIO-1006` once and the default 1 s applies. The code option `flushTimeoutMs` wins over it, the file's `flushTimeoutMs` comes after it. Nothing is dropped when it runs out: the events stay queued for the next flush. Keep it well inside the function's own timeout when the flush is awaited (AWS Lambda's default is 3 s). Since 0.5.5. | `1000` |
+| `YAVIO_WAIT_UNTIL_TIMEOUT_MS` | How long the flush `flushWhenSent()` hands to `waitUntil` may keep waiting for the batch it sent, past `flushTimeoutMs`, an integer number of milliseconds in [100, 2147483647]. Empty counts as unset; anything else logs `YAVIO-1006` once and the default 10 s applies. The code option `waitUntilTimeoutMs` wins over it, the file's comes after it. Lower it on Vercel, where the function runs while the flush waits, if an ingest that hangs must cost less. Since 0.5.5. | `10000` |
 
 ```bash title=".env"
 YAVIO_API_KEY=yav_abc123...
@@ -42,7 +44,9 @@ The SDK walks up the directory tree from `process.cwd()` looking for a `.yaviorc
 {
   "apiKey": "yav_abc123...",
   "endpoint": "http://localhost:3001/v1/events",
-  "shutdownTimeoutMs": 5000
+  "shutdownTimeoutMs": 5000,
+  "flushTimeoutMs": 1000,
+  "waitUntilTimeoutMs": 10000
 }
 ```
 
@@ -63,6 +67,8 @@ Place it in your project root or any parent directory. The nearest file wins.
 | `capture.rejectedInputValues` | `false` |
 | `tools` | none |
 | `shutdownTimeoutMs` | `4000` |
+| `flushTimeoutMs` | `1000` |
+| `waitUntilTimeoutMs` | `10000` |
 | `sessionKey` | none |
 
 ## Capture options
