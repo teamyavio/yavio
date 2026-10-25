@@ -21,6 +21,7 @@ import {
   logOnce,
   pinShared,
   releaseShared,
+  reviveHold,
   settleShared,
 } from "./shared.js";
 
@@ -75,11 +76,15 @@ function warnNoApiKey(): void {
   );
 }
 
-/** Process-level log lines, once per process whatever the host's request rate. */
+/**
+ * Process-level log lines, once per process whatever the host's request
+ * rate. On stderr, like every SDK line: on a stdio server stdout is the
+ * JSON-RPC wire, and a client reads every line there as a message (#174).
+ */
 function logModes(config: YavioConfig): void {
   if (config.serverOnly) {
     logOnce("server-only", () =>
-      console.info(
+      console.error(
         "[yavio] Server-only mode: skipping _meta.yavio injection and widget token minting. The React widget will not auto-connect.",
       ),
     );
@@ -89,7 +94,7 @@ function logModes(config: YavioConfig): void {
     // `required` is independently configurable; the log must not claim
     // "required" for a server that was explicitly configured optional.
     logOnce(`intent:${config.intent.required}`, () =>
-      console.info(
+      console.error(
         config.intent.required
           ? "[yavio] Intent capture enabled: tools advertise a 'context' parameter — required on model-facing tools, optional on widget-invoked ones (pass intent: false to disable)."
           : "[yavio] Intent capture enabled: tools advertise an optional 'context' parameter on every tool (pass intent: false to disable).",
@@ -148,7 +153,7 @@ function wrapServer<T extends McpServerLike>(
       );
     } else {
       logOnce("rewrap", () =>
-        console.debug(
+        console.error(
           `[yavio] ${entry} called on a server that is already wrapped — returning the existing proxy. Shown once per process.`,
         ),
       );
@@ -216,7 +221,11 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
   // resolving with the batch still on its way (#142).
   let closing: Promise<void> = Promise.resolve();
   const state = (): SharedState => {
-    if (hold && isLiveHold(config, hold)) return hold.state;
+    // A hold a natural-exit drain took is live again once its entry is
+    // back: revived, not replaced, or the entry would count it twice (#167).
+    if (hold && (isLiveHold(config, hold) || reviveHold(config, hold, SDK_VERSION))) {
+      return hold.state;
+    }
     // A stale hold is replaced, not released: its explicit value leaves the
     // live set here, or it would count towards D after this client's
     // shutdown() released the new one (#148 review round 7).

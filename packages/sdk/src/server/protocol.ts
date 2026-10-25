@@ -41,14 +41,39 @@ export interface CallContext {
  * One tools/call request in flight. Opened by the status wrapper; the callback
  * wrapper, when it runs inside one, hands its finished event over instead of
  * sending it, and the status wrapper sends exactly one event per frame once
- * the downstream handler is done. That is what makes "two events for one
- * call" impossible and lets a post-handler failure (output validation) patch
- * the callback's event before it leaves.
+ * the downstream handler is done. That is what lets a post-handler failure
+ * (output validation) patch the callback's event before it leaves.
+ *
+ * The callback can run more than once inside one frame: MCP SDK v2's
+ * 2025-era legacy shim fulfils an `input_required` result over a
+ * server-to-client request and re-enters the handler inside the same
+ * tools/call (#168). Only the round whose result is final hands its event
+ * over; the rounds that asked for input are counted here.
  */
 export interface CallFrame {
   toolName: string;
   context: CallContext;
   event: ToolCallEvent | null;
+  /** The rounds inside this request that returned `input_required` so far (#168). */
+  inputRounds: number;
+  /**
+   * Their summed handler time in ms, unrounded. The client's think time
+   * between the rounds is not in it.
+   */
+  inputMs: number;
+  /**
+   * The event the latest of those rounds would have been. Sent, corrected to
+   * `error` / `server`, only when the request fails before a final round: the
+   * shim could not get the input (no channel to the client, a capability the
+   * client did not declare, a failed or timed-out leg, too many rounds), or
+   * v2 refused the input request on 2026-07-28.
+   */
+  interim: ToolCallEvent | null;
+  /**
+   * The request is a client's 2026-07-28 retry (`readCallExtra().inputRetry`
+   * on the context the protocol layer received).
+   */
+  inputRetry: boolean;
 }
 
 const callFrames = new AsyncLocalStorage<CallFrame>();

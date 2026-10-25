@@ -250,7 +250,7 @@ describe("per-request servers share one process-level state", () => {
   });
 
   it("logs the mode lines once per process, not once per wrap", () => {
-    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
     for (let i = 0; i < 3; i++) {
       withYavio(new McpServer({ name: "s", version: "1" }), {
         apiKey: "yav_log",
@@ -259,7 +259,7 @@ describe("per-request servers share one process-level state", () => {
         intent: true,
       });
     }
-    const lines = info.mock.calls.map((c) => String(c[0]));
+    const lines = stderr.mock.calls.map((c) => String(c[0]));
     expect(lines.filter((l) => l.includes("Server-only mode"))).toHaveLength(1);
     expect(lines.filter((l) => l.includes("Intent capture enabled"))).toHaveLength(1);
   });
@@ -321,7 +321,7 @@ describe("per-request servers share one process-level state", () => {
     // withYavio() did not: still the first proxy, the tool stays untracked.
     const same = createYavio({ apiKey: "yav_first", endpoint, serverOnly: true });
     expect(same.wrap(raw)).toBe(first);
-    // Same options again: no warning, the debug line only.
+    // Same options again: no warning, the re-wrap note only.
     expect(withYavio(raw, { apiKey: "yav_first", endpoint, serverOnly: true })).toBe(first);
     await callOnce(first);
     await same.shutdown();
@@ -413,7 +413,7 @@ describe("per-request servers share one process-level state", () => {
   });
 
   it("after the signal handler ran, requests still served send at once, best effort — new wraps and existing proxies alike", async () => {
-    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
     const client = createYavio({ apiKey: "yav_sigterm", endpoint, serverOnly: true });
     const before = client.wrap(new McpServer({ name: "before", version: "1.0" }));
     before.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => ok("before"));
@@ -440,7 +440,9 @@ describe("per-request servers share one process-level state", () => {
       (e) => (e.output_content as { content: Array<{ text: string }> }).content[0]?.text,
     );
     expect(outputs.sort()).toEqual(["after", "before", "before"]);
-    const lines = info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("best effort"));
+    const lines = stderr.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.includes("best effort"));
     expect(lines).toHaveLength(1);
   });
 
@@ -474,7 +476,7 @@ describe("per-request servers share one process-level state", () => {
   });
 
   it("after the signal handler ran, a long-lived withYavio() server that is never wrapped again still delivers", async () => {
-    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
     const server = withYavio(new McpServer({ name: "long-lived", version: "1.0" }), {
       apiKey: "yav_sig_pinned",
       endpoint,
@@ -495,7 +497,7 @@ describe("per-request servers share one process-level state", () => {
       (e) => (e.output_content as { content: Array<{ text: string }> }).content[0]?.text,
     );
     expect(outputs).toEqual(["late"]);
-    expect(info.mock.calls.filter((c) => String(c[0]).includes("best effort"))).toHaveLength(1);
+    expect(stderr.mock.calls.filter((c) => String(c[0]).includes("best effort"))).toHaveLength(1);
   });
 
   describe("a result the MCP SDK rejects on the wire (v1)", () => {
@@ -596,7 +598,7 @@ describe("per-request servers share one process-level state", () => {
 
   it("wrapping the same server again returns the existing proxy: one tool_call per call, not one per wrap", async () => {
     const client = createYavio({ apiKey: "yav_rewrap", endpoint, serverOnly: true });
-    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
     const server = new McpServer({ name: "long-lived", version: "1.0" });
     const first = client.wrap(server);
     first.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => ok("x"));
@@ -607,7 +609,7 @@ describe("per-request servers share one process-level state", () => {
     }
     // Wrapping the proxy itself is the same no-op.
     expect(client.wrap(first)).toBe(first);
-    expect(debug.mock.calls.filter((c) => String(c[0]).includes("already wrapped"))).toHaveLength(
+    expect(stderr.mock.calls.filter((c) => String(c[0]).includes("already wrapped"))).toHaveLength(
       1,
     );
 

@@ -250,15 +250,17 @@ export interface WithYavioOptions {
    * participant that sets none does not lower D; `YAVIO_SHUTDOWN_TIMEOUT_MS`
    * counts even with no participant live. Rule of thumb: the close cap of
    * your handler + 1 s, and both inside the platform's grace period (Fly.io
-   * 5 s, Cloud Run 10 s, Kubernetes and ECS 30 s).
+   * 5 s, Cloud Run 10 s, Kubernetes and ECS 30 s). A process that ends on
+   * its own with events queued (no signal, no `shutdown()`: a stdio server
+   * whose client closed stdin) drains within min(1.5 s, D): a lower value
+   * lowers that bound, a higher one does not raise it (#167).
    */
   shutdownTimeoutMs?: number;
   /**
    * The conversation a call belongs to, for clients that send no session key
-   * the SDK knows (#144) — on a per-request host (a new McpServer per
-   * request, stateless Streamable HTTP) every such call would otherwise be a
-   * session of its own (`session_source: "per_request"`, not counted as a
-   * session). Called only when the call carries none of, in this order,
+   * the SDK knows (#144). Over HTTP, on any host, every such call is
+   * otherwise a session of its own (`session_source: "per_request"`, not
+   * counted as a session). Called only when the call carries none of, in this order,
    * `Mcp-Session-Id`, `_meta["openai/session"]`, `_meta["vscode.conversationId"]`
    * and the Codex CLI's `_meta.threadId`:
    *
@@ -333,7 +335,10 @@ export interface YavioClient {
    * they have settled). The transport stops only when no other
    * client with the same configuration holds it and no `withYavio()` call
    * pinned it; a later wrap by this client holds it again, or starts a
-   * fresh one.
+   * fresh one. A call made while the SDK's natural-exit drain runs (from an
+   * app `beforeExit` listener registered after the SDK's) waits for that
+   * drain, which ends within min(1.5 s, D) whatever this client's own
+   * value (#167): to wait longer, call it before the event loop empties.
    */
   shutdown(): Promise<void>;
 }
@@ -365,9 +370,9 @@ export interface SessionState {
   stepSequence: number;
   /**
    * How `sessionId` was derived (#144), stamped on every event of the
-   * session as `session_source`. Set when a keyed session is created; the
-   * connection's own session is labelled by the first request that falls
-   * back to it (`per_request` over HTTP, `connection` otherwise).
+   * session as `session_source`. Set when a keyed session or a key-less HTTP
+   * call's own session (`per_request`, #169) is created; the connection's own
+   * session is labelled `connection` by the first key-less call off HTTP.
    */
   sessionSource?: SessionSource;
 }

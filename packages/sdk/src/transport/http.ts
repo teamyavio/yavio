@@ -117,9 +117,10 @@ interface PartialBody {
  * The 207 body, or undefined when it cannot be read — unparsable, or cut by
  * `signal` (the fetch timeout or the shutdown deadline aborting the
  * controller that fetched it): the status said accepted, so neither is a
- * loss, and a `console.debug` note is all it gets. Raced against the signal
- * itself, since a body stream that ignores its abort would otherwise hold
- * the batch in flight past the deadline (#148 review rounds 4 and 6).
+ * loss, and a note on stderr is all it gets (not stdout, the JSON-RPC wire
+ * of a stdio server, #174). Raced against the signal itself, since a body
+ * stream that ignores its abort would otherwise hold the batch in flight
+ * past the deadline (#148 review rounds 4 and 6).
  */
 async function readPartial(
   response: Response,
@@ -139,7 +140,7 @@ async function readPartial(
         .finally(() => signal.removeEventListener("abort", onAbort));
     });
   } catch (error) {
-    console.debug(
+    console.error(
       `[yavio] 207 body unreadable, batch accepted: ${error instanceof Error ? error.message : String(error)}`,
     );
     return undefined;

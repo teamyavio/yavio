@@ -160,6 +160,12 @@ export interface ToolCallData {
    */
   intentContext?: "required" | "optional" | "none";
   clientMeta?: ClientMeta;
+  /**
+   * The event's `metadata`. On a tool_call only the multi-round-trip markers
+   * (#168): `input_rounds` and `input_retry`, see `inputMetadata()` in
+   * server/proxy.ts. Unset on an ordinary call.
+   */
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -204,6 +210,7 @@ export function buildToolCallEvent(ctx: EventContext, data: ToolCallData): ToolC
     locale: data.clientMeta?.locale,
     end_user_agent: data.clientMeta?.endUserAgent,
     subject_id: data.clientMeta?.subjectId,
+    metadata: data.metadata,
   };
 }
 

@@ -126,6 +126,36 @@ describe("readCallExtra: authInfo (#144)", () => {
   });
 });
 
+describe("readCallExtra: v2 and the multi-round-trip retry marker (#168)", () => {
+  it("marks a v2 context, and a retry by inputResponses, droppedInputResponseKeys or a requestState", () => {
+    expect(readCallExtra({ mcpReq: { id: 1 } })).toMatchObject({ v2: true });
+    expect(readCallExtra({ mcpReq: { id: 1 } }).inputRetry).toBeUndefined();
+    expect(readCallExtra({ mcpReq: { inputResponses: {} } }).inputRetry).toBe(true);
+    expect(readCallExtra({ mcpReq: { droppedInputResponseKeys: ["x"] } }).inputRetry).toBe(true);
+    expect(readCallExtra({ mcpReq: { requestState: () => "s1" } }).inputRetry).toBe(true);
+    expect(readCallExtra({ mcpReq: { requestState: () => undefined } }).inputRetry).toBeUndefined();
+    expect(readCallExtra({ _meta: {} }).v2).toBeUndefined();
+  });
+
+  it("a requestState accessor that throws costs only the marker: the rest of the context is still read", () => {
+    const extra = {
+      sessionId: "s-1",
+      mcpReq: {
+        _meta: { "openai/session": "conv-1" },
+        requestState: () => {
+          throw new Error("accessor broke");
+        },
+      },
+      http: { req: { headers: { "user-agent": "openai-mcp/1.0.0" } } },
+    };
+    const read = readCallExtra(extra);
+    expect(read.v2).toBe(true);
+    expect(read.inputRetry).toBeUndefined();
+    expect(read.meta).toEqual({ "openai/session": "conv-1" });
+    expect(read.requestHeaders).toEqual({ "user-agent": "openai-mcp/1.0.0" });
+  });
+});
+
 describe("readCallExtra: the 2026-07-28 envelope's version and capabilities (#170)", () => {
   const ctx = (envelope: unknown) => ({ mcpReq: { id: 1, method: "tools/call", envelope } });
 

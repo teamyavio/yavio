@@ -2316,3 +2316,393 @@ describe("loss accounting (#148)", () => {
     expect(lines1205()[1]).toContain("2 events not delivered"); // its own count, not 4
   });
 });
+
+/**
+ * The natural exit (#167): Node emits `beforeExit` once the loop has
+ * emptied — a stdio server whose client closed stdin, a script that never
+ * called `shutdown()`, a host that closed its server without a signal. The
+ * SDK stops every live transport there under min(1.5 s, D), so what is
+ * queued is delivered before the process goes. Before #167 nothing listened
+ * and the queue went with the process, without a line.
+ */
+describe("the natural exit: beforeExit with events queued (#167)", () => {
+  let ingest: MockIngest;
+  let warn: ReturnType<typeof vi.spyOn>;
+  let stderr: ReturnType<typeof vi.spyOn>;
+  let lines: string[];
+  const lines1205 = () => lines.filter((l) => l.includes("YAVIO-1205"));
+  const exitHooks = () => process.listeners("exit").filter((l) => l.name === "yavioReportAtExit");
+  const sdkBeforeExit = () =>
+    process.listeners("beforeExit").filter((l) => l.name === "onBeforeExit");
+  /** What Node does when the loop empties, for the SDK's listener only (vitest may have its own). */
+  const emitBeforeExit = () => {
+    for (const listener of sdkBeforeExit()) listener.call(process, 0);
+  };
+
+  function build(apiKey: string, options: { shutdownTimeoutMs?: number } = {}) {
+    const client = createYavio({ apiKey, endpoint: ingest.endpoint, serverOnly: true, ...options });
+    const raw = new McpServer({ name: "app", version: "1.0" });
+    client.wrap(raw).registerTool("get_price", { inputSchema: { q: z.string() } }, ok);
+    return { client, raw };
+  }
+
+  beforeEach(async () => {
+    _resetGlobalState();
+    lines = [];
+    warn = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      lines.push(String(args[0]));
+    });
+    stderr = spyStderr(lines);
+    ingest = await startMockIngest({ respondAfterMs: 50 });
+  });
+
+  afterEach(async () => {
+    await ingest.answerHung();
+    _resetGlobalState();
+    warn.mockRestore();
+    stderr.mockRestore();
+    await ingest.close();
+  });
+
+  it("one listener per process, installed with the first transport; the test reset removes it", () => {
+    expect(sdkBeforeExit()).toHaveLength(0);
+    build("yav_167_a");
+    build("yav_167_b");
+    withYavio(new McpServer({ name: "app", version: "1.0" }), {
+      apiKey: "yav_167_c",
+      endpoint: ingest.endpoint,
+      serverOnly: true,
+    });
+    expect(sdkBeforeExit()).toHaveLength(1);
+    _resetGlobalState();
+    expect(sdkBeforeExit()).toHaveLength(0);
+  });
+
+  it("delivers what is queued, once: the pass Node emits again while the drain runs, and the one after it, add nothing", async () => {
+    const { raw } = build("yav_167_once");
+    await callTool(raw, "get_price", { q: "x" });
+    expect(ingest.events).toHaveLength(0); // buffered: the flush interval is 10 s
+    emitBeforeExit();
+    emitBeforeExit(); // re-entry while the stop runs
+    expect(_sharedStateCount()).toBe(0); // the registry was stopped and emptied
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0)); // the stop settled
+    emitBeforeExit(); // what Node emits after the drain settled
+    await new Promise((r) => setTimeout(r, 100));
+    expect(ingest.batches).toHaveLength(1);
+    expect(ingest.events.map((e) => e.event_type)).toEqual(["connection", "tool_call"]);
+    expect(lines1205()).toEqual([]);
+    exitHooks()[0]?.call(process, 0); // armed by the drain; nothing left to report
+    expect(lines1205()).toEqual([]);
+  });
+
+  it("with nothing queued: returns at once — nothing stopped, nothing armed, nothing printed", async () => {
+    build("yav_167_idle");
+    emitBeforeExit();
+    expect(_sharedStateCount()).toBe(1);
+    expect(exitHooks()).toHaveLength(0);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(ingest.batches).toHaveLength(0);
+    expect(lines1205()).toEqual([]);
+  });
+
+  it("a shutdown() called while the drain runs (an app's own beforeExit listener) waits for it", async () => {
+    ingest.respondAfterMs = 300;
+    const { client, raw } = build("yav_167_join");
+    await callTool(raw, "get_price", { q: "x" });
+    emitBeforeExit();
+    const t = Date.now();
+    await client.shutdown();
+    expect(Date.now() - t).toBeGreaterThanOrEqual(250);
+    expect(ingest.responded).toBe(1);
+    expect(ingest.batches).toHaveLength(1); // one drain, no second send
+  });
+
+  it.each([
+    ["no option: 1.5 s", undefined, 1_500],
+    ["a lower shutdownTimeoutMs: its own", 600, 600],
+    ["a higher shutdownTimeoutMs does not raise it", 10_000, 1_500],
+  ] as const)(
+    "bounded by min(1.5 s, D) — %s; the deadline's loss is one exit line in the natural wording",
+    async (_label, own, boundMs) => {
+      ingest.hangEvents = true;
+      const { raw } = build("yav_167_bound", own === undefined ? {} : { shutdownTimeoutMs: own });
+      await callTool(raw, "get_price", { q: "x" });
+      const t = Date.now();
+      emitBeforeExit();
+      await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0), {
+        timeout: 3_000,
+        interval: 10,
+      });
+      const took = Date.now() - t;
+      expect(took).toBeGreaterThanOrEqual(boundMs - 20);
+      expect(took).toBeLessThan(boundMs + 300);
+      // Not a `shutdown() deadline` line: nobody called shutdown().
+      expect(lines1205()).toEqual([]);
+      exitHooks()[0]?.call(process, 0);
+      expect(lines1205()).toEqual([
+        `[YAVIO-1205] Exit deadline of ${boundMs} ms reached — 2 events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the event loop empties (on stdin's end or at the end of the script; a beforeExit listener is too late).`,
+      ]);
+    },
+  );
+
+  it("a signal during the drain takes over its stops and does not extend them: the cycle ends at the natural deadline, one line", async () => {
+    const reraisedSignals: string[] = [];
+    _setSignalReraise((signal) => reraisedSignals.push(signal));
+    ingest.hangEvents = true;
+    await withoutOtherListeners("SIGTERM", async () => {
+      const { raw } = build("yav_167_signal");
+      await callTool(raw, "get_price", { q: "x" });
+      const t = Date.now();
+      emitBeforeExit(); // natural deadline at t + 1.5 s
+      await new Promise((r) => setTimeout(r, 500));
+      process.emit("SIGTERM", "SIGTERM"); // D = 4 s would end at t + 4.5 s
+      await vi.waitFor(() => expect(reraisedSignals).toEqual(["SIGTERM"]), {
+        timeout: 6_000,
+        interval: 10,
+      });
+      const took = Date.now() - t;
+      expect(took).toBeGreaterThanOrEqual(1_480);
+      expect(took).toBeLessThan(1_900);
+      expect(lines1205()).toHaveLength(1); // the cycle's
+      // It names D, not the natural deadline that did the cut: the known
+      // limitation of #167 (the count is right).
+      expect(lines1205()[0]).toContain(
+        "Shutdown deadline of 4000 ms reached — 2 events not delivered",
+      );
+      exitHooks()[0]?.call(process, 0); // nothing left for the exit hook
+      expect(lines1205()).toHaveLength(1);
+    });
+  });
+
+  it("an exit before the drain's stops settled (an app's process.exit() during it) is not its deadline's: the exit line keeps the Process exit wording", async () => {
+    ingest.hangEvents = true;
+    const { raw } = build("yav_167_early");
+    await callTool(raw, "get_price", { q: "x" });
+    emitBeforeExit(); // the natural deadline 1.5 s ahead
+    await vi.waitFor(() => expect(ingest.batches).toHaveLength(1));
+    exitHooks()[0]?.call(process, 0);
+    expect(lines1205()).toEqual([
+      "[YAVIO-1205] Process exit with 2 events not delivered — await analytics.shutdown() before exiting, or raise shutdownTimeoutMs.",
+    ]);
+  });
+
+  it("0.5.4's workaround — an app beforeExit listener registered after createYavio() that calls shutdown() — waits only for the SDK's 1.5 s drain, whatever its own shutdownTimeoutMs; the line says a beforeExit listener is too late (review round 1)", async () => {
+    ingest.respondAfterMs = 2_500; // answers after the natural bound, within the client's own 10 s
+    const { client, raw } = build("yav_167_workaround", { shutdownTimeoutMs: 10_000 });
+    await callTool(raw, "get_price", { q: "x" });
+    const t = Date.now();
+    emitBeforeExit(); // the SDK's listener runs first: it was installed by createYavio()
+    await client.shutdown(); // the workaround's call, in the app's listener after it
+    const took = Date.now() - t;
+    expect(took).toBeGreaterThanOrEqual(1_480);
+    expect(took).toBeLessThan(2_200);
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    exitHooks()[0]?.call(process, 0);
+    expect(lines1205()).toEqual([
+      "[YAVIO-1205] Exit deadline of 1500 ms reached — 2 events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the event loop empties (on stdin's end or at the end of the script; a beforeExit listener is too late).",
+    ]);
+  });
+
+  /** A server with one tool, wrapped by either entry point: what a later send goes through is the proxy it already has. */
+  function wrapped(entry: "createYavio().wrap()" | "withYavio()", apiKey: string): McpServer {
+    if (entry === "createYavio().wrap()") return build(apiKey).raw;
+    const raw = new McpServer({ name: "app", version: "1.0" });
+    withYavio(raw, { apiKey, endpoint: ingest.endpoint, serverOnly: true }).registerTool(
+      "get_price",
+      { inputSchema: { q: z.string() } },
+      ok,
+    );
+    return raw;
+  }
+  const qs = (batch: { events: Array<Record<string, unknown>> } | undefined) =>
+    (batch?.events ?? []).map(
+      (e) => (e.input_values as { q?: string } | undefined)?.q ?? e.event_type,
+    );
+
+  it.each(["createYavio().wrap()", "withYavio()"] as const)(
+    "the process goes on after the drain, round after round (an app's beforeExit listener schedules more work; Lambda's Node 20/22 client answers a callback handler from beforeExit after every invocation) — %s: each round's sends through the same proxy re-enter the registry, and the next beforeExit delivers them (review round 1)",
+    async (entry) => {
+      const raw = wrapped(entry, "yav_167_late");
+      await callTool(raw, "get_price", { q: "first" });
+      emitBeforeExit();
+      await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0)); // the drain settled
+      expect(qs(ingest.batches[0])).toEqual(["connection", "first"]);
+      expect(_sharedStateCount()).toBe(0);
+
+      // drain → late sends → drain → late sends → drain: every round delivered.
+      for (const round of [1, 2, 3]) {
+        await callTool(raw, "get_price", { q: `late${round}a` }); // dropped without a line before review round 1
+        await callTool(raw, "get_price", { q: `late${round}b` });
+        expect(_sharedStateCount()).toBe(1); // re-entered, with a fresh transport
+        expect(_trackedTransportCount()).toBe(1);
+        expect(ingest.batches).toHaveLength(round); // queued: the flush interval is 10 s
+        emitBeforeExit(); // what Node emits once the late work has settled
+        await vi.waitFor(() => expect(ingest.batches).toHaveLength(round + 1));
+        expect(qs(ingest.batches[round])).toEqual([`late${round}a`, `late${round}b`]);
+        await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+        expect(_sharedStateCount()).toBe(0); // drained again: the next round re-enters again
+      }
+      expect(ingest.ofType("tool_call")).toHaveLength(7);
+      exitHooks()[0]?.call(process, 0);
+      expect(lines1205()).toEqual([]);
+    },
+  );
+
+  it("a send while the drain still runs (an unref'd timer of the app's fires while the drain holds the loop) goes through a fresh transport, which the next beforeExit drains (review round 1)", async () => {
+    ingest.respondAfterMs = 300;
+    const { raw } = build("yav_167_during");
+    await callTool(raw, "get_price", { q: "first" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(ingest.batches).toHaveLength(1)); // the drain's batch is out
+    await callTool(raw, "get_price", { q: "during" });
+    expect(_sharedStateCount()).toBe(1);
+    await vi.waitFor(() => expect(ingest.responded).toBe(1)); // the first drain's batch answered
+    emitBeforeExit();
+    await vi.waitFor(() => expect(ingest.responded).toBe(2));
+    expect(qs(ingest.batches[1])).toEqual(["during"]);
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    exitHooks()[0]?.call(process, 0);
+    expect(lines1205()).toEqual([]);
+  });
+
+  it("only a natural drain makes a later send re-enter: after a re-acquire and the last holder's release, a send is dropped as before (review round 1)", async () => {
+    const { client, raw } = build("yav_167_released");
+    await callTool(raw, "get_price", { q: "first" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    client.wrap(new McpServer({ name: "again", version: "1.0" })); // re-acquires the key
+    expect(_sharedStateCount()).toBe(1);
+    await client.shutdown(); // the last holder releases: the transport stops
+    expect(_sharedStateCount()).toBe(0);
+    await callTool(raw, "get_price", { q: "after release" });
+    expect(_sharedStateCount()).toBe(0); // nowhere to go, as with any stopped transport
+    expect(_trackedTransportCount()).toBe(0);
+  });
+
+  it("the drain took a client's hold, then the client's shutdown() releases it: a send after that is dropped, as after any last release (review round 2)", async () => {
+    const { client, raw } = build("yav_167_r2_a");
+    await callTool(raw, "get_price", { q: "first" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    await client.shutdown(); // its hold went with the drain: the release counts on the drained entry
+    await callTool(raw, "get_price", { q: "after shutdown" }); // re-entered and delivered in round 1
+    expect(_sharedStateCount()).toBe(0);
+    expect(_trackedTransportCount()).toBe(0);
+    emitBeforeExit();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(ingest.ofType("tool_call").map((e) => (e.input_values as { q: string }).q)).toEqual([
+      "first",
+    ]);
+  });
+
+  it("after a re-entry, a client's shutdown() against a hanging ingest stops the transport at its own deadline — the fetch aborted, its shutdown() line — not a drain that leaves the fetch running (review round 2)", async () => {
+    const { client, raw } = build("yav_167_r2_c", { shutdownTimeoutMs: 600 });
+    await callTool(raw, "get_price", { q: "first" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    await callTool(raw, "get_price", { q: "re-entered" });
+    expect(_sharedStateCount()).toBe(1);
+    ingest.hangEvents = true;
+    const t = Date.now();
+    await client.shutdown();
+    const took = Date.now() - t;
+    expect(took).toBeGreaterThanOrEqual(580);
+    expect(took).toBeLessThan(1_100);
+    // Released and stopped: before round 2 the stale hold only drained, the
+    // registry kept the SDK's pin and the hanging fetch kept its socket.
+    expect(_sharedStateCount()).toBe(0);
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    expect(lines1205()).toEqual([
+      "[YAVIO-1205] shutdown() deadline of 600 ms reached — 1 events not delivered. Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.",
+    ]);
+    exitHooks()[0]?.call(process, 0); // nothing left for the exit hook
+    expect(lines1205()).toHaveLength(1);
+  });
+
+  const toolCallQs = () =>
+    ingest.ofType("tool_call").map((e) => (e.input_values as { q: string }).q);
+
+  it("two createYavio() clients on one key: after the drain one re-wraps and shuts down, and the other's later calls are still delivered — the re-wrap put the drained entry back (review round 3)", async () => {
+    const a = build("yav_167_r3_two");
+    const b = build("yav_167_r3_two");
+    await callTool(a.raw, "get_price", { q: "a1" });
+    await callTool(b.raw, "get_price", { q: "b1" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    a.client.wrap(new McpServer({ name: "a2", version: "1.0" })); // a re-acquire
+    await callTool(b.raw, "get_price", { q: "b2" });
+    await a.client.shutdown(); // a releases; b still holds
+    // Before round 3: a's wrap made a new entry, a's shutdown() stopped it,
+    // and b's hold — on the drained entry — was stale: b3 was dropped.
+    expect(_sharedStateCount()).toBe(1);
+    await callTool(b.raw, "get_price", { q: "b3" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(toolCallQs()).toEqual(["a1", "b1", "b2", "b3"]));
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    // No phantom holder: a's hold was revived, not taken twice, so b's
+    // shutdown() is the last release and stops the transport.
+    await callTool(b.raw, "get_price", { q: "b4" });
+    await b.client.shutdown();
+    expect(_sharedStateCount()).toBe(0);
+    expect(toolCallQs()).toEqual(["a1", "b1", "b2", "b3", "b4"]);
+    expect(lines1205()).toEqual([]);
+  });
+
+  it("a client created after the drain shuts down, and the older client's later calls are still delivered — createYavio() put the drained entry back (review round 3)", async () => {
+    const a = build("yav_167_r3_late_client");
+    await callTool(a.raw, "get_price", { q: "a1" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    const late = build("yav_167_r3_late_client"); // createYavio() takes a hold
+    expect(_sharedStateCount()).toBe(1);
+    await late.client.shutdown(); // the late client releases; a still holds
+    // Before round 3: the late client's hold was on a new entry, its
+    // shutdown() stopped it, and a's later calls vanished without a line.
+    expect(_sharedStateCount()).toBe(1);
+    await callTool(a.raw, "get_price", { q: "a2" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(toolCallQs()).toEqual(["a1", "a2"]));
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    await a.client.shutdown(); // a's hold, revived by the send: the last release
+    expect(_sharedStateCount()).toBe(0);
+    // The second drain already emptied the registry, so the count above proves
+    // nothing about the release; a send after it does: the last release drops
+    // the drained mark, so the key is not put back and the call is not sent.
+    await callTool(a.raw, "get_price", { q: "a3" });
+    emitBeforeExit();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(toolCallQs()).toEqual(["a1", "a2"]);
+    expect(_sharedStateCount()).toBe(0);
+    expect(lines1205()).toEqual([]);
+  });
+
+  it.each(["createYavio().wrap()", "withYavio()"] as const)(
+    "100 rounds of drain → send → drain accumulate nothing — %s: at most one registry entry and one transport, one beforeExit listener, D unchanged, every event once (review round 2)",
+    async (entry) => {
+      ingest.respondAfterMs = 0; // 100 round trips
+      const raw = wrapped(entry, "yav_167_r2_rounds");
+      const sdkListeners = () => sdkBeforeExit().length;
+      const budget = processBudgetMs();
+      for (let round = 1; round <= 100; round++) {
+        await callTool(raw, "get_price", { q: `r${round}` });
+        expect(_sharedStateCount()).toBe(1);
+        expect(_trackedTransportCount()).toBe(1);
+        emitBeforeExit();
+        await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0), { interval: 2 });
+        expect(_sharedStateCount()).toBe(0);
+      }
+      expect(sdkListeners()).toBe(1);
+      expect(processBudgetMs()).toBe(budget);
+      const qsDelivered = ingest
+        .ofType("tool_call")
+        .map((e) => (e.input_values as { q: string }).q);
+      expect(qsDelivered).toEqual(Array.from({ length: 100 }, (_, i) => `r${i + 1}`));
+      const ids = ingest.events.map((e) => e.event_id);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(ingest.batches).toHaveLength(100);
+      exitHooks()[0]?.call(process, 0);
+      expect(lines1205()).toEqual([]);
+    },
+    20_000,
+  );
+});
