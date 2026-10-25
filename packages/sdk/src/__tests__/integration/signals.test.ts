@@ -2722,6 +2722,17 @@ describe("a SIGTERM after the cycle's SIGINT: a client's stop sequence (#175)", 
   const lines1205 = () => lines.filter((l) => l.includes("YAVIO-1205"));
   const exitHooks = () => process.listeners("exit").filter((l) => l.name === "yavioReportAtExit");
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  /**
+   * Resolve once `Date.now()` has reached `at`. Called with `Date.now() + 100`
+   * right after the SIGINT's emit — the cycle read its start inside it — so
+   * the SIGTERM comes at least 100 ms after that start by the clock the cycle
+   * reads. A plain `sleep(100)` can end at 99 ms by `Date.now()` (Node's
+   * timers run on libuv's millisecond clock, not the wall clock): the SIGTERM
+   * + 300 ms bound then wins and the line says 399 ms (CI, 2026-10-25).
+   */
+  const sleepUntil = async (at: number) => {
+    while (Date.now() < at) await sleep(at - Date.now());
+  };
   const CLIENT_HINT =
     "The client stops the server with SIGINT, SIGTERM and SIGKILL (Claude Code: 100 ms, then 400 ms); a higher shutdownTimeoutMs does not extend that.";
   const BOUND_LINE =
@@ -2808,7 +2819,7 @@ describe("a SIGTERM after the cycle's SIGINT: a client's stop sequence (#175)", 
       await pinned("yav_175_hang");
       t0 = Date.now();
       process.emit("SIGINT", "SIGINT");
-      await sleep(100);
+      await sleepUntil(Date.now() + 100);
       process.emit("SIGTERM", "SIGTERM");
       await vi.waitFor(() => expect(reraised).toHaveLength(1), { timeout: 2_000 });
       expect(reraised[0]?.signal).toBe("SIGTERM");
@@ -2927,7 +2938,7 @@ describe("a SIGTERM after the cycle's SIGINT: a client's stop sequence (#175)", 
         await pinned("yav_175_sigterm_app");
         t0 = Date.now();
         process.emit("SIGINT", "SIGINT"); // the SDK alone: Node's default would end the process
-        await sleep(100);
+        await sleepUntil(Date.now() + 100);
         process.emit("SIGTERM", "SIGTERM"); // the app's own signal
         expect(app).toHaveBeenCalledTimes(1);
         await vi.waitFor(() => expect(lines1205()).toHaveLength(1), { timeout: 2_000 }); // the bound came
@@ -3006,7 +3017,7 @@ describe("a SIGTERM after the cycle's SIGINT: a client's stop sequence (#175)", 
       try {
         t0 = Date.now();
         process.emit("SIGINT", "SIGINT");
-        await sleep(100);
+        await sleepUntil(Date.now() + 100);
         process.emit("SIGTERM", "SIGTERM");
         await vi.waitFor(() => expect(returnedAt).toBeDefined(), { timeout: 5_000 });
         // Before #175 the SIGTERM handed back at once and the app's
@@ -3096,7 +3107,7 @@ describe("a SIGTERM after the cycle's SIGINT: a client's stop sequence (#175)", 
       try {
         t0 = Date.now();
         process.emit("SIGINT", "SIGINT");
-        await sleep(100);
+        await sleepUntil(Date.now() + 100);
         process.emit("SIGTERM", "SIGTERM");
         // Two calls served after the SIGTERM, through one post-signal
         // transport: the first's batch in flight, its fetch bounded by
