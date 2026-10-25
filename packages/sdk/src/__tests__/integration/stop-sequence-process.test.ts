@@ -33,7 +33,7 @@ import { Client as ClientV2 } from "@modelcontextprotocol/client";
 import { StdioClientTransport as StdioClientV2 } from "@modelcontextprotocol/client/stdio";
 import { Client as ClientV1 } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport as StdioClientV1 } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type MockIngest, startMockIngest } from "./helpers.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -203,7 +203,7 @@ describe.each(STACKS)("stop sequences against a stdio server on MCP SDK %s", (st
     );
 
     it(
-      "ingest hanging: exit by SIGTERM at the child's SIGINT + 400 ms, with one line that names that bound and not the hint to raise shutdownTimeoutMs",
+      "ingest hanging: exit by SIGTERM at the bound — the child's SIGINT + 400 ms, or its SIGTERM + 300 ms when that is sooner — with one line that names that bound and not the hint to raise shutdownTimeoutMs",
       { timeout: 30_000 },
       async () => {
         ingest.hangEvents = true;
@@ -216,19 +216,27 @@ describe.each(STACKS)("stop sequences against a stdio server on MCP SDK %s", (st
         expect(exit, wire.stderr()).toMatchObject({ code: null, signal: "SIGTERM" });
         const sigintAt = wire.dispatchedAt("SIGINT") as number;
         expect(sigintAt, wire.stderr()).toBeGreaterThanOrEqual(t0);
-        // Not before the bound — before #175 the exit came at the SIGTERM,
-        // about 100 ms in — and with a tolerance for a loaded host after it.
-        expect(exit.at - sigintAt).toBeGreaterThanOrEqual(395);
-        expect(exit.at - sigintAt).toBeLessThan(1_500);
         const lines = lossLines(wire.stderr());
         expect(lines, wire.stderr()).toHaveLength(1);
-        expect(lines[0]).toMatch(
-          /^\[YAVIO-1205\] Shutdown deadline of 400 ms \(SIGTERM \d+ ms after SIGINT\) reached — 6 events not delivered \(queued, in flight or refused after the deadline\)\. /,
-        );
+        const [, bound, sigtermAfter] =
+          /^\[YAVIO-1205\] Shutdown deadline of (\d+) ms \(SIGTERM (\d+) ms after SIGINT\) reached — 6 events not delivered \(queued, in flight or refused after the deadline\)\. /.exec(
+            lines[0] ?? "",
+          ) ?? [];
+        expect(bound, lines[0]).toBeDefined();
+        // The child usually handles the SIGTERM about 100 ms after its
+        // SIGINT (400 ms); a busy one handles both late, close together,
+        // and the SIGTERM side decides (review round 1).
+        expect(Number(bound)).toBe(Math.min(400, Number(sigtermAfter) + 300));
+        // Not before the bound — before #175 the exit came at the SIGTERM,
+        // about 100 ms in — and with a tolerance for a loaded host after it.
+        expect(exit.at - sigintAt).toBeGreaterThanOrEqual(Number(bound) - 5);
+        expect(exit.at - sigintAt).toBeLessThan(1_500);
+        expect(Number(bound)).toBeGreaterThanOrEqual(300);
         expect(lines[0]?.endsWith(CLIENT_HINT)).toBe(true);
         expect(lines[0]).not.toContain("Raise shutdownTimeoutMs");
         expect(ingest.batches).toHaveLength(1);
-        expect(ingest.batches[0]?.abortedAt).toBeDefined();
+        // The mock sees the dead child's socket close a moment after its exit.
+        await vi.waitFor(() => expect(ingest.batches[0]?.abortedAt).toBeDefined());
       },
     );
 
