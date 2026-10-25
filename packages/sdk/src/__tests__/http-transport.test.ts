@@ -2110,6 +2110,23 @@ describe("HttpTransport.flushQueued() and a send another request left behind (#1
     expect(transport.pendingEvents()).toBe(1);
   });
 
+  it("a hold that runs into its holdAt leaves nothing registered when it resolves: its loop sets no watch after the flush's finally ended them (#171 review round 3)", async () => {
+    const { fetch } = slowFetch(Number.POSITIVE_INFINITY);
+    const transport = new HttpTransport({ ...base, flushIntervalMs: 3_600_000, fetch });
+    const inner = transport as unknown as {
+      slotWatchers: Set<unknown>;
+      retryWaitWatchers: Set<unknown>;
+    };
+    transport.send([fakeEvent()]);
+    let atEnd: number[] | undefined;
+    void transport.flushQueued(1_000, 1_000, 1_500).then(() => {
+      // On Workers the request ends here: whatever is registered now stays.
+      atEnd = [inner.slotWatchers.size, inner.retryWaitWatchers.size];
+    });
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(atEnd).toEqual([0, 0]);
+  });
+
   it("against a hanging ingest the hold stays bounded: one holder until its holdAt, 'deadline'; a concurrent flush returns at its own budget; once the holder is gone, the next flush takes the batch back (#171 review round 3)", async () => {
     const { fetch, calls, t0 } = slowFetch(Number.POSITIVE_INFINITY);
     const transport = new HttpTransport({ ...base, flushIntervalMs: 3_600_000, fetch });

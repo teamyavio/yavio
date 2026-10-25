@@ -1501,9 +1501,20 @@ export async function flushShared(
       outcome = "done"; // nothing above rejects; should it ever, the flush still resolves
     },
   );
-  await raceDeadline(work, total, { keepAlive: true, waiters: deadlineWaiters });
+  // The transport's flush bounds itself by the same deadline, and must end
+  // first: its watches are removed in its own finally, from its own request
+  // context. Came the two due in the same millisecond, this race (set
+  // first) won, and on Workers the request ended with a watch left behind,
+  // which a later request's flush then resolved (#171 review round 3).
+  await raceDeadline(work, total + FLUSH_RACE_MARGIN_MS, {
+    keepAlive: true,
+    waiters: deadlineWaiters,
+  });
   reportFlush(key, ms, outcome ?? "deadline");
 }
+
+/** How much later than the transport's own deadline `flushShared()`'s safety race comes due (#171 review round 3). */
+const FLUSH_RACE_MARGIN_MS = 25;
 
 /**
  * One `YAVIO-1208` line per stall per key (#171): printed by the first

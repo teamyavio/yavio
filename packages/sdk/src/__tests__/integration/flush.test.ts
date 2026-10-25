@@ -16,6 +16,7 @@ import { _resetConfigWarnings } from "../../core/config.js";
 import { createYavio } from "../../server/index.js";
 import { _resetGlobalState } from "../../server/proxy.js";
 import { _setSignalReraise, _sharedStateCount } from "../../server/shared.js";
+import { HttpTransport } from "../../transport/http.js";
 import { type MockIngest, callTool, refusedEndpoint, startMockIngest } from "./helpers.js";
 
 const ok = async () => ({ content: [{ type: "text" as const, text: "ok" }] });
@@ -605,4 +606,69 @@ describe("flushWhenSent() (#171)", () => {
       vi.unstubAllGlobals();
     }
   }, 15_000);
+
+  /**
+   * The transport's own flush must have ended — its watches removed from
+   * its own context — before what `waitUntil` holds settles: on Workers the
+   * request ends then, and a timer of the transport's still pending never
+   * fires (#171 review round 3: the outer deadline in `flushShared()` and
+   * the hold's own timer came due in the same millisecond, the outer one
+   * won, and a watch was left behind, which a later request's flush then
+   * resolved: workerd's "different request context" warning).
+   */
+  it.each([
+    ["the hold runs into waitUntilTimeoutMs", "sent"],
+    ["a plain flush() runs into flushTimeoutMs", "plain"],
+  ])(
+    "when %s, the transport's flush has ended before the promise waitUntil holds settles (#171 review round 3)",
+    async (_label, how) => {
+      const { fetch, state } = workersFetch(60_000);
+      vi.stubGlobal("fetch", fetch);
+      const original = HttpTransport.prototype.flushQueued;
+      const inner: boolean[] = [];
+      vi.spyOn(HttpTransport.prototype, "flushQueued").mockImplementation(function (
+        this: HttpTransport,
+        ...args: Parameters<HttpTransport["flushQueued"]>
+      ) {
+        const index = inner.push(false) - 1;
+        const flushing = original.apply(this, args);
+        void flushing.then(() => {
+          inner[index] = true;
+        });
+        return flushing;
+      });
+      try {
+        const analytics = createYavio({
+          apiKey: `yav_race_${how}`,
+          endpoint: "http://ingest.test/v1/events",
+          serverOnly: true,
+          waitUntilTimeoutMs: 1_500,
+        });
+        await invoke(analytics);
+        // Timers that come due in the same millisecond fire in the order they
+        // were set, as on workerd — Node's own order there differs by run.
+        vi.useFakeTimers();
+        let atSettle: boolean[] | undefined;
+        const settled = (): void => {
+          atSettle = [...inner];
+        };
+        if (how === "sent") {
+          await analytics
+            .flushWhenSent(new Response("x"), (promise) => {
+              void promise.then(settled);
+            })
+            .text();
+        } else {
+          void analytics.flush().then(settled);
+        }
+        await vi.advanceTimersByTimeAsync(2_000);
+        state.alive = false;
+        expect(atSettle).toEqual([true]);
+      } finally {
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+      }
+    },
+    15_000,
+  );
 });

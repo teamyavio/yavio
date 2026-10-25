@@ -828,12 +828,19 @@ export class HttpTransport implements Transport {
       });
       if (expired && holdAt > Date.now() && this.holdsOwnFetch(own)) {
         let held = false;
-        await raceDeadline(this.hold(own, adopt, holdAt, watches), holdAt - Date.now(), {
-          keepAlive: true,
-          onTimeout: () => {
-            held = true;
+        // `held` also stops the hold's loop: the finally below ends the
+        // watch it waits on, and it must not set another one after that,
+        // which on Workers outlived the request (#171 review round 3).
+        await raceDeadline(
+          this.hold(own, adopt, holdAt, watches, () => held),
+          holdAt - Date.now(),
+          {
+            keepAlive: true,
+            onTimeout: () => {
+              held = true;
+            },
           },
-        });
+        );
         // Its sends answered, or one failed and waits for its retry. Events
         // still queued — no time was left for their round trip, or another
         // flush's send holds the slot — make it "deadline", not "done", so
@@ -870,9 +877,10 @@ export class HttpTransport implements Transport {
     adopt: (send: Send) => void,
     holdAt: number,
     watches: Set<() => void>,
+    over: () => boolean,
   ): Promise<void> {
     for (let i = 0; i < 1_000; i++) {
-      if (this.closing || this.stopped) return;
+      if (over() || this.closing || this.stopped) return;
       const send = this.current;
       if (!send) {
         if (this.queued() === 0 || Date.now() + this.lastRoundTripMs >= holdAt) return;
