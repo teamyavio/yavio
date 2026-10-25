@@ -10,8 +10,8 @@
  * `withYavio()`) | "v2" (`serveStdio` and `createYavio().wrap()`); MODE =
  * "plain" (nothing else: the process ends when stdin does) | "stdin-end"
  * (the README's recipe for a server with handles of its own:
- * `shutdownTimeoutMs: 1_500`, and on stdin's end await
- * `analytics.shutdown()`, then exit) | "handle" (a handle of the
+ * `shutdownTimeoutMs: 1_500` — or RECIPE_SHUTDOWN_TIMEOUT_MS — and on
+ * stdin's end await `analytics.shutdown()`, then exit) | "handle" (a handle of the
  * app's outlives the EOF by 1 s, so the client's `SIGTERM` arrives while the
  * SDK's natural-exit drain runs) | "sigint" (an app `SIGINT` listener that
  * only prints `[fixture] SIGINT` to stderr: the process survives the SDK's
@@ -39,8 +39,12 @@ const options = {
   endpoint,
   serverOnly: true,
   intent,
-  // The README's stdio recipe: its shutdown() ends before the client's SIGTERM at 2 s.
-  ...(mode === "stdin-end" ? { shutdownTimeoutMs: 1_500 } : {}),
+  // The README's stdio recipe: its shutdown() ends before the client's
+  // SIGTERM at 2 s. RECIPE_SHUTDOWN_TIMEOUT_MS lowers it for a test that
+  // needs a wider margin on a loaded host.
+  ...(mode === "stdin-end"
+    ? { shutdownTimeoutMs: Number(process.env.RECIPE_SHUTDOWN_TIMEOUT_MS ?? 1_500) }
+    : {}),
 };
 const echo = async ({ q }: { q: string }) => ({ content: [{ type: "text" as const, text: q }] });
 /** Marks a tool as one the widget calls: with intent required, the SDK logs that it advertises `context` as optional there. */

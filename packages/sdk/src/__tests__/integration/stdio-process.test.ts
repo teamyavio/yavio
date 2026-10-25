@@ -159,8 +159,12 @@ describe.each(STACKS)("a stdio server on MCP SDK %s", (stack: Stack) => {
       lossLines: number[];
     }
 
-    async function session(calls: number, mode: Mode = "plain"): Promise<Run> {
-      const wire = await open({ MODE: mode });
+    async function session(
+      calls: number,
+      mode: Mode = "plain",
+      env: Record<string, string> = {},
+    ): Promise<Run> {
+      const wire = await open({ MODE: mode, ...env });
       for (let i = 0; i < calls; i++) await call(wire, "echo", { q: `q${i}` });
       const closeMs = await wire.close();
       const exit = await wire.exited;
@@ -222,16 +226,21 @@ describe.each(STACKS)("a stdio server on MCP SDK %s", (stack: Stack) => {
     );
 
     it(
-      "hanging ingest: exits on its own at the 1.5 s bound, before the client's SIGTERM, with one counted line",
+      "hanging ingest, YAVIO_SHUTDOWN_TIMEOUT_MS=1000: exits on its own at that lower bound, before the client's SIGTERM, with one counted line",
       { timeout: 30_000 },
       async () => {
+        // The bound is min(1.5 s, D): the env value lowers it to 1 s here,
+        // which leaves about 1 s to the client's SIGTERM for a loaded host
+        // (the EOF itself reached the child up to 330 ms late under load,
+        // review round 1). The 1.5 s default is pinned in process
+        // (signals.test.ts, 1 500 / 600 / 1 500).
         ingest.hangEvents = true;
-        const run = await session(5);
+        const run = await session(5, "plain", { YAVIO_SHUTDOWN_TIMEOUT_MS: "1000" });
         expectNaturalExit(run);
-        expect(run.closeMs).toBeGreaterThanOrEqual(1_450);
+        expect(run.closeMs).toBeGreaterThanOrEqual(950);
         expect(run.lossLines).toEqual([6]);
         expect(run.output).toContain(
-          "[YAVIO-1205] Exit deadline of 1500 ms reached — 6 events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the event loop empties (on stdin's end or at the end of the script; a beforeExit listener is too late).",
+          "[YAVIO-1205] Exit deadline of 1000 ms reached — 6 events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the event loop empties (on stdin's end or at the end of the script; a beforeExit listener is too late).",
         );
       },
     );
@@ -261,16 +270,19 @@ describe.each(STACKS)("a stdio server on MCP SDK %s", (stack: Stack) => {
     );
 
     it(
-      "the README recipe against a hanging ingest: shutdownTimeoutMs 1 500 ends it before the client's SIGTERM, with its shutdown() line",
+      "the README recipe against a hanging ingest, its shutdownTimeoutMs at 1 000: its shutdown() ends it before the client's SIGTERM, with its shutdown() line",
       { timeout: 30_000 },
       async () => {
+        // The recipe's shape, not its value: the README's 1 500 leaves
+        // 0.5 s to the SIGTERM, measured 1 598–1 619 ms unloaded, too
+        // close for a loaded CI host (review round 1).
         ingest.hangEvents = true;
-        const run = await session(5, "stdin-end");
+        const run = await session(5, "stdin-end", { RECIPE_SHUTDOWN_TIMEOUT_MS: "1000" });
         expectNaturalExit(run);
-        expect(run.closeMs).toBeGreaterThanOrEqual(1_450);
+        expect(run.closeMs).toBeGreaterThanOrEqual(950);
         expect(run.lossLines).toEqual([6]);
         expect(run.output).toContain(
-          "[YAVIO-1205] shutdown() deadline of 1500 ms reached — 6 events not delivered.",
+          "[YAVIO-1205] shutdown() deadline of 1000 ms reached — 6 events not delivered.",
         );
       },
     );
