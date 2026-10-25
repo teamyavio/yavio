@@ -2731,6 +2731,11 @@ describe("one proxy, many conversations", () => {
     // session id that nothing ever deletes; a conversation that stays active
     // throughout must keep its mark (a hit refreshes it) and not emit a second
     // connection event once 10,000 newer marks have been inserted.
+    // The bound is a module constant without a test hook, so the loop has to
+    // insert the real 10,000: with fewer, nothing is evicted and a mark that is
+    // never refreshed survives too. It runs in about a second alone; the
+    // explicit timeout is for a loaded machine, where the default 5 s was not
+    // enough (#180).
     const server = new McpServer({ name: "test", version: "1.0" });
     const transport = createMockTransport();
     const proxy = createProxy(server, testConfig, transport, "0.0.1");
@@ -2746,10 +2751,12 @@ describe("one proxy, many conversations", () => {
     await handler?.(extra("conv-0", "r0"));
     for (let i = 1; i <= 10_100; i += 1) {
       // A transport that reports its own close, so the server can reconnect.
+      // Plain functions, not vi.fn(): nothing asserts on them, and 30,000
+      // mocks were about half of the test's runtime (#180).
       const mcpTransport: { onclose?: () => void; [k: string]: unknown } = {
-        start: vi.fn(),
-        send: vi.fn(),
-        close: vi.fn(async () => mcpTransport.onclose?.()),
+        start: async () => {},
+        send: async () => {},
+        close: async () => mcpTransport.onclose?.(),
       };
       await proxy.connect(mcpTransport as never);
       await handler?.(keyless(`k${i}`));
@@ -2762,7 +2769,7 @@ describe("one proxy, many conversations", () => {
       (e) => e.event_type === "connection" && e.session_id === first,
     );
     expect(connections).toHaveLength(1);
-  });
+  }, 20_000);
 
   it("attributes overlapping calls from two conversations to their own sessions", async () => {
     const server = new McpServer({ name: "test", version: "1.0" });
