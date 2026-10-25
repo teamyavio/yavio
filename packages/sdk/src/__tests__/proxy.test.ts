@@ -3023,8 +3023,8 @@ describe("session keys and session_source (#144)", () => {
       ["olga", 2],
     ]);
     // One connection event, the outer call's: a nested call that joined it
-    // adds none, although its context names another client (#169 review
-    // round 2; 0.5.4 added one labelled `connection`).
+    // adds none, although its context names no client and no protocol
+    // version (#169 review round 2; 0.5.4 added one labelled `connection`).
     expect(
       sent()
         .filter((e) => e.event_type === "connection")
