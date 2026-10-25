@@ -389,7 +389,9 @@ export interface YavioClient {
    * transport takes over at once so those servers keep sending (#179,
    * 0.5.5; before, that release only drained).
    * A client that wraps servers only drains a pinned key, as in 0.5.4: on
-   * such a host, `flush()` at each request's end. A later wrap by this
+   * such a host, create it once at startup, wrap per request and `flush()`
+   * at each request's end (a client per request that never shuts down
+   * holds the key for the life of the process). A later wrap by this
    * client holds it again, or starts a fresh one. A call made while the
    * SDK's natural-exit drain runs (from an
    * app `beforeExit` listener registered after the SDK's) waits for that
