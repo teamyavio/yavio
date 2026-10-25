@@ -107,6 +107,11 @@ export function retryAfterMs(header: string | null): number | undefined {
   return Number.isNaN(at) ? undefined : Math.min(MAX_RETRY_AFTER_MS, Math.max(0, at - Date.now()));
 }
 
+/** A response header, or null — also for a response without readable headers. */
+function headerOf(response: Response, name: string): string | null {
+  return typeof response.headers?.get === "function" ? response.headers.get(name) : null;
+}
+
 /** What a 207 body says: how many of the batch ingest rejected. */
 interface PartialBody {
   rejected?: number;
@@ -614,9 +619,14 @@ export class HttpTransport implements Transport {
    * the retry:
    *
    * - A batch waiting for its retry (a 5xx, a network error, a 429 without
-   *   `Retry-After`) is retried at once, once per flush, in a send of the
-   *   flush's own; that attempt does not count towards `maxRetries`, and its
-   *   failure prints no `YAVIO-1200` line (C2). A `Retry-After` wait is
+   *   `Retry-After`) is retried at once, once per flush, when its last
+   *   attempt is at least `BASE_RETRY_DELAY_MS` old; that attempt does not
+   *   count towards `maxRetries`, and its failure prints no `YAVIO-1200`
+   *   line (C2). The age rule keeps a host that flushes after every one of
+   *   many concurrent requests at one early retry a second (#171 review
+   *   round 1: a 503 ingest and a request every 20 ms made 130 POSTs in
+   *   3 s); a host that freezes between invocations still gets one per
+   *   invocation. A `Retry-After` wait (a 429 or a 5xx that sent one) is
    *   never cut. A retry wait whose end has passed without its timer
    *   running — on Workers the timer belonged to a request that has ended
    *   — is the retry, sent now and counted. Otherwise a wait is watched
@@ -697,7 +707,7 @@ export class HttpTransport implements Transport {
             this.abandon(send, next);
             continue;
           }
-          const early = !wait.honoured && !retried;
+          const early = !wait.honoured && !retried && now - send.attemptAt >= BASE_RETRY_DELAY_MS;
           if (early && now < deadlineAt && !this.immediate) {
             retried = true;
             this.abandon(send, {
@@ -1084,14 +1094,16 @@ export class HttpTransport implements Transport {
           return this.giveUp("failed");
         }
 
-        // 5xx — retry with backoff
+        // 5xx — retry with backoff, or after the `Retry-After` it sent: what
+        // ingest's backpressure 503 carries (#171 review round 1).
         if (response.status >= 500) {
           if (attempt < this.maxRetries) {
+            const retryAfter = retryAfterMs(headerOf(response, "Retry-After"));
             const step = await this.waitForRetry(
               send,
-              BASE_RETRY_DELAY_MS * 2 ** attempt,
+              retryAfter ?? BASE_RETRY_DELAY_MS * 2 ** attempt,
               `[${ErrorCode.SDK.FLUSH_FAILED_RETRYING}] Server error ${response.status}, retry ${attempt + 1}/${this.maxRetries}`,
-              { quiet },
+              { quiet, honoured: retryAfter !== undefined },
             );
             if (step === "stop") return;
             quiet = false;

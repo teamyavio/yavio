@@ -145,7 +145,7 @@ describe("flush() (#171)", () => {
     expect(flushLines()).toHaveLength(2);
   });
 
-  it("a refusing ingest costs two fast attempts, not the deadline: a retry that would end past it is not waited for", async () => {
+  it("a refusing ingest: a flush never waits out a backoff that ends past its deadline, and retries early only once the last attempt is a second old", async () => {
     const analytics = createYavio({
       apiKey: "yav_f4",
       endpoint: await refusedEndpoint(),
@@ -155,17 +155,25 @@ describe("flush() (#171)", () => {
     const t0 = Date.now();
     await analytics.flush();
     expect(Date.now() - t0).toBeLessThan(500); // not 1 s: the 1 s backoff ends past the deadline
+    await sleep(1_100); // the backoff's own retry, refused: a 2 s backoff
     const t1 = Date.now();
-    await analytics.flush(); // one more attempt, as fast
+    await analytics.flush(); // the last attempt is fresh: nothing sent
     expect(Date.now() - t1).toBeLessThan(500);
+    await sleep(1_000);
+    const t2 = Date.now();
+    await analytics.flush(); // a second old: one early retry, refused, no line of its own
+    expect(Date.now() - t2).toBeLessThan(500);
     expect(flushLines()).toHaveLength(1);
     expect(flushLines()[0]).toMatch(
       /flush\(\) left 2 events undelivered — ingest failed a batch, which waits for its retry/,
     );
-    expect(lines().filter((l) => l.includes("YAVIO-1200"))).toHaveLength(1); // the early retries print none
-  });
+    expect(lines().filter((l) => l.includes("YAVIO-1200"))).toEqual([
+      "[YAVIO-1200] Network error, retry 1/5",
+      "[YAVIO-1200] Network error, retry 2/5",
+    ]);
+  }, 10_000);
 
-  it("a batch waiting for its retry is retried at once, once per flush(), without spending the retry budget", async () => {
+  it("a batch waiting for its retry is retried at once by a flush once its last attempt is a second old, instead of after its backoff", async () => {
     const analytics = createYavio({
       apiKey: "yav_f5",
       endpoint: ingest.endpoint,
@@ -174,15 +182,40 @@ describe("flush() (#171)", () => {
     ingest.failNext = [503, 503];
     await invoke(analytics);
     const t0 = Date.now();
-    await analytics.flush(); // 503, retried at once, 503: the retry waits 1 s, past the deadline
+    await analytics.flush(); // 503: the 1 s backoff ends past the deadline
     expect(Date.now() - t0).toBeLessThan(500);
+    expect(ingest.batches.map((b) => b.status)).toEqual([503]);
+    await sleep(2_100); // the backoff's retry at 1 s: 503, and a 2 s backoff, until 3 s
     expect(ingest.batches.map((b) => b.status)).toEqual([503, 503]);
     const t1 = Date.now();
-    await analytics.flush(); // retried now
+    await analytics.flush(); // a second old: retried now, not at 3 s
     expect(Date.now() - t1).toBeLessThan(500);
     expect(ingest.batches.map((b) => b.status)).toEqual([503, 503, 200]);
     expect(flushLines()).toHaveLength(1);
-  });
+  }, 10_000);
+
+  it("a 503 ingest and a host that flushes after every request, one every 20 ms: about one early retry a second, not one per request (#171 review round 1)", async () => {
+    ingest.failWith = 503;
+    const analytics = createYavio({
+      apiKey: "yav_storm",
+      endpoint: ingest.endpoint,
+      serverOnly: true,
+    });
+    const flushes: Promise<void>[] = [];
+    const t0 = Date.now();
+    let requests = 0;
+    while (Date.now() - t0 < 3_000) {
+      await invoke(analytics);
+      requests++;
+      flushes.push(analytics.flush());
+      await sleep(20);
+    }
+    await Promise.all(flushes);
+    expect(requests).toBeGreaterThan(50);
+    // The first attempt, the backoff's retry at 1 s, early retries at about
+    // 2 s and 3 s — on 0.5.6's first cut, one per request (130 in 3 s).
+    expect(ingest.batches.length).toBeLessThanOrEqual(8);
+  }, 20_000);
 
   it("an ingest that answers, only slower than flushTimeoutMs, and a host that flushes after every request: calls keep getting through — the head batch is not re-sent forever (#171 review round 1)", async () => {
     ingest.respondAfterMs = 600;
