@@ -187,6 +187,13 @@ interface Send {
   quiet: boolean;
   /** Set when a flush took the batch back. */
   abandoned: boolean;
+  /**
+   * Set while the flush that started it still runs, within its budget or
+   * holding it (#171 review round 3): no other flush takes it back then.
+   * Its fetch is alive — on Workers its request is — and that flush's
+   * deadline, or `holdAt`, bounds it.
+   */
+  owned?: boolean;
   /** When the fetch in flight started, absolute; undefined while none is out. */
   fetchStartedAt?: number;
   /** The controller of that fetch. */
@@ -704,12 +711,17 @@ export class HttpTransport implements Transport {
    *
    * `holdMs`, when longer than `deadlineMs`: at the deadline, a fetch this
    * flush started (or re-sent) that is still out is waited for until it
-   * answers, up to `holdMs` from the call — nothing new is started or
-   * taken back then (#171 review round 2). For `flushWhenSent()`, whose
-   * flush runs in `waitUntil` and delays no response: on Workers a fetch
-   * dies with the request whose `waitUntil` has settled, so against an
-   * ingest that stays slower than `flushTimeoutMs` every flush's fetch
-   * died and only the head batch was ever sent, again and again.
+   * answers, up to `holdMs` from the call — nothing is taken back then
+   * (#171 review round 2). For `flushWhenSent()`, whose flush runs in
+   * `waitUntil` and delays no response: on Workers a fetch dies with the
+   * request whose `waitUntil` has settled, so against an ingest that stays
+   * slower than `flushTimeoutMs` every flush's fetch died and only the
+   * head batch was ever sent, again and again. Once its batch is answered
+   * the flush sends what is queued next — the events of concurrent
+   * requests, whose flushes gave up at their own budget while it held the
+   * slot — while a round trip still fits before `holdMs` (review round 3:
+   * a burst of 3 against a 1.5 s ingest stored 1 tool call). A send a
+   * running flush started is never taken back by another (`owned`).
    */
   async flushQueued(
     deadlineMs: number,
@@ -725,6 +737,10 @@ export class HttpTransport implements Transport {
     // back — C3 is for what an earlier flush left out, and at its own
     // deadline a flush aborts nothing (C1).
     const own = new Set<Send>();
+    const adopt = (send: Send) => {
+      own.add(send);
+      send.owned = true;
+    };
     const loop = async () => {
       // A batch takes a few rounds here (started, watched, taken back),
       // bounded by the buffer cap like `drain()`.
@@ -741,15 +757,20 @@ export class HttpTransport implements Transport {
           // Started from this flush, not awaited: the next round watches it.
           this.flush().catch(() => {});
           if (!this.current) return;
-          own.add(this.current);
+          adopt(this.current);
           continue;
         }
         const now = Date.now();
-        // Only a send an earlier flush left behind is taken back, and only
-        // while this one still has time to send it; never on a post-signal
-        // transport, whose every fetch the process deadline bounds (#154).
+        // Only a send an earlier flush left behind is taken back — not one
+        // whose flush still runs (`owned`) — and only while this one still
+        // has time to send it; never on a post-signal transport, whose every
+        // fetch the process deadline bounds (#154).
         const mine =
-          !own.has(send) && now < deadlineAt && !this.immediate && !this.inflightPrecounted;
+          !own.has(send) &&
+          !send.owned &&
+          now < deadlineAt &&
+          !this.immediate &&
+          !this.inflightPrecounted;
         if (send.fetchStartedAt !== undefined) {
           const staleAt = send.fetchStartedAt + this.staleAfter(send, staleAfterMs);
           if (mine && now > staleAt) {
@@ -757,7 +778,9 @@ export class HttpTransport implements Transport {
             this.abandon(send, next);
             continue;
           }
-          await this.watch(staleAt + 1, watches);
+          // One this flush may not take back: until it settles, its retry
+          // wait begins or this flush's deadline — not round after round.
+          await this.watch(mine ? staleAt + 1 : Math.max(staleAt + 1, deadlineAt), watches);
           continue;
         }
         const wait = this.pendingDelay;
@@ -805,21 +828,26 @@ export class HttpTransport implements Transport {
       });
       if (expired && holdAt > Date.now() && this.holdsOwnFetch(own)) {
         let held = false;
-        await raceDeadline(this.hold(own, holdAt, watches), holdAt - Date.now(), {
+        await raceDeadline(this.hold(own, adopt, holdAt, watches), holdAt - Date.now(), {
           keepAlive: true,
           onTimeout: () => {
             held = true;
           },
         });
-        // Its own send answered (or failed and waits for its retry): what
-        // is still queued is newer requests' and goes with their flushes.
-        if (!held) outcome = this.pendingDelay ? "retrying" : "done";
+        // Its sends answered, or one failed and waits for its retry. Events
+        // still queued — no time was left for their round trip, or another
+        // flush's send holds the slot — make it "deadline", not "done", so
+        // the stall line is not cleared with them undelivered (round 3).
+        if (!held) {
+          outcome = this.pendingDelay ? "retrying" : this.queued() > 0 ? "deadline" : "done";
+        }
         expired = held;
       }
     } finally {
       // From this flush's own context, while it is still alive: nothing of
       // another request resolves its promises later.
       for (const end of [...watches]) end();
+      for (const send of own) send.owned = false;
     }
     return expired ? "deadline" : outcome;
   }
@@ -832,13 +860,28 @@ export class HttpTransport implements Transport {
 
   /**
    * Wait, until `holdAt`, for the fetch of the send in flight while it is
-   * one of `own`: through its answer, not into a retry wait, a newer batch
-   * or a shutdown (#171 review round 2).
+   * one of `own`: through its answer, not into a retry wait, another
+   * flush's batch or a shutdown (#171 review round 2). Once the slot is
+   * free, send what is queued next and wait for that too, while a round
+   * trip as long as the last one still fits before `holdAt` (round 3).
    */
-  private async hold(own: Set<Send>, holdAt: number, watches: Set<() => void>): Promise<void> {
+  private async hold(
+    own: Set<Send>,
+    adopt: (send: Send) => void,
+    holdAt: number,
+    watches: Set<() => void>,
+  ): Promise<void> {
     for (let i = 0; i < 1_000; i++) {
+      if (this.closing || this.stopped) return;
       const send = this.current;
-      if (!send || !own.has(send) || this.closing || this.stopped) return;
+      if (!send) {
+        if (this.queued() === 0 || Date.now() + this.lastRoundTripMs >= holdAt) return;
+        this.flush().catch(() => {});
+        if (!this.current) return;
+        adopt(this.current);
+        continue;
+      }
+      if (!own.has(send)) return;
       if (send.fetchStartedAt === undefined) {
         if (this.pendingDelay?.send === send) return;
         await this.watch(Math.min(holdAt, Date.now() + 10), watches);

@@ -2040,6 +2040,104 @@ describe("HttpTransport.flushQueued() and a send another request left behind (#1
     await draining;
   });
 
+  /** A fetch answering after `ms` (never, with Infinity) that honours abort; it records each call. */
+  const slowFetch = (ms: number) => {
+    const t0 = Date.now();
+    const calls: Array<{ at: number; n: number; aborted: boolean }> = [];
+    const fetch = vi.fn().mockImplementation(
+      (_url: string, init: RequestInit) =>
+        new Promise((resolve, reject) => {
+          const call = {
+            at: Date.now() - t0,
+            n: (JSON.parse(init.body as string) as { events: unknown[] }).events.length,
+            aborted: false,
+          };
+          calls.push(call);
+          const timer = Number.isFinite(ms)
+            ? setTimeout(() => resolve(answer(200)), ms)
+            : undefined;
+          init.signal?.addEventListener("abort", () => {
+            call.aborted = true;
+            clearTimeout(timer);
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        }),
+    );
+    return { fetch, calls, t0 };
+  };
+
+  it("a burst against an ingest slower than the budget: the holding flush's send is not taken back, the concurrent flush gives up at its own budget with 'deadline', and the holder sends its events next (#171 review round 3)", async () => {
+    const { fetch, calls, t0 } = slowFetch(1_500);
+    const transport = new HttpTransport({ ...base, flushIntervalMs: 3_600_000, fetch });
+    const ended: Record<string, [string, number]> = {};
+    const track = (name: string, flushing: Promise<string>) =>
+      void flushing.then((outcome) => {
+        ended[name] = [outcome, Date.now() - t0];
+      });
+    transport.send([fakeEvent()]); // request A's event
+    track("a", transport.flushQueued(1_000, 1_000, 10_000)); // flushWhenSent's: holds up to 10 s
+    await vi.advanceTimersByTimeAsync(200);
+    transport.send([fakeEvent()]); // request B's event
+    track("b", transport.flushQueued(1_000, 1_000, 10_000));
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(transport.deliveredEvents()).toBe(2);
+    expect(transport.pendingEvents()).toBe(0);
+    expect(calls).toEqual([
+      { at: 0, n: 1, aborted: false }, // A's, not taken back by B
+      { at: 1_500, n: 1, aborted: false }, // B's event, sent by A once its own was answered
+    ]);
+    expect(ended).toEqual({ b: ["deadline", 1_200], a: ["done", 3_000] });
+  });
+
+  it("a holder whose next round trip no longer fits before its holdAt leaves the queue for the next request and returns 'deadline', not 'done' (#171 review round 3)", async () => {
+    const { fetch, calls, t0 } = slowFetch(1_500);
+    const transport = new HttpTransport({ ...base, flushIntervalMs: 3_600_000, fetch });
+    const ended: Record<string, [string, number]> = {};
+    const track = (name: string, flushing: Promise<string>) =>
+      void flushing.then((outcome) => {
+        ended[name] = [outcome, Date.now() - t0];
+      });
+    transport.send([fakeEvent()]);
+    track("a", transport.flushQueued(1_000, 1_000, 2_500)); // holds to 2500 at most
+    await vi.advanceTimersByTimeAsync(200);
+    transport.send([fakeEvent()]);
+    track("b", transport.flushQueued(1_000, 1_000, 2_500));
+    await vi.advanceTimersByTimeAsync(3_000);
+    // A's answer at 1500; another 1.5 s round trip would end past 2500: not started.
+    expect(ended).toEqual({ b: ["deadline", 1_200], a: ["deadline", 1_500] });
+    expect(calls).toHaveLength(1);
+    expect(transport.deliveredEvents()).toBe(1);
+    expect(transport.pendingEvents()).toBe(1);
+  });
+
+  it("against a hanging ingest the hold stays bounded: one holder until its holdAt, 'deadline'; a concurrent flush returns at its own budget; once the holder is gone, the next flush takes the batch back (#171 review round 3)", async () => {
+    const { fetch, calls, t0 } = slowFetch(Number.POSITIVE_INFINITY);
+    const transport = new HttpTransport({ ...base, flushIntervalMs: 3_600_000, fetch });
+    const ended: Record<string, [string, number]> = {};
+    const track = (name: string, flushing: Promise<string>) =>
+      void flushing.then((outcome) => {
+        ended[name] = [outcome, Date.now() - t0];
+      });
+    transport.send([fakeEvent()]);
+    track("a", transport.flushQueued(1_000, 1_000, 5_000));
+    await vi.advanceTimersByTimeAsync(200);
+    transport.send([fakeEvent()]);
+    track("b", transport.flushQueued(1_000, 1_000, 5_000));
+    await vi.advanceTimersByTimeAsync(5_000); // to 5200
+    // B: no hold, its own fetch is not out; A: held to its holdAt, nothing new started meanwhile.
+    expect(ended).toEqual({ b: ["deadline", 1_200], a: ["deadline", 5_000] });
+    expect(calls).toEqual([{ at: 0, n: 1, aborted: false }]);
+    track("c", transport.flushQueued(1_000, 1_000, 5_000)); // the next request, at 5200
+    await vi.advanceTimersByTimeAsync(10);
+    // Its holder gone, the batch is taken back and re-sent first, by C, which holds it now.
+    expect(calls).toEqual([
+      { at: 0, n: 1, aborted: true },
+      { at: 5_200, n: 1, aborted: false },
+    ]);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(ended.c).toEqual(["deadline", 10_200]);
+  });
+
   it.each([
     [2, 10],
     [100, 10_000],
