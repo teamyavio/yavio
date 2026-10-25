@@ -417,11 +417,13 @@ export default {
 };
 ```
 
-Without `waitUntil` a Worker sends nothing at all, because its timers end with the request. A fetch or a retry wait that outlives its request never settles there. `flushWhenSent()` waits for the batch it sent, up to `waitUntilTimeoutMs`, so it is answered before the request ends. What still outlives a request — a hang longer than that, a batch another request's flush sent — is taken back and sent again by the next request's flush. If no later request comes before Cloudflare evicts the isolate, that batch is lost. With `ctx.waitUntil(analytics.flush())` instead of `flushWhenSent()`, the flush stops at `flushTimeoutMs`: set it above ingest's worst latency, or a slow ingest never gets an answer through. This was checked on a local workerd, not on Cloudflare's edge, with:
+Without `waitUntil` a Worker sends nothing at all, because its timers end with the request. A fetch or a retry wait that outlives its request never settles there. `flushWhenSent()` waits for the batch it sent, up to `waitUntilTimeoutMs`, so an answer within that time arrives before the request ends. What still outlives a request — a hang longer than that, a batch another request's flush sent — is taken back and sent again by the next request's flush. If no later request comes before Cloudflare evicts the isolate, that batch is lost. With `ctx.waitUntil(analytics.flush())` instead of `flushWhenSent()`, the flush stops at `flushTimeoutMs`: set it above ingest's worst latency, or a slow ingest never gets an answer through. This was checked on a local workerd, not on Cloudflare's edge, with:
 
 - concurrent requests;
 - an ingest slower than `flushTimeoutMs`, for one request and for all of them;
-- an ingest that fails twice. `createYavio()` at module scope works since 0.5.6. Before that it threw "Disallowed operation called within global scope", and every batch failed with "Illegal invocation".
+- an ingest that fails twice.
+
+`createYavio()` at module scope works since 0.5.6. Before that it threw "Disallowed operation called within global scope", and every batch failed with "Illegal invocation".
 
 **Cloud Run with request-based billing.** The CPU is throttled outside requests, so a flush after the response stalls until the next request, and what is left is drained at `SIGTERM`. Flush before the response is sent, as in the Lambda recipe: take the body, `await analytics.flush()`, then write it. Alternatively, switch the service to instance-based billing, which keeps the CPU and needs neither. With a transport that writes the response itself (the Express recipe above, the Lambda Web Adapter), the app cannot flush before the response ends. There events arrive late (on a later request, or at `SIGTERM`), but they are not lost.
 
