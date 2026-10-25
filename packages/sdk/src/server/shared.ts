@@ -435,15 +435,22 @@ let beforeExitInstalled = false;
 /** Transports a natural-exit drain stops: their loss is the exit line's, not a `shutdown()` line (#167). */
 const exitStops = new WeakSet<Transport>();
 /**
- * Keys a natural-exit drain took out of the registry and nothing has
- * re-acquired since (#167 review round 1). Nobody released them: the
- * process went on after `beforeExit` — an app's `beforeExit` listener that
+ * The entries a natural-exit drain took out of the registry, by key, until
+ * something re-acquires the key or the last hold on such an entry is
+ * released (#167 review rounds 1 and 2). Nobody released them: the process
+ * went on after `beforeExit` — an app's `beforeExit` listener that
  * schedules more work, an unref'd timer of the app's firing while the
  * drain holds the loop — and a proxy it already has still sends. Such a
- * send re-enters the registry (`slotFor`'s facade) instead of being
- * dropped, and the next `beforeExit` drains it.
+ * send puts the entry back (`slotFor`'s facade) with a fresh transport and
+ * the same generation, holders and pin, so the holds the drain took are
+ * live again: a `createYavio()` client's `shutdown()` then releases and
+ * stops it under its own deadline, as before the drain. The next
+ * `beforeExit` drains it again. Round 1 re-entered with a new entry pinned
+ * by the SDK, which left the client's hold stale: its `shutdown()` only
+ * drained, never aborted a hanging fetch, and the process stayed up for
+ * the 30 s fetch timeout.
  */
-const exitDrained = new Set<string>();
+const exitDrained = new Map<string, Entry>();
 
 /**
  * D for a signal arriving now: the smallest `shutdownTimeoutMs` set
@@ -785,8 +792,9 @@ function registryPending(): number {
  * goes on to the next invocation, so this drain runs after every one of
  * them, #171), or an unref'd timer or socket of the app's that fires while
  * the drain holds the loop.
- * A send through a proxy it already has then re-enters the registry with
- * a fresh transport (`exitDrained`), and the next `beforeExit`, which
+ * A send through a proxy it already has then puts the entry back into the
+ * registry with a fresh transport and its holds and pin (`exitDrained`),
+ * and the next `beforeExit`, which
  * Node emits once that work has settled, drains it under a deadline of
  * its own (review round 1: those events were dropped without a line).
  *
@@ -812,7 +820,7 @@ function onBeforeExit(): void {
   const stops: Promise<void>[] = [];
   for (const [key, entry] of registry) {
     registry.delete(key);
-    exitDrained.add(key); // a later send re-enters (review round 1)
+    exitDrained.set(key, entry); // a later send puts it back (review rounds 1 and 2)
     const live = entry.slot.live;
     entry.slot.live = null;
     if (!live) continue;
@@ -1189,12 +1197,17 @@ function slotFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string) 
         // as with a stopped transport) — or a signal drained it, and a
         // request still being served sends best effort through an immediate
         // transport, like a wrap after the signal would get — or a natural
-        // exit drained it and the process went on: the send re-enters the
-        // registry as a pin, as a `withYavio()` call would, so the next
-        // `beforeExit` drains it (#167 review round 1).
+        // exit drained it and the process went on: the entry the drain took
+        // goes back with a fresh transport, its holds and pin live again,
+        // and the next `beforeExit` drains it (#167 review rounds 1 and 2).
         if (!slot.live) {
+          const drained = draining ? undefined : exitDrained.get(key);
           if (draining) slot.live = newTransport(config, sdkVersion);
-          else if (exitDrained.has(key)) entryFor(config, sdkVersion, onEvict).pinned = true;
+          else if (drained) {
+            exitDrained.delete(key);
+            drained.slot.live = newTransport(config, sdkVersion);
+            registry.set(key, drained);
+          }
         }
         slot.live?.send(events);
       },
@@ -1221,8 +1234,9 @@ function entryFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string)
   slot.live = transport;
   const entry: Entry = { slot, holders: 0, pinned: false, generation: ++generations };
   registry.set(key, entry);
-  // Re-acquired: a later release that stops this transport is a release,
-  // and a send after it is dropped as before (review round 1).
+  // Re-acquired: a new entry, and the holds the drain took stay stale; a
+  // later release that stops this transport is a release, and a send after
+  // it is dropped as before (review round 1).
   exitDrained.delete(key);
   installSignalHandlers();
   installBeforeExit();
@@ -1322,6 +1336,14 @@ export async function releaseShared(config: Key, hold: SharedHold): Promise<void
   try {
     if (signalDrain) await signalDrain;
     const entry = registry.get(key);
+    const drained = exitDrained.get(key);
+    if (!entry && drained?.generation === hold.generation) {
+      // A hold a natural-exit drain took, and nothing sent since: its
+      // release counts on that entry, so after the last one a send is
+      // dropped, as after any last release (#167 review round 2).
+      drained.holders = Math.max(0, drained.holders - 1);
+      if (drained.holders === 0 && !drained.pinned) exitDrained.delete(key);
+    }
     if (!entry || entry.generation !== hold.generation) {
       await drainTransport(slots.get(key)?.live ?? null, boundedBy(ownMs));
       return;

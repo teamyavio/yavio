@@ -11,8 +11,11 @@
  * more calls 300 ms after each of the first two passes, so the process
  * goes on after the SDK's natural-exit drain twice) | "unref-tick" (3 calls; an unref'd interval of
  * the app's makes 2 more calls 250 ms apart, which fire only while the
- * SDK's drain holds the loop — the test makes ingest answer late). Progress
- * goes to stderr; nothing here writes to stdout.
+ * SDK's drain holds the loop — the test makes ingest answer late) |
+ * "reenter-shutdown" (ENTRY "create" only: 3 calls; once the first drain
+ * ran, the app makes one more call and ends with `await
+ * analytics.shutdown()`, no `process.exit()` — review round 2). Progress
+ * goes to stderr as `[cli +<ms>] …`; nothing here writes to stdout.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -24,11 +27,12 @@ const endpoint = process.env.ENDPOINT;
 if (!endpoint) throw new Error("ENDPOINT is not set");
 const scenario = process.env.SCENARIO ?? "cli";
 const options = { apiKey: "yav_cli_child", endpoint, serverOnly: true };
-const log = (line: string) => process.stderr.write(`[cli] ${line}\n`);
+const t0 = Date.now();
+const log = (line: string) => process.stderr.write(`[cli +${Date.now() - t0}ms] ${line}\n`);
 
 const raw = new McpServer({ name: "cli", version: "1.0.0" });
-const server =
-  process.env.ENTRY === "create" ? createYavio(options).wrap(raw) : withYavio(raw, options);
+const analytics = process.env.ENTRY === "create" ? createYavio(options) : undefined;
+const server = analytics ? analytics.wrap(raw) : withYavio(raw, options);
 server.registerTool("echo", { inputSchema: { q: z.string() } }, async ({ q }) => ({
   content: [{ type: "text", text: q }],
 }));
@@ -69,5 +73,15 @@ if (scenario === "unref-tick") {
     log(`tick ${n} done`);
   }, 250);
   tick.unref();
+}
+if (scenario === "reenter-shutdown") {
+  process.once("beforeExit", () => {
+    setTimeout(async () => {
+      await call("late");
+      log("late call done");
+      await analytics?.shutdown();
+      log("shutdown() resolved");
+    }, 100);
+  });
 }
 process.on("exit", (code) => log(`exit ${code}`));

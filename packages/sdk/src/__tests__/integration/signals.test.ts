@@ -2578,4 +2578,74 @@ describe("the natural exit: beforeExit with events queued (#167)", () => {
     expect(_sharedStateCount()).toBe(0); // nowhere to go, as with any stopped transport
     expect(_trackedTransportCount()).toBe(0);
   });
+
+  it("the drain took a client's hold, then the client's shutdown() releases it: a send after that is dropped, as after any last release (review round 2)", async () => {
+    const { client, raw } = build("yav_167_r2_a");
+    await callTool(raw, "get_price", { q: "first" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    await client.shutdown(); // its hold went with the drain: the release counts on the drained entry
+    await callTool(raw, "get_price", { q: "after shutdown" }); // re-entered and delivered in round 1
+    expect(_sharedStateCount()).toBe(0);
+    expect(_trackedTransportCount()).toBe(0);
+    emitBeforeExit();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(ingest.ofType("tool_call").map((e) => (e.input_values as { q: string }).q)).toEqual([
+      "first",
+    ]);
+  });
+
+  it("after a re-entry, a client's shutdown() against a hanging ingest stops the transport at its own deadline — the fetch aborted, its shutdown() line — not a drain that leaves the fetch running (review round 2)", async () => {
+    const { client, raw } = build("yav_167_r2_c", { shutdownTimeoutMs: 600 });
+    await callTool(raw, "get_price", { q: "first" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    await callTool(raw, "get_price", { q: "re-entered" });
+    expect(_sharedStateCount()).toBe(1);
+    ingest.hangEvents = true;
+    const t = Date.now();
+    await client.shutdown();
+    const took = Date.now() - t;
+    expect(took).toBeGreaterThanOrEqual(580);
+    expect(took).toBeLessThan(1_100);
+    // Released and stopped: before round 2 the stale hold only drained, the
+    // registry kept the SDK's pin and the hanging fetch kept its socket.
+    expect(_sharedStateCount()).toBe(0);
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    expect(lines1205()).toEqual([
+      "[YAVIO-1205] shutdown() deadline of 600 ms reached — 1 events not delivered. Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.",
+    ]);
+    exitHooks()[0]?.call(process, 0); // nothing left for the exit hook
+    expect(lines1205()).toHaveLength(1);
+  });
+
+  it.each(["createYavio().wrap()", "withYavio()"] as const)(
+    "100 rounds of drain → send → drain accumulate nothing — %s: at most one registry entry and one transport, one beforeExit listener, D unchanged, every event once (review round 2)",
+    async (entry) => {
+      ingest.respondAfterMs = 0; // 100 round trips
+      const raw = wrapped(entry, "yav_167_r2_rounds");
+      const sdkListeners = () => sdkBeforeExit().length;
+      const budget = processBudgetMs();
+      for (let round = 1; round <= 100; round++) {
+        await callTool(raw, "get_price", { q: `r${round}` });
+        expect(_sharedStateCount()).toBe(1);
+        expect(_trackedTransportCount()).toBe(1);
+        emitBeforeExit();
+        await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0), { interval: 2 });
+        expect(_sharedStateCount()).toBe(0);
+      }
+      expect(sdkListeners()).toBe(1);
+      expect(processBudgetMs()).toBe(budget);
+      const qsDelivered = ingest
+        .ofType("tool_call")
+        .map((e) => (e.input_values as { q: string }).q);
+      expect(qsDelivered).toEqual(Array.from({ length: 100 }, (_, i) => `r${i + 1}`));
+      const ids = ingest.events.map((e) => e.event_id);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(ingest.batches).toHaveLength(100);
+      exitHooks()[0]?.call(process, 0);
+      expect(lines1205()).toEqual([]);
+    },
+    20_000,
+  );
 });
