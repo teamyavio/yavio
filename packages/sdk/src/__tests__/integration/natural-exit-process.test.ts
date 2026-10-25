@@ -39,7 +39,13 @@ interface Run {
   stderr: string;
 }
 
-type Scenario = "cli" | "rearm" | "unref-tick" | "reenter-shutdown" | "late-client";
+type Scenario =
+  | "cli"
+  | "rearm"
+  | "unref-tick"
+  | "reenter-shutdown"
+  | "late-client"
+  | "reenter-exit";
 
 /** Run the fixture to its exit; killed with SIGKILL after `killAfterMs`, so a process that stays up fails the test instead of timing it out. */
 function runChild(
@@ -201,3 +207,46 @@ describe("a createYavio() client whose app ends with await shutdown() after a re
     },
   );
 });
+
+describe.each(ENTRIES)(
+  "an app that ends with await shutdown(); process.exit(0) after a natural-exit drain, %s (#178 follow-up)",
+  (entry) => {
+    let ingest: MockIngest;
+
+    beforeEach(async () => {
+      ingest = await startMockIngest();
+    });
+
+    afterEach(async () => {
+      await ingest.answerHung();
+      await ingest.close();
+    });
+
+    it(
+      "ingest answers the drain, then hangs: the stop's shutdown() line comes before shutdown() returns, so the exit right after it prints nothing else",
+      { timeout: 30_000 },
+      async () => {
+        ingest.respondAfterMs = () => {
+          ingest.hangEvents = true; // every later batch hangs
+          return 0;
+        };
+        const result = await runChild(ingest, entry, "reenter-exit", {
+          YAVIO_SHUTDOWN_TIMEOUT_MS: "600",
+        });
+
+        expect(result, result.stderr).toMatchObject({ code: 0, signal: null });
+        // Before: the release awaited the drain that had settled long ago, its
+        // stop armed its deadline timer after the shutdown() wait's, the wait
+        // returned first, and process.exit(0) printed "Exit deadline of 600 ms
+        // reached — 1 events not delivered (the process ended on its own …)".
+        const lines = [...result.stderr.matchAll(/\[YAVIO-1205\][^\n]*/g)].map((m) => m[0]);
+        expect(lines, result.stderr).toEqual([
+          "[YAVIO-1205] shutdown() deadline of 600 ms reached — 1 events not delivered. Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.",
+        ]);
+        expect(at(result.stderr, "exit 0") - at(result.stderr, "late call done")).toBeLessThan(
+          1_100,
+        );
+      },
+    );
+  },
+);

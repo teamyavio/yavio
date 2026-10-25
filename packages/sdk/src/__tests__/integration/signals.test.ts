@@ -3273,16 +3273,44 @@ describe("the last client's shutdown() on a key withYavio() pinned (#179)", () =
     const took = Date.now() - t;
     expect(took).toBeGreaterThanOrEqual(580);
     expect(took).toBeLessThan(1_100);
-    // Before #179 the restored pinned entry was only drained: no line. The
-    // release awaited the natural drain first, so the stop's deadline timer
-    // was armed after the wait's and its line can follow shutdown()'s
-    // return by a few milliseconds — as on #167's unpinned re-entry.
-    await vi.waitFor(() => expect(lines1205()).toHaveLength(1), { timeout: 1_000 });
+    // Before #179 the restored pinned entry was only drained: no line. And
+    // until the #178 follow-up the release awaited the long-settled natural
+    // drain, so the stop's line came a few milliseconds after shutdown()
+    // returned: the app's process.exit(0) printed the exit hook's instead.
     expect(lines1205()).toEqual([
       "[YAVIO-1205] shutdown() deadline of 600 ms reached — 1 events not delivered. Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.",
     ]);
     await vi.waitFor(() => expect(ingest.batches[1]?.abortedAt).toBeDefined(), { timeout: 1_000 });
     expect(_sharedStateCount()).toBe(1);
+    exitHooks()[0]?.call(process, 0);
+    expect(lines1205()).toHaveLength(1);
+  });
+
+  it("a shutdown() called while the natural-exit drain still runs, on an entry a send put back: it waits for the drain, its stop's deadline counts from the call, and the stop's line comes before shutdown() returns (#178 follow-up)", async () => {
+    const { analytics, raw } = setup("yav_178_running", 600);
+    // The drain's batch is answered after 300 ms; every later one hangs.
+    ingest.respondAfterMs = () => {
+      ingest.hangEvents = true; // read before this delay: every later batch hangs
+      return 300;
+    };
+    await callTool(raw, "get_price", { q: "first" });
+    emitBeforeExit(); // the natural-exit drain: 300 ms
+    await callTool(raw, "get_price", { q: "re-entered" }); // puts the entry back, holds and pin live
+    const t = Date.now();
+    await analytics.shutdown();
+    const took = Date.now() - t;
+    const atReturn = lines1205();
+    // Before: the stop got its 600 ms from the drain's end, about 900 ms
+    // after the call, so shutdown() returned at 600 ms with no line yet.
+    // Now its deadline is 600 ms from the call less ABORT_SETTLE_MS (100):
+    // the stop settles, and shutdown() returns, at about 500 ms.
+    expect(took).toBeGreaterThanOrEqual(480);
+    expect(took).toBeLessThan(1_000);
+    expect(atReturn).toEqual([
+      expect.stringMatching(
+        /^\[YAVIO-1205\] shutdown\(\) deadline of \d+ ms reached — 1 events not delivered\./,
+      ),
+    ]);
     exitHooks()[0]?.call(process, 0);
     expect(lines1205()).toHaveLength(1);
   });

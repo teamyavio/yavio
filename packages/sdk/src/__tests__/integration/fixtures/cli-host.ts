@@ -17,7 +17,11 @@
  * analytics.shutdown()`, no `process.exit()` — review round 2) |
  * "late-client" (3 calls; once the first drain ran, the app creates a
  * second `createYavio()` client on the same key, shuts it down, then calls
- * through the first proxy — review round 3). Progress
+ * through the first proxy — review round 3) | "reenter-exit" (3 calls;
+ * once the first drain ran, one more call, then `await analytics.shutdown()`
+ * and `process.exit(0)` — the README's ending; with ENTRY "with" the
+ * client is the README's shutdown-only client for the pinned key, created
+ * at startup — #178 follow-up, #187 review round 1). Progress
  * goes to stderr as `[cli +<ms>] …`; nothing here writes to stdout.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -36,6 +40,8 @@ const log = (line: string) => process.stderr.write(`[cli +${Date.now() - t0}ms] 
 const raw = new McpServer({ name: "cli", version: "1.0.0" });
 const analytics = process.env.ENTRY === "create" ? createYavio(options) : undefined;
 const server = analytics ? analytics.wrap(raw) : withYavio(raw, options);
+// The README's shutdown-only client next to withYavio(), once, at startup.
+const recipeClient = scenario === "reenter-exit" ? (analytics ?? createYavio(options)) : undefined;
 server.registerTool("echo", { inputSchema: { q: z.string() } }, async ({ q }) => ({
   content: [{ type: "text", text: q }],
 }));
@@ -84,6 +90,17 @@ if (scenario === "reenter-shutdown") {
       log("late call done");
       await analytics?.shutdown();
       log("shutdown() resolved");
+    }, 100);
+  });
+}
+if (scenario === "reenter-exit") {
+  process.once("beforeExit", () => {
+    setTimeout(async () => {
+      await call("late");
+      log("late call done");
+      await recipeClient?.shutdown();
+      log("shutdown() resolved");
+      process.exit(0);
     }, 100);
   });
 }

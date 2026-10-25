@@ -9,7 +9,7 @@ import {
 import { LruMap } from "../core/lru.js";
 import { raceDeadline, unref } from "../core/timers.js";
 import type { SessionState, YavioConfig } from "../core/types.js";
-import { type FlushOutcome, HttpTransport } from "../transport/http.js";
+import { ABORT_SETTLE_MS, type FlushOutcome, HttpTransport } from "../transport/http.js";
 import type { Transport } from "../transport/types.js";
 
 /**
@@ -286,13 +286,33 @@ let draining = false;
 /**
  * The signal handler's drain, running or done — accumulated when a signal is
  * handled again after a hand-back, and joined by a natural-exit drain
- * (#167). Awaited by every `releaseShared` and `settleShared`, so an app
- * handler's `client.shutdown()` waits for the drain the SDK's listener
- * started a tick earlier (#142) — and an app's own `beforeExit` listener
- * for the natural-exit drain. Cleared with the rest of the state only in
+ * (#167). Awaited by every `releaseShared` while it runs
+ * (`signalDrainSettled`) and by `settleShared`, so an app handler's
+ * `client.shutdown()` waits for the drain the SDK's listener started a
+ * tick earlier (#142) — and an app's own `beforeExit` listener for the
+ * natural-exit drain. Cleared with the rest of the state only in
  * tests: a process that got a signal stays on its way out.
  */
 let signalDrain: Promise<void> | null = null;
+/**
+ * Whether `signalDrain` has settled (#178 follow-up). A release awaits it
+ * only while it runs: awaiting one that settled long ago — a natural-exit
+ * drain the process went on after — still yields, and the release's stop
+ * then armed its deadline timer after the `shutdown()` wait's, so the wait
+ * returned first and the app's `process.exit(0)` printed the exit hook's
+ * `Exit deadline …` line instead of the stop's `shutdown() deadline` line.
+ */
+let signalDrainSettled = true;
+
+/** Keep `drain` in `signalDrain`, joined to what is already there, and note when it settles. */
+function noteSignalDrain(drain: Promise<void>): void {
+  const joined = signalDrain ? Promise.all([signalDrain, drain]).then(() => {}) : drain;
+  signalDrain = joined;
+  signalDrainSettled = false;
+  void joined.then(() => {
+    if (signalDrain === joined) signalDrainSettled = true;
+  });
+}
 
 function noteDraining(): void {
   logOnce("draining", () =>
@@ -944,7 +964,7 @@ function onBeforeExit(): void {
   const drained = Promise.all(stops).then(() => {
     drain.settled = true;
   });
-  signalDrain = signalDrain ? Promise.all([signalDrain, drained]).then(() => {}) : drained;
+  noteSignalDrain(drained);
 }
 
 function installBeforeExit(): void {
@@ -1543,14 +1563,33 @@ export function reviveHold(config: Key, hold: SharedHold, sdkVersion: string): b
  */
 export async function releaseShared(config: Key, hold: SharedHold): Promise<void> {
   const key = keyOf(config);
-  const ownMs = config.shutdownTimeoutMs;
+  const calledAt = Date.now();
+  let waited = false;
+  // This client's own value. After a drain the release had to wait for,
+  // what is left of it from the call, less `ABORT_SETTLE_MS` (#178
+  // follow-up): the `shutdown()` wait (`awaitBounded`) counts from the
+  // call, and a stop armed later for the same instant fired after it — the
+  // two timers run on clocks a loop turn apart, 12 ms measured in process —
+  // so the wait returned before the stop's line, and an app's
+  // `process.exit(0)` right after it printed the exit hook's line instead.
+  // The stop's deadline comes that much earlier, which is also what a stop
+  // needs after its deadline to count the loss.
+  const ownMs = () =>
+    waited
+      ? Math.max(0, config.shutdownTimeoutMs - (Date.now() - calledAt) - ABORT_SETTLE_MS)
+      : config.shutdownTimeoutMs;
   // The hold's value leaves the live set now — whether or not its transport
   // is still the key's — and counts on through `noteInProgress` until the
   // call resolves.
   dropHoldDeadline(hold);
   const done = noteInProgress(config);
   try {
-    if (signalDrain) await signalDrain;
+    // Only a drain still running: awaiting one that settled earlier yields,
+    // and the stop below then armed its deadline timer after the wait's.
+    if (signalDrain && !signalDrainSettled) {
+      waited = true;
+      await signalDrain;
+    }
     const entry = registry.get(key);
     const drained = exitDrained.get(key);
     if (!entry && drained?.generation === hold.generation) {
@@ -1561,12 +1600,12 @@ export async function releaseShared(config: Key, hold: SharedHold): Promise<void
       if (drained.holders === 0 && !drained.pinned) exitDrained.delete(key);
     }
     if (!entry || entry.generation !== hold.generation) {
-      await drainTransport(slots.get(key)?.live ?? null, boundedBy(ownMs));
+      await drainTransport(slots.get(key)?.live ?? null, boundedBy(ownMs()));
       return;
     }
     entry.holders = Math.max(0, entry.holders - 1);
     if (entry.holders > 0) {
-      await drainTransport(entry.slot.live, boundedBy(ownMs));
+      await drainTransport(entry.slot.live, boundedBy(ownMs()));
       return;
     }
     // The last client's release stops the key's transport, pinned or not
@@ -1591,7 +1630,7 @@ export async function releaseShared(config: Key, hold: SharedHold): Promise<void
     }
     if (!live) return;
     try {
-      await trackStop(live, live.shutdown(boundedBy(ownMs)));
+      await trackStop(live, live.shutdown(boundedBy(ownMs())));
     } finally {
       if (slot.stopping === live) slot.stopping = null;
     }
@@ -1758,8 +1797,7 @@ function noteInProgress(config: Key): () => void {
 export function beginProcessShutdown(): Promise<void> {
   draining = true;
   const run = shutdownAllShared();
-  const previous = signalDrain;
-  signalDrain = previous ? Promise.all([previous, run]).then(() => {}) : run;
+  noteSignalDrain(run);
   return run;
 }
 
@@ -1863,6 +1901,7 @@ export function _resetSharedState(): void {
   slots.clear();
   draining = false;
   signalDrain = null;
+  signalDrainSettled = true;
   clearTimeout(cycleTimer);
   cycleTimer = undefined;
   signalInFlight = null;
