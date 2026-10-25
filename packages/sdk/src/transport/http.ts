@@ -840,7 +840,13 @@ export class HttpTransport implements Transport {
             this.abandon(send, next);
             continue;
           }
-          const early = !wait.honoured && !retried && now - send.attemptAt >= BASE_RETRY_DELAY_MS;
+          // Not another running flush's send (`owned`): its own timer is
+          // alive and that flush watches it (#171 review round 4).
+          const early =
+            !wait.honoured &&
+            !retried &&
+            (own.has(send) || !send.owned) &&
+            now - send.attemptAt >= BASE_RETRY_DELAY_MS;
           if (early && now < deadlineAt && !this.immediate) {
             retried = true;
             this.abandon(send, {

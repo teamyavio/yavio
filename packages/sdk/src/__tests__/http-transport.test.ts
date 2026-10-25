@@ -2165,6 +2165,34 @@ describe("HttpTransport.flushQueued() and a send another request left behind (#1
     expect(atEnd).toEqual([0, 0]);
   });
 
+  it("a running flush's send in its retry wait is not retried early by another flush: its own timer retries it, counted (#171 review round 4)", async () => {
+    const statuses = [503, 503];
+    const t0 = Date.now();
+    const at: number[] = [];
+    const fetch = vi.fn().mockImplementation(() => {
+      at.push(Date.now() - t0);
+      return Promise.resolve(answer(statuses.shift() ?? 200));
+    });
+    const transport = new HttpTransport({ ...base, flushIntervalMs: 3_600_000, fetch });
+    transport.send([fakeEvent()]);
+    // A's flush, with a long budget: 503 at 0, the backoff's retry at 1 s, 503, a 2 s wait.
+    const a = transport.flushQueued(5_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(at).toEqual([0, 1_000]);
+    // B's flush at 2 s: the attempt is a second old, but A still runs and watches it.
+    transport.send([fakeEvent()]);
+    const b = transport.flushQueued(500);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(at).toEqual([0, 1_000]); // not re-sent by B
+    expect(await b).toBe("deferred");
+    await vi.advanceTimersByTimeAsync(1_000);
+    // The retry, by A's send's own timer; then B's event, which A carries.
+    expect(at).toEqual([0, 1_000, 3_000, 3_000]);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await a).toBe("done");
+    expect(transport.deliveredEvents()).toBe(2);
+  });
+
   it("against a hanging ingest the hold stays bounded: one holder until its holdAt, 'deadline'; a concurrent flush returns at its own budget, 'deferred'; once the holder is gone, the next flush takes the batch back (#171 review round 3)", async () => {
     const { fetch, calls, t0 } = slowFetch(Number.POSITIVE_INFINITY);
     const transport = new HttpTransport({ ...base, flushIntervalMs: 3_600_000, fetch });
