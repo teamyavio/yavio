@@ -266,7 +266,7 @@ export interface WithYavioOptions {
    */
   shutdownTimeoutMs?: number;
   /**
-   * How long `flush()` waits for ingest: an
+   * How long `flush()` (and `flushWhenSent()`) waits for ingest: an
    * integer number of milliseconds in [100, 2147483647] (default 1 000;
    * env `YAVIO_FLUSH_TIMEOUT_MS`; anything else logs `YAVIO-1006` once and
    * uses the default). Keep it well inside the function's own timeout
@@ -369,9 +369,10 @@ export interface YavioClient {
    * runtimes that freeze or throttle the instance once the response is
    * out: AWS Lambda, Vercel Functions, Cloudflare Workers, Cloud Run with
    * request-based billing, Netlify Functions (#171). Where the platform has
-   * a `waitUntil`, hand it the flush once the response body has been sent;
-   * where it has none, `await analytics.flush()` once the response body is
-   * complete and before the handler returns.
+   * a `waitUntil`, hand it the flush once the response body has been sent
+   * — `flushWhenSent()` does that for a web-standard response; where it
+   * has none, `await analytics.flush()` once the response body is complete
+   * and before the handler returns.
    *
    * Resolves once nothing that was queued or in flight at the call is
    * left; or once a batch failed and waits for a retry that ends past the
@@ -393,7 +394,39 @@ export interface YavioClient {
    * resolves at once.
    */
   flush(): Promise<void>;
+  /**
+   * `flush()` once a web-standard response has been sent, handed to the
+   * platform's `waitUntil` (#171): Vercel's `waitUntil` from
+   * `@vercel/functions` (or Next.js's `after`), or a context that has one
+   * — Cloudflare's `ctx`, Netlify's `context` — passed as the object, so
+   * its `waitUntil` is called as its method (workerd throws "Illegal
+   * invocation" for a `ctx.waitUntil` called on its own; a bound function
+   * works too). Returns the response to send instead of
+   * `response`: the same status, status text and headers, its body piped
+   * through, so the flush starts once the body has been read to its end
+   * — or cancelled, the client gone. A streamed MCP response (Server-Sent
+   * Events, what most clients get from MCP SDK v2's `createMcpHandler`)
+   * resolves `handler.fetch()` before the tool call has ended and queued
+   * its event, so a `waitUntil(analytics.flush())` right after `fetch()`
+   * flushes too early and every call's event waits for the next
+   * invocation. A response without a body (or one already read) is
+   * returned as it is and flushed at once. `waitUntil` is called once,
+   * synchronously, with a promise that never rejects; if it throws, the
+   * response is still returned and the flush runs without it (one line).
+   * In no-op mode it returns `response` untouched.
+   */
+  flushWhenSent(response: Response, waitUntil: WaitUntil): Response;
 }
+
+/**
+ * Where `flushWhenSent()` hands its flush (#171): a `waitUntil` function
+ * (Vercel's from `@vercel/functions`, Next.js's `after`), or a context
+ * object whose `waitUntil` method is called on it (Cloudflare Workers'
+ * `ctx`, Netlify's `context`).
+ */
+export type WaitUntil =
+  | ((promise: Promise<unknown>) => void)
+  | { waitUntil(promise: Promise<unknown>): void };
 
 /** The tracking context available via the `yavio` singleton. */
 export interface YavioContext {
