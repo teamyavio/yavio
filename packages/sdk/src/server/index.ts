@@ -334,8 +334,10 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
  * on the server before the wrap stays untracked (`createYavio().wrap()` is
  * the entry point that instruments those). Safe for a server created per
  * request on a stateless host: the transport, the session store and the
- * shutdown hooks are shared per API key and endpoint, and never stopped
- * before the process exits. Wrapping the same long-lived server again returns
+ * shutdown hooks are shared per API key and endpoint, and the key always
+ * has a live transport until a signal — the last `createYavio()` client's
+ * `shutdown()` on the same key stops the current one, and a fresh one takes
+ * over at once (#179). Wrapping the same long-lived server again returns
  * the existing proxy.
  */
 export function withYavio<T extends McpServerLike>(server: T, options?: WithYavioOptions): T {

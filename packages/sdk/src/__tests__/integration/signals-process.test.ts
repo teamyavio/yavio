@@ -868,10 +868,11 @@ describe.each(STACKS)("a failed send at the signal on MCP SDK %s (#164)", (stack
       const exit = await child.exited;
       const exitAt = Date.now();
 
-      // The pin keeps the transport, so the shutdown drains it rather than
-      // stopping it: drain()'s own deadline (shutdownTimeoutMs, 4 s) is what
-      // holds the process through the 1 s backoff. Without its keepAlive the
-      // process exits mid-backoff, nothing delivered, shutdown() unresolved.
+      // The last client's shutdown() stops the pinned key's transport (#179;
+      // a drain before), and the stop's own deadline (shutdownTimeoutMs,
+      // 4 s) is what holds the process through the 1 s backoff. Without its
+      // keepAlive the process exits mid-backoff, nothing delivered,
+      // shutdown() unresolved.
       expect(exit, child.output()).toMatchObject({ code: 0, signal: null });
       expect(child.output()).toContain("shutdown resolved");
       expect(exit.afterSignalMs).toBeGreaterThanOrEqual(1_000);

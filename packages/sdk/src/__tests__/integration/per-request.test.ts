@@ -582,18 +582,36 @@ describe("per-request servers share one process-level state", () => {
     expect(outputs).toEqual(["before", "after"]);
   });
 
-  it("never stops a transport withYavio() created: shutdown() of a client sharing it only flushes", async () => {
-    withYavio(new McpServer({ name: "w", version: "1" }), {
-      apiKey: "yav_pinned",
-      endpoint,
-      serverOnly: true,
-    });
+  it("the last client's shutdown() stops the transport withYavio() pinned, and a fresh one takes over for the pin: its later calls are still delivered (#179)", async () => {
+    // A per-request withYavio() server on the pinned key, called once.
+    const callPinned = async (marker: string) => {
+      const wrapped = withYavio(new McpServer({ name: marker, version: "1" }), {
+        apiKey: "yav_pinned",
+        endpoint,
+        serverOnly: true,
+      });
+      wrapped.registerTool("get_price", { inputSchema: { q: z.string() } }, async () => ok(marker));
+      await callOnce(wrapped);
+    };
     const client = createYavio({ apiKey: "yav_pinned", endpoint, serverOnly: true });
+    await callPinned("before");
     expect(_sharedStateCount()).toBe(1);
     const shutdowns = vi.spyOn(HttpTransport.prototype, "shutdown");
+    const starts = vi.spyOn(HttpTransport.prototype, "start");
     await client.shutdown();
-    expect(shutdowns).not.toHaveBeenCalled();
+    // Stopped, not drained (before #179: not called at all), and replaced
+    // at once: the entry, its generation and the pin stay.
+    expect(shutdowns).toHaveBeenCalledTimes(1);
+    expect(starts).toHaveBeenCalledTimes(1);
     expect(_sharedStateCount()).toBe(1);
+    await callPinned("after"); // through the fresh transport
+    await createYavio({ apiKey: "yav_pinned", endpoint, serverOnly: true }).shutdown();
+    expect(shutdowns).toHaveBeenCalledTimes(2);
+    expect(_sharedStateCount()).toBe(1);
+    const outputs = toolCallEvents().map(
+      (e) => (e.output_content as { content: Array<{ text: string }> }).content[0]?.text,
+    );
+    expect(outputs).toEqual(["before", "after"]);
   });
 
   it("wrapping the same server again returns the existing proxy: one tool_call per call, not one per wrap", async () => {

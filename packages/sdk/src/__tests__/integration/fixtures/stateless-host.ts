@@ -21,10 +21,11 @@
  * it up there with one line, #167 — nothing of the SDK's keeps the process
  * alive past that, #164) | "pinned-cli" (a CLI or cron shape: a
  * `withYavio()` pin on the same key, and SIGUSR2 closes the server and
- * awaits `analytics.shutdown()` — no signal the SDK handles; the pin keeps
- * the transport, so the shutdown drains it, and that drain must hold the
- * process until its retry delivers; prints `shutdown resolved`, #164 review
- * round 4). Prints `ready <port>` once listening
+ * awaits `analytics.shutdown()` — no signal the SDK handles; the client's
+ * shutdown stops the pinned key's transport (#179; it only drained it
+ * before), and that stop must hold the process until its retry delivers,
+ * or abort the fetch at its deadline; prints `shutdown resolved`, #164
+ * review round 4). Prints `ready <port>` once listening
  * and `started <sku>` when the `slow` tool begins, so the test can send the
  * signal with that call in flight. `slow` with `track: true` also calls
  * `yavio.track()` before it returns: a request served after the signal
