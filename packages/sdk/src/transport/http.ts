@@ -282,7 +282,7 @@ export class HttpTransport implements Transport {
   } | null = null;
   /** Called when a retry wait begins: how a flush watching the batch in flight learns that it failed (#171). */
   private readonly retryWaitWatchers = new Set<() => void>();
-  /** Called when a flush takes the send in flight's batch back: how a `drain()` waiting on it learns (#171). */
+  /** Called when the send in flight settles or a flush takes its batch back: how a flush's watch or a `drain()` learns (#171). */
   private readonly slotWatchers = new Set<() => void>();
   /** How long ingest took to answer the last fetch it answered, in ms; 0 before any answer (#171, C3). */
   private lastRoundTripMs = 0;
@@ -523,6 +523,7 @@ export class HttpTransport implements Transport {
       this.inflightSize = 0;
       this.inflightPrecounted = false;
       then?.();
+      this.notifySlot();
     });
     this.inflight = inflight;
     return inflight;
@@ -564,6 +565,19 @@ export class HttpTransport implements Transport {
     // Defensive: one send at a time, so nothing is waiting to be re-sent here.
     if (this.resend) this.buffer.unshift(...this.resend.batch);
     this.resend = { batch: send.batch, ...next };
+    this.notifySlot();
+  }
+
+  /**
+   * Tell every watch and drain waiting on the in-flight slot that it
+   * changed: its send settled or was taken back. A set the waiter leaves
+   * when it ends, not a `.then()` on the send's promise, which no waiter
+   * can take back: on Workers a send of a request still alive (its flush
+   * waiting for it, review round 2) settles after another request whose
+   * flush watched it has ended, and resolving that request's promise logs
+   * workerd's "different request context" warning.
+   */
+  private notifySlot(): void {
     for (const watcher of [...this.slotWatchers]) watcher();
   }
 
@@ -621,8 +635,7 @@ export class HttpTransport implements Transport {
 
   /** Resolves once the send in flight settles or a flush takes its batch back (#171). */
   private slotChange(waits: Set<() => void>): Promise<void> {
-    const inflight = this.inflight;
-    if (!inflight) return Promise.resolve();
+    if (!this.inflight) return Promise.resolve();
     return new Promise<void>((resolve) => {
       let ended = false;
       const end = () => {
@@ -634,7 +647,6 @@ export class HttpTransport implements Transport {
       };
       this.slotWatchers.add(end);
       waits.add(end);
-      inflight.then(end, end);
     });
   }
 
@@ -738,7 +750,7 @@ export class HttpTransport implements Transport {
             this.abandon(send, next);
             continue;
           }
-          await this.watch(send, staleAt + 1, watches);
+          await this.watch(staleAt + 1, watches);
           continue;
         }
         const wait = this.pendingDelay;
@@ -764,12 +776,12 @@ export class HttpTransport implements Transport {
             outcome = "retrying";
             return;
           }
-          await this.watch(send, wait.endsAt, watches);
+          await this.watch(wait.endsAt, watches);
           continue;
         }
         // Between two steps of its send (a wait just ended, a body read):
         // look again shortly.
-        await this.watch(send, now + 10, watches);
+        await this.watch(now + 10, watches);
       }
     };
     // keepAlive: a host awaits the flush before it returns (#164's rule
@@ -822,10 +834,10 @@ export class HttpTransport implements Transport {
       if (!send || !own.has(send) || this.closing || this.stopped) return;
       if (send.fetchStartedAt === undefined) {
         if (this.pendingDelay?.send === send) return;
-        await this.watch(send, Math.min(holdAt, Date.now() + 10), watches);
+        await this.watch(Math.min(holdAt, Date.now() + 10), watches);
         continue;
       }
-      await this.watch(send, holdAt, watches);
+      await this.watch(holdAt, watches);
     }
   }
 
@@ -845,13 +857,13 @@ export class HttpTransport implements Transport {
   }
 
   /**
-   * Resolves at `at`, or before: once `send` has settled or its next retry
-   * wait has begun (#171). The timer is the flush's own, so a send whose
-   * request has ended (Workers) cannot hold it; once ended, the watch
-   * ignores a late call from anywhere.
+   * Resolves at `at`, or before: once the send in flight has settled or
+   * been taken back, or a retry wait has begun (#171). The timer is the
+   * flush's own, so a send whose request has ended (Workers) cannot hold
+   * it; once ended, the watch ignores a late call from anywhere, and
+   * nothing it registered outlives it (`notifySlot`).
    */
-  private watch(send: Send, at: number, watches: Set<() => void>): Promise<void> {
-    const inflight = this.current === send ? this.inflight : null;
+  private watch(at: number, watches: Set<() => void>): Promise<void> {
     return new Promise<void>((resolve) => {
       let ended = false;
       const end = () => {
@@ -859,14 +871,15 @@ export class HttpTransport implements Transport {
         ended = true;
         clearTimeout(timer);
         this.retryWaitWatchers.delete(end);
+        this.slotWatchers.delete(end);
         watches.delete(end);
         resolve();
       };
       const timer = setTimeout(end, Math.max(0, at - Date.now()));
       unref(timer);
       this.retryWaitWatchers.add(end);
+      this.slotWatchers.add(end);
       watches.add(end);
-      inflight?.then(end, end);
     });
   }
 

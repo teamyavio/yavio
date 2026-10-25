@@ -2079,4 +2079,27 @@ describe("HttpTransport.flushQueued() and a send another request left behind (#1
       expect(Date.now() - started).toBeLessThanOrEqual(within);
     },
   );
+
+  it("a flush that watched another request's send leaves nothing on it once it ends: no then() on its promise, no watcher (workerd's \"different request context\" warning, #171 review round 2)", async () => {
+    const fetch = vi.fn().mockImplementation(() => new Promise(() => {})); // never answers
+    const transport = new HttpTransport({ ...base, flushIntervalMs: 3_600_000, fetch });
+    transport.send([fakeEvent()]);
+    const first = transport.flushQueued(1_000); // request 1's: it starts the send
+    await vi.advanceTimersByTimeAsync(10);
+    const inner = transport as unknown as {
+      inflight: Promise<void>;
+      slotWatchers: Set<unknown>;
+      retryWaitWatchers: Set<unknown>;
+    };
+    // Request 1 still waits for it (its flush holds); request 2's flush watches it, then ends.
+    const then = vi.spyOn(inner.inflight, "then");
+    const second = transport.flushQueued(500);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(await second).toBe("deadline");
+    expect(then).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(await first).toBe("deadline");
+    expect(inner.slotWatchers.size).toBe(0);
+    expect(inner.retryWaitWatchers.size).toBe(0);
+  });
 });
