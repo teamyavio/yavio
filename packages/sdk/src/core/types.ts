@@ -293,8 +293,10 @@ export interface WithYavioOptions {
    * delays no response, and on Cloudflare Workers a fetch dies with its
    * request once the flush ends, so an ingest slower than
    * `flushTimeoutMs` would never have its batches answered. Only the
-   * flush with a fetch of its own out waits; nothing new is sent or taken
-   * back in that time, and a fetch gives up at its 30 s timeout anyway.
+   * flush with a fetch of its own out waits, and no other flush takes that
+   * batch back meanwhile; once it is answered, the flush sends what
+   * concurrent requests queued, while a round trip still fits (review
+   * round 3). A fetch gives up at its 30 s timeout anyway.
    * Workers allow 30 s of `waitUntil` after the response; on Vercel the
    * function runs as long as it waits, so lower it there if an ingest that
    * hangs must not cost more (#171 review round 2).
