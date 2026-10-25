@@ -20,7 +20,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createYavio, yavio } from "../../server/index.js";
 import { _resetGlobalState } from "../../server/proxy.js";
-import { type MockIngest, startMockIngest } from "./helpers.js";
+import { type MockIngest, registeredTool, startMockIngest } from "./helpers.js";
 
 /** The installed MCP SDK v1 version, read from its package.json (not exported). */
 function installedV1Version(): string {
@@ -78,6 +78,21 @@ describe.skipIf(!reuseAllowed)(
           return { content: [{ type: "text" as const, text: user }] };
         },
       );
+      // A handler that invokes another wrapped tool's registered handler
+      // directly, with a context it built itself (no requestInfo).
+      server.registerTool("inner", { description: "d" }, async () => {
+        yavio.step("inner");
+        return { content: [{ type: "text" as const, text: "in" }] };
+      });
+      server.registerTool(
+        "outer",
+        { description: "d", inputSchema: { user: z.string() } },
+        async ({ user }) => {
+          yavio.identify(user);
+          await registeredTool(server, "inner")?.handler({});
+          return { content: [{ type: "text" as const, text: user }] };
+        },
+      );
       // ONE transport, connected once, for every request of the process.
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
@@ -101,12 +116,13 @@ describe.skipIf(!reuseAllowed)(
         clientName: string,
         args: { user: string; identify?: boolean },
         meta?: Record<string, unknown>,
+        tool = "whoami",
       ) => {
         const client = new Client({ name: clientName, version: "1.0" });
         await client.connect(new StreamableHTTPClientTransport(url));
         try {
           await client.callTool({
-            name: "whoami",
+            name: tool,
             arguments: args,
             ...(meta ? { _meta: meta } : {}),
           });
@@ -180,6 +196,44 @@ describe.skipIf(!reuseAllowed)(
       expect(calls[1]?.session_id).not.toBe(calls[0]?.session_id);
       // The conversation's step sequence continues; the key-less call's starts at 1.
       expect(ingest.ofType("step").map((e) => e.step_sequence)).toEqual([1, 2, 1, 2, 3, 4]);
+    });
+
+    it("a handler invoking another wrapped tool's handler with a context of its own: each caller's inner call stays in that caller's session (#169 review round 1)", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const { analytics, callAs } = await start("yav_169_nested");
+      await callAs("claude-code", { user: "u1" }, undefined, "outer");
+      await callAs("cursor", { user: "u2" }, undefined, "outer");
+      await analytics.shutdown();
+
+      const calls = ingest.ofType("tool_call");
+      expect(calls.map((e) => [e.event_name, e.user_id ?? null, e.session_source])).toEqual([
+        ["inner", "u1", "per_request"],
+        ["outer", "u1", "per_request"],
+        ["inner", "u2", "per_request"],
+        ["outer", "u2", "per_request"],
+      ]);
+      expect(calls[0]?.session_id).toBe(calls[1]?.session_id);
+      expect(calls[2]?.session_id).toBe(calls[3]?.session_id);
+      expect(calls[2]?.session_id).not.toBe(calls[0]?.session_id);
+      expect(ingest.ofType("step").map((e) => [e.session_id, e.user_id, e.step_sequence])).toEqual([
+        [calls[0]?.session_id, "u1", 1],
+        [calls[2]?.session_id, "u2", 1],
+      ]);
+      // No connection session of its own: every connection event is on its
+      // caller's session. The inner call's context has no headers, so it
+      // names no protocol version, and its per-client mark adds one more per
+      // client (once per process), as 0.5.4 added one labelled `connection`.
+      expect(
+        ingest
+          .ofType("connection")
+          .map((e) => [e.client_name, e.session_id, e.session_source, e.protocol_version ?? null]),
+      ).toEqual([
+        ["claude-code", calls[0]?.session_id, "per_request", expect.any(String)],
+        ["claude-code", calls[0]?.session_id, "per_request", null],
+        ["cursor", calls[2]?.session_id, "per_request", expect.any(String)],
+        ["cursor", calls[2]?.session_id, "per_request", null],
+      ]);
+      expect(warn.mock.calls.filter((args) => String(args[0]).includes("YAVIO-1302"))).toEqual([]);
     });
   },
 );
