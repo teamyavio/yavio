@@ -62,7 +62,7 @@ All SDK error codes are prefixed with `YAVIO-1` and logged to stderr.
 | `YAVIO-1003` | Config loaded successfully (debug) |
 | `YAVIO-1004` | `.yaviorc.json` is malformed JSON |
 | `YAVIO-1005` | Config file version is not supported |
-| `YAVIO-1006` | A capture flag has a value it does not accept (`geo`: `true`, `false`, `"country"`, `"region"`; the others: `true`, `false`) — that capture turned off. Also: `shutdownTimeoutMs` (option, `YAVIO_SHUTDOWN_TIMEOUT_MS`, `.yaviorc.json`) is not an integer in [100, 2147483647] milliseconds — the default 4 s is used. Also: `flushTimeoutMs` (option, `YAVIO_FLUSH_TIMEOUT_MS`, `.yaviorc.json`) is not such an integer — the default 1 s is used. Also: `sessionKey` is not a function (a header name passed instead of a callback, `null`) — it is ignored, as if not set |
+| `YAVIO-1006` | A capture flag has a value it does not accept (`geo`: `true`, `false`, `"country"`, `"region"`; the others: `true`, `false`) — that capture turned off. Also: `shutdownTimeoutMs` (option, `YAVIO_SHUTDOWN_TIMEOUT_MS`, `.yaviorc.json`) is not an integer in [100, 2147483647] milliseconds — the default 4 s is used. Also: `flushTimeoutMs` (option, `YAVIO_FLUSH_TIMEOUT_MS`, `.yaviorc.json`) is not such an integer — the default 1 s is used. The same for `waitUntilTimeoutMs` (option, `YAVIO_WAIT_UNTIL_TIMEOUT_MS`, `.yaviorc.json`), default 10 s. Also: `sessionKey` is not a function (a header name passed instead of a callback, `null`) — it is ignored, as if not set |
 
 ### Proxy and instrumentation (1100-1199)
 
