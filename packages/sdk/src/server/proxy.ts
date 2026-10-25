@@ -949,8 +949,10 @@ export function createProxy<T extends McpServerLike>(
    * long-lived server that reuses one stateless transport (MCP SDK v1
    * 1.24/1.25 allow it) the connection's session served every caller, and
    * the first identified user, its traits, its platform and the step
-   * sequence landed on all of them. Off HTTP (stdio, in-memory) the
-   * connection is one client: its session, `connection`.
+   * sequence landed on all of them. A key-less call made from inside one
+   * of those calls (a wrapped handler invoked directly, with any context or
+   * none) joins it. Off HTTP (stdio, in-memory) the connection is one
+   * client: its session, `connection`.
    */
   const callSessions: CallSessions = {
     transportSessionId: () =>
@@ -958,14 +960,18 @@ export function createProxy<T extends McpServerLike>(
         ? currentMcpTransport.sessionId
         : undefined,
     resolve: (key, http) => {
-      if (!key && http) {
-        // A wrapped handler invoked directly from inside such a call (the
-        // same request) joins it, as it did when both used the connection's.
+      if (!key) {
+        // A wrapped handler invoked directly from inside a key-less HTTP call
+        // joins it, whatever context it is handed (the outer call's own, one
+        // it built, none): the request store still holds the call's state.
+        // Off HTTP the store holds the connection's, never in the set.
         const enclosing = getStore()?.session;
         if (enclosing && perCallSessions.has(enclosing)) {
           activeSession = enclosing;
           return enclosing;
         }
+      }
+      if (!key && http) {
         const call: SessionState = {
           sessionId: generateSessionId(),
           userId: null,
