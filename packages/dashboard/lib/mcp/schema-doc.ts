@@ -114,6 +114,12 @@ rounds inside the request that asked for input, JSONExtractBool(metadata,
 'input_retry') = the request is the client's MCP 2026-07-28 retry (its earlier
 rounds were other requests and have no row). Such a call: input_rounds > 0 OR
 input_retry. Its latency_ms is handler time only, never the user's think time.
+A tool_call can carry the caller's W3C trace context (SDK 0.5.5+):
+JSONExtractString(metadata, 'traceparent') = 'version-traceid-parentid-flags'
+(validated lower-case hex, from the request _meta or else the HTTP header;
+'' when absent), its trace id splitByChar('-', JSONExtractString(metadata,
+'traceparent'))[2], for joining a call to the app's own traces. Never
+baggage or tracestate.
 Widget: viewport_width/height, scroll_depth_pct, click_count, visible_duration_ms,
 field_name, nav_from, nav_to, device_touch, device_pixel_ratio, load_time_ms.
 Funnel steps: event_type 'step', event_name = the step, step_sequence (Nullable
