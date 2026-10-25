@@ -80,17 +80,22 @@ Live counts, tool_call events, 2026-08-26: `_requestId` on 497/497 (an integrati
 | `baggage` | dropped, name in `_metaDroppedKeys` (was verbatim) | dropped, named (unchanged) |
 | `tracestate` | dropped, named (was verbatim) | dropped, named (unchanged) |
 | a valid `traceparent` | moved to `metadata.traceparent`, not named (was verbatim) | moved to `metadata.traceparent`, not named (was dropped and named) |
-| an invalid `traceparent` | dropped, named (was verbatim) | dropped, named (unchanged) |
-| every other key | verbatim (unchanged) | known keys only (unchanged) |
+| an invalid `traceparent`, or one under another spelling (`Traceparent`) | dropped, named (was verbatim) | dropped, named (unchanged) |
+| `Correlation-Context` (review round 1) | dropped, named (was verbatim) | dropped, named (unchanged) |
+| `uberctx-…`, `ot-baggage-…` (review round 1) | dropped, counted in `_metaDroppedUnnamed` (was verbatim) | dropped, counted (was named: the member's name) |
+| every other key, `Request-Id` included | verbatim (unchanged) | known keys only (unchanged) |
 
-- **Names only.** `_metaDroppedKeys` thus also appears under `geo: true`, for these three keys only. Only the `_meta` key's name is recorded, never a baggage member's (`user.id`, `tenant.id`): the integrator's upstream services pick those, a key can name a customer or a cohort, and Yavio has no use for them.
+All names are matched in any letter case (`Baggage`, `TraceState`); only the exact key `traceparent` is lifted.
+
+- **Other baggage carriers (review round 1).** The C# MCP SDK propagates through `DistributedContextPropagator.Current`, whose default on .NET 8 and 9 (`LegacyPropagator`) writes baggage as `Correlation-Context` (and an id as `Request-Id`); .NET 10 switched to W3C, but .NET 8 is LTS. Jaeger (`uberctx-<member>`) and OpenTracing (`ot-baggage-<member>`) carry one member per key, the member's name in the key, so those keys are counted, not named. Other vendors' keys (`sentry-trace`, `b3`, `uber-trace-id`) are ids and stay like any other key; a vendor's own baggage format under another key is not recognised.
+- **Names only.** `_metaDroppedKeys` thus also appears under `geo: true`, for the trace-context keys only. Only the `_meta` key's name is recorded, never a baggage member's (`user.id`, `tenant.id`): the integrator's upstream services pick those, a key can name a customer or a cohort, and Yavio has no use for them.
 - **Valid** (`traceparentOf()`, `core/trace-context.ts`): exactly `^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$` (55 characters), version not `ff`, neither id all zeros (W3C Trace Context §3.2.2). Not lifted: a non-string, upper case, padding or a trailing newline, a joined or repeated header, a future version with extra fields (§3.2.4).
 - **Source:** `_meta.traceparent` first, because it is what the MCP client attached and the only carrier on stdio; else the HTTP header, which any hop on the way can set. `traceparent` left `CAPTURED_HEADERS`, so `_requestInfo` keeps four headers. Stored once.
 - **Where:** `metadata.traceparent` on the `tool_call`, one object with #168's `input_rounds` / `input_retry`. Rejected: `input_values._traceparent` (missing for a tool without arguments, which has no `input_values`, and lost with the rest when `input_values` exceeds 10 KB) and a column (migration, shared schema, ingest and dashboard; worth it once a read-side feature filters or links by trace id). Query: `JSONExtractString(metadata, 'traceparent')`; the trace id is its second field.
 - **When:** under `capture.inputValues` like the client metadata, per-tool overrides included; under every `geo`; for tools without arguments too; on successful, thrown, `isError` and rejected (`validation`) calls. New under `"region"`, `"country"` and `false`: a traceparent that arrives only in `_meta` (stdio, VS Code) is now stored. It is a random id, and these settings already stored it for HTTP clients.
 - **`tracestate` is dropped under `geo: true` too:** vendor-opaque, up to 32 members of 256 characters, meaningless without that vendor's backend, and correlation needs only `traceparent`. W3C §6.2 asks vendors to keep PII out of it, which is a rule for vendors, not a guarantee to the receiver.
 - **PII stripper:** both strippers (SDK `core/pii.ts`, ingest `lib/pii-stripper.ts`) return a string that is exactly a valid traceparent unchanged. Their phone pattern (ten decimal digits and a word boundary) cut ~1.9 % of valid ones: a 32- or 16-digit hex id ends in ten decimal digits with probability (10/16)^10 each, and the W3C example `…-b7ad6b7169203331-01` is among them. A path exemption for `metadata.traceparent` alone was rejected: it would let any text under that key past the stripper. The same false positive on UUIDs and other hex ids in `input_values` and `output_content` is #182. The ingest half ships with the next ingest deploy, no migration.
-- Rows stored before keep their `baggage` and `tracestate` until the 13-month TTL.
+- Rows stored before keep `input_values._meta.baggage` / `tracestate` until the 13-month TTL; nothing is backfilled.
 
 ## Changes
 

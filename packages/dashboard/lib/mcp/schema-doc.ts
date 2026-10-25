@@ -119,7 +119,7 @@ JSONExtractString(metadata, 'traceparent') = 'version-traceid-parentid-flags'
 (validated lower-case hex, from the request _meta or else the HTTP header;
 '' when absent), its trace id splitByChar('-', JSONExtractString(metadata,
 'traceparent'))[2], for joining a call to the app's own traces. Never
-baggage or tracestate.
+baggage (also not .NET's Correlation-Context) or tracestate.
 Widget: viewport_width/height, scroll_depth_pct, click_count, visible_duration_ms,
 field_name, nav_from, nav_to, device_touch, device_pixel_ratio, load_time_ms.
 Funnel steps: event_type 'step', event_name = the step, step_sequence (Nullable
