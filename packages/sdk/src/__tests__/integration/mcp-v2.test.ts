@@ -1213,6 +1213,57 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
     });
   });
 
+  it("only v2's requestState refusal (data.reason invalid_request_state) makes a thrown InvalidParams on a retry an event", async () => {
+    // A stand-in for v2's stored tools/call handler, wrapped in place by the
+    // proxy, called with a retry context: what it throws is all that differs.
+    const server = new McpServer({ name: "throws", version: "1.0" });
+    const low = (
+      server as unknown as {
+        server: { _requestHandlers: Map<string, (req: unknown, ctx: unknown) => Promise<unknown>> };
+      }
+    ).server;
+    let toThrow: Error = new Error("unset");
+    low._requestHandlers.set("tools/call", async () => {
+      throw toThrow;
+    });
+    const transport = createMockTransport();
+    createProxy(server, makeConfig({ endpoint: ingest.endpoint }), transport, "0.5.5");
+    const call = (error: Error) => {
+      toThrow = error;
+      return low._requestHandlers
+        .get("tools/call")?.(
+          { method: "tools/call", params: { name: "deploy", arguments: { env: "prod" } } },
+          {
+            mcpReq: {
+              id: 7,
+              method: "tools/call",
+              _meta: { "openai/session": "conv-throws" },
+              inputResponses: { confirm: { action: "accept", content: { confirm: true } } },
+              requestState: () => undefined,
+            },
+          },
+        )
+        .catch((thrown: unknown) => thrown);
+    };
+
+    // Any other InvalidParams the MCP SDK throws before the handler is not
+    // the proxy's to classify, retry or not.
+    const other = Object.assign(new Error("Invalid tools/call request: x"), { code: -32602 });
+    expect(await call(other)).toBe(other);
+    expect(toolCalls(transport.sent)).toHaveLength(0);
+
+    // The control: the same path with v2's refusal sends one server event.
+    const refused = Object.assign(new Error("Invalid or expired requestState"), {
+      code: -32602,
+      data: { reason: "invalid_request_state" },
+    });
+    expect(await call(refused)).toBe(refused);
+    const events = toolCalls(transport.sent);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.error_category).toBe("server");
+    expect(events[0]?.metadata).toEqual({ input_retry: true });
+  });
+
   it("an interim result reaches the client byte-identical, also without serverOnly (direct handler call)", async () => {
     // No frame (the handler is called directly): the callback wrapper alone
     // must leave an InputRequiredResult as the handler built it.
