@@ -2847,6 +2847,71 @@ describe("SEP-414 trace context: traceparent, tracestate, baggage (#173)", () =>
     expect(JSON.stringify({ ...both, metadata: undefined })).not.toContain("0af7651916cd43dd");
   });
 
+  // Review round 2: Datadog's MCP instrumentation (dd-trace-js and
+  // dd-trace-py, on by default) writes its whole text_map injection into
+  // `_meta._dd_trace_context`: its own ids, `x-datadog-tags` (which can carry
+  // `_dd.p.usr.id`, a base64 user id), and, with the default inject styles,
+  // a traceparent, a tracestate and the baggage.
+  const DD_TRACEPARENT = "00-0000000000000000a3ce929d0e0e4736-00f067aa0ba902b7-01";
+  const DD_TRACE_CONTEXT = {
+    "x-datadog-trace-id": "11803532876627986230",
+    "x-datadog-parent-id": "67667974448284343",
+    "x-datadog-sampling-priority": "1",
+    "x-datadog-tags": "_dd.p.dm=-0,_dd.p.usr.id=dXNlci00ODIxMw==",
+    traceparent: DD_TRACEPARENT,
+    tracestate: "dd=s:1;t.usr.id:dXNlci00ODIxMw==",
+    baggage: "user.id=u-48213-dd",
+  };
+
+  it.each([true, "region", "country", false] as const)(
+    "stores none of Datadog's _dd_trace_context under geo %s, names it, and falls back to its traceparent",
+    async (geo) => {
+      const event = await call(
+        { _meta: { "openai/locale": "de-DE", _dd_trace_context: DD_TRACE_CONTEXT } },
+        { geo },
+      );
+      const serialized = JSON.stringify({ ...event, metadata: undefined });
+      for (const value of [
+        "dXNlci00ODIxMw",
+        "u-48213-dd",
+        "x-datadog",
+        "11803532876627986230",
+        "a3ce929d0e0e4736",
+      ]) {
+        expect(serialized, value).not.toContain(value);
+      }
+      const inputValues = inputValuesOf(event);
+      expect(inputValues._meta).toEqual({ "openai/locale": "de-DE" });
+      // A fixed vendor key, not data: named, although a leading `_` is not recordable.
+      expect(inputValues._metaDroppedKeys).toEqual(["_dd_trace_context"]);
+      expect(inputValues).not.toHaveProperty("_metaDroppedUnnamed");
+      expect(event.metadata).toEqual({ traceparent: DD_TRACEPARENT });
+    },
+  );
+
+  it("prefers _meta.traceparent and the header over Datadog's, and lifts no invalid one", async () => {
+    const dd = { _dd_trace_context: DD_TRACE_CONTEXT };
+    const metaFirst = await call({ _meta: { ...dd, traceparent: META_TRACEPARENT } });
+    expect(metaFirst.metadata).toEqual({ traceparent: META_TRACEPARENT });
+    const headerFirst = await call({
+      _meta: dd,
+      requestInfo: { headers: { traceparent: HEADER_TRACEPARENT } },
+    });
+    expect(headerFirst.metadata).toEqual({ traceparent: HEADER_TRACEPARENT });
+    const invalid = await call({
+      _meta: { _dd_trace_context: { ...DD_TRACE_CONTEXT, traceparent: "00-00-00-00" } },
+    });
+    expect(invalid.metadata).toBeUndefined();
+    // Any letter case is dropped and named; only the exact key is read for the fallback.
+    const upper = await call({ _meta: { _DD_TRACE_CONTEXT: DD_TRACE_CONTEXT } });
+    expect(upper.metadata).toBeUndefined();
+    expect(inputValuesOf(upper)._meta).toEqual({});
+    expect(inputValuesOf(upper)._metaDroppedKeys).toEqual(["_DD_TRACE_CONTEXT"]);
+    const notAnObject = await call({ _meta: { _dd_trace_context: DD_TRACEPARENT } });
+    expect(notAnObject.metadata).toBeUndefined();
+    expect(inputValuesOf(notAnObject)._metaDroppedKeys).toEqual(["_dd_trace_context"]);
+  });
+
   it("lifts no traceparent that is not a string", async () => {
     const event = await call({ _meta: { traceparent: { value: META_TRACEPARENT } } });
     expect(event.metadata).toBeUndefined();

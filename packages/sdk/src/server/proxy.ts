@@ -17,7 +17,7 @@ import {
 import { LruMap } from "../core/lru.js";
 import { detectPlatform } from "../core/platform.js";
 import { stable } from "../core/stable.js";
-import { traceContextKey, traceparentOf } from "../core/trace-context.js";
+import { datadogTraceparent, traceContextKey, traceparentOf } from "../core/trace-context.js";
 import type { CaptureConfig, McpServerLike, SessionState, YavioConfig } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
 import { type RequestStore, getStore, runInContext } from "./context.js";
@@ -1703,16 +1703,17 @@ function extractInputTypes(args: unknown): Record<string, unknown> | undefined {
  *   context never stays (#173, see traceContextKey): `baggage` (also as
  *   .NET's `Correlation-Context`, or one member per `uberctx-` /
  *   `ot-baggage-` key) is free-form application context (user and tenant
- *   ids, flags) and `tracestate` vendor state, neither of use here; a valid
+ *   ids, flags), `tracestate` vendor state and Datadog's
+ *   `_dd_trace_context` both and more, none of use here; a valid
  *   `traceparent` goes to `metadata.traceparent` instead (extractClientMeta).
  *   The clone is what makes this safe: the handler's own `_meta` is never
  *   touched.
  * - `_metaDroppedKeys` / `_metaDroppedUnnamed`: the names (never the values)
  *   of the `_meta` keys reduceMeta dropped, so a new key shows up, and the
  *   count of those it does not name. Under `geo: true` only the trace-context
- *   keys can be named there (`tracestate`, `baggage`, `correlation-context`
- *   in any letter case, an invalid or not lower-case `traceparent`), and only
- *   the per-key baggage carriers counted.
+ *   keys can be named there (`tracestate`, `baggage`, `correlation-context`,
+ *   `_dd_trace_context` in any letter case, an invalid or not lower-case
+ *   `traceparent`), and only the per-key baggage carriers counted.
  * - `_taskId`: MCP task id, for correlating task-based flows.
  * - `_requestInfo`: allow-listed headers and the URL sans query, see
  *   sanitizeRequestInfo.
@@ -1799,8 +1800,9 @@ function recordable(key: string): boolean {
  * - The trace-context keys never stay, under any `geo` (#173,
  *   traceContextKey). A valid `traceparent` under exactly that key is not
  *   lost — extractClientMeta sends it as `metadata.traceparent` — so it is
- *   not named either; `tracestate`, `baggage`, `correlation-context` (any
- *   letter case) and any other `traceparent` are dropped and named. Only the
+ *   not named either; `tracestate`, `baggage`, `correlation-context`,
+ *   `_dd_trace_context` (any letter case) and any other `traceparent` are
+ *   dropped and named, as sent (a fixed name, never data). Only the
  *   `_meta` key's name: never a baggage member's (`user.id`, a tenant), which
  *   the integrator's upstream chooses and which can name a customer. That is
  *   why a per-key carrier (`uberctx-user.id`, `ot-baggage-tenant`), whose
@@ -1826,9 +1828,9 @@ function reduceMeta(
     const traceKey = traceContextKey(key);
     if (traceKey === "counted") unnamed++;
     else if (traceKey === "named") {
-      if (key === "traceparent" && traceparentOf(value)) continue;
-      if (recordable(key)) named.push(key);
-      else unnamed++;
+      // A fixed name in some letter case, never data: named as sent, also
+      // `_dd_trace_context`, which recordable() would refuse.
+      if (!(key === "traceparent" && traceparentOf(value))) named.push(key);
     } else if (geo === true || KNOWN_META_KEYS.has(key)) kept[key] = value;
     else if (key === "openai/userLocation") continue;
     else if (recordable(key)) named.push(key);
@@ -1889,7 +1891,8 @@ const CAPTURED_HEADERS = new Set([
  * country and region, or drops it.)
  *
  * `traceparent` (#173): a valid W3C traceparent from `_meta` (SEP-414; the
- * only carrier on stdio), else from the HTTP header, under every `geo` — the
+ * only carrier on stdio), else from the HTTP header, else from Datadog's
+ * `_meta._dd_trace_context` (review round 2), under every `geo` — the
  * `_meta` value first, because it is what the MCP client attached to this
  * request, while a header can come from any HTTP hop in between. Sent as
  * `metadata.traceparent`, for joining a call to the integrator's own traces.
@@ -1910,7 +1913,8 @@ function extractClientMeta(
       ? header.join(", ")
       : undefined
     : header;
-  const traceparent = traceparentOf(ex.meta?.traceparent) ?? traceparentOf(headerText);
+  const traceparent =
+    traceparentOf(ex.meta?.traceparent) ?? traceparentOf(headerText) ?? datadogTraceparent(ex.meta);
   const m = ex.meta;
   if (!m) return traceparent ? { traceparent } : undefined;
 
