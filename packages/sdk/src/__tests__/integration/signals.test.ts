@@ -2849,6 +2849,26 @@ describe("a SIGTERM after the cycle's SIGINT: a client's stop sequence (#175)", 
     });
   });
 
+  it("a loop blocked through both signals handles them back to back: the bound is then 300 ms after the SIGTERM — Claude Code's SIGKILL comes 400 ms after it — not SIGINT + 400 ms (review round 1)", async () => {
+    await alone(async () => {
+      ingest.hangEvents = true;
+      await pinned("yav_175_blocked");
+      t0 = Date.now();
+      // Both pending when the loop frees up: the SIGINT handled late, the
+      // SIGTERM 5 ms after it.
+      emitAt(0, "SIGINT");
+      emitAt(5, "SIGTERM");
+      expect(reraised).toEqual([]);
+      await vi.waitFor(() => expect(reraised).toHaveLength(1), { timeout: 2_000 });
+      expect(reraised[0]?.at).toBeGreaterThanOrEqual(295);
+      expect(lines1205()).toEqual([
+        expect.stringMatching(
+          /^\[YAVIO-1205\] Shutdown deadline of 305 ms \(SIGTERM 5 ms after SIGINT\) reached — 2 events not delivered/,
+        ),
+      ]);
+    });
+  });
+
   it("a third signal hands back at once: SIGINT, SIGTERM at +100 ms, SIGINT at +150 ms", async () => {
     await alone(async () => {
       ingest.hangEvents = true;

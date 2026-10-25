@@ -377,9 +377,9 @@ interface SignalCycle {
    * Set when a `SIGTERM` came after the `SIGINT` that started the cycle and
    * before `ESCALATION_MS` had passed (#175): a client's stop sequence, not
    * a request to give up at once. `afterMs`: when the `SIGTERM` came,
-   * counted from `startedAt`; `cut`: it moved `deadlineAt` in to
-   * `startedAt + ESCALATION_MS` — false when a lower D already ended the
-   * cycle sooner.
+   * counted from `startedAt`; `cut`: it moved `deadlineAt` in to the
+   * bound (`escalate`) — false when a lower D already ended the cycle
+   * sooner.
    */
   escalation?: { afterMs: number; cut: boolean };
 }
@@ -425,22 +425,34 @@ const SAME_DELIVERY_MS = 250;
 /**
  * How long after the `SIGINT` that started a cycle a `SIGTERM` lets the
  * drain run (#175): the cycle hands the `SIGTERM` back by min(SIGINT + D,
- * SIGINT + 400 ms), at once when that has passed. Measured in Claude Code
- * 2.1.310 on macOS and Linux: it stops a stdio server with `SIGINT`, a
- * `SIGTERM` 100 ms later if the process is still alive, and a `SIGKILL`
- * 400 ms after that — without closing stdin first. Before #175 that
+ * SIGINT + 400 ms, SIGTERM + `AFTER_SIGTERM_MS`), at once when SIGINT +
+ * 400 ms has passed. Measured in Claude Code 2.1.310 on macOS and Linux:
+ * it stops a stdio server with `SIGINT`, a `SIGTERM` 100 ms later if the
+ * process is still alive, and a `SIGKILL` 400 ms after that — without
+ * closing stdin first. Before #175 that
  * `SIGTERM` handed back at once, about 100 ms in, and a batch on a fresh
  * connection to a remote ingest never left the machine; 400 ms leaves
  * about 100 ms before the `SIGKILL` for the hand-back, its line and the
- * re-raise. Counted from the `SIGINT`, never from the `SIGTERM`: the
+ * re-raise. Counted from the `SIGINT`, not from the `SIGTERM` alone: the
  * `SIGINT`'s drain is often the process's first `fetch()`, whose lazy
  * setup blocks the loop for tens of milliseconds (more under load), so the
- * `SIGTERM` is handled late and "its arrival + 300 ms" came after the
- * `SIGKILL` in 5 of 12 measured runs. Only that order: `SIGTERM` then
+ * `SIGTERM` is handled late and "its arrival + 300 ms" alone came after
+ * the `SIGKILL` in 5 of 12 measured runs. Only that order: `SIGTERM` then
  * `SIGINT` — Ctrl-C on a process a supervisor is already stopping — still
  * hands back at once.
  */
 const ESCALATION_MS = 400;
+/**
+ * The other side of the bound (#175 review round 1): never later than
+ * this long after the `SIGTERM` was handled. Claude Code's `SIGKILL` comes
+ * 400 ms after its `SIGTERM`; 300 ms leaves the same 100 ms margin. It
+ * decides only when the `SIGINT` itself was handled late — a loop blocked
+ * through both signals handles them back to back, and SIGINT + 400 ms then
+ * lands past the `SIGKILL` (measured: a v1 exit at 523 ms, the `SIGKILL` at
+ * 508 ms). A `SIGTERM` handled 100 ms or more after the `SIGINT` — the
+ * usual case — leaves SIGINT + 400 ms the earlier one.
+ */
+const AFTER_SIGTERM_MS = 300;
 /**
  * Transport stops started outside a signal and still running (the last
  * holder's release), with the transport each one stops: a signal arriving
@@ -1119,17 +1131,18 @@ let reraise: (signal: HandledSignal) => void = defaultReraise;
  * taken for the first one delivered twice (a heuristic, see
  * `SAME_DELIVERY_MS`), and a `SIGTERM` after the cycle's `SIGINT`, a
  * client's stop sequence, which the cycle hands back by SIGINT +
- * `ESCALATION_MS` (#175, `escalate`). What is handed back is the signal
- * that ARRIVED, with its own listeners deciding: re-raised only if the SDK
- * is its only listener (re-raising the first signal with the first's
- * decision killed an app that handles only the second one — SIGINT, say —
- * with the default action of the first, SIGTERM's 143, in the middle of
- * its own shutdown; #148 review round 4). Whether to re-raise is decided
- * when the signal arrives: an app listener registered with `process.once`
- * is gone by the time the drain is done, and that app must not be killed
- * in the middle of its own shutdown. Each cycle is its own object, and
- * `finishSignal(cycle)` ends only the cycle still in flight: a drain that
- * ends after its cycle was handed back cannot end a later cycle.
+ * `ESCALATION_MS` or sooner (#175, `escalate`). What is handed back is
+ * the signal that ARRIVED, with its own listeners deciding: re-raised only
+ * if the SDK is its only listener (re-raising the first signal with the
+ * first's decision killed an app that handles only the second one —
+ * SIGINT, say — with the default action of the first, SIGTERM's 143, in
+ * the middle of its own shutdown; #148 review round 4). Whether to
+ * re-raise is decided when the signal arrives: an app listener registered
+ * with `process.once` is gone by the time the drain is done, and that app
+ * must not be killed in the middle of its own shutdown. Each cycle is its
+ * own object, and `finishSignal(cycle)` ends only the cycle still in
+ * flight: a drain that ends after its cycle was handed back cannot end a
+ * later cycle.
  */
 function onSignal(signal: HandledSignal): void {
   const running = signalInFlight;
@@ -1213,12 +1226,14 @@ function armCycleTimer(cycle: SignalCycle): void {
  * 400 ms after that, so this is a client's stop sequence, not a request to
  * give up at once. The cycle goes on and hands the `SIGTERM` back — its
  * own listeners deciding, as at any hand-back — by min(SIGINT + D, SIGINT
- * + `ESCALATION_MS`). Everything the cycle bounds follows the earlier
- * deadline: `deadlineAt` moves in (never out), the cycle's timer is
- * re-armed for it, the cycle's stops are cut to it (`cutDeadline` aborts
- * their fetch there), the drain's wait and every `shutdown()` and
- * `flush()` wait end on that timer (`deadlineWaiters`), and a post-signal
- * fetch started from now on gets what is left (`lateFetchBudgetMs`). D
+ * + `ESCALATION_MS`, now + `AFTER_SIGTERM_MS`): the last decides only when
+ * the `SIGINT` was handled late too (review round 1). Everything the
+ * cycle bounds follows the earlier deadline: `deadlineAt` moves in (never
+ * out), the cycle's timer is re-armed for it, the cycle's stops are cut to
+ * it (`cutDeadline` aborts their fetch there), the drain's wait and every
+ * `shutdown()` and `flush()` wait end on that timer (`deadlineWaiters`),
+ * and a post-signal fetch started from now on gets what is left
+ * (`lateFetchBudgetMs`). D
  * itself (`budgetMs`) stays: after the hand-back a `shutdown()` still
  * waits at most D from its call. A post-signal fetch already in flight
  * keeps its budget; as the only listener the re-raise ends it anyway.
@@ -1226,8 +1241,9 @@ function armCycleTimer(cycle: SignalCycle): void {
  * as before #175.
  */
 function escalate(cycle: SignalCycle, afterMs: number): boolean {
-  const at = cycle.startedAt + ESCALATION_MS;
-  if (at <= Date.now()) return false;
+  const now = Date.now();
+  if (cycle.startedAt + ESCALATION_MS <= now) return false;
+  const at = Math.min(cycle.startedAt + ESCALATION_MS, now + AFTER_SIGTERM_MS);
   const cut = at < cycle.deadlineAt;
   cycle.escalation = { afterMs, cut };
   if (!cut) return true; // a lower D ends the cycle sooner
