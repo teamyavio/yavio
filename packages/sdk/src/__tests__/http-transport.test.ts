@@ -1590,7 +1590,7 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
 /**
  * Cloudflare Workers (#171): workerd rejects a `fetch` called with another
  * `this` ("Illegal invocation") and any timer outside a request ("Disallowed
- * operation called within global scope"). On 0.5.5 the first made every
+ * operation called within global scope"). On 0.5.4 the first made every
  * batch a network error and the second made a module-scope `createYavio()`
  * fail the Worker's load.
  */
@@ -1967,7 +1967,7 @@ describe("HttpTransport.flushQueued() (#171)", () => {
  * Cloudflare Workers' rules, emulated in Node (#171 review round 1): a fetch
  * or timer belongs to the request that started it, and once that request has
  * ended its fetch never settles — not even when aborted — and its timer
- * never fires. On 0.5.6's first cut the shared transport wedged for good: the
+ * never fires. On #171's first cut the shared transport wedged for good: the
  * one in-flight slot waited on the dead send, and every later event in the
  * isolate stayed queued.
  */

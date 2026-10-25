@@ -125,7 +125,7 @@ A stdio server ends when its client closes the server's stdin. A server that hol
 [YAVIO-1205] Exit deadline of 1500 ms reached — 6 events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the event loop empties (on stdin's end or at the end of the script; a beforeExit listener is too late).
 ```
 
-A higher `shutdownTimeoutMs` does not raise the 1.5 s: the MCP TypeScript clients send `SIGTERM` 2 s after they close stdin, and the drain ends before that. With nothing queued the exit is as fast and as quiet as without the SDK. The same holds for every process that ends on its own with events queued — a script or CLI that never calls `shutdown()`, a host that closes its server without a signal. Before 0.5.5 those events were lost without a line. `process.exit()` skips this: call it only after `await analytics.shutdown()`. On AWS Lambda's Node 20/22 runtimes the drain runs after every invocation of a callback-style handler, because the runtime client answers it from its own `beforeExit` listener. Streaming handlers there wait for an empty loop as well, so their billed invocation can last until the drain's stops settle (at most the 1.5 s bound). On Lambda, use `flush()` (since 0.5.6, see [Serverless and edge runtimes](#serverless-and-edge-runtimes)).
+A higher `shutdownTimeoutMs` does not raise the 1.5 s: the MCP TypeScript clients send `SIGTERM` 2 s after they close stdin, and the drain ends before that. With nothing queued the exit is as fast and as quiet as without the SDK. The same holds for every process that ends on its own with events queued — a script or CLI that never calls `shutdown()`, a host that closes its server without a signal. Before 0.5.5 those events were lost without a line. `process.exit()` skips this: call it only after `await analytics.shutdown()`. On AWS Lambda's Node 20/22 runtimes the drain runs after every invocation of a callback-style handler, because the runtime client answers it from its own `beforeExit` listener. Streaming handlers there wait for an empty loop as well, so their billed invocation can last until the drain's stops settle (at most the 1.5 s bound). On Lambda, use `flush()` (since 0.5.5, see [Serverless and edge runtimes](#serverless-and-edge-runtimes)).
 
 How clients end a stdio server:
 
@@ -287,7 +287,7 @@ The SDK runs on Node.js ≥ 20 hosts with the recipes below. How far each runtim
 
 The Vercel Edge runtime and Netlify Edge Functions cannot load the SDK, and Deno and Bun are untested.
 
-Most of these platforms freeze or throttle the instance once the response is out. A frozen process runs no timers, and the platform may recycle it without a signal the app could act on. Events wait for a 10 s interval, so before 0.5.6 the last invocations' events were lost without a line. Since 0.5.6:
+Most of these platforms freeze or throttle the instance once the response is out. A frozen process runs no timers, and the platform may recycle it without a signal the app could act on. Events wait for a 10 s interval, so before 0.5.5 the last invocations' events were lost without a line. Since 0.5.5:
 
 - `await analytics.flush()` sends what is queued at the call and waits until ingest has answered it. Events queued after the call are the next flush's. Use it where the platform has no `waitUntil`, once the response body is complete and before the handler returns.
 - `analytics.flushWhenSent(response, waitUntil)` returns the response to send instead and hands the platform's `waitUntil` a flush that starts once the body has been sent. Use it where the platform has a `waitUntil`: it adds nothing to the response time. Pass Vercel's `waitUntil` function, or a context that has one (Cloudflare's `ctx`, Netlify's `context`), not `ctx.waitUntil` on its own, which workerd rejects with "Illegal invocation".
@@ -424,7 +424,7 @@ Without `waitUntil` a Worker sends nothing at all, because its timers end with t
 - bursts of 3 and 5 concurrent requests against such an ingest;
 - an ingest that fails twice.
 
-`createYavio()` at module scope works since 0.5.6. Before that it threw "Disallowed operation called within global scope", and every batch failed with "Illegal invocation".
+`createYavio()` at module scope works since 0.5.5. Before that it threw "Disallowed operation called within global scope", and every batch failed with "Illegal invocation".
 
 **Cloud Run with request-based billing.** The CPU is throttled outside requests, so a flush after the response stalls until the next request, and what is left is drained at `SIGTERM`. Flush before the response is sent, as in the Lambda recipe: take the body, `await analytics.flush()`, then write it. Alternatively, switch the service to instance-based billing, which keeps the CPU and needs neither. With a transport that writes the response itself (the Express recipe above, the Lambda Web Adapter), the app cannot flush before the response ends. There events arrive late (on a later request, or at `SIGTERM`), but they are not lost.
 

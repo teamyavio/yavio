@@ -264,7 +264,7 @@ describe("flush() (#171)", () => {
     await Promise.all(flushes);
     expect(requests).toBeGreaterThan(50);
     // The first attempt, the backoff's retry at 1 s, early retries at about
-    // 2 s and 3 s — on 0.5.6's first cut, one per request (130 in 3 s).
+    // 2 s and 3 s — on #171's first cut, one per request (130 in 3 s).
     expect(ingest.batches.length).toBeLessThanOrEqual(8);
   }, 20_000);
 
