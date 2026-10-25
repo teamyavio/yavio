@@ -2761,6 +2761,60 @@ describe("SEP-414 trace context: traceparent, tracestate, baggage (#173)", () =>
     expect(inputValuesOf(two)).not.toHaveProperty("_requestInfo");
   });
 
+  // Review round 1, should-fix 1: baggage under other carriers. .NET 8/9's
+  // default propagator (LegacyPropagator, which the C# MCP SDK uses through
+  // DistributedContextPropagator.Current) writes it as `Correlation-Context`;
+  // Jaeger (`uberctx-`) and OpenTracing (`ot-baggage-`) put one baggage member
+  // per key, its name in the key. `Request-Id` is an id and is not one of them.
+  const OTHER_CARRIERS = {
+    "Correlation-Context": "user.id=u-48213,tenant.id=acme-gmbh",
+    Baggage: "user.id=u-48213",
+    TraceState: "congo=t61rcWkgMzE",
+    "uberctx-user.id": "u-48213",
+    "ot-baggage-tenant": "acme-gmbh",
+    "UberCtx-plan": "gold-tier",
+    "Request-Id": "|abc.1.",
+  };
+
+  it.each([true, "region", "country", false] as const)(
+    "stores no other baggage carrier under geo %s: names Correlation-Context, Baggage and TraceState, counts the per-key ones",
+    async (geo) => {
+      const event = await call({ _meta: { "openai/locale": "de-DE", ...OTHER_CARRIERS } }, { geo });
+      const serialized = JSON.stringify(event);
+      for (const value of ["u-48213", "acme-gmbh", "t61rcWkgMzE", "gold-tier", "user.id", "plan"]) {
+        expect(serialized, value).not.toContain(value);
+      }
+      const inputValues = inputValuesOf(event);
+      // Request-Id is kept like any unknown key under geo true, dropped and named otherwise.
+      expect(inputValues._meta).toEqual(
+        geo === true
+          ? { "openai/locale": "de-DE", "Request-Id": "|abc.1." }
+          : { "openai/locale": "de-DE" },
+      );
+      expect(inputValues._metaDroppedKeys).toEqual(
+        geo === true
+          ? ["Baggage", "Correlation-Context", "TraceState"]
+          : ["Baggage", "Correlation-Context", "Request-Id", "TraceState"],
+      );
+      // The per-key carriers' names embed the baggage member's name: counted, never named.
+      expect(inputValues._metaDroppedUnnamed).toBe(3);
+      expect(event.metadata).toBeUndefined();
+    },
+  );
+
+  it("lifts only the lower-case traceparent key; another spelling is dropped and named", async () => {
+    const other = await call({ _meta: { Traceparent: META_TRACEPARENT } });
+    expect(other.metadata).toBeUndefined();
+    expect(inputValuesOf(other)._meta).toEqual({});
+    expect(inputValuesOf(other)._metaDroppedKeys).toEqual(["Traceparent"]);
+    const both = await call({
+      _meta: { traceparent: META_TRACEPARENT, TRACEPARENT: HEADER_TRACEPARENT },
+    });
+    expect(both.metadata).toEqual({ traceparent: META_TRACEPARENT });
+    expect(inputValuesOf(both)._metaDroppedKeys).toEqual(["TRACEPARENT"]);
+    expect(JSON.stringify({ ...both, metadata: undefined })).not.toContain("0af7651916cd43dd");
+  });
+
   it("lifts no traceparent that is not a string", async () => {
     const event = await call({ _meta: { traceparent: { value: META_TRACEPARENT } } });
     expect(event.metadata).toBeUndefined();

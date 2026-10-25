@@ -5,12 +5,41 @@
  * `traceparent` header.
  */
 
-/** The SEP-414 `_meta` keys. None of them is ever kept in the `_meta` clone. */
-export const TRACE_CONTEXT_META_KEYS: ReadonlySet<string> = new Set([
+/**
+ * The trace-context `_meta` keys, lower-cased: SEP-414's three and
+ * `correlation-context`, under which .NET 8/9's default propagator
+ * (`LegacyPropagator`, used by the C# MCP SDK through
+ * `DistributedContextPropagator.Current`) writes baggage. Matched in any
+ * letter case. None of them is ever kept in the `_meta` clone; only the
+ * exact key `traceparent` is lifted (extractClientMeta).
+ */
+const TRACE_CONTEXT_META_KEYS: ReadonlySet<string> = new Set([
   "traceparent",
   "tracestate",
   "baggage",
+  "correlation-context",
 ]);
+
+/**
+ * Per-key baggage carriers, lower-cased: Jaeger's `uberctx-<member>` and
+ * OpenTracing's `ot-baggage-<member>`. One baggage member per key, its name
+ * in the key (`uberctx-user.id`).
+ */
+const BAGGAGE_KEY_PREFIXES = ["uberctx-", "ot-baggage-"] as const;
+
+/**
+ * What a `_meta` key is to the trace-context rules (review round 1 of #173):
+ * `"named"` — one of TRACE_CONTEXT_META_KEYS in any letter case, dropped
+ * and its name recorded (a valid lower-case `traceparent` is moved instead);
+ * `"counted"` — a per-key baggage carrier, dropped and only counted, because
+ * its name embeds the baggage member's; `undefined` — any other key.
+ */
+export function traceContextKey(key: string): "named" | "counted" | undefined {
+  const lower = key.toLowerCase();
+  if (TRACE_CONTEXT_META_KEYS.has(lower)) return "named";
+  if (BAGGAGE_KEY_PREFIXES.some((prefix) => lower.startsWith(prefix))) return "counted";
+  return undefined;
+}
 
 /**
  * `version "-" trace-id "-" parent-id "-" trace-flags`, lower-case hex,
