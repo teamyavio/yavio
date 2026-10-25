@@ -723,8 +723,10 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
     badOutput?: boolean;
     throwFinal?: boolean;
     urlAfterConfirm?: boolean;
-    /** Once round 1 ran, the instances serving the retry have the tool changed or removed (a fleet mid-deploy). */
-    afterRound1?: "schema_changed" | "removed";
+    /** Once round 1 ran, the instances serving the retry have the tool changed, removed or disabled (a fleet mid-deploy). */
+    afterRound1?: "schema_changed" | "removed" | "disabled";
+    /** Round 1 disables the tool as it asks: the shim's re-entry finds it disabled. */
+    disableWhileAsking?: boolean;
     /** The server's `requestState.verify` hook refuses every state (a signed state past its expiry). */
     rejectState?: boolean;
     /** Round 1's input_required result also carries `isError: true`. */
@@ -761,6 +763,12 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
         server.registerTool("deploy", { inputSchema: z.object({ env: z.number() }) }, async () =>
           ok("deployed"),
         );
+      } else if (opts.afterRound1 === "disabled") {
+        server
+          .registerTool("deploy", { inputSchema: z.object({ env: z.string() }) }, async () =>
+            ok("deployed"),
+          )
+          .disable();
       } else {
         // Another tool keeps tools/call registered: `deploy` is unknown, not the method.
         server.registerTool("status", { inputSchema: z.object({}) }, async () => ok("up"));
@@ -774,7 +782,7 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
         ? { content: [{ type: "text" as const, text }], structuredContent: { deployed: "no" } }
         : ok(text);
     };
-    server.registerTool(
+    const tool = server.registerTool(
       "deploy",
       {
         inputSchema: z.object({ env: z.string() }),
@@ -795,6 +803,7 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
         }
         if (!responses) {
           await sleep(40);
+          if (opts.disableWhileAsking) tool.disable();
           const ask = inputRequired({
             inputRequests: {
               confirm: inputRequired.elicit({
@@ -1077,21 +1086,27 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
       expect(event?.input_values).not.toHaveProperty("env");
     });
 
-    it("a retry the MCP SDK rejects before the handler (the tool changed or vanished between the rounds) is one validation event, marked as a retry", async () => {
+    it("a retry the MCP SDK rejects before the handler (the tool changed, vanished or was disabled between the rounds) is one server error, marked as a retry, as on the shim", async () => {
       const changed = await modernCall({ afterRound1: "schema_changed" });
       expect(changed.runs).toBe(1);
       expect((changed.result as { isError?: boolean }).isError).toBe(true);
       expect(changed.calls).toHaveLength(1);
-      expect(changed.calls[0]?.error_category).toBe("validation");
+      expect(changed.calls[0]?.status).toBe("error");
+      expect(changed.calls[0]?.error_category).toBe("server");
       expect(changed.calls[0]?.latency_ms).toBeUndefined();
       expect(changed.calls[0]?.metadata).toEqual({ input_retry: true });
-      _resetGlobalState();
-      ingest.events.length = 0;
-      const removed = await modernCall({ afterRound1: "removed" });
-      expect(removed.runs).toBe(1);
-      expect(removed.calls).toHaveLength(1);
-      expect(removed.calls[0]?.error_category).toBe("validation");
-      expect(removed.calls[0]?.metadata).toEqual({ input_retry: true });
+      for (const afterRound1 of ["removed", "disabled"] as const) {
+        _resetGlobalState();
+        ingest.events.length = 0;
+        const call = await modernCall({ afterRound1 });
+        expect(call.runs).toBe(1);
+        expect(call.calls).toHaveLength(1);
+        expect(call.calls[0]?.error_category).toBe("server");
+        expect(call.calls[0]?.error_message).toBe(
+          afterRound1 === "removed" ? "Tool deploy not found" : "Tool deploy disabled",
+        );
+        expect(call.calls[0]?.metadata).toEqual({ input_retry: true });
+      }
     });
 
     it("a 2025-era client against a per-request host: the shim has no channel, one server error as before", async () => {
@@ -1170,6 +1185,15 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
       expect(event?.metadata).toEqual({ input_rounds: 1 });
       // Round 1 ran (40 ms) in this request.
       expect(event?.latency_ms).toBeGreaterThanOrEqual(35);
+    });
+
+    it("the tool disabled while the shim waits for the answer is one server error, as on 2026-07-28", async () => {
+      const call = await shimCall({ disableWhileAsking: true });
+      expect(call.runs).toBe(1);
+      expect(call.calls).toHaveLength(1);
+      expect(call.calls[0]?.status).toBe("error");
+      expect(call.calls[0]?.error_category).toBe("server");
+      expect(call.calls[0]?.metadata).toEqual({ input_rounds: 1 });
     });
 
     it("a URL elicitation after an interim round leaves no event: the client retries the call after the URL flow", async () => {

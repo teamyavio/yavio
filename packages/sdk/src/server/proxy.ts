@@ -799,10 +799,6 @@ export function createProxy<T extends McpServerLike>(
     args: unknown,
     extra: unknown,
     result: unknown,
-    // `server` only for a 2026-07-28 retry whose requestState v2 refused
-    // (see the status wrapper); every other pre-handler failure is
-    // `validation`.
-    rejectionCategory: "validation" | "server" = "validation",
   ): ToolCallEvent | null => {
     const { toolName, context } = frame;
     // The interim result of a 2026-07-28 multi-round-trip call: the client
@@ -836,6 +832,15 @@ export function createProxy<T extends McpServerLike>(
     // tool's capture flags — resolved by name even when the tool is not (or
     // no longer) registered, so an override still holds for a removed tool a
     // client calls from a cached schema.
+    //
+    // A 2026-07-28 retry is `server` instead (#168): the call's handler ran in
+    // an earlier request and asked for input, and the round trip failed — the
+    // tool was disabled, removed or changed its schema between the rounds (a
+    // fleet mid-deploy), or v2 refused the retry's requestState. v2's
+    // 2025-era shim gives the same failures after an interim round in one
+    // request, and they are `server` there (the interim event, corrected), so
+    // both eras agree. The event is built as for any pre-handler failure.
+    const category = frame.inputRetry ? "server" : "validation";
     const capture = resolveToolCapture(config, toolName);
     // The VALUES of a rejected call are exactly what the schema refused:
     // whatever the model put into an enum field, free text from the
@@ -861,7 +866,7 @@ export function createProxy<T extends McpServerLike>(
       {
         toolName,
         status: "error",
-        errorCategory: rejectionCategory,
+        errorCategory: category,
         // Result-derived text, so under outputValues; McpServer's text can
         // echo the rejected value (Zod 3), so as-is only with the values.
         errorMessage: !capture.outputValues
@@ -879,9 +884,8 @@ export function createProxy<T extends McpServerLike>(
         intentSignals: getCapturedIntent() ?? undefined,
         intentContext: intentContextFor(config),
         clientMeta: capture.inputValues ? extractClientMeta(extra, capture.geo) : undefined,
-        // A 2026-07-28 retry the MCP SDK rejects before the handler — the tool
-        // was disabled, removed or changed its schema between the rounds (a
-        // fleet mid-deploy) — is still the client's retry (#168).
+        // A 2026-07-28 retry the MCP SDK rejects before the handler is still
+        // the client's retry (#168).
         metadata: inputMetadata(0, frame.inputRetry),
       },
     );
@@ -961,7 +965,9 @@ export function createProxy<T extends McpServerLike>(
       // comes after an interim round in the same request (the branch above).
       // Built like a pre-handler failure — no latency (nothing ran in this
       // request), and the retry's arguments, which nothing validated in this
-      // request, stored like a rejected call's.
+      // request, stored like a rejected call's. finalizeCallEvent gives every
+      // pre-handler failure of a retry that category, an unknown or disabled
+      // tool between the rounds included (review round 2).
       try {
         if (frame.event) {
           transport.send([
@@ -987,7 +993,7 @@ export function createProxy<T extends McpServerLike>(
             isError: true,
             content: [{ type: "text", text: INVALID_REQUEST_STATE_MESSAGE }],
           };
-          const event = finalizeCallEvent(frame, params?.arguments, extra, rejection, "server");
+          const event = finalizeCallEvent(frame, params?.arguments, extra, rejection);
           if (event) transport.send([event]);
         }
       } catch {
