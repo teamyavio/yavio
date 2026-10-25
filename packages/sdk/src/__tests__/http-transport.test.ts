@@ -2039,4 +2039,44 @@ describe("HttpTransport.flushQueued() and a send another request left behind (#1
     expect(drainedAt).toBeLessThan(2_200);
     await draining;
   });
+
+  it.each([
+    ["one 25 s answer (a slow ingest)", 25_000, 5_000],
+    ["one answer that spanned a 10-minute freeze", 600_000, 2_000],
+  ])(
+    "after %s, the next hung fetch is taken back within a few budgets, not at the 30 s fetch timeout (#171 review round 2)",
+    async (_label, firstMs, within) => {
+      const pending: Array<{ resolve: (r: unknown) => void; aborted: boolean }> = [];
+      const fetch = vi.fn().mockImplementation(
+        (_url: string, init: RequestInit) =>
+          new Promise((resolve, reject) => {
+            const call = { resolve, aborted: false };
+            pending.push(call);
+            init.signal?.addEventListener("abort", () => {
+              call.aborted = true;
+              reject(new DOMException("aborted", "AbortError"));
+            });
+          }),
+      );
+      const transport = new HttpTransport({ ...base, flushIntervalMs: 3_600_000, fetch });
+      transport.send([fakeEvent()]);
+      void transport.flushQueued(1_000);
+      // A freeze moves the clock and runs no timer; a slow answer just takes long.
+      if (firstMs > 30_000) vi.setSystemTime(Date.now() + firstMs);
+      else await vi.advanceTimersByTimeAsync(firstMs - 1);
+      pending[0]?.resolve(answer(200));
+      await vi.advanceTimersByTimeAsync(1);
+      expect(transport.deliveredEvents()).toBe(1);
+      transport.send([fakeEvent()]); // its fetch hangs
+      const started = Date.now();
+      void transport.flushQueued(1_000); // starts it: its own, never taken back by it
+      await vi.advanceTimersByTimeAsync(1_000);
+      while (!pending[1]?.aborted && Date.now() - started < 40_000) {
+        void transport.flushQueued(1_000); // a request every second, each flushes
+        await vi.advanceTimersByTimeAsync(1_000);
+      }
+      expect(pending[1]?.aborted).toBe(true);
+      expect(Date.now() - started).toBeLessThanOrEqual(within);
+    },
+  );
 });

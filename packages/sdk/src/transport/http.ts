@@ -833,12 +833,15 @@ export class HttpTransport implements Transport {
    * How long a fetch of `send` may be out before a flush takes its batch
    * back (C3): the flush's budget, doubled for every time the batch was
    * taken back before, and at least twice the last round trip ingest
-   * answered in — an ingest that answers in 1.5 s keeps its batches —
-   * capped at the fetch timeout.
+   * answered in — an ingest that answers in 1.5 s keeps its batches — but
+   * that floor at most four budgets: one slow answer must not keep the next
+   * hung fetch for the 30 s fetch timeout (#171 review round 2: after one
+   * 25 s answer, 28 flushes in a row delivered nothing). Capped at the
+   * fetch timeout.
    */
   private staleAfter(send: Send, staleAfterMs: number): number {
-    const bound = Math.max(staleAfterMs * 2 ** send.staleAborts, 2 * this.lastRoundTripMs);
-    return Math.min(this.fetchTimeoutMs, bound);
+    const floor = Math.min(2 * this.lastRoundTripMs, 4 * staleAfterMs);
+    return Math.min(this.fetchTimeoutMs, Math.max(staleAfterMs * 2 ** send.staleAborts, floor));
   }
 
   /**
@@ -1105,7 +1108,11 @@ export class HttpTransport implements Transport {
 
         // The answer of a batch a flush took back: the resend counts (#171).
         if (send.abandoned) return;
-        this.lastRoundTripMs = Date.now() - now;
+        // A round trip longer than the fetch timeout spanned a freeze: the
+        // timeout's timer, which would have cut it, did not run (#171
+        // review round 2). Not a measure of ingest.
+        const roundTripMs = Date.now() - now;
+        if (roundTripMs <= this.fetchTimeoutMs) this.lastRoundTripMs = roundTripMs;
 
         if (response.status === 200) {
           this.delivered += batch.length;
