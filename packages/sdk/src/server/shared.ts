@@ -94,7 +94,9 @@ import type { Transport } from "../transport/types.js";
  * TypeScript clients send `SIGTERM` 2 s after they close stdin — and a
  * signal during the drain takes its stops over without extending them.
  * With nothing queued the listener returns at once, as fast and quiet as
- * before. `process.exit()`, a signal's default exit and an uncaught
+ * before. A process that goes on after it and sends again re-enters the
+ * registry, and the next `beforeExit` drains that too (review round 1).
+ * `process.exit()`, a signal's default exit and an uncaught
  * exception emit no `beforeExit`: those paths are unchanged. Before #167
  * the queue went with the process, without a line.
  */
@@ -432,6 +434,16 @@ let lastExitDrain: ExitDrain | null = null;
 let beforeExitInstalled = false;
 /** Transports a natural-exit drain stops: their loss is the exit line's, not a `shutdown()` line (#167). */
 const exitStops = new WeakSet<Transport>();
+/**
+ * Keys a natural-exit drain took out of the registry and nothing has
+ * re-acquired since (#167 review round 1). Nobody released them: the
+ * process went on after `beforeExit` — an app's `beforeExit` listener that
+ * schedules more work, an unref'd timer of the app's firing while the
+ * drain holds the loop — and a proxy it already has still sends. Such a
+ * send re-enters the registry (`slotFor`'s facade) instead of being
+ * dropped, and the next `beforeExit` drains it.
+ */
+const exitDrained = new Set<string>();
 
 /**
  * D for a signal arriving now: the smallest `shutdownTimeoutMs` set
@@ -764,6 +776,15 @@ function registryPending(): number {
  * own `beforeExit` listener, 0.5.4's workaround — awaits them
  * (`signalDrain`). `draining` is not set: no signal came.
  *
+ * The process may go on after it: an app's `beforeExit` listener that
+ * schedules more work (AWS Lambda's Node runtime reportedly answers
+ * callback-style handlers from `beforeExit` and continues), or an unref'd
+ * timer or socket of the app's that fires while the drain holds the loop.
+ * A send through a proxy it already has then re-enters the registry with
+ * a fresh transport (`exitDrained`), and the next `beforeExit`, which
+ * Node emits once that work has settled, drains it under a deadline of
+ * its own (review round 1: those events were dropped without a line).
+ *
  * Returns at once while a signal cycle is in flight (its stops hold the
  * loop, so this is defensive) and when the registry holds nothing
  * pending: an idle exit stays as fast and quiet as before, and so do the
@@ -786,6 +807,7 @@ function onBeforeExit(): void {
   const stops: Promise<void>[] = [];
   for (const [key, entry] of registry) {
     registry.delete(key);
+    exitDrained.add(key); // a later send re-enters (review round 1)
     const live = entry.slot.live;
     entry.slot.live = null;
     if (!live) continue;
@@ -1161,8 +1183,14 @@ function slotFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string) 
         // Nothing live: every holder released (the event has nowhere to go,
         // as with a stopped transport) — or a signal drained it, and a
         // request still being served sends best effort through an immediate
-        // transport, like a wrap after the signal would get.
-        if (!slot.live && draining) slot.live = newTransport(config, sdkVersion);
+        // transport, like a wrap after the signal would get — or a natural
+        // exit drained it and the process went on: the send re-enters the
+        // registry as a pin, as a `withYavio()` call would, so the next
+        // `beforeExit` drains it (#167 review round 1).
+        if (!slot.live) {
+          if (draining) slot.live = newTransport(config, sdkVersion);
+          else if (exitDrained.has(key)) entryFor(config, sdkVersion, onEvict).pinned = true;
+        }
         slot.live?.send(events);
       },
       flush: () => slot.live?.flush() ?? Promise.resolve(),
@@ -1188,6 +1216,9 @@ function entryFor(config: Key, sdkVersion: string, onEvict?: (sessionId: string)
   slot.live = transport;
   const entry: Entry = { slot, holders: 0, pinned: false, generation: ++generations };
   registry.set(key, entry);
+  // Re-acquired: a later release that stops this transport is a release,
+  // and a send after it is dropped as before (review round 1).
+  exitDrained.delete(key);
   installSignalHandlers();
   installBeforeExit();
   return entry;
@@ -1479,6 +1510,7 @@ export function _resetSharedState(): void {
   if (beforeExitInstalled) process.off("beforeExit", onBeforeExit);
   beforeExitInstalled = false;
   lastExitDrain = null;
+  exitDrained.clear();
   exitHookArmed = false;
   exitReported = false;
   _setSignalReraise(null);

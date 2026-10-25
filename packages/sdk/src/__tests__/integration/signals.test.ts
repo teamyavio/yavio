@@ -2485,4 +2485,74 @@ describe("the natural exit: beforeExit with events queued (#167)", () => {
       "[YAVIO-1205] Process exit with 2 events not delivered — await analytics.shutdown() before exiting, or raise shutdownTimeoutMs.",
     ]);
   });
+
+  /** A server with one tool, wrapped by either entry point: what a later send goes through is the proxy it already has. */
+  function wrapped(entry: "createYavio().wrap()" | "withYavio()", apiKey: string): McpServer {
+    if (entry === "createYavio().wrap()") return build(apiKey).raw;
+    const raw = new McpServer({ name: "app", version: "1.0" });
+    withYavio(raw, { apiKey, endpoint: ingest.endpoint, serverOnly: true }).registerTool(
+      "get_price",
+      { inputSchema: { q: z.string() } },
+      ok,
+    );
+    return raw;
+  }
+  const qs = (batch: { events: Array<Record<string, unknown>> } | undefined) =>
+    (batch?.events ?? []).map(
+      (e) => (e.input_values as { q?: string } | undefined)?.q ?? e.event_type,
+    );
+
+  it.each(["createYavio().wrap()", "withYavio()"] as const)(
+    "the process goes on after the drain (an app's beforeExit listener schedules more work) — %s: a later send through the same proxy re-enters the registry, and the next beforeExit delivers it (review round 1)",
+    async (entry) => {
+      const raw = wrapped(entry, "yav_167_late");
+      await callTool(raw, "get_price", { q: "first" });
+      emitBeforeExit();
+      await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0)); // the drain settled
+      expect(qs(ingest.batches[0])).toEqual(["connection", "first"]);
+      expect(_sharedStateCount()).toBe(0);
+
+      await callTool(raw, "get_price", { q: "late" }); // dropped without a line before review round 1
+      expect(_sharedStateCount()).toBe(1); // re-entered, with a fresh transport
+      expect(_trackedTransportCount()).toBe(1);
+      expect(ingest.batches).toHaveLength(1); // queued: the flush interval is 10 s
+      emitBeforeExit(); // what Node emits once the late work has settled
+      await vi.waitFor(() => expect(ingest.batches).toHaveLength(2));
+      expect(qs(ingest.batches[1])).toEqual(["late"]);
+      await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+      exitHooks()[0]?.call(process, 0);
+      expect(lines1205()).toEqual([]);
+    },
+  );
+
+  it("a send while the drain still runs (an unref'd timer of the app's fires while the drain holds the loop) goes through a fresh transport, which the next beforeExit drains (review round 1)", async () => {
+    ingest.respondAfterMs = 300;
+    const { raw } = build("yav_167_during");
+    await callTool(raw, "get_price", { q: "first" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(ingest.batches).toHaveLength(1)); // the drain's batch is out
+    await callTool(raw, "get_price", { q: "during" });
+    expect(_sharedStateCount()).toBe(1);
+    await vi.waitFor(() => expect(ingest.responded).toBe(1)); // the first drain's batch answered
+    emitBeforeExit();
+    await vi.waitFor(() => expect(ingest.responded).toBe(2));
+    expect(qs(ingest.batches[1])).toEqual(["during"]);
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    exitHooks()[0]?.call(process, 0);
+    expect(lines1205()).toEqual([]);
+  });
+
+  it("only a natural drain makes a later send re-enter: after a re-acquire and the last holder's release, a send is dropped as before (review round 1)", async () => {
+    const { client, raw } = build("yav_167_released");
+    await callTool(raw, "get_price", { q: "first" });
+    emitBeforeExit();
+    await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
+    client.wrap(new McpServer({ name: "again", version: "1.0" })); // re-acquires the key
+    expect(_sharedStateCount()).toBe(1);
+    await client.shutdown(); // the last holder releases: the transport stops
+    expect(_sharedStateCount()).toBe(0);
+    await callTool(raw, "get_price", { q: "after release" });
+    expect(_sharedStateCount()).toBe(0); // nowhere to go, as with any stopped transport
+    expect(_trackedTransportCount()).toBe(0);
+  });
 });
