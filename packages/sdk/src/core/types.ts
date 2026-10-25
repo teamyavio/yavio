@@ -383,10 +383,11 @@ export interface YavioClient {
    * the signal was handed back before the transport stops had settled: at
    * the deadline when a `shutdown()` is still waiting then, otherwise once
    * they have settled). The transport stops once no other client with the
-   * same configuration holds it — on a key a `withYavio()` call pinned too
+   * same configuration holds it — and on a key a `withYavio()` call pinned
    * when this client never wrapped a server (the shutdown-only client next
-   * to `withYavio()`), where a fresh transport takes over at once so those
-   * servers keep sending (#179, 0.5.6; before, that release only drained).
+   * to `withYavio()`), whatever other clients still hold it, where a fresh
+   * transport takes over at once so those servers keep sending (#179,
+   * 0.5.6; before, that release only drained).
    * A client that wraps servers only drains a pinned key, as in 0.5.5: on
    * such a host, `flush()` at each request's end. A later wrap by this
    * client holds it again, or starts a fresh one. A call made while the
