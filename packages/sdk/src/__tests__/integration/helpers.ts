@@ -5,7 +5,7 @@
  * registered handler directly the way the MCP SDK does.
  */
 import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
+import { type AddressInfo, connect } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -224,16 +224,45 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
 }
 
 /**
- * An endpoint nothing listens on: a port that was bound and released, so a
- * fetch to it is refused at once (ECONNREFUSED), like an ingest that is down
- * or a hostname that resolves to a closed port (#148).
+ * The port `refusedEndpoint()` returns: below 1024, so no `listen(0)` is ever
+ * handed it (every OS's ephemeral range starts far above) and on a default
+ * kernel no unprivileged process can bind it. Not port 1: fetch blocks it as
+ * a "bad port" before connecting.
+ */
+const REFUSED_PORT = 2;
+
+/**
+ * An endpoint nothing listens on, so a fetch to it is refused at once
+ * (ECONNREFUSED), like an ingest that is down or a hostname that resolves
+ * to a closed port (#148). Until 2026-10-25 it was a port bound with
+ * `listen(0)` and released, and any process's next `listen(0)` could be
+ * handed it: in CI a mock ingest in another vitest worker was, took a child
+ * host's 53-event drain with a 200, and counted 100 tool calls for its 50,
+ * while the child, with nothing left to retry, exited 1.5 s after the
+ * signal instead of 3 s. Checked on every call: where something does
+ * listen there, this throws instead of a test failing by chance.
  */
 export async function refusedEndpoint(): Promise<string> {
-  const server = createServer();
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const port = (server.address() as AddressInfo).port;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  return `http://127.0.0.1:${port}/v1/events`;
+  const problem = await new Promise<string | undefined>((resolve) => {
+    const socket = connect(REFUSED_PORT, "127.0.0.1");
+    socket.setTimeout(2_000, () => {
+      socket.destroy();
+      resolve("no answer within 2 s");
+    });
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve("something listens there");
+    });
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      resolve(error.code === "ECONNREFUSED" ? undefined : (error.code ?? error.message));
+    });
+  });
+  if (problem) {
+    throw new Error(
+      `refusedEndpoint(): 127.0.0.1:${REFUSED_PORT} must refuse connections — ${problem}`,
+    );
+  }
+  return `http://127.0.0.1:${REFUSED_PORT}/v1/events`;
 }
 
 /**
