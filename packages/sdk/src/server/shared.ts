@@ -46,10 +46,10 @@ import type { Transport } from "../transport/types.js";
  * (which has no shutdown of its own). `client.shutdown()` drains and
  * releases that client's hold; the last hold's release stops the transport
  * — another client's events for the same key keep flowing until then. On
- * a pinned key a fresh transport takes over at once, so a pinned key
- * always has a live transport and its `withYavio()` servers keep sending
- * (#179; before, that release only drained, and its deadline neither
- * aborted the fetch nor counted the loss). The signal handlers drain
+ * a pinned key a fresh transport takes over at once, so a release never
+ * leaves a pinned key without a live transport and its `withYavio()`
+ * servers keep sending (#179; before, that release only drained, and its
+ * deadline neither aborted the fetch nor counted the loss). The signal handlers drain
  * everything regardless, and so does a natural exit with events queued
  * (#167, below). The key's state object outlives its transports: proxies
  * keep it, and a re-acquire after a stop puts a fresh transport behind the
@@ -184,9 +184,10 @@ interface Entry {
   holders: number;
   /**
    * Set by `withYavio()`, which never releases: the entry stays in the
-   * registry until a signal, with a live transport — the last client's
-   * release stops the current one and puts a fresh one behind the pin
-   * (#179).
+   * registry, with a live transport — the last client's release stops the
+   * current one and puts a fresh one behind the pin (#179) — until a signal
+   * or a natural-exit drain takes it out; a natural-exit drain's entry
+   * comes back with the next send (`exitDrained`).
    */
   pinned: boolean;
   /** Distinct per transport: a hold on a cleared or stopped one must not release the next. */
@@ -1476,8 +1477,9 @@ async function drainTransport(transport: Transport | null, deadlineMs?: number):
 
 /**
  * The shared state for a resolved config, pinned: created on first use, then
- * reused by every later wrap with the same endpoint and key, and always with
- * a live transport until a signal (`withYavio()` has no shutdown). The last
+ * reused by every later wrap with the same endpoint and key, with a live
+ * transport until a signal or a natural-exit drain takes it out — the
+ * next send starts one again (`withYavio()` has no shutdown). The last
  * `createYavio()` client's `shutdown()` on the key stops the current
  * transport and a fresh one takes over at once (#179). Installs the process
  * signal handlers the first time any state is created.
