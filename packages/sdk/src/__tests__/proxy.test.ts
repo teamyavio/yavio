@@ -3022,18 +3022,14 @@ describe("session keys and session_source (#144)", () => {
       ["olga", 1],
       ["olga", 2],
     ]);
-    // No connection session of its own: every connection event is on the
-    // call's session. The nested call names no client (its context has no
-    // headers), so its per-client mark differs and it adds one, once per
-    // process, as 0.5.4 added one labelled `connection`.
+    // One connection event, the outer call's: a nested call that joined it
+    // adds none, although its context names another client (#169 review
+    // round 2; 0.5.4 added one labelled `connection`).
     expect(
       sent()
         .filter((e) => e.event_type === "connection")
         .map((e) => [e.session_source, e.session_id, e.client_name]),
-    ).toEqual([
-      ["per_request", calls[0]?.session_id, "cursor"],
-      ["per_request", calls[0]?.session_id, undefined],
-    ]);
+    ).toEqual([["per_request", calls[0]?.session_id, "cursor"]]);
   });
 
   it("several key-less HTTP callers on one proxy, each invoking a wrapped handler with a context of its own: every inner call stays with its caller (#169 review round 1)", async () => {
@@ -3062,9 +3058,97 @@ describe("session keys and session_source (#144)", () => {
         ["u2", 2],
       ]);
       expect(warn.mock.calls.filter((args) => String(args[0]).includes("YAVIO-1302"))).toEqual([]);
+      // One connection event per caller, none from the nested calls.
+      expect(
+        sent()
+          .filter((e) => e.event_type === "connection")
+          .map((e) => [e.session_source, e.session_id, e.client_name]),
+      ).toEqual([
+        ["per_request", calls[0]?.session_id, "claude-code"],
+        ["per_request", calls[3]?.session_id, "cursor"],
+      ]);
     } finally {
       warn.mockRestore();
     }
+  });
+
+  // #169 review round 2: the join is per proxy, and only into a key-less
+  // HTTP call's own state.
+  it("a call into ANOTHER wrapped server from inside a key-less HTTP call does not join it: its own session, no user, its own connection event (#169 review round 2)", async () => {
+    const yavio = createYavioContext();
+    const serverA = new McpServer({ name: "a", version: "1.0" });
+    const serverB = new McpServer({ name: "b", version: "1.0" });
+    const transportA = createMockTransport();
+    const transportB = createMockTransport();
+    const proxyA = createProxy(serverA, testConfig, transportA, "0.0.1");
+    const proxyB = createProxy(
+      serverB,
+      { ...testConfig, apiKey: "yav_test_other" },
+      transportB,
+      "0.0.1",
+    );
+    proxyB.tool("other", () => {
+      yavio.step("other");
+      return { content: [{ type: "text", text: "b" }] };
+    });
+    proxyA.tool("outer", async (extra: unknown) => {
+      yavio.identify("olga");
+      await registeredTool(serverB, "other")?.handler(extra);
+      return { content: [{ type: "text", text: "a" }] };
+    });
+    await registeredTool(serverA, "outer")?.handler(http({ "user-agent": "cursor/1.7.0" }));
+    const eventsA = transportA.sent.flat() as Array<Record<string, unknown>>;
+    const eventsB = transportB.sent.flat() as Array<Record<string, unknown>>;
+    const callA = eventsA.find((e) => e.event_type === "tool_call");
+    const callB = eventsB.find((e) => e.event_type === "tool_call");
+    expect([callA?.event_name, callA?.user_id, callA?.session_source]).toEqual([
+      "outer",
+      "olga",
+      "per_request",
+    ]);
+    expect([callB?.event_name, callB?.user_id, callB?.session_source]).toEqual([
+      "other",
+      undefined,
+      "per_request",
+    ]);
+    expect(callB?.session_id).not.toBe(callA?.session_id);
+    expect(
+      eventsB
+        .filter((e) => e.event_type === "step")
+        .map((e) => [e.session_id, e.user_id, e.step_sequence]),
+    ).toEqual([[callB?.session_id, undefined, 1]]);
+    expect(eventsB.filter((e) => e.event_type === "connection").map((e) => e.session_id)).toEqual([
+      callB?.session_id,
+    ]);
+  });
+
+  it("a key-less call from inside a KEYED call is not joined: without request headers the connection's state, with them one of its own (#169 review round 2)", async () => {
+    const yavio = createYavioContext();
+    const server = new McpServer({ name: "test", version: "1.0" });
+    const transport = createMockTransport();
+    const proxy = createProxy(server, testConfig, transport, "0.0.1");
+    proxy.tool("inner", () => {
+      yavio.step("inner");
+      return { content: [{ type: "text", text: "in" }] };
+    });
+    proxy.tool("outer", async () => {
+      yavio.identify("kim");
+      await registeredTool(server, "inner")?.handler({});
+      await registeredTool(server, "inner")?.handler(http({ "user-agent": "cursor/1.7.0" }));
+      return { content: [{ type: "text", text: "out" }] };
+    });
+    await registeredTool(server, "outer")?.handler(
+      http({ "user-agent": "cursor/1.7.0" }, { _meta: { "openai/session": "conv-k" } }),
+    );
+    const calls = (transport.sent.flat() as Array<Record<string, unknown>>).filter(
+      (e) => e.event_type === "tool_call",
+    );
+    expect(calls.map((e) => [e.event_name, e.user_id, e.session_source])).toEqual([
+      ["inner", undefined, "connection"],
+      ["inner", undefined, "per_request"],
+      ["outer", "kim", "openai_session"],
+    ]);
+    expect(new Set(calls.map((e) => e.session_id)).size).toBe(3);
   });
 
   it("a key-less HTTP call's session is not stored: 50 calls leave the session map empty, keyed calls fill it (#169 guard)", async () => {

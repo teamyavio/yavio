@@ -219,19 +219,16 @@ describe.skipIf(!reuseAllowed)(
         [calls[0]?.session_id, "u1", 1],
         [calls[2]?.session_id, "u2", 1],
       ]);
-      // No connection session of its own: every connection event is on its
-      // caller's session. The inner call's context has no headers, so it
-      // names no protocol version, and its per-client mark adds one more per
-      // client (once per process), as 0.5.4 added one labelled `connection`.
+      // One connection event per caller, on its session: the inner call
+      // joined it and adds none, although its context names no protocol
+      // version (#169 review round 2; 0.5.4 added one labelled `connection`).
       expect(
         ingest
           .ofType("connection")
           .map((e) => [e.client_name, e.session_id, e.session_source, e.protocol_version ?? null]),
       ).toEqual([
         ["claude-code", calls[0]?.session_id, "per_request", expect.any(String)],
-        ["claude-code", calls[0]?.session_id, "per_request", null],
         ["cursor", calls[2]?.session_id, "per_request", expect.any(String)],
-        ["cursor", calls[2]?.session_id, "per_request", null],
       ]);
       expect(warn.mock.calls.filter((args) => String(args[0]).includes("YAVIO-1302"))).toEqual([]);
     });
