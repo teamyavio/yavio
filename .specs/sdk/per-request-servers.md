@@ -18,7 +18,7 @@ Everything that must survive across wraps lives in a module-level registry keyed
 
 | Shared per key | Per wrapped instance (`createProxy`) | Module level |
 |---|---|---|
-| the `HttpTransport` (one flush timer, one batch stream) | the connection's own session (calls without a session key) | `emittedConnections` — one `connection` per `(apiKey, session id)` |
+| the `HttpTransport` (one flush timer, one batch stream) | the connection's own session (calls without a session key off HTTP; a key-less HTTP call gets a state of its own, not stored, #169) | `emittedConnections` — one `connection` per `(apiKey, session id)` |
 | `sessions` — the LRU of conversation states (identify, traits, step sequence), keyed by the derived session id | the current MCP transport reference | `emittedToolDiscoveries` — one `tool_discovery` per `(apiKey, tool name)` |
 | exactly one `SIGTERM`/`SIGINT` handler pair per process, draining every transport in the registry and then handing the signal back (#138) | `instrumentedTools` — the tools this instance wrapped | `proxiesByServer` — every proxy by the server it wraps and by itself (WeakMap), with the options it was built with, so a second wrap of the same server returns the first proxy |
 | | the intent controller | `installedServers` — the low-level servers already patched; the warn-once sets |
