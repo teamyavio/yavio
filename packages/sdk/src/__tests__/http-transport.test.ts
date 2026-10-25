@@ -1646,3 +1646,219 @@ describe("HttpTransport on Cloudflare Workers (#171)", () => {
     }
   });
 });
+
+/**
+ * `flushQueued()`, what `client.flush()` runs on the key's transport (#171):
+ * C1 nothing dropped or aborted at its deadline; C2 a batch waiting for its
+ * retry retried at once, once per flush, not counted towards `maxRetries`
+ * and without a retry line, a `Retry-After` never cut; C3 a fetch older than
+ * the flush's budget aborted and its batch re-sent unchanged, first.
+ */
+describe("HttpTransport.flushQueued() (#171)", () => {
+  const base = { endpoint: "http://test/v1/events", apiKey: "yav_test", sdkVersion: "0.0.1" };
+  const answer = (status: number, headers: Record<string, string> = {}) => ({
+    status,
+    headers: { get: (name: string) => headers[name] ?? null },
+    json: () => ({}),
+  });
+  let warn: ReturnType<typeof vi.spyOn>;
+  let error: ReturnType<typeof vi.spyOn>;
+  const lines = (code: string) =>
+    [...warn.mock.calls, ...error.mock.calls]
+      .map((c) => String(c[0]))
+      .filter((l) => l.includes(code));
+
+  beforeEach(() => {
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    error = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  /** A fetch that answers each call with the next of `script`: a status, "hang" (until aborted) or "reject" (a network error). */
+  function scriptedFetch(
+    script: Array<number | "hang" | "reject">,
+    fallback: number | "hang" = 200,
+  ) {
+    const bodies: Array<{ events: Array<{ event_id: string }> }> = [];
+    let aborted = 0;
+    const fetch = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(init.body as string));
+      const next = script.shift() ?? fallback;
+      if (next === "reject") return Promise.reject(new TypeError("fetch failed"));
+      if (next === "hang") {
+        return new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            aborted++;
+            reject(new DOMException("The operation was aborted.", "AbortError"));
+          });
+        });
+      }
+      return Promise.resolve(answer(next));
+    });
+    return { fetch, bodies, aborted: () => aborted };
+  }
+
+  it("C2: a batch waiting for its retry is retried at once, once per flush — six flush-triggered failures leave the time-based retry at retry 2/5, with one YAVIO-1200 line before it", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const { fetch } = scriptedFetch([], 503);
+    const transport = new HttpTransport({ ...base, flushIntervalMs: 60_000, fetch });
+    transport.send([fakeEvent()]);
+    // 503, the 1 s backoff begins and is cut at once: 503 again, a new 1 s
+    // backoff, past the 500 ms deadline — the flush returns, the retry stays.
+    expect(await transport.flushQueued(500)).toBe("retrying");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    for (let i = 0; i < 5; i++) expect(await transport.flushQueued(500)).toBe("retrying");
+    expect(fetch).toHaveBeenCalledTimes(7); // one attempt, six early retries
+    expect(lines("YAVIO-1200")).toEqual(["[YAVIO-1200] Server error 503, retry 1/5"]);
+    expect(transport.pendingEvents()).toBe(1); // nothing dropped, nothing given up
+    expect(transport.lostEvents()).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(1_000); // the backoff runs out on its own
+    expect(fetch).toHaveBeenCalledTimes(8);
+    expect(lines("YAVIO-1200")).toEqual([
+      "[YAVIO-1200] Server error 503, retry 1/5",
+      "[YAVIO-1200] Server error 503, retry 2/5",
+    ]);
+    const closing = transport.shutdown(0);
+    await vi.advanceTimersByTimeAsync(ABORT_SETTLE_MS);
+    await closing;
+  });
+
+  it("C2: a network error's early retry prints no YAVIO-1200 line, and a success after it delivers", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const { fetch } = scriptedFetch(["reject", "reject", "reject"]);
+    const transport = new HttpTransport({ ...base, flushIntervalMs: 60_000, fetch });
+    transport.send([fakeEvent()]);
+    expect(await transport.flushQueued(500)).toBe("retrying"); // fails, early retry fails
+    expect(lines("YAVIO-1200")).toEqual(["[YAVIO-1200] Network error, retry 1/5"]);
+    expect(await transport.flushQueued(500)).toBe("retrying"); // its early retry fails: no line
+    expect(lines("YAVIO-1200")).toHaveLength(1);
+    expect(await transport.flushQueued(500)).toBe("done"); // its early retry delivers
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(transport.deliveredEvents()).toBe(1);
+    expect(lines("YAVIO-1201")).toEqual([]);
+  });
+
+  it("C2: a 429 Retry-After is never cut — past the deadline the flush returns at once, within it the flush waits it out", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    let calls = 0;
+    const fetch = vi.fn().mockImplementation(() => {
+      calls++;
+      if (calls === 1) return Promise.resolve(answer(429, { "Retry-After": "2" }));
+      if (calls === 2) return Promise.resolve(answer(429, { "Retry-After": "1" }));
+      return Promise.resolve(answer(200));
+    });
+    const transport = new HttpTransport({ ...base, flushIntervalMs: 60_000, fetch });
+    transport.send([fakeEvent()]);
+    expect(await transport.flushQueued(500)).toBe("retrying"); // 2 s: past the deadline
+    expect(await transport.flushQueued(500)).toBe("retrying"); // not cut by a second flush either
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2_000); // the wait ends: 429 with 1 s
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const flushing = transport.flushQueued(1_500); // 1 s ends within the deadline: waited out
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await flushing).toBe("done");
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(transport.deliveredEvents()).toBe(1);
+  });
+
+  it("C3: a fetch in flight for longer than the flush's budget is aborted and its batch re-sent first — the same events in the same order — not counted as an attempt and without a retry line", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const { fetch, bodies, aborted } = scriptedFetch(["hang"]);
+    // maxRetries 0: counted as an attempt, the aborted batch would be given up.
+    const transport = new HttpTransport({
+      ...base,
+      maxBatchSize: 2,
+      maxRetries: 0,
+      flushIntervalMs: 60_000,
+      fetch,
+    });
+    transport.send([fakeEvent(), fakeEvent()]); // the early flush at 2: out, hanging
+    transport.send([fakeEvent()]);
+    const first = transport.flushQueued(100); // the fetch is fresh: waited on, not aborted
+    await vi.advanceTimersByTimeAsync(150);
+    expect(await first).toBe("deadline");
+    expect(aborted()).toBe(0);
+    transport.send([fakeEvent()]);
+    expect(await transport.flushQueued(100)).toBe("done"); // 150 ms old: aborted, re-sent
+    expect(aborted()).toBe(1);
+    const ids = bodies.map((b) => b.events.map((e) => e.event_id));
+    expect(ids).toHaveLength(3);
+    expect(ids[1]).toEqual(ids[0]); // the resend, as it was, before anything queued after it
+    expect(ids[2]).toHaveLength(2);
+    expect(ids[2]).not.toContain(ids[0]?.[0]);
+    expect(transport.deliveredEvents()).toBe(4);
+    expect(transport.lostEvents()).toBe(0);
+    expect(lines("YAVIO-1200")).toEqual([]);
+    expect(lines("YAVIO-1201")).toEqual([]);
+  });
+
+  it("C1: at its deadline a flush drops and aborts nothing — the fetch in flight goes on, what is queued stays queued, both go out later", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    let release: (() => void) | undefined;
+    const fetch = vi.fn().mockImplementation(
+      (_url: string, init: RequestInit) =>
+        new Promise((resolve, reject) => {
+          release = () => resolve(answer(200));
+          init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        }),
+    );
+    const transport = new HttpTransport({
+      ...base,
+      maxBatchSize: 2,
+      flushIntervalMs: 60_000,
+      fetch,
+    });
+    transport.send([fakeEvent(), fakeEvent(), fakeEvent()]);
+    const flushing = transport.flushQueued(200);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(await flushing).toBe("deadline");
+    expect(transport.pendingEvents()).toBe(3);
+    release?.();
+    await vi.advanceTimersByTimeAsync(0);
+    const second = transport.flushQueued(200); // the third event's fetch, hanging
+    await vi.advanceTimersByTimeAsync(200);
+    expect(await second).toBe("deadline");
+    expect(transport.deliveredEvents()).toBe(2);
+    release?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(transport.deliveredEvents()).toBe(3);
+    expect(transport.lostEvents()).toBe(0);
+  });
+
+  it("the flush's deadline timer holds the event loop while it runs and is cleared when it ends; the backoff stays unref'd (#164's rule)", async () => {
+    const realSetTimeout = globalThis.setTimeout;
+    const timers: Array<{ ms: number | undefined; handle: NodeJS.Timeout }> = [];
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+      fn: (...args: unknown[]) => void,
+      ms?: number,
+    ) => {
+      const handle = realSetTimeout(fn, ms);
+      timers.push({ ms, handle });
+      return handle;
+    }) as typeof setTimeout);
+    const settled = (handle: NodeJS.Timeout) =>
+      (handle as unknown as { _destroyed: boolean })._destroyed;
+    const { fetch } = scriptedFetch([503, "hang"]);
+    const transport = new HttpTransport({ ...base, flushIntervalMs: 60_000, fetch });
+    transport.send([fakeEvent()]);
+    const flushing = transport.flushQueued(300);
+    const deadline = timers.find((t) => t.ms === 300);
+    expect(deadline?.handle.hasRef()).toBe(true);
+    expect(await flushing).toBe("deadline"); // 503, early retry hangs until the deadline
+    expect(settled(deadline?.handle as NodeJS.Timeout)).toBe(true);
+    const backoff = timers.find((t) => t.ms === 1_000);
+    expect(backoff?.handle.hasRef()).toBe(false);
+    expect(timers.filter((t) => t.ms === 30_000).every((t) => !t.handle.hasRef())).toBe(true); // fetch timeouts
+    await transport.shutdown(0);
+  });
+});
