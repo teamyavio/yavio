@@ -2041,6 +2041,27 @@ describe("HttpTransport.flushQueued() and a send another request left behind (#1
   });
 
   it.each([
+    [2, 10],
+    [100, 10_000],
+  ])(
+    "drain() of a full buffer (batches of %d, a cap of %d) delivers all of it: its bound counts batches, not rounds (#171 review round 3)",
+    async (maxBatchSize, maxBufferSize) => {
+      const fetch = vi.fn().mockImplementation(() => Promise.resolve(answer(200)));
+      const transport = new HttpTransport({
+        ...base,
+        flushIntervalMs: 3_600_000,
+        maxBatchSize,
+        maxBufferSize,
+        fetch,
+      });
+      transport.send(Array.from({ length: maxBufferSize }, () => fakeEvent())); // one send: no early flush
+      await transport.drain(10_000);
+      expect(transport.deliveredEvents()).toBe(maxBufferSize);
+      expect(fetch).toHaveBeenCalledTimes(maxBufferSize / maxBatchSize);
+    },
+  );
+
+  it.each([
     ["one 25 s answer (a slow ingest)", 25_000, 5_000],
     ["one answer that spanned a 10-minute freeze", 600_000, 2_000],
   ])(

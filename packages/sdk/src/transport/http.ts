@@ -595,8 +595,14 @@ export class HttpTransport implements Transport {
     let expired = false;
     const waits = new Set<() => void>();
     const loop = async () => {
-      const rounds = Math.ceil(this.maxBufferSize / this.maxBatchSize) + 1;
-      for (let i = 0; i < rounds && !expired; i++) {
+      // Bounded by the batches this drain starts, not by its rounds: each
+      // batch takes two, started and then waited for (#171 review round 3
+      // — with the old bound a full buffer of 10 000 in batches of 100 got
+      // 5 100 out). The rounds have a bound of their own, as in
+      // `flushQueued()`, for sends that other flushes take back.
+      const batches = Math.ceil(this.maxBufferSize / this.maxBatchSize) + 1;
+      let started = 0;
+      for (let i = 0; i < batches * 4 + 1 && !expired; i++) {
         // A shutdown took over (a signal, the last holder): its sends are
         // what this drain waits for.
         if (this.closing) {
@@ -611,11 +617,12 @@ export class HttpTransport implements Transport {
           await this.slotChange(waits);
           continue;
         }
-        if (this.queued() === 0) return;
+        if (this.queued() === 0 || started >= batches) return;
         // Started, then waited for through the slot like any send: its own
         // promise never settles if a flush takes the batch back (#171).
         // sendBatch never rejects; should it, the next batch still goes out.
         this.flush().catch(() => {});
+        started++;
         if (!this.inflight) return;
       }
     };
