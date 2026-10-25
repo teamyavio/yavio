@@ -1565,21 +1565,22 @@ export function reviveHold(config: Key, hold: SharedHold, sdkVersion: string): b
  */
 export async function releaseShared(config: Key, hold: SharedHold): Promise<void> {
   const key = keyOf(config);
+  const ownMs = config.shutdownTimeoutMs;
   const calledAt = Date.now();
   let waited = false;
-  // This client's own value. After a drain the release had to wait for,
-  // what is left of it from the call, less `ABORT_SETTLE_MS` (#178
-  // follow-up): the `shutdown()` wait (`awaitBounded`) counts from the
-  // call, and a stop armed later for the same instant fired after it — the
-  // two timers run on clocks a loop turn apart, 12 ms measured in process —
-  // so the wait returned before the stop's line, and an app's
-  // `process.exit(0)` right after it printed the exit hook's line instead.
-  // The stop's deadline comes that much earlier, which is also what a stop
-  // needs after its deadline to count the loss.
-  const ownMs = () =>
-    waited
-      ? Math.max(0, config.shutdownTimeoutMs - (Date.now() - calledAt) - ABORT_SETTLE_MS)
-      : config.shutdownTimeoutMs;
+  // The stop's deadline: this client's own value — after a drain the
+  // release had to wait for, what is left of it from the call, less
+  // `ABORT_SETTLE_MS` (#178 follow-up). The `shutdown()` wait
+  // (`awaitBounded`) counts from the call, and a stop armed later for the
+  // same instant fired after it — the two timers run on clocks a loop turn
+  // apart, 12 ms measured in process — so the wait returned before the
+  // stop's line, and an app's `process.exit(0)` right after it printed the
+  // exit hook's line instead. The stop's deadline comes that much earlier,
+  // which is also what a stop needs after its deadline to count the loss.
+  // Drains print no line and keep their deadline (the signal path's #154
+  // timing depends on it).
+  const stopMs = () =>
+    waited ? Math.max(0, ownMs - (Date.now() - calledAt) - ABORT_SETTLE_MS) : ownMs;
   // The hold's value leaves the live set now — whether or not its transport
   // is still the key's — and counts on through `noteInProgress` until the
   // call resolves.
@@ -1602,12 +1603,12 @@ export async function releaseShared(config: Key, hold: SharedHold): Promise<void
       if (drained.holders === 0 && !drained.pinned) exitDrained.delete(key);
     }
     if (!entry || entry.generation !== hold.generation) {
-      await drainTransport(slots.get(key)?.live ?? null, boundedBy(ownMs()));
+      await drainTransport(slots.get(key)?.live ?? null, boundedBy(ownMs));
       return;
     }
     entry.holders = Math.max(0, entry.holders - 1);
     if (entry.holders > 0) {
-      await drainTransport(entry.slot.live, boundedBy(ownMs()));
+      await drainTransport(entry.slot.live, boundedBy(ownMs));
       return;
     }
     // The last client's release stops the key's transport, pinned or not
@@ -1632,7 +1633,7 @@ export async function releaseShared(config: Key, hold: SharedHold): Promise<void
     }
     if (!live) return;
     try {
-      await trackStop(live, live.shutdown(boundedBy(ownMs())));
+      await trackStop(live, live.shutdown(boundedBy(stopMs())));
     } finally {
       if (slot.stopping === live) slot.stopping = null;
     }
