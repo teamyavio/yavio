@@ -201,8 +201,9 @@ describe("HttpTransport", () => {
       onClosed,
     });
     transport.start();
-    expect(vi.getTimerCount()).toBe(1); // the flush interval
+    expect(vi.getTimerCount()).toBe(0); // armed on the first send (#171)
     transport.send([fakeEvent()]);
+    expect(vi.getTimerCount()).toBe(1); // the flush interval
     await transport.flush();
     // Before #148 review round 5 the 401 only set `stopped`: the interval
     // kept ticking into a dead transport every 10 s and `onClosed` never
@@ -1582,6 +1583,66 @@ describe("HttpTransport and the shutdown deadline (#148)", () => {
       spy.mockRestore();
       warn.mockRestore();
       error.mockRestore();
+    }
+  });
+});
+
+/**
+ * Cloudflare Workers (#171): workerd rejects a `fetch` called with another
+ * `this` ("Illegal invocation") and any timer outside a request ("Disallowed
+ * operation called within global scope"). On 0.5.5 the first made every
+ * batch a network error and the second made a module-scope `createYavio()`
+ * fail the Worker's load.
+ */
+describe("HttpTransport on Cloudflare Workers (#171)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("calls the global fetch with globalThis as `this`", async () => {
+    const seen: unknown[] = [];
+    vi.stubGlobal("fetch", function (this: unknown) {
+      seen.push(this);
+      return Promise.resolve({ status: 200, headers: { get: () => null }, json: () => ({}) });
+    });
+    const transport = new HttpTransport({
+      endpoint: "http://test/v1/events",
+      apiKey: "yav_test",
+      sdkVersion: "0.0.1",
+    });
+    transport.send([fakeEvent()]);
+    await transport.flush();
+    expect(seen).toEqual([globalThis]);
+    expect(transport.deliveredEvents()).toBe(1);
+  });
+
+  it("start() arms no timer: the flush interval is armed by the first send, once, and then sends on its own", async () => {
+    vi.useFakeTimers();
+    try {
+      const interval = vi.spyOn(globalThis, "setInterval");
+      const fetch = createMockFetch();
+      const transport = new HttpTransport({
+        endpoint: "http://test/v1/events",
+        apiKey: "yav_test",
+        sdkVersion: "0.0.1",
+        flushIntervalMs: 1_000,
+        fetch,
+      });
+      transport.start();
+      expect(interval).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      transport.send([fakeEvent()]);
+      transport.send([fakeEvent()]);
+      expect(interval).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fetch).toHaveBeenCalledOnce();
+      await transport.shutdown(0);
+      transport.send([fakeEvent()]); // refused after the shutdown: no interval again
+      expect(interval).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

@@ -150,6 +150,8 @@ async function readPartial(
 export class HttpTransport implements Transport {
   private buffer: BaseEvent[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
+  /** Set by `start()`: the flush interval is armed by the first `send()` after it (#171). */
+  private started = false;
   /** The batch send in flight, if any (one at a time). */
   private inflight: Promise<void> | null = null;
   /**
@@ -270,12 +272,29 @@ export class HttpTransport implements Transport {
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.fetchTimeoutMs = options.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
-    this._fetch = options.fetch ?? globalThis.fetch;
+    // Bound: called as `this._fetch(…)`, an unbound `globalThis.fetch` runs
+    // with the transport as `this`. Node does not mind; Cloudflare's workerd
+    // throws "Illegal invocation", so every batch failed there as a network
+    // error (`YAVIO-1200`) and was dropped after its retries (#171). The
+    // widget transport binds it the same way.
+    this._fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
   }
 
-  /** Start the periodic flush timer. */
+  /**
+   * Start the periodic flush. The interval is armed on the first `send()`,
+   * not here (#171): Cloudflare Workers forbid timers outside a request, so
+   * a `createYavio()` at module scope — which starts the transport — threw
+   * "Disallowed operation called within global scope" from `setInterval`
+   * and the Worker failed to load. In Node only the interval's phase
+   * changes: it counts from the first event instead of from the start.
+   */
   start(): void {
-    if (this.timer) return;
+    this.started = true;
+    if (this.buffer.length > 0) this.armTimer();
+  }
+
+  private armTimer(): void {
+    if (this.timer || this.stopped) return;
     this.timer = setInterval(() => {
       this.flush().catch(() => {});
     }, this.flushIntervalMs);
@@ -352,6 +371,7 @@ export class HttpTransport implements Transport {
     }
 
     this.buffer.push(...events);
+    if (this.started && !this.timer) this.armTimer();
 
     // Enforce buffer cap — drop oldest events
     if (this.buffer.length > this.maxBufferSize) {
