@@ -2665,6 +2665,14 @@ describe("the natural exit: beforeExit with events queued (#167)", () => {
     await vi.waitFor(() => expect(_trackedTransportCount()).toBe(0));
     await a.client.shutdown(); // a's hold, revived by the send: the last release
     expect(_sharedStateCount()).toBe(0);
+    // The second drain already emptied the registry, so the count above proves
+    // nothing about the release; a send after it does: the last release drops
+    // the drained mark, so the key is not put back and the call is not sent.
+    await callTool(a.raw, "get_price", { q: "a3" });
+    emitBeforeExit();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(toolCallQs()).toEqual(["a1", "a2"]);
+    expect(_sharedStateCount()).toBe(0);
     expect(lines1205()).toEqual([]);
   });
 
