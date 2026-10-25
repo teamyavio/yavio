@@ -110,7 +110,7 @@ function logModes(config: YavioConfig): void {
  * to its end by the platform — or cancelled (the client went away), for
  * `flushWhenSent()` (#171). Status, status text and headers are the
  * original's: the response itself is the init, which also carries what a
- * platform adds to it (`webSocket`, `cf` on Workers). A response without a
+ * platform adds to it (a `webSocket` on Workers). A response without a
  * body, or whose body is already locked or read, comes back as it is, the
  * promise resolved.
  */
@@ -219,7 +219,8 @@ function wrapServer<T extends McpServerLike>(
  * web-standard response has been sent (#171).
  *
  * If no API key is found, `wrap()` returns every server unchanged
- * (transparent no-op) and `shutdown()` and `flush()` do nothing.
+ * (transparent no-op), `shutdown()` and `flush()` do nothing, and
+ * `flushWhenSent()` returns the response it was given.
  */
 export function createYavio(options?: WithYavioOptions): YavioClient {
   const config = resolveConfig(options);

@@ -30,14 +30,14 @@ server.registerTool("search", { inputSchema: { query: z.string() } }, async ({ q
 });
 ```
 
-Tool calls, inputs, outputs, and timing are captured automatically. Custom events are optional. Events are batched and sent in the background; when the process ends — its client closes a stdio server's stdin, or a `SIGTERM`/`SIGINT` arrives — the SDK sends what is still queued first, without shutdown code of yours (see [stdio servers](#stdio-servers) and **Graceful shutdown** under [Stateless / per-request servers](#stateless--per-request-servers)).
+Tool calls, inputs, outputs, and timing are captured automatically. Custom events are optional. Events are batched and sent in the background; when the process ends — its client closes a stdio server's stdin, or a `SIGTERM`/`SIGINT` arrives — the SDK sends what is still queued first, without shutdown code of yours (see [stdio servers](#stdio-servers) and **Graceful shutdown** under [Stateless / per-request servers](#stateless--per-request-servers)). On a platform that freezes the instance once the response is out — AWS Lambda, Vercel, Cloudflare Workers, Cloud Run with request-based billing — call `analytics.flush()` or `analytics.flushWhenSent()` per request (see [Serverless and edge runtimes](#serverless-and-edge-runtimes)).
 
 ## Configuration
 
 The SDK resolves config in order:
 
 1. Options passed to `withYavio(server, options)`
-2. Environment variables `YAVIO_API_KEY`, `YAVIO_ENDPOINT` (and `YAVIO_SERVER_ONLY`, `YAVIO_INTENT`, `YAVIO_SHUTDOWN_TIMEOUT_MS`)
+2. Environment variables `YAVIO_API_KEY`, `YAVIO_ENDPOINT` (and `YAVIO_SERVER_ONLY`, `YAVIO_INTENT`, `YAVIO_SHUTDOWN_TIMEOUT_MS`, `YAVIO_FLUSH_TIMEOUT_MS`)
 3. `.yaviorc.json` (walks up from cwd)
 
 If no API key is found, `withYavio()` returns the original server unchanged — zero overhead, no HTTP requests.
@@ -62,6 +62,7 @@ withYavio(server, {
     "book-contract": { inputValues: false, outputValues: false, intent: false },
   },
   shutdownTimeoutMs: 4_000, // deadline for delivering queued events on shutdown: an integer in [100, 2147483647] ms (default: 4 s); on SIGTERM/SIGINT one deadline for the whole process, the smallest value set explicitly, see Stateless
+  flushTimeoutMs: 1_000,    // how long createYavio().flush() waits for ingest: an integer in [100, 2147483647] ms (default: 1 s); nothing is dropped at it, see Serverless
   sessionKey: ({ headers }) => headers["x-conversation-id"], // the conversation of a call that carries no session key the SDK knows (default: none; code only), see Stateless
 });
 ```
@@ -123,7 +124,7 @@ A stdio server ends when its client closes the server's stdin. A server that hol
 [YAVIO-1205] Exit deadline of 1500 ms reached — 6 events not delivered (the process ended on its own with events queued; queued, in flight or refused after the deadline). To wait longer, await analytics.shutdown() before the event loop empties (on stdin's end or at the end of the script; a beforeExit listener is too late).
 ```
 
-A higher `shutdownTimeoutMs` does not raise the 1.5 s: the MCP TypeScript clients send `SIGTERM` 2 s after they close stdin, and the drain ends before that. With nothing queued the exit is as fast and as quiet as without the SDK. The same holds for every process that ends on its own with events queued — a script or CLI that never calls `shutdown()`, a host that closes its server without a signal. Before 0.5.5 those events were lost without a line. `process.exit()` skips this: call it only after `await analytics.shutdown()`. On AWS Lambda's Node 20/22 runtimes the drain runs after every invocation of a callback-style handler, because the runtime client answers it from its own `beforeExit` listener. Streaming handlers there wait for an empty loop as well, so their billed invocation can last until the drain's stops settle (at most the 1.5 s bound). `flush()` ([#171](https://github.com/teamyavio/yavio/issues/171), planned for 0.5.6) is the intended API on Lambda.
+A higher `shutdownTimeoutMs` does not raise the 1.5 s: the MCP TypeScript clients send `SIGTERM` 2 s after they close stdin, and the drain ends before that. With nothing queued the exit is as fast and as quiet as without the SDK. The same holds for every process that ends on its own with events queued — a script or CLI that never calls `shutdown()`, a host that closes its server without a signal. Before 0.5.5 those events were lost without a line. `process.exit()` skips this: call it only after `await analytics.shutdown()`. On AWS Lambda's Node 20/22 runtimes the drain runs after every invocation of a callback-style handler, because the runtime client answers it from its own `beforeExit` listener. Streaming handlers there wait for an empty loop as well, so their billed invocation can last until the drain's stops settle (at most the 1.5 s bound). On Lambda, use `flush()` (since 0.5.6, see [Serverless and edge runtimes](#serverless-and-edge-runtimes)).
 
 How clients end a stdio server:
 
@@ -274,6 +275,157 @@ Created inside the handler instead, after the SDK handed the signal back, it wou
 Without a handler the SDK drains everything on `SIGTERM`/`SIGINT` within the deadline, prints what it had to give up (one `YAVIO-1205` line), then hands the signal back: it removes its own listeners and, if it was the only listener when the signal arrived, re-raises the signal so Node's default exit runs (128 + the signal number: 130 after Ctrl-C, 143 after `SIGTERM`; set by hand on Windows) — an app with its own handler keeps control, and a second signal ends the wait: a different signal at once, the same signal once 250 ms have passed since the first — handed back for the signal that arrived, re-raised only if nothing else listens to it. The 250 ms window is a heuristic for one keypress delivered twice (`npm run` forwards the terminal's Ctrl-C to a script that already received it, a few milliseconds apart); it goes by the clock, so a deliberate second `SIGTERM` within 250 ms is taken for the same delivery and the drain runs on to the deadline, and a forward delayed past 250 ms on a loaded host ends the drain early with the events given up counted in the `YAVIO-1205` line — neither costs more than the deadline. An app that calls `process.exit()` before its `shutdown()` resolved gets one `YAVIO-1205` line at exit with what was still undelivered. A process that ends on its own with events queued gets one line at exit for what its natural-exit drain could not deliver (`Exit deadline of 1500 ms reached — 6 events not delivered (the process ended on its own with events queued; …)`), and none with nothing queued. After a `shutdown()` that returned in that cycle, once its deadline has come, what the deadline left — a late request's batch it cut in flight, the second event of a request served after the signal, a send in its last 100 ms — comes at exit in the deadline's wording (`Shutdown deadline of 4000 ms reached — 1 more events not delivered (in flight when the deadline cut it, …)`, "more" only after a line of that cycle), without the hint to await `shutdown()`. A library that also waits to be the last listener (signal-exit, used by execa and ora) does not get its turn, so an app that depends on it should handle the signal itself. A `401` from ingest stops delivery for that key process-wide (`YAVIO-1203`): every wrap sharing the key is affected, which is what an invalid key means.
 
 A value that is not an `McpServer` (no `registerTool()` / `connect()`) comes back unwrapped with one `YAVIO-1107` error per process — in no-op mode too — so a mis-wired integration keeps serving. After `SIGTERM`/`SIGINT` requests still served during the graceful-shutdown window send their events at once; a `shutdown()` after them waits for those sends too.
+
+### Serverless and edge runtimes
+
+The SDK runs on Node.js ≥ 20 hosts, AWS Lambda, Vercel's Node runtime, Cloud Run and Netlify Functions included, with the recipes below. Cloudflare Workers work with `nodejs_compat` and a compatibility date of 2025-09-15 or later; that is tested on workerd, not on Cloudflare's edge. The Vercel Edge runtime is not supported, and Deno and Bun are untested.
+
+Most of these platforms freeze or throttle the instance once the response is out. A frozen process runs no timers, and the platform may recycle it without a signal the app could act on. Events wait for a 10 s interval, so before 0.5.6 the last invocations' events were lost without a line. Since 0.5.6:
+
+- `await analytics.flush()` sends what is queued and waits until ingest has answered. Use it where the platform has no `waitUntil`, once the response body is complete and before the handler returns.
+- `analytics.flushWhenSent(response, waitUntil)` returns the response to send instead and hands the platform's `waitUntil` a flush that starts once the body has been sent. Use it where the platform has a `waitUntil`: it adds nothing to the response time. Pass Vercel's `waitUntil` function, or a context that has one (Cloudflare's `ctx`, Netlify's `context`), not `ctx.waitUntil` on its own, which workerd rejects with "Illegal invocation".
+
+Both wait at most `flushTimeoutMs` (1 s by default; option, `YAVIO_FLUSH_TIMEOUT_MS` or `.yaviorc.json`). Neither rejects nor drops anything: what ingest did not take stays queued for the next flush, and one `YAVIO-1208` line says so until a flush delivers everything again. A batch that waits for a retry after a failed send is retried at once, once per flush, and that attempt does not count towards the retry limit; a `Retry-After` from ingest is honoured. A send still in flight from before is aborted when it is older than `flushTimeoutMs`, because its connection likely died in a freeze, and its batch is re-sent unchanged; ingest drops the duplicate. Both keep the transport, so the next request's `wrap()` finds it, and a flush sends the events of every request on the instance. Concurrent flushes share the batches, so each event goes out once. With a healthy ingest a flush is one round trip (about 55 ms against an ingest that answers in 50 ms). `shutdown()` is for the end of the process, not for every request.
+
+| Runtime | After the response | Recipe |
+|---|---|---|
+| AWS Lambda (Node 20, 22, 24), buffered | frozen until the next invocation; recycled after hours or when idle, with `SIGTERM` only when an extension is registered | `await analytics.flush()` once the body is complete |
+| Lambda response streaming | the invocation lasts until the handler's promise settles | pipe the body, then `await analytics.flush()` |
+| Lambda Managed Instances | not frozen | none: a long-lived host |
+| Vercel Functions, Node runtime | suspended until the next invocation | `flushWhenSent(response, waitUntil)`, or Next.js `after(() => analytics.flush())` |
+| Cloudflare Workers, `nodejs_compat`, date ≥ 2025-09-15 | timers end with the request | `flushWhenSent(response, ctx)` |
+| Cloud Run, request-based billing (the default) | CPU throttled until the next request; `SIGTERM` with 10 s at the end | `await analytics.flush()` before the response is sent, or instance-based billing |
+| Netlify Functions | on AWS Lambda | `flushWhenSent(response, context)` |
+| Vercel Edge runtime, Netlify Edge Functions | no `node:fs`, `node:crypto` or `node:os` | not supported |
+| Deno Deploy, Bun | — | untested |
+
+The recipes use MCP SDK v2's `createMcpHandler`, which takes a web `Request` and returns a web `Response`. Create both once per instance, at module scope:
+
+<!-- recipe:shared -->
+```typescript
+import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
+import { createYavio } from "@yavio/sdk";
+
+export const analytics = createYavio({ serverOnly: true });
+export const mcp = createMcpHandler(() => analytics.wrap(buildServer()));
+
+function buildServer(): McpServer {
+  const server = new McpServer({ name: "example", version: "1.0.0" });
+  // server.registerTool(…) as usual
+  return server;
+}
+```
+
+**AWS Lambda.** Behind a function URL or an API Gateway HTTP API (payload format 2.0), the event turned into a web `Request` (both Lambda recipes use this):
+
+<!-- recipe:lambda-request -->
+```typescript
+export interface HttpEvent {
+  rawPath: string;
+  rawQueryString: string;
+  headers: Record<string, string>;
+  body?: string;
+  isBase64Encoded: boolean;
+  requestContext: { http: { method: string } };
+}
+
+export function toRequest(event: HttpEvent): Request {
+  const query = event.rawQueryString ? `?${event.rawQueryString}` : "";
+  const body =
+    event.body && (event.isBase64Encoded ? Buffer.from(event.body, "base64") : event.body);
+  return new Request(`https://${event.headers.host}${event.rawPath}${query}`, {
+    method: event.requestContext.http.method,
+    headers: event.headers,
+    body: body || undefined,
+  });
+}
+```
+
+Take the whole body first, so every tool call has ended and queued its event, then flush and return. The flush adds one ingest round trip to the invocation:
+
+<!-- recipe:lambda -->
+```typescript
+export const handler = async (event: HttpEvent) => {
+  const response = await mcp.fetch(toRequest(event));
+  const body = await response.text();
+  await analytics.flush();
+  return { statusCode: response.status, headers: Object.fromEntries(response.headers), body };
+};
+```
+
+Lambda's Node 20 and 22 runtimes also run the SDK's natural-exit drain after every invocation of a callback-style handler (see [stdio servers](#stdio-servers)), but only as a race with the freeze. An `await analytics.flush()` before the callback leaves that drain nothing to do.
+
+**Lambda response streaming.** The client has the whole body once it is piped; the invocation, and its billing, lasts until the flush after it has settled:
+
+<!-- recipe:lambda-streaming -->
+```typescript
+import { Writable } from "node:stream";
+
+export const handler = awslambda.streamifyResponse(async (event: HttpEvent, responseStream) => {
+  const response = await mcp.fetch(toRequest(event));
+  const stream = awslambda.HttpResponseStream.from(responseStream, {
+    statusCode: response.status,
+    headers: Object.fromEntries(response.headers),
+  });
+  if (response.body) await response.body.pipeTo(Writable.toWeb(stream));
+  else stream.end();
+  await analytics.flush();
+});
+```
+
+**Vercel.** A Next.js route handler on the Node runtime (Fluid compute). The flush runs after the response, on Vercel's `waitUntil`:
+
+<!-- recipe:vercel -->
+```typescript
+// app/mcp/route.ts
+import { waitUntil } from "@vercel/functions";
+
+export async function POST(request: Request): Promise<Response> {
+  return analytics.flushWhenSent(await mcp.fetch(request), waitUntil);
+}
+```
+
+Next.js's own `after()` (stable since Next.js 15.1) works too. In a route handler it runs its callbacks once the response has closed, after a streamed body has been sent:
+
+<!-- recipe:next-after -->
+```typescript
+import { after } from "next/server";
+
+export async function POST(request: Request): Promise<Response> {
+  after(() => analytics.flush());
+  return mcp.fetch(request);
+}
+```
+
+`waitUntil(analytics.flush())` right after `mcp.fetch()` is too early. Most clients today get the answer as a Server-Sent Events stream, and `fetch()` resolves before the tool call has ended and queued its event, so each call's event waits for the next invocation and the last one is lost.
+
+**Cloudflare Workers.** Set `compatibility_flags = ["nodejs_compat"]` and a `compatibility_date` of 2025-09-15 or later. Pass the context itself:
+
+<!-- recipe:workers -->
+```typescript
+export default {
+  async fetch(request: Request, env: unknown, ctx: ExecutionContext): Promise<Response> {
+    return analytics.flushWhenSent(await mcp.fetch(request), ctx);
+  },
+};
+```
+
+Without `waitUntil` a Worker sends nothing at all, because its timers end with the request. `createYavio()` at module scope works since 0.5.6. Before that it threw "Disallowed operation called within global scope", and every batch failed with "Illegal invocation".
+
+**Cloud Run with request-based billing.** The CPU is throttled outside requests, so a flush after the response stalls until the next request, and what is left is drained at `SIGTERM`. Flush before the response is sent, as in the Lambda recipe: take the body, `await analytics.flush()`, then write it. Alternatively, switch the service to instance-based billing, which keeps the CPU and needs neither. With a transport that writes the response itself (the Express recipe above, the Lambda Web Adapter), the app cannot flush before the response ends. There events arrive late (on a later request, or at `SIGTERM`), but they are not lost.
+
+**Netlify Functions.** `context.waitUntil` exists since March 2025:
+
+<!-- recipe:netlify -->
+```typescript
+// netlify/functions/mcp.mts
+import type { Context } from "@netlify/functions";
+
+export default async (request: Request, context: Context): Promise<Response> =>
+  analytics.flushWhenSent(await mcp.fetch(request), context);
+```
+
+A `withYavio()` host creates one `createYavio()` client at startup for the same key and endpoint, and calls its `flush()`, as for `shutdown()` above. The SDK needs `node:async_hooks`, `node:crypto`, `node:fs` and `node:os`, so runtimes without them (Vercel Edge, Netlify Edge) cannot load it.
 
 ## Captured data
 
