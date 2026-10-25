@@ -237,6 +237,9 @@ const transportKeys = new WeakMap<Transport, string>();
  * request. Cleared by the next flush that delivers everything.
  */
 const stalledFlushes = new Set<string>();
+/** When each key's last `YAVIO-1208` line was printed: at most one per key per `STALL_LINE_INTERVAL_MS` (#171 review round 4). */
+const stallLineAt = new Map<string, number>();
+const STALL_LINE_INTERVAL_MS = 60_000;
 
 /**
  * The deadline a config registers for the signal drain: its
@@ -1521,10 +1524,13 @@ const FLUSH_RACE_MARGIN_MS = 25;
  * flush that leaves events undelivered after one that delivered everything
  * (or after none), then nothing until a flush delivers everything again.
  * Nothing while the process drains after a signal: the cycle's `YAVIO-1205`
- * line counts what is not delivered then.
+ * line counts what is not delivered then. A flush that deferred to another
+ * running flush's send neither prints nor clears: that flush carries its
+ * events and reports for them. And at most one line per key per minute, so
+ * a stall that clears and comes back is not a line a second (review round 4).
  */
 function reportFlush(key: string, ms: number, outcome: FlushOutcome): void {
-  if (draining) return;
+  if (draining || outcome === "deferred") return;
   const live = slots.get(key)?.live;
   const pending = live instanceof HttpTransport ? live.pendingEvents() : 0;
   if (outcome === "done" || pending === 0) {
@@ -1533,6 +1539,10 @@ function reportFlush(key: string, ms: number, outcome: FlushOutcome): void {
   }
   if (stalledFlushes.has(key)) return;
   stalledFlushes.add(key);
+  const now = Date.now();
+  const last = stallLineAt.get(key);
+  if (last !== undefined && now - last < STALL_LINE_INTERVAL_MS) return;
+  stallLineAt.set(key, now);
   const why =
     outcome === "retrying"
       ? "ingest failed a batch, which waits for its retry"
@@ -1698,5 +1708,6 @@ export function _resetSharedState(): void {
   _setSignalReraise(null);
   loggedOnce.clear();
   stalledFlushes.clear();
+  stallLineAt.clear();
   removeSignalHandlers();
 }

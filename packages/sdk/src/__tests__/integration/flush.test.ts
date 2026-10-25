@@ -139,7 +139,18 @@ describe("flush() (#171)", () => {
     const ids = ingest.ofType("tool_call").map((e) => e.event_id);
     expect(new Set(ids).size).toBe(2); // both delivered (re-sends are ingest's to dedup)
     expect(flushLines()).toHaveLength(1);
-    // A new stall after a flush that delivered everything is a new line.
+    // A new stall after a flush that delivered everything is a new line —
+    // but not within a minute of the last one (review round 4's backstop).
+    ingest.hangEvents = true;
+    await invoke(analytics);
+    await analytics.flush();
+    expect(flushLines()).toHaveLength(1);
+    ingest.hangEvents = false;
+    await sleep(100);
+    await analytics.flush(); // delivers everything: the stall is over
+    expect(new Set(ingest.ofType("tool_call").map((e) => e.event_id)).size).toBe(3);
+    const realNow = Date.now.bind(Date);
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + 61_000); // a minute later
     ingest.hangEvents = true;
     await invoke(analytics);
     await analytics.flush();
@@ -333,6 +344,77 @@ describe("flush() (#171)", () => {
       "[YAVIO-1006] waitUntilTimeoutMs must be an integer between 100 and 2147483647 milliseconds, got 0 — using 10000. Shown once per process.",
     ]);
   });
+
+  /**
+   * A busy host and a healthy ingest (#171 review round 4, the reviewer's
+   * review-steady): a request every few milliseconds, each flushing. Before,
+   * a flush chased every event queued after its call until its budget ran
+   * out, so every flush took 1 s and printed `YAVIO-1208` while ingest
+   * answered in 50 ms. A flush's job is what was queued or in flight at its
+   * call: it ends after a round trip or two.
+   */
+  it.each([
+    ["flushWhenSent(), a request every 20 ms", "sent", 20],
+    ["flushWhenSent(), a request every 5 ms", "sent", 5],
+    ["flush(), a request every 20 ms", "plain", 20],
+  ])(
+    "steady traffic against a healthy ingest (%s): every flush ends within a round trip or two, nothing undelivered, no YAVIO-1208 line (#171 review round 4)",
+    async (_label, how, gap) => {
+      ingest.respondAfterMs = 50;
+      const analytics = createYavio({
+        apiKey: `yav_steady_${how}_${gap}`,
+        endpoint: ingest.endpoint,
+        serverOnly: true,
+      });
+      const durations: number[] = [];
+      const all: Promise<unknown>[] = [];
+      let requests = 0;
+      const t0 = Date.now();
+      while (Date.now() - t0 < 2_000) {
+        await invoke(analytics);
+        requests++;
+        const started = Date.now();
+        const done = () => durations.push(Date.now() - started);
+        if (how === "sent") {
+          await analytics
+            .flushWhenSent(new Response("x"), (promise) => {
+              all.push(promise.then(done));
+            })
+            .text();
+        } else {
+          all.push(analytics.flush().then(done));
+        }
+        await sleep(gap);
+      }
+      await Promise.all(all);
+      durations.sort((a, b) => a - b);
+      const p50 = durations[Math.floor(durations.length / 2)] ?? Number.NaN;
+      expect(new Set(ingest.ofType("tool_call").map((e) => e.event_id)).size).toBe(requests);
+      expect(flushLines()).toEqual([]);
+      expect(p50).toBeLessThan(400); // a round trip or two of 50 ms, not the 1 s budget
+    },
+    30_000,
+  );
+
+  it("steady traffic against a hanging ingest: the stall is still one YAVIO-1208 line, from the flush whose own batch went unanswered, though the others defer to it (#171 review round 4)", async () => {
+    ingest.hangEvents = true;
+    const analytics = createYavio({
+      apiKey: "yav_steady_hang",
+      endpoint: ingest.endpoint,
+      serverOnly: true,
+      flushTimeoutMs: 300,
+    });
+    const all: Promise<unknown>[] = [];
+    const t0 = Date.now();
+    while (Date.now() - t0 < 1_500) {
+      await invoke(analytics);
+      all.push(analytics.flush());
+      await sleep(20);
+    }
+    await Promise.all(all);
+    expect(flushLines()).toHaveLength(1);
+    expect(flushLines()[0]).toMatch(/ingest did not answer within 300 ms/);
+  }, 15_000);
 });
 
 describe("flushWhenSent() (#171)", () => {
@@ -573,6 +655,35 @@ describe("flushWhenSent() (#171)", () => {
       state.alive = false;
       expect(Date.now() - t0).toBeLessThan(1_400);
       expect(state.answered).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }, 15_000);
+
+  it("on Workers, a burst against an ingest slower than flushTimeoutMs: every event is answered, and the concurrent request's flush, deferred to the holder, prints no YAVIO-1208 line (#171 review round 4)", async () => {
+    const { fetch, state } = workersFetch(1_500);
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const analytics = createYavio({
+        apiKey: "yav_burst",
+        endpoint: "http://ingest.test/v1/events",
+        serverOnly: true,
+      });
+      const held: Promise<unknown>[] = [];
+      for (let request = 0; request < 2; request++) {
+        await invoke(analytics);
+        await analytics
+          .flushWhenSent(new Response("x"), (promise) => {
+            held.push(promise);
+          })
+          .text();
+        await sleep(200);
+      }
+      await Promise.all(held);
+      state.alive = false;
+      expect(state.calls).toBe(2); // the holder's batch, then the other request's event
+      expect(state.answered).toBe(2);
+      expect(flushLines()).toEqual([]);
     } finally {
       vi.unstubAllGlobals();
     }

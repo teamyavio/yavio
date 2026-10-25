@@ -156,13 +156,20 @@ async function readPartial(
 }
 
 /**
- * How a `flushQueued()` ended (#171): `done` — everything queued was sent
- * and answered, or the transport stopped (its shutdown reports its own
- * losses); `deadline` — its deadline came with events still queued or in
- * flight; `retrying` — a batch failed and waits for a retry that ends past
- * the deadline, which goes on in the background.
+ * How a `flushQueued()` ended (#171). Its job is what was queued or in
+ * flight at the call (decision A), plus what flushes that deferred to it
+ * left it (`carriedTo`):
+ * - `done`: all of that was sent and answered, or the transport stopped
+ *   (its shutdown reports its own losses);
+ * - `deadline`: its deadline came with some of it still queued, or in a
+ *   fetch of its own or no running flush's;
+ * - `deferred`: its deadline came while another running flush's send
+ *   (`owned`) had the slot — that flush carries this one's events and
+ *   reports for them (#171 review round 4);
+ * - `retrying`: its batch failed and waits for a retry that ends past the
+ *   deadline, which goes on in the background.
  */
-export type FlushOutcome = "done" | "deadline" | "retrying";
+export type FlushOutcome = "done" | "deadline" | "deferred" | "retrying";
 
 /**
  * One batch's send, from its first attempt to its outcome (#171 review
@@ -297,6 +304,21 @@ export class HttpTransport implements Transport {
   /** How long ingest took to answer the last fetch it answered, in ms; 0 before any answer (#171, C3). */
   private lastRoundTripMs = 0;
   /**
+   * Each queued event's place in the order events were queued (#171 review
+   * round 4): a flush's job is the events up to the last one queued at its
+   * call. Batches leave the queue in that order, one at a time, so what is
+   * left of a flush's job is known from the oldest event still pending.
+   */
+  private readonly seqOf = new WeakMap<BaseEvent, number>();
+  /** The place of the last event queued so far. */
+  private queuedSeq = 0;
+  /**
+   * The furthest job a flush that deferred to a running flush's send left
+   * behind (`deferred`): every running flush takes it on, so its events do
+   * not wait for the next request because their own flush gave up first.
+   */
+  private carriedTo = 0;
+  /**
    * Events a shutdown deadline gave up: queued at the deadline, in flight
    * and cut by it, refused after it, or a batch given up because its retry
    * wait would have ended past it. What `YAVIO-1205` counts (#148) — and only that: a batch
@@ -402,6 +424,21 @@ export class HttpTransport implements Transport {
     return this.buffer.length + (this.resend?.batch.length ?? 0);
   }
 
+  /**
+   * The place of the oldest event not yet delivered or given up — in a
+   * batch to re-send, in flight or queued — or Infinity when none is
+   * (#171 review round 4). Each of the three holds its events in the order
+   * they were queued, so the oldest is one of their heads.
+   */
+  private oldestPending(): number {
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const event of [this.resend?.batch[0], this.current?.batch[0], this.buffer[0]]) {
+      const seq = event === undefined ? undefined : this.seqOf.get(event);
+      if (seq !== undefined && seq < oldest) oldest = seq;
+    }
+    return oldest;
+  }
+
   /** The next batch to send: a batch to re-send first, as it was and with its state, else the head of the buffer. */
   private takeBatch(): Carried {
     const resend = this.resend;
@@ -480,6 +517,7 @@ export class HttpTransport implements Transport {
       }
     }
 
+    for (const event of events) this.seqOf.set(event, ++this.queuedSeq);
     this.buffer.push(...events);
     if (this.started && !this.timer) this.armTimer();
 
@@ -732,8 +770,16 @@ export class HttpTransport implements Transport {
     holdMs: number = deadlineMs,
   ): Promise<FlushOutcome> {
     const deadlineAt = Date.now() + deadlineMs;
+    // Its job (decision A): what is queued or in flight now. What is queued
+    // after the call is the next flush's, so under steady traffic a flush
+    // ends after a round trip or two instead of chasing new events until
+    // its budget runs out (#171 review round 4: a request every 20 ms
+    // against a 50 ms ingest, every flush 1 s and 165 YAVIO-1208 lines in
+    // 10 s). Plus what flushes that deferred to this one left it.
+    const target = this.queuedSeq;
+    const scope = () => Math.max(target, this.carriedTo);
+    const finished = () => this.oldestPending() > scope();
     let expired = false;
-    let outcome: FlushOutcome = "done";
     let retried = false; // one early retry per flush (C2)
     const watches = new Set<() => void>();
     // The sends this flush started: it waits for them, it never takes them
@@ -753,10 +799,9 @@ export class HttpTransport implements Transport {
           await this.closing;
           return;
         }
-        if (this.stopped) return;
+        if (this.stopped || finished()) return;
         const send = this.current;
         if (!send) {
-          if (this.queued() === 0) return;
           // Started from this flush, not awaited: the next round watches it.
           this.flush().catch(() => {});
           if (!this.current) return;
@@ -805,10 +850,7 @@ export class HttpTransport implements Transport {
             });
             continue;
           }
-          if (wait.endsAt >= deadlineAt) {
-            outcome = "retrying";
-            return;
-          }
+          if (wait.endsAt >= deadlineAt) return; // `retrying`, or `deferred` to its flush
           await this.watch(wait.endsAt, watches);
           continue;
         }
@@ -845,7 +887,7 @@ export class HttpTransport implements Transport {
         // watch it waits on, and it must not set another one after that,
         // which on Workers outlived the request (#171 review round 3).
         await raceDeadline(
-          this.hold(own, adopt, holdAt, watches, () => held),
+          this.hold(own, adopt, holdAt, watches, finished, () => held),
           holdAt - Date.now(),
           {
             keepAlive: true,
@@ -854,22 +896,31 @@ export class HttpTransport implements Transport {
             },
           },
         );
-        // Its sends answered, or one failed and waits for its retry. Events
-        // still queued — no time was left for their round trip, or another
-        // flush's send holds the slot — make it "deadline", not "done", so
-        // the stall line is not cleared with them undelivered (round 3).
-        if (!held) {
-          outcome = this.pendingDelay ? "retrying" : this.queued() > 0 ? "deadline" : "done";
-        }
-        expired = held;
       }
+      const outcome = this.outcome(finished(), own);
+      // Another running flush has its events: that one reports for them.
+      if (outcome === "deferred") this.carriedTo = Math.max(this.carriedTo, scope());
+      return outcome;
     } finally {
       // From this flush's own context, while it is still alive: nothing of
       // another request resolves its promises later.
       for (const end of [...watches]) end();
       for (const send of own) send.owned = false;
     }
-    return expired ? "deadline" : outcome;
+  }
+
+  /**
+   * How a flush ended, from what is left of its job (#171 review round 4):
+   * `done` when nothing is; `deferred` when another running flush's send
+   * has the slot; `retrying` when its batch waits for a retry; `deadline`
+   * otherwise — its own batch unanswered, or nobody's flush to defer to.
+   */
+  private outcome(finished: boolean, own: Set<Send>): FlushOutcome {
+    if (finished) return "done";
+    const send = this.current;
+    if (send && !own.has(send) && send.owned) return "deferred";
+    if (send && this.pendingDelay?.send === send) return "retrying";
+    return "deadline";
   }
 
   /** Whether the send in flight is one of `own`, its fetch out (#171 review round 2). */
@@ -881,28 +932,37 @@ export class HttpTransport implements Transport {
   /**
    * Wait, until `holdAt`, for the fetch of the send in flight while it is
    * one of `own`: through its answer, not into a retry wait, another
-   * flush's batch or a shutdown (#171 review round 2). Once the slot is
-   * free, send what is queued next and wait for that too, while a round
-   * trip as long as the last one still fits before `holdAt` (round 3).
+   * running flush's batch or a shutdown (#171 review round 2). Once the
+   * slot is free and some of its job is left — its own events, and those
+   * of the flushes that deferred to it (round 3) — send the next batch and
+   * wait for that too, while a round trip as long as the last one still
+   * fits before `holdAt`. Events queued after the call that no deferring
+   * flush left it are not its job (round 4).
    */
   private async hold(
     own: Set<Send>,
     adopt: (send: Send) => void,
     holdAt: number,
     watches: Set<() => void>,
+    finished: () => boolean,
     over: () => boolean,
   ): Promise<void> {
     for (let i = 0; i < 1_000; i++) {
-      if (over() || this.closing || this.stopped) return;
+      if (over() || this.closing || this.stopped || finished()) return;
       const send = this.current;
       if (!send) {
-        if (this.queued() === 0 || Date.now() + this.lastRoundTripMs >= holdAt) return;
+        if (Date.now() + this.lastRoundTripMs >= holdAt) return;
         this.flush().catch(() => {});
         if (!this.current) return;
         adopt(this.current);
         continue;
       }
-      if (!own.has(send)) return;
+      if (!own.has(send)) {
+        if (send.owned) return; // another running flush's: `deferred` to it
+        // No flush's (the interval's): it carries the job's head; wait.
+        await this.watch(holdAt, watches);
+        continue;
+      }
       if (send.fetchStartedAt === undefined) {
         if (this.pendingDelay?.send === send) return;
         await this.watch(Math.min(holdAt, Date.now() + 10), watches);

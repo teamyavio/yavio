@@ -2104,7 +2104,7 @@ describe("HttpTransport.flushQueued() and a send another request left behind (#1
     return { fetch, calls, t0 };
   };
 
-  it("a burst against an ingest slower than the budget: the holding flush's send is not taken back, the concurrent flush gives up at its own budget with 'deadline', and the holder sends its events next (#171 review round 3)", async () => {
+  it("a burst against an ingest slower than the budget: the holding flush's send is not taken back, the concurrent flush gives up at its own budget, 'deferred' to it, and the holder sends its events next (#171 review rounds 3 and 4)", async () => {
     const { fetch, calls, t0 } = slowFetch(1_500);
     const transport = new HttpTransport({ ...base, flushIntervalMs: 3_600_000, fetch });
     const ended: Record<string, [string, number]> = {};
@@ -2124,7 +2124,7 @@ describe("HttpTransport.flushQueued() and a send another request left behind (#1
       { at: 0, n: 1, aborted: false }, // A's, not taken back by B
       { at: 1_500, n: 1, aborted: false }, // B's event, sent by A once its own was answered
     ]);
-    expect(ended).toEqual({ b: ["deadline", 1_200], a: ["done", 3_000] });
+    expect(ended).toEqual({ b: ["deferred", 1_200], a: ["done", 3_000] });
   });
 
   it("a holder whose next round trip no longer fits before its holdAt leaves the queue for the next request and returns 'deadline', not 'done' (#171 review round 3)", async () => {
@@ -2142,7 +2142,7 @@ describe("HttpTransport.flushQueued() and a send another request left behind (#1
     track("b", transport.flushQueued(1_000, 1_000, 2_500));
     await vi.advanceTimersByTimeAsync(3_000);
     // A's answer at 1500; another 1.5 s round trip would end past 2500: not started.
-    expect(ended).toEqual({ b: ["deadline", 1_200], a: ["deadline", 1_500] });
+    expect(ended).toEqual({ b: ["deferred", 1_200], a: ["deadline", 1_500] });
     expect(calls).toHaveLength(1);
     expect(transport.deliveredEvents()).toBe(1);
     expect(transport.pendingEvents()).toBe(1);
@@ -2165,7 +2165,7 @@ describe("HttpTransport.flushQueued() and a send another request left behind (#1
     expect(atEnd).toEqual([0, 0]);
   });
 
-  it("against a hanging ingest the hold stays bounded: one holder until its holdAt, 'deadline'; a concurrent flush returns at its own budget; once the holder is gone, the next flush takes the batch back (#171 review round 3)", async () => {
+  it("against a hanging ingest the hold stays bounded: one holder until its holdAt, 'deadline'; a concurrent flush returns at its own budget, 'deferred'; once the holder is gone, the next flush takes the batch back (#171 review round 3)", async () => {
     const { fetch, calls, t0 } = slowFetch(Number.POSITIVE_INFINITY);
     const transport = new HttpTransport({ ...base, flushIntervalMs: 3_600_000, fetch });
     const ended: Record<string, [string, number]> = {};
@@ -2180,7 +2180,7 @@ describe("HttpTransport.flushQueued() and a send another request left behind (#1
     track("b", transport.flushQueued(1_000, 1_000, 5_000));
     await vi.advanceTimersByTimeAsync(5_000); // to 5200
     // B: no hold, its own fetch is not out; A: held to its holdAt, nothing new started meanwhile.
-    expect(ended).toEqual({ b: ["deadline", 1_200], a: ["deadline", 5_000] });
+    expect(ended).toEqual({ b: ["deferred", 1_200], a: ["deadline", 5_000] });
     expect(calls).toEqual([{ at: 0, n: 1, aborted: false }]);
     track("c", transport.flushQueued(1_000, 1_000, 5_000)); // the next request, at 5200
     await vi.advanceTimersByTimeAsync(10);
@@ -2269,7 +2269,7 @@ describe("HttpTransport.flushQueued() and a send another request left behind (#1
     const then = vi.spyOn(inner.inflight, "then");
     const second = transport.flushQueued(500);
     await vi.advanceTimersByTimeAsync(500);
-    expect(await second).toBe("deadline");
+    expect(await second).toBe("deferred"); // request 1's flush still runs and carries it (round 4)
     expect(then).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(500);
     expect(await first).toBe("deadline");
