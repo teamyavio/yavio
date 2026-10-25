@@ -88,6 +88,9 @@ export const MAX_RETRY_AFTER_MS = DEFAULT_FETCH_TIMEOUT_MS;
  */
 export const ABORT_SETTLE_MS = 100;
 
+/** A hold with no more than this left is not armed (#171 review round 3): see `flushQueued()`. */
+const MIN_HOLD_MS = 5;
+
 /**
  * A `Retry-After` value as a wait in milliseconds: delay-seconds, or an
  * HTTP-date (counted from now, never negative), either capped at
@@ -826,7 +829,17 @@ export class HttpTransport implements Transport {
           expired = true;
         },
       });
-      if (expired && holdAt > Date.now() && this.holdsOwnFetch(own)) {
+      // Only a hold asked for (`flushWhenSent()`), and only with more than a
+      // few milliseconds left: Node's timers run on a monotonic clock and
+      // Date.now() on the wall clock, so a deadline timer can fire a
+      // millisecond "early", and a flush without a hold then armed a ref'd
+      // 1 ms one (a flake on #187's CI, #171 review round 3).
+      if (
+        expired &&
+        holdMs > deadlineMs &&
+        holdAt - Date.now() > MIN_HOLD_MS &&
+        this.holdsOwnFetch(own)
+      ) {
         let held = false;
         // `held` also stops the hold's loop: the finally below ends the
         // watch it waits on, and it must not set another one after that,

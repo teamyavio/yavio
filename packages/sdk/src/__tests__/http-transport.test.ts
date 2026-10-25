@@ -1923,6 +1923,44 @@ describe("HttpTransport.flushQueued() (#171)", () => {
     expect(timers.filter((t) => t.handle.hasRef())).toHaveLength(1); // the flush's own wake-ups are unref'd too
     await transport.shutdown(0);
   });
+
+  it.each([
+    ["a flush without a hold", 1_500, "deadline"],
+    ["a hold with a millisecond left", 1_501, "deadline"],
+  ])(
+    "when the deadline timer fires a millisecond early against Date.now(), %s arms no hold: no second ref'd timer, and the flush ends at its deadline (#171 review round 3)",
+    async (_label, holdMs, outcome) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+      const fakeSetTimeout = globalThis.setTimeout;
+      const timers: Array<{ ms: number | undefined; handle: NodeJS.Timeout }> = [];
+      vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+        fn: (...args: unknown[]) => void,
+        ms?: number,
+      ) => {
+        const handle = fakeSetTimeout(fn, ms);
+        timers.push({ ms, handle });
+        return handle;
+      }) as typeof setTimeout);
+      const { fetch } = scriptedFetch(["hang"]);
+      const transport = new HttpTransport({ ...base, flushIntervalMs: 3_600_000, fetch });
+      transport.send([fakeEvent()]);
+      let ended: string | undefined;
+      void transport.flushQueued(1_500, 1_500, holdMs).then((o) => {
+        ended = o;
+      });
+      await vi.advanceTimersByTimeAsync(1_499);
+      // Node's timers run on a monotonic clock, Date.now() on the wall clock:
+      // the two may disagree by a millisecond. Here Date.now() lags by one.
+      vi.setSystemTime(Date.now() - 1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(timers.filter((t) => t.handle.hasRef()).map((t) => t.ms)).toEqual([1_500]);
+      expect(ended).toBe(outcome);
+      const stopping = transport.shutdown(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await stopping;
+    },
+  );
 });
 
 /**
