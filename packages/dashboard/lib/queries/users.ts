@@ -34,9 +34,9 @@ interface QueryContext {
  *   identify never re-attributes history. Only identify rows are read — a
  *   primary-key range, a few percent of the events. An event without a
  *   session never maps to anyone, nor does a `per_request` session (#144):
- *   it is one call, and up to SDK 0.5.4 a long-lived MCP SDK v1 1.24/1.25
- *   server that reused one stateless transport put every key-less caller
- *   into one such session (#169), so one caller's identify would key
+ *   since SDK 0.5.5 it is one call, and on 0.5.4 a long-lived MCP SDK v1
+ *   1.24/1.25 server that reused one stateless transport put every key-less
+ *   caller into one such session (#169), so one caller's identify would key
  *   everybody's rows. Every copy of this map — querySessionUsers() in
  *   session-users.ts, USER_KEY_SQL in lib/mcp/schema-doc.ts, the statistics
  *   prelude in packages/ingest — has the same rule.
@@ -84,10 +84,10 @@ const bound = (column: string, window?: TimeWindow): string =>
   window ? `AND ${column} >= ${window.from} AND ${column} < ${window.to}` : "";
 
 /**
- * The rows whose session counts as a session (#144). A session the SDK
- * labelled `per_request` is a key-less HTTP call: one call on any host since
- * SDK 0.5.5 (#169), before only on a per-request host (a long-lived server
- * reusing one stateless transport put every key-less caller into one); its
+ * The rows whose session counts as a session (#144). The SDK labels every
+ * key-less HTTP call `per_request`, on any host (0.5.4 and later): one call
+ * since 0.5.5, while on 0.5.4 a long-lived server reusing one stateless
+ * transport put every key-less caller into one such session (#169). Its
  * widget rows carry the label too (0.5.4 widgets). NULL (an SDK before
  * 0.5.4, server or widget) counts as before. Used by the Sessions KPI and
  * the users list's totalSessions; users themselves are never keyed by

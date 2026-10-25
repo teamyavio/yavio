@@ -447,9 +447,10 @@ describe.skipIf(!url)("user queries on a real ClickHouse (#89)", () => {
     });
 
     it("never maps a per_request session: one caller's identify keys nobody else's calls (#144)", async () => {
-      // Up to SDK 0.5.4 a long-lived MCP SDK v1 1.24/1.25 server that reused
-      // one stateless transport put every key-less caller into one
-      // per_request session (#169); such rows stay in storage for 13 months.
+      // On SDK 0.5.4 a long-lived MCP SDK v1 1.24/1.25 server that reused one
+      // stateless transport put every key-less caller into one per_request
+      // session (0.5.5 gives each call its own, #169); such rows stay in
+      // storage for 13 months.
       const p = scoped("per-request");
       await p.insert([
         { ...identify("ann", "pr-shared", day(-2, "09:00:00.000")), session_source: "per_request" },

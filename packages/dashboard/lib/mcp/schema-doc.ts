@@ -84,17 +84,17 @@ session_source (Nullable): how the SDK derived session_id — 'mcp_session_id'
 'vscode_conversation' (VS Code's conversation id), 'codex_thread' (the Codex
 CLI's thread), 'custom' (the app's own sessionKey option), 'connection' (no
 key, a non-HTTP transport such as stdio: one session per client process) or
-'per_request' (a key-less HTTP call: this "session" is ONE CALL, not a
-conversation — on any server since SDK 0.5.5; before 0.5.5 only on servers
-that build a new MCP server per request, while a long-lived server reusing one
-stateless transport put every key-less caller into one such session). Widget
+'per_request' (a key-less HTTP call, on any server: not a conversation). Widget
 events carry their server session's source too. NULL = SDK < 0.5.4 (server or
 widget). Count sessions as uniqExactIf(session_id,
 ifNull(session_source, '') != 'per_request') — what the dashboard's Sessions
 KPI and the users list do; countIf(event_type = 'tool_call' AND
 session_source = 'per_request') is the number of calls from clients that send
-no session key. Paths, funnels and identify() are per session, so they are
-empty or one call long for per_request traffic.
+no session key. Paths, funnels and identify() are per session: since SDK 0.5.5
+a per_request session is ONE CALL, so they are empty or one call long for it;
+on SDK 0.5.4 a server that reuses one stateless transport put all its key-less
+callers into one per_request session, mixing their identify(), users,
+platforms and steps.
 A 'connection' event is emitted at least once per session per SDK process (a
 stateless fleet writes one per instance that served the conversation) — for
 per_request traffic once per SDK process per client (platform, client name and
@@ -120,8 +120,9 @@ coalesce(the event's own user_id, the FIRST user_id an 'identify' event gave its
 session_id, the user_id last seen with its subject_id, subject_id) — never the
 session itself. Once a session is identified, all its events count for that
 user — except a per_request session (see session_source), which is never
-mapped: it is one call, and before SDK 0.5.5 a server that reused one
-stateless transport put every key-less caller into one such session. The same key as one query (tool calls per person over the last 30 days;
+mapped: since SDK 0.5.5 it is one call, and on 0.5.4 one could hold every
+key-less caller of a server that reused one stateless transport. The same key
+as one query (tool calls per person over the last 30 days;
 person NULL = calls without a known user; uniqExact(person) counts users):
 ${USER_KEY_SQL}
 Keep both maps bounded to the query's window, as here and in the dashboard's

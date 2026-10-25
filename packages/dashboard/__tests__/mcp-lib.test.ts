@@ -193,11 +193,15 @@ describe("get_schema doc", () => {
     expect(SCHEMA_DOC).toMatch(
       /uniqExactIf\(session_id,\s+ifNull\(session_source, ''\) != 'per_request'\)/,
     );
-    // Right for both SDK eras (#169): every key-less HTTP call since 0.5.5,
-    // a per-request host's call (or a reused transport's shared one) before.
+    // Right for the rows of both SDKs that send the label (#169): 0.5.4
+    // already labels every key-less HTTP call on any server; since 0.5.5 each
+    // is one call, where 0.5.4 shared one session across a reused transport.
     const doc = SCHEMA_DOC.replace(/\s+/g, " ");
-    expect(doc).toContain(
-      `'per_request' (a key-less HTTP call: this "session" is ONE CALL, not a conversation — on any server since SDK 0.5.5; before 0.5.5 only on servers that build a new MCP server per request`,
+    expect(doc).toMatch(/'per_request' \(a key-less HTTP call, on any server/);
+    expect(doc).toMatch(/since SDK 0\.5\.5 a per_request session is ONE CALL/);
+    expect(doc).toMatch(
+      /on SDK 0\.5\.4 a server that reuses one stateless transport put all its key-less callers into one per_request session/,
     );
+    expect(doc).not.toMatch(/only on (a )?servers? that builds? a new MCP server per request/);
   });
 });

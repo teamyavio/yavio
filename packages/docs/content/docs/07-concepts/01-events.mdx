@@ -32,7 +32,7 @@ A `session_id` stands for one conversation. The server SDK derives it from the f
 | `codex_thread` | The Codex CLI's `_meta.threadId` (only from `codex-mcp-client`) |
 | `custom` | Your [`sessionKey`](/docs/02-sdk/03-configuration#session-key) option — stored as a hash keyed with your API key |
 | `connection` | No key, a non-HTTP transport (stdio): one session per client process |
-| `per_request` | No key on an HTTP request. This is **one call**, not a conversation, on every server since SDK 0.5.5 (before, on a server that builds a new `McpServer` per request), so it is not counted as a session |
+| `per_request` | No key on an HTTP request, on any server. It is not counted as a session. Since SDK 0.5.5 it is **one call**, not a conversation; on 0.5.4 a server that reuses one stateless transport put all its key-less callers into one |
 
 The same key gives the same `session_id` on every server instance and process. Both server and widget events share the session ID — the server propagates it to the widget via the configuration injection. Multiple traces (tool invocations) can share the same session.
 
