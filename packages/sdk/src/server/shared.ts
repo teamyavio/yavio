@@ -313,9 +313,12 @@ function noteSignalDrain(drain: Promise<void>): void {
   const joined = signalDrain ? Promise.all([signalDrain, drain]).then(() => {}) : drain;
   signalDrain = joined;
   signalDrainSettled = false;
-  void joined.then(() => {
-    if (signalDrain === joined) signalDrainSettled = true;
-  });
+  void joined.then(
+    () => {
+      if (signalDrain === joined) signalDrainSettled = true;
+    },
+    () => {},
+  );
 }
 
 function noteDraining(): void {
@@ -1122,10 +1125,17 @@ function writeStderrLine(line: string): void {
 function reportCallLoss(transport: Transport, lost: number, deadlineMs: number): void {
   if (signalInFlight || signalStops.has(transport) || exitStops.has(transport)) return;
   reportedLost += lost;
+  // The client's own value, when a release ran its stop under less of it
+  // (after waiting for a running drain, #178 follow-up): that is the value
+  // the hint to raise is about (review round 2).
+  const named = stopLabels.get(transport) ?? deadlineMs;
   console.warn(
-    `[YAVIO-1205] shutdown() deadline of ${deadlineMs} ms reached — ${lost} events not delivered. ${RAISE_HINT}`,
+    `[YAVIO-1205] shutdown() deadline of ${named} ms reached — ${lost} events not delivered. ${RAISE_HINT}`,
   );
 }
+
+/** The client's `shutdownTimeoutMs` a stop's line names, for a stop run under less of it (#178 follow-up). */
+const stopLabels = new WeakMap<Transport, number>();
 
 /**
  * Re-raise a signal once the SDK's listener is gone, so Node's default action
@@ -1265,7 +1275,10 @@ function armCycleTimer(cycle: SignalCycle): void {
  * as before #175.
  */
 function escalate(cycle: SignalCycle, afterMs: number): boolean {
-  const now = Date.now();
+  // The SIGTERM's arrival as `onSignal` measured it: a second Date.now()
+  // could tick past it, and the line's bound would then be min(400,
+  // afterMs + 301) (review round 2).
+  const now = cycle.startedAt + afterMs;
   if (cycle.startedAt + ESCALATION_MS <= now) return false;
   const at = Math.min(cycle.startedAt + ESCALATION_MS, now + AFTER_SIGTERM_MS);
   const cut = at < cycle.deadlineAt;
@@ -1650,6 +1663,7 @@ export async function releaseShared(
       slot.live = null;
     }
     if (!live) return;
+    if (waited) stopLabels.set(live, ownMs); // the line names the client's value, not what was left of it
     try {
       await trackStop(live, live.shutdown(boundedBy(stopMs())));
     } finally {

@@ -3376,10 +3376,11 @@ describe("the last client's shutdown() on a key withYavio() pinned (#179)", () =
     // the stop settles, and shutdown() returns, at about 500 ms.
     expect(took).toBeGreaterThanOrEqual(480);
     expect(took).toBeLessThan(1_000);
+    // The line names the client's 600 ms, not what was left of it (review
+    // round 2: "shutdown() deadline of 184 ms reached …" next to the hint
+    // to raise shutdownTimeoutMs).
     expect(atReturn).toEqual([
-      expect.stringMatching(
-        /^\[YAVIO-1205\] shutdown\(\) deadline of \d+ ms reached — 1 events not delivered\./,
-      ),
+      "[YAVIO-1205] shutdown() deadline of 600 ms reached — 1 events not delivered. Raise shutdownTimeoutMs (or YAVIO_SHUTDOWN_TIMEOUT_MS) if the platform's grace period allows.",
     ]);
     exitHooks()[0]?.call(process, 0);
     expect(lines1205()).toHaveLength(1);
