@@ -1901,11 +1901,16 @@ function extractClientMeta(
   const ex = readCallExtra(extra);
   // A repeated header (an array, from a hand-built record) is joined as
   // sanitizeRequestInfo joins it, so two header lines are never lifted as the
-  // first one: a joined value is not a valid traceparent.
+  // first one: a joined value is not a valid traceparent. Only an array of
+  // strings: joining an element whose string conversion throws (a
+  // null-prototype object, a symbol) would fail the call (#173 review round 1).
   const header = ex.requestHeaders?.traceparent;
-  const traceparent =
-    traceparentOf(ex.meta?.traceparent) ??
-    traceparentOf(Array.isArray(header) ? header.join(", ") : header);
+  const headerText = Array.isArray(header)
+    ? header.every((v) => typeof v === "string")
+      ? header.join(", ")
+      : undefined
+    : header;
+  const traceparent = traceparentOf(ex.meta?.traceparent) ?? traceparentOf(headerText);
   const m = ex.meta;
   if (!m) return traceparent ? { traceparent } : undefined;
 

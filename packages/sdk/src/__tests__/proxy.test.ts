@@ -2761,6 +2761,38 @@ describe("SEP-414 trace context: traceparent, tracestate, baggage (#173)", () =>
     expect(inputValuesOf(two)).not.toHaveProperty("_requestInfo");
   });
 
+  // Review round 1, nit 2: an element whose string conversion throws used to
+  // throw out of the join and fail a successful call.
+  it.each([
+    ["a null-prototype object", () => Object.create(null) as unknown],
+    ["a symbol", () => Symbol("traceparent") as unknown],
+  ])(
+    "lifts nothing from a header array holding %s, and the call still succeeds",
+    async (_case, element) => {
+      const server = new McpServer({ name: "test", version: "1.0" });
+      const transport = createMockTransport();
+      const proxy = createProxy(server, testConfig, transport, "0.0.1");
+      const ok = { content: [{ type: "text" as const, text: "ok" }] };
+      proxy.tool("tc_tool", { q: z.string() }, () => ok);
+      const returned = await registeredTool(server, "tc_tool")?.handler(
+        { q: "hello" },
+        {
+          signal: new AbortController().signal,
+          sendNotification: async () => {},
+          sendRequest: async () => ({}),
+          requestInfo: { headers: { traceparent: [element()], "user-agent": "probe/1.0" } },
+        },
+      );
+      expect(returned).toEqual(ok);
+      const event = transport.sent.flat().find((e) => e.event_type === "tool_call") as Record<
+        string,
+        unknown
+      >;
+      expect(event.status).toBe("success");
+      expect(event.metadata).toBeUndefined();
+    },
+  );
+
   // Review round 1, should-fix 1: baggage under other carriers. .NET 8/9's
   // default propagator (LegacyPropagator, which the C# MCP SDK uses through
   // DistributedContextPropagator.Current) writes it as `Correlation-Context`;
