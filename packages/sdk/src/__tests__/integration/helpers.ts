@@ -224,10 +224,15 @@ export async function startMockIngest(options: MockIngestOptions = {}): Promise<
 }
 
 /**
- * The port `refusedEndpoint()` returns: below 1024, so no `listen(0)` is ever
- * handed it (every OS's ephemeral range starts far above) and on a default
- * kernel no unprivileged process can bind it. Not port 1: fetch blocks it as
- * a "bad port" before connecting.
+ * The port `refusedEndpoint()` returns. What keeps it refusing: it is below
+ * 1024, so no `listen(0)` is ever handed it (the default ephemeral ranges
+ * start at 32768 on Linux and 49152 on macOS and Windows); nothing in the
+ * suite or on a CI runner listens on it; and `refusedEndpoint()` checks on
+ * every call and throws if something does. Being privileged is no guard:
+ * a Linux host refuses an unprivileged bind, but a Docker container
+ * (`ip_unprivileged_port_start=0`) and macOS 10.14 and later let any user
+ * listen there. Not port 1: fetch blocks it as a "bad port" before
+ * connecting.
  */
 const REFUSED_PORT = 2;
 
