@@ -15,13 +15,28 @@
  * app's outlives the EOF by 1 s, so the client's `SIGTERM` arrives while the
  * SDK's natural-exit drain runs) | "sigint" (an app `SIGINT` listener that
  * only prints `[fixture] SIGINT` to stderr: the process survives the SDK's
- * hand-back and serves the calls that follow, #174); INTENT = "1" turns
- * intent capture on and adds `widget_echo`, a widget-invoked tool, so every
- * informational line the SDK has is printed (#174).
+ * hand-back and serves the calls that follow, #174) | "stdin-end-with" (the
+ * README's stdio recipe next to `withYavio()`: the servers wrapped with
+ * `withYavio()` on both stacks, a shutdown-only `createYavio()` client on the
+ * same key with RECIPE_SHUTDOWN_TIMEOUT_MS or 1 500, and on stdin's end
+ * await its `shutdown()`, then exit, #179) | "stdin-end-with-noexit" (the
+ * same without `process.exit()`: prints `[fixture] shutdown resolved` to
+ * stderr, and the process ends once nothing keeps it alive, #179) |
+ * "stdin-end-mixed" (the recipe on a key a second `createYavio()` client also
+ * holds: it wraps the servers, `withYavio()` only pins the key — the
+ * shutdown-only client's `shutdown()` must stop the transport anyway,
+ * #187 review round 3); INTENT =
+ * "1" turns intent capture on and adds `widget_echo`, a widget-invoked
+ * tool, so every informational line the SDK has is printed (#174);
+ * SIGNAL_PROBE = "1" prints `[fixture] <signal> <Date.now()>` to stderr
+ * when Node dispatches a SIGINT or SIGTERM, before any listener runs —
+ * through `process.emit`, so no listener is added and the SDK still sees
+ * itself as the only one (#175).
  *
  * stdout is the MCP wire: nothing here writes to it, and the SDK must not
  * either (#174) — so this fixture leaves `console` as it is.
  */
+import { writeSync } from "node:fs";
 import { McpServer as McpServerV1 } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { McpServer as McpServerV2 } from "@modelcontextprotocol/server";
@@ -49,9 +64,60 @@ const options = {
 const echo = async ({ q }: { q: string }) => ({ content: [{ type: "text" as const, text: q }] });
 /** Marks a tool as one the widget calls: with intent required, the SDK logs that it advertises `context` as optional there. */
 const widgetMeta = { "openai/widgetAccessible": true };
+/** #179: the README's stdio recipe next to `withYavio()`. */
+const pinnedRecipe =
+  mode === "stdin-end-with" || mode === "stdin-end-with-noexit" || mode === "stdin-end-mixed";
+
+if (process.env.SIGNAL_PROBE === "1") {
+  // Node dispatches a signal through `process.emit(name, name)`: wrapping
+  // it reports the dispatch without adding a listener of the app's.
+  const emit = process.emit.bind(process) as (event: string, ...args: unknown[]) => boolean;
+  (process as { emit: unknown }).emit = (event: string, ...args: unknown[]): boolean => {
+    if (event === "SIGINT" || event === "SIGTERM") {
+      writeSync(2, `[fixture] ${event} ${Date.now()}\n`);
+    }
+    return emit(event, ...args);
+  };
+}
 
 let analytics: ReturnType<typeof createYavio> | undefined;
-if (stack === "v2") {
+if (pinnedRecipe) {
+  // Once, at startup, for the same key: shutdown() only.
+  analytics = createYavio({
+    ...options,
+    shutdownTimeoutMs: Number(process.env.RECIPE_SHUTDOWN_TIMEOUT_MS ?? 1_500),
+  });
+  // "stdin-end-mixed" (#187 review round 3): a second createYavio() client
+  // wraps the servers and so holds the key, withYavio() only pins it.
+  const serving = mode === "stdin-end-mixed" ? createYavio(options) : undefined;
+  if (serving) withYavio(new McpServerV1({ name: "pin", version: "1.0.0" }), options);
+  // Wrapped first: withYavio() tracks the tools registered through its proxy.
+  // `slow` answers after `ms`: a call still running when stdin ends, which
+  // finishes during the recipe's shutdown() (#179 review round 1). It says
+  // `[fixture] slow started` on stderr: v2 drops a request it has not
+  // dispatched yet when stdin ends, so the test ends stdin after this line.
+  const slowSchema = { description: "Echo after ms", inputSchema: { ms: z.number() } };
+  const slow = async ({ ms }: { ms: number }) => {
+    writeSync(2, "[fixture] slow started\n");
+    await new Promise((resolve) => setTimeout(resolve, ms));
+    return { content: [{ type: "text" as const, text: `slept ${ms}` }] };
+  };
+  if (stack === "v2") {
+    serveStdio(() => {
+      const raw = new McpServerV2({ name: "child", version: "1.0.0" });
+      const server = serving ? serving.wrap(raw) : withYavio(raw, options);
+      server.registerTool("echo", { description: "Echo", inputSchema: { q: z.string() } }, echo);
+      server.registerTool("slow", slowSchema, slow);
+      return server;
+    });
+  } else {
+    const raw = new McpServerV1({ name: "child", version: "1.0.0" });
+    const server = serving ? serving.wrap(raw) : withYavio(raw, options);
+    server.registerTool("echo", { description: "Echo", inputSchema: { q: z.string() } }, echo);
+    server.registerTool("slow", slowSchema, slow);
+    await server.connect(new StdioServerTransport());
+  }
+} else if (stack === "v2") {
   analytics = createYavio(options);
   const client = analytics;
   serveStdio(() => {
@@ -82,10 +148,16 @@ if (stack === "v2") {
   await server.connect(new StdioServerTransport());
 }
 
-if (mode === "stdin-end") {
+if (mode === "stdin-end" || mode === "stdin-end-with" || mode === "stdin-end-mixed") {
   process.stdin.on("end", async () => {
     await analytics?.shutdown();
     process.exit(0);
+  });
+}
+if (mode === "stdin-end-with-noexit") {
+  process.stdin.on("end", async () => {
+    await analytics?.shutdown();
+    writeSync(2, "[fixture] shutdown resolved\n");
   });
 }
 if (mode === "handle") {

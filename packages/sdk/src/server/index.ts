@@ -250,6 +250,12 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
   // a stale hold never counts against a successor.
   const onEvict = evictionHookFor(config);
   let hold: SharedHold | null = null;
+  // Whether this client ever wrapped a server. A client that never did is
+  // the README's shutdown-only client next to withYavio(): its shutdown()
+  // ends the process, and on a pinned key it stops the transport. One that
+  // wraps — a per-request client — only drains a pinned key, as in 0.5.4,
+  // so the withYavio() servers' queue outlives it (#179 review round 2).
+  let wrapped = false;
   // Every shutdown() so far, chained: a second or concurrent call (two
   // handlers, a framework and the app) waits for the first instead of
   // resolving with the batch still on its way (#142).
@@ -277,6 +283,7 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
         rejectUnsupported(server, "createYavio().wrap()");
         return server;
       }
+      wrapped = true;
       return wrapServer(server, config, state, true, "createYavio().wrap()");
     },
     shutdown: async () => {
@@ -286,7 +293,7 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
       // With a hold: deliver and release it. Without one (a second call, or
       // a signal drained it and nothing re-wrapped since): deliver whatever
       // the signal drain and the key's post-signal transport still carry.
-      const work = released ? releaseShared(config, released) : settleShared(config);
+      const work = released ? releaseShared(config, released, { wrapped }) : settleShared(config);
       closing = Promise.all([closing, work.catch(() => {})]).then(() => {});
       // One deadline per call, whatever the chain behind it waits for: this
       // client's own value from the call, cut to the process deadline once a
@@ -334,9 +341,14 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
  * on the server before the wrap stays untracked (`createYavio().wrap()` is
  * the entry point that instruments those). Safe for a server created per
  * request on a stateless host: the transport, the session store and the
- * shutdown hooks are shared per API key and endpoint, and never stopped
- * before the process exits. Wrapping the same long-lived server again returns
- * the existing proxy.
+ * shutdown hooks are shared per API key and endpoint, and the key has a
+ * live transport whenever a send needs one: a `shutdown()` on the same
+ * key by a `createYavio()` client that never wrapped a server stops the
+ * current one, whatever other clients still hold it, and a fresh one takes
+ * over at once (#179) — a client that wraps servers only drains it, as in
+ * 0.5.4; after a signal, or after
+ * a natural-exit drain the process went on from, the next send starts one.
+ * Wrapping the same long-lived server again returns the existing proxy.
  */
 export function withYavio<T extends McpServerLike>(server: T, options?: WithYavioOptions): T {
   // Before the configuration is resolved and anything is created: an

@@ -263,6 +263,10 @@ export interface WithYavioOptions {
    * `shutdown()` still running when the signal arrives, else the default;
    * the SDK's drain and every `shutdown()` at or after the signal resolve by
    * then, however long the handler's close before it took (#148). A
+   * `SIGTERM` after the `SIGINT` that started the drain — Claude Code's stop
+   * sequence for a stdio server — moves that deadline in to SIGINT +
+   * 400 ms (never later than 300 ms after the `SIGTERM`) when that is
+   * sooner, and a higher value does not extend it (#175, 0.5.5). A
    * participant that sets none does not lower D; `YAVIO_SHUTDOWN_TIMEOUT_MS`
    * counts even with no participant live. Rule of thumb: the close cap of
    * your handler + 1 s, and both inside the platform's grace period (Fly.io
@@ -378,10 +382,18 @@ export interface YavioClient {
    * deadline gives up is counted in one `YAVIO-1205` line (one more when
    * the signal was handed back before the transport stops had settled: at
    * the deadline when a `shutdown()` is still waiting then, otherwise once
-   * they have settled). The transport stops only when no other
-   * client with the same configuration holds it and no `withYavio()` call
-   * pinned it; a later wrap by this client holds it again, or starts a
-   * fresh one. A call made while the SDK's natural-exit drain runs (from an
+   * they have settled). The transport stops once no other client with the
+   * same configuration holds it — and on a key a `withYavio()` call pinned
+   * when this client never wrapped a server (the shutdown-only client next
+   * to `withYavio()`), whatever other clients still hold it, where a fresh
+   * transport takes over at once so those servers keep sending (#179,
+   * 0.5.5; before, that release only drained).
+   * A client that wraps servers only drains a pinned key, as in 0.5.4: on
+   * such a host, create it once at startup, wrap per request and `flush()`
+   * at each request's end (a client per request that never shuts down
+   * holds the key for the life of the process). A later wrap by this
+   * client holds it again, or starts a fresh one. A call made while the
+   * SDK's natural-exit drain runs (from an
    * app `beforeExit` listener registered after the SDK's) waits for that
    * drain, which ends within min(1.5 s, D) whatever this client's own
    * value (#167): to wait longer, call it before the event loop empties.
