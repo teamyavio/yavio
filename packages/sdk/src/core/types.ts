@@ -441,7 +441,10 @@ export interface YavioClient {
    * its event, so a `waitUntil(analytics.flush())` right after `fetch()`
    * flushes too early and every call's event waits for the next
    * invocation. A response without a body (or one already read) is
-   * returned as it is and flushed at once. `waitUntil` is called once,
+   * returned as it is and flushed at once. Past `flushTimeoutMs`, the
+   * flush keeps waiting for the batch it sent, up to `waitUntilTimeoutMs`
+   * (10 s): it delays no response, and on Workers a fetch dies with its
+   * request once the flush ends. `waitUntil` is called once,
    * synchronously, with a promise that never rejects; if it throws, the
    * response is still returned and the flush runs without it (one line).
    * In no-op mode it returns `response` untouched.
