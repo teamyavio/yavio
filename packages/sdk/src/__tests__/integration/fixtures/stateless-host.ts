@@ -23,7 +23,7 @@
  * `withYavio()` pin on the same key, and SIGUSR2 closes the server and
  * awaits `analytics.shutdown()` — no signal the SDK handles; that client
  * also wraps every request's server, so its shutdown only drains the
- * pinned key, as in 0.5.5 (#187 review round 2), and the drain must hold
+ * pinned key, as before #179 (#187 review round 2), and the drain must hold
  * the process until its retry delivers; prints `shutdown resolved`, #164
  * review round 4) | "pinned-cli-with" (the same, but the README's
  * `withYavio()` host: every request's server is wrapped by `withYavio()`

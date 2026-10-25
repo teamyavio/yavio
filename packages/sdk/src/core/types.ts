@@ -266,7 +266,7 @@ export interface WithYavioOptions {
    * `SIGTERM` after the `SIGINT` that started the drain — Claude Code's stop
    * sequence for a stdio server — moves that deadline in to SIGINT +
    * 400 ms (never later than 300 ms after the `SIGTERM`) when that is
-   * sooner, and a higher value does not extend it (#175, 0.5.6). A
+   * sooner, and a higher value does not extend it (#175, 0.5.5). A
    * participant that sets none does not lower D; `YAVIO_SHUTDOWN_TIMEOUT_MS`
    * counts even with no participant live. Rule of thumb: the close cap of
    * your handler + 1 s, and both inside the platform's grace period (Fly.io
@@ -387,8 +387,8 @@ export interface YavioClient {
    * when this client never wrapped a server (the shutdown-only client next
    * to `withYavio()`), whatever other clients still hold it, where a fresh
    * transport takes over at once so those servers keep sending (#179,
-   * 0.5.6; before, that release only drained).
-   * A client that wraps servers only drains a pinned key, as in 0.5.5: on
+   * 0.5.5; before, that release only drained).
+   * A client that wraps servers only drains a pinned key, as in 0.5.4: on
    * such a host, `flush()` at each request's end. A later wrap by this
    * client holds it again, or starts a fresh one. A call made while the
    * SDK's natural-exit drain runs (from an

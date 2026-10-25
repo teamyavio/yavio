@@ -253,7 +253,7 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
   // Whether this client ever wrapped a server. A client that never did is
   // the README's shutdown-only client next to withYavio(): its shutdown()
   // ends the process, and on a pinned key it stops the transport. One that
-  // wraps — a per-request client — only drains a pinned key, as in 0.5.5,
+  // wraps — a per-request client — only drains a pinned key, as in 0.5.4,
   // so the withYavio() servers' queue outlives it (#179 review round 2).
   let wrapped = false;
   // Every shutdown() so far, chained: a second or concurrent call (two
@@ -346,7 +346,7 @@ export function createYavio(options?: WithYavioOptions): YavioClient {
  * key by a `createYavio()` client that never wrapped a server stops the
  * current one, whatever other clients still hold it, and a fresh one takes
  * over at once (#179) — a client that wraps servers only drains it, as in
- * 0.5.5; after a signal, or after
+ * 0.5.4; after a signal, or after
  * a natural-exit drain the process went on from, the next send starts one.
  * Wrapping the same long-lived server again returns the existing proxy.
  */

@@ -52,7 +52,7 @@ import type { Transport } from "../transport/types.js";
  * fetch nor counted the loss), and a fresh transport takes over at once,
  * so a release never leaves a pinned key without a live transport and its
  * `withYavio()` servers keep sending; a client that wraps servers only
- * drains a pinned key, as in 0.5.5 (#187 review round 2). The signal
+ * drains a pinned key, as in 0.5.4 (#187 review round 2). The signal
  * handlers drain everything regardless, and so does a natural exit with
  * events queued (#167, below). The key's state object outlives its
  * transports: proxies keep it, and a re-acquire after a stop puts a fresh
@@ -1577,7 +1577,7 @@ export function reviveHold(config: Key, hold: SharedHold, sdkVersion: string): b
  * `withYavio()` call pinned, a fresh transport takes over at once (#179)
  * — but on a pinned key the client decides, not the holders left: one
  * that wrapped servers (`wrapped`: a per-request client) only drains, as
- * in 0.5.5 (#179 review round 2), one that never did stops it even while
+ * in 0.5.4 (#179 review round 2), one that never did stops it even while
  * others hold it (review round 3); otherwise the other holders keep
  * delivering through it, with
  * everything this client queued delivered first. Every drain or stop this
@@ -1640,7 +1640,7 @@ export async function releaseShared(
     // other clients still hold it (review round 3); they keep their hold,
     // the fresh transport takes over the key, and their own shutdown()
     // later drains it. A client that wraps — a per-request client that shuts
-    // down at every request's end — drains it, as in 0.5.5: stopping there
+    // down at every request's end — drains it, as in 0.5.4: stopping there
     // gave up the withYavio() servers' queue at each such shutdown() against
     // a failing ingest (4 of 36 calls delivered in a 3 s outage, review
     // round 2). On an unpinned key the last holder's release stops it.

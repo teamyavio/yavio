@@ -874,7 +874,7 @@ describe.each(STACKS)("a failed send at the signal on MCP SDK %s (#164)", (stack
       const exitAt = Date.now();
 
       // A client that wraps requests only drains the pinned key (as in
-      // 0.5.5, review round 2 of #187); a shutdown-only client stops it
+      // 0.5.4, review round 2 of #187); a shutdown-only client stops it
       // (#179). Either way the shutdown's own deadline (shutdownTimeoutMs,
       // 4 s) is what holds the process through the 1 s backoff. Without its
       // keepAlive the process exits mid-backoff, nothing delivered,
