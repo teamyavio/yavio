@@ -17,6 +17,7 @@ import {
 import { LruMap } from "../core/lru.js";
 import { detectPlatform } from "../core/platform.js";
 import { stable } from "../core/stable.js";
+import { TRACE_CONTEXT_META_KEYS, traceparentOf } from "../core/trace-context.js";
 import type { CaptureConfig, McpServerLike, SessionState, YavioConfig } from "../core/types.js";
 import type { Transport } from "../transport/types.js";
 import { type RequestStore, getStore, runInContext } from "./context.js";
@@ -1698,11 +1699,16 @@ function extractInputTypes(args: unknown): Record<string, unknown> | undefined {
  *   removed from the clone — a flag named geo must not leave coordinates
  *   in; `"country"` / `"region"` replace it with a NEW `{ country }` /
  *   `{ country, region }` object; and of the rest only the known keys stay
- *   (KNOWN_META_KEYS). The clone is what makes this safe: the handler's own
- *   `_meta` is never touched.
- * - `_metaDroppedKeys` / `_metaDroppedUnnamed`: under a `geo` other than
- *   `true`, the names (never the values) of the `_meta` keys reduceMeta
- *   dropped, so a new key shows up, and the count of those it does not name.
+ *   (KNOWN_META_KEYS). Under every `geo`, `true` included, the SEP-414 trace
+ *   context never stays (#173): `baggage` is free-form application context
+ *   (user and tenant ids, flags) and `tracestate` vendor state, neither of
+ *   use here; a valid `traceparent` goes to `metadata.traceparent` instead
+ *   (extractClientMeta). The clone is what makes this safe: the handler's
+ *   own `_meta` is never touched.
+ * - `_metaDroppedKeys` / `_metaDroppedUnnamed`: the names (never the values)
+ *   of the `_meta` keys reduceMeta dropped, so a new key shows up, and the
+ *   count of those it does not name. Under `geo: true` only `tracestate`,
+ *   `baggage` and an invalid `traceparent` can be named there.
  * - `_taskId`: MCP task id, for correlating task-based flows.
  * - `_requestInfo`: allow-listed headers and the URL sans query, see
  *   sanitizeRequestInfo.
@@ -1725,7 +1731,7 @@ function extractInputValues(
     const ex = readCallExtra(extra);
     if (ex.meta) {
       const meta = JSON.parse(JSON.stringify(ex.meta)) as unknown;
-      if (geo !== true && meta && typeof meta === "object" && !Array.isArray(meta)) {
+      if (meta && typeof meta === "object" && !Array.isArray(meta)) {
         const reduced = reduceMeta(meta as Record<string, unknown>, geo);
         clone._meta = reduced.meta;
         if (reduced.droppedKeys.length > 0) clone._metaDroppedKeys = reduced.droppedKeys;
@@ -1749,9 +1755,10 @@ function extractInputValues(
  * The top-level `_meta` keys kept under a `capture.geo` other than `true`,
  * besides `openai/userLocation`, which is rebuilt. Everything else is dropped:
  * the conversation and request ids ChatGPT sends (`sessionId`, `windowId`,
- * `callId`, `itemId`, `openai/request_id`), `traceparent`,
- * `openai/organization`, the client capabilities, the top-level `timezone`
- * and `timezone_offset_minutes`, and any key the platform adds later.
+ * `callId`, `itemId`, `openai/request_id`), `openai/organization`, the client
+ * capabilities, the top-level `timezone` and `timezone_offset_minutes`, and
+ * any key the platform adds later. The SEP-414 trace context never stays,
+ * under any `geo` (see reduceMeta).
  *
  * An allowlist, not a denylist (#127): ChatGPT added seven undocumented
  * top-level keys between 2026-09 and 2026-10, one of them location data, and
@@ -1783,26 +1790,35 @@ function recordable(key: string): boolean {
 }
 
 /**
- * The request `_meta` (a clone) under a `capture.geo` other than `true`.
+ * The request `_meta` (a clone) as `input_values._meta` stores it.
  *
- * - `openai/userLocation` is rebuilt from an allow-list, so a field the
- *   platform adds later cannot leak through: `{ country }` for `"country"`,
- *   `{ country, region }` for `"region"` (`{ country }` when there is no
- *   valid region), and removed for `false` or when there is no valid country.
- * - Every other key is kept only if it is in KNOWN_META_KEYS.
+ * - The SEP-414 keys never stay, under any `geo` (#173). A valid
+ *   `traceparent` is not lost — extractClientMeta sends it as
+ *   `metadata.traceparent` — so it is not named either; `tracestate`,
+ *   `baggage` and an invalid `traceparent` are dropped and named. Only the
+ *   `_meta` key's name: never a baggage member's (`user.id`, a tenant), which
+ *   the integrator's upstream chooses and which can name a customer.
+ * - `geo: true`: everything else verbatim.
+ * - Any other `geo`: `openai/userLocation` is rebuilt from an allow-list, so
+ *   a field the platform adds later cannot leak through: `{ country }` for
+ *   `"country"`, `{ country, region }` for `"region"` (`{ country }` when
+ *   there is no valid region), and removed for `false` or when there is no
+ *   valid country. Every other key is kept only if it is in KNOWN_META_KEYS.
  * - `droppedKeys`: the names (never the values) of what went, sorted, at most
  *   MAX_DROPPED_KEYS; `droppedUnnamed`: how many dropped keys are not named —
  *   an id-like or malformed name, or one past the cap.
  */
 function reduceMeta(
   meta: Record<string, unknown>,
-  geo: "country" | "region" | false,
+  geo: CaptureConfig["geo"],
 ): { meta: Record<string, unknown>; droppedKeys: string[]; droppedUnnamed: number } {
   const kept: Record<string, unknown> = {};
   const named: string[] = [];
   let unnamed = 0;
   for (const [key, value] of Object.entries(meta)) {
-    if (KNOWN_META_KEYS.has(key)) kept[key] = value;
+    if (TRACE_CONTEXT_META_KEYS.has(key)) {
+      if (!(key === "traceparent" && traceparentOf(value))) named.push(key);
+    } else if (geo === true || KNOWN_META_KEYS.has(key)) kept[key] = value;
     else if (key === "openai/userLocation") continue;
     else if (recordable(key)) named.push(key);
     else unnamed++;
@@ -1832,7 +1848,7 @@ function reduceMeta(
  *
  * The first two survive because they answer questions the dashboard actually
  * asks — which client called (beyond the coarse `platform` field) and in which
- * language — and neither identifies a person. The README lists all five; keep
+ * language — and neither identifies a person. The README lists all four; keep
  * it in step.
  */
 const CAPTURED_HEADERS = new Set([
@@ -1841,10 +1857,11 @@ const CAPTURED_HEADERS = new Set([
   // Anthropic's surface marker ("ClaudeAI", "Cowork") — the trustworthy way
   // to tell Claude surfaces apart, verified in live traffic 2026-07-29.
   "x-anthropic-client",
-  // Wire protocol version and W3C trace context for log correlation.
-  // None of these carry personal data.
+  // Wire protocol version. Carries no personal data.
   "mcp-protocol-version",
-  "traceparent",
+  // Not `traceparent` since #173: a valid one is `metadata.traceparent`
+  // (extractClientMeta), stored once; the raw header was any text a caller
+  // sent. `tracestate` and `baggage` were never kept.
 ]);
 
 /**
@@ -1859,13 +1876,27 @@ const CAPTURED_HEADERS = new Set([
  * (They do travel inside the verbatim `_meta` clone in `input_values` while
  * `geo` is `true`; otherwise reduceMeta cuts that object down to the same
  * country and region, or drops it.)
+ *
+ * `traceparent` (#173): a valid W3C traceparent from `_meta` (SEP-414; the
+ * only carrier on stdio), else from the HTTP header, under every `geo` — the
+ * `_meta` value first, because it is what the MCP client attached to this
+ * request, while a header can come from any HTTP hop in between. Sent as
+ * `metadata.traceparent`, for joining a call to the integrator's own traces.
  */
 function extractClientMeta(
   extra: unknown,
   geo: CaptureConfig["geo"],
 ): import("../core/events.js").ClientMeta | undefined {
-  const m = readCallExtra(extra).meta;
-  if (!m) return undefined;
+  const ex = readCallExtra(extra);
+  // A repeated header (an array, from a hand-built record) is joined as
+  // sanitizeRequestInfo joins it, so two header lines are never lifted as the
+  // first one: a joined value is not a valid traceparent.
+  const header = ex.requestHeaders?.traceparent;
+  const traceparent =
+    traceparentOf(ex.meta?.traceparent) ??
+    traceparentOf(Array.isArray(header) ? header.join(", ") : header);
+  const m = ex.meta;
+  if (!m) return traceparent ? { traceparent } : undefined;
 
   const str = (v: unknown, max: number): string | undefined =>
     typeof v === "string" && v.length > 0 ? v.slice(0, max) : undefined;
@@ -1881,8 +1912,11 @@ function extractClientMeta(
     locale: str(m["openai/locale"], 35),
     endUserAgent: str(m["openai/userAgent"], 512),
     subjectId: str(m["openai/subject"], 256),
+    traceparent,
   };
-  return out.countryCode || out.locale || out.endUserAgent || out.subjectId ? out : undefined;
+  return out.countryCode || out.locale || out.endUserAgent || out.subjectId || out.traceparent
+    ? out
+    : undefined;
 }
 
 /**

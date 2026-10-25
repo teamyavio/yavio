@@ -7,6 +7,8 @@
  * (the ingestion API performs authoritative stripping).
  */
 
+import { traceparentOf } from "./trace-context.js";
+
 /**
  * Luhn algorithm — validates that a digit string is a plausible credit card
  * number. Mirrors the ingest-side stripper so this layer never redacts digit
@@ -83,6 +85,11 @@ const PII_PATTERNS: Array<{
 ];
 
 function stripPiiFromString(value: string): string {
+  // A valid W3C traceparent (#173) is random hex in a fixed format and cannot
+  // hold PII, but its 32- and 16-digit ids end in ten decimal digits often
+  // enough (~1.9 %, the spec's own example among them) for the phone pattern
+  // to cut them: `…-b7ad6b[PHONE_REDACTED]-01`. Mirrored in ingest.
+  if (traceparentOf(value)) return value;
   let result = value;
   for (const { pattern, replacement, validate } of PII_PATTERNS) {
     pattern.lastIndex = 0;
