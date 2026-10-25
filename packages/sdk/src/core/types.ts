@@ -409,9 +409,11 @@ export interface YavioClient {
    * could not deliver stays queued for the next flush, the flush interval
    * or `shutdown()`, with one `YAVIO-1208` line until a flush delivers
    * everything again, at most one a minute (a second stall within it is
-   * reported once the minute has passed); not from a flush that gave up
-   * waiting on another running flush's batch, which reports for it. Events
-   * queued after the call are the next flush's. A fetch an earlier request left in flight, older
+   * reported by the first flush after the minute if it still lasts then;
+   * one that ends within the minute prints nothing); not from a flush that
+   * gave up waiting on another running flush's batch, which reports for it.
+   * Events queued after the call are the next flush's. A fetch an earlier
+   * request left in flight, older
    * than `flushTimeoutMs` (twice that each time the batch is taken back,
    * and at least twice ingest's last round trip) — after a freeze its
    * connection is likely dead, on Cloudflare Workers it never settles once

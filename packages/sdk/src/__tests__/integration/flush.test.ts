@@ -167,32 +167,36 @@ describe("flush() (#171)", () => {
       serverOnly: true,
       flushTimeoutMs: 200,
     });
-    ingest.hangEvents = true;
-    await invoke(analytics);
-    await analytics.flush(); // stall 1: its line
-    expect(flushLines()).toHaveLength(1);
-    ingest.hangEvents = false;
-    await ingest.answerHung();
-    await sleep(50);
-    await invoke(analytics);
-    await analytics.flush(); // delivered: stall 1 is over
-    offset += 5_000;
-    ingest.hangEvents = true; // stall 2, 5 s after the recovery
-    const seen: number[] = [];
-    for (const step of [0, 20_000, 20_000, 30_000, 60_000, 60_000]) {
-      offset += step;
+    try {
+      ingest.hangEvents = true;
       await invoke(analytics);
-      await analytics.flush();
-      seen.push(flushLines().length);
+      await analytics.flush(); // stall 1: its line
+      expect(flushLines()).toHaveLength(1);
+      ingest.hangEvents = false;
+      await ingest.answerHung();
+      await sleep(50);
+      await invoke(analytics);
+      await analytics.flush(); // delivered: stall 1 is over
+      offset += 5_000;
+      ingest.hangEvents = true; // stall 2, 5 s after the recovery
+      const seen: number[] = [];
+      for (const step of [0, 20_000, 20_000, 30_000, 60_000, 60_000]) {
+        offset += step;
+        await invoke(analytics);
+        await analytics.flush();
+        seen.push(flushLines().length);
+      }
+      // 5 s, 25 s, 45 s after the first line: within its minute, silent; 75 s:
+      // the line; later flushes in the same stall: nothing more.
+      expect(seen).toEqual([1, 1, 1, 2, 2, 2]);
+    } finally {
+      // Deliver the backlog and stop, also when an assertion above failed:
+      // nothing of this test's transport may run into the next one (its
+      // retries against the closed ingest print YAVIO-1200 lines there).
+      ingest.hangEvents = false;
+      await ingest.answerHung();
+      await analytics.shutdown();
     }
-    // 5 s, 25 s, 45 s after the first line: within its minute, silent; 75 s: the
-    // line; later flushes in the same stall: nothing more.
-    expect(seen).toEqual([1, 1, 1, 2, 2, 2]);
-    // Deliver the backlog and stop: nothing of this test's transport may run
-    // into the next one (its flush interval against the closed ingest).
-    ingest.hangEvents = false;
-    await ingest.answerHung();
-    await analytics.shutdown();
     expect(new Set(ingest.ofType("tool_call").map((e) => e.event_id)).size).toBe(8);
   }, 30_000);
 

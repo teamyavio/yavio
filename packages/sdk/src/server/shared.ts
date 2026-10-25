@@ -231,10 +231,13 @@ const keyOf = (config: Key): string => `${config.endpoint}\n${config.apiKey}`;
 /** The key each transport was created for: a `flush()` awaits only its own key's stops in progress (#171). */
 const transportKeys = new WeakMap<Transport, string>();
 /**
- * Keys whose last `flush()` left events undelivered (#171): a later one that
- * ends the same way prints nothing, so an ingest outage on a host that
- * flushes after every request is one `YAVIO-1208` line, not one per
- * request. Cleared by the next flush that delivers everything.
+ * Keys whose current stall has had its `YAVIO-1208` line (#171): a later
+ * flush that leaves events undelivered prints nothing while the key is
+ * here, so an ingest outage on a host that flushes after every request is
+ * one line, not one per request. A stall the once-a-minute limit silenced
+ * is not added, so the first flush after the minute that still leaves
+ * events undelivered reports it (review round 5). Cleared by the next flush
+ * that delivers everything.
  */
 const stalledFlushes = new Set<string>();
 /** When each key's last `YAVIO-1208` line was printed: at most one per key per `STALL_LINE_INTERVAL_MS` (#171 review round 4). */
@@ -1530,8 +1533,9 @@ const FLUSH_RACE_MARGIN_MS = 25;
  * running flush's send neither prints nor clears: that flush carries its
  * events and reports for them. And at most one line per key per minute, so
  * a stall that clears and comes back is not a line a second (review round
- * 4); such a stall is reported by the first flush after the minute
- * (round 5).
+ * 4); such a stall is reported by the first flush after the minute that
+ * still leaves events undelivered, and one that ends within the minute
+ * prints nothing (round 5).
  */
 function reportFlush(key: string, ms: number, outcome: FlushOutcome): void {
   if (draining || outcome === "deferred") return;
@@ -1543,9 +1547,9 @@ function reportFlush(key: string, ms: number, outcome: FlushOutcome): void {
   }
   if (stalledFlushes.has(key)) return;
   // Marked only when its line is printed: a stall the minute's limit
-  // silenced is reported by a later flush once the minute has passed, not
-  // never (#171 review round 5: a flapping ingest's second stall stayed
-  // unreported for its ten minutes).
+  // silenced is reported by the first flush after the minute that still
+  // leaves events undelivered, not never (#171 review round 5: a flapping
+  // ingest's second stall stayed unreported for its ten minutes).
   const now = Date.now();
   const last = stallLineAt.get(key);
   if (last !== undefined && now - last < STALL_LINE_INTERVAL_MS) return;
