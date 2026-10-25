@@ -727,6 +727,8 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
     afterRound1?: "schema_changed" | "removed";
     /** The server's `requestState.verify` hook refuses every state (a signed state past its expiry). */
     rejectState?: boolean;
+    /** Round 1's input_required result also carries `isError: true`. */
+    interimIsError?: boolean;
   }
 
   const mrtrServer = (opts: DeployOptions) =>
@@ -793,7 +795,7 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
         }
         if (!responses) {
           await sleep(40);
-          return inputRequired({
+          const ask = inputRequired({
             inputRequests: {
               confirm: inputRequired.elicit({
                 message: `Deploy to ${env}?`,
@@ -801,6 +803,7 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
               }),
             },
           });
+          return opts.interimIsError ? ({ ...ask, isError: true } as typeof ask) : ask;
         }
         if (acceptedContent(responses, "confirm", confirmSchema)?.confirm !== true) {
           await sleep(20);
@@ -1044,6 +1047,15 @@ describe("MCP SDK v2 — a tool call that asks for input is one tool_call (#168)
       expect(
         (call.result as { _meta?: { yavio?: { traceId?: string } } })._meta?.yavio?.traceId,
       ).toBe(call.calls[0]?.trace_id);
+    });
+
+    it("an interim result that also carries isError: true is still interim: one event, from the final round", async () => {
+      const call = await modernCall({ interimIsError: true });
+      expect(call.runs).toBe(2);
+      expect(text(call.result)).toBe("deployed to prod");
+      expect(call.calls).toHaveLength(1);
+      expect(call.calls[0]?.status).toBe("success");
+      expect(call.calls[0]?.metadata).toEqual({ input_retry: true });
     });
 
     it("a retry whose requestState the server's verify hook refuses (-32602 before the handler) is one server error, marked as a retry", async () => {
