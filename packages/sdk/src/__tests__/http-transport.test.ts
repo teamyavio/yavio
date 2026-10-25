@@ -1862,3 +1862,93 @@ describe("HttpTransport.flushQueued() (#171)", () => {
     await transport.shutdown(0);
   });
 });
+
+/**
+ * Cloudflare Workers' rules, emulated in Node (#171 review round 1): a fetch
+ * or timer belongs to the request that started it, and once that request has
+ * ended its fetch never settles — not even when aborted — and its timer
+ * never fires. On 0.5.6's first cut the shared transport wedged for good: the
+ * one in-flight slot waited on the dead send, and every later event in the
+ * isolate stayed queued.
+ */
+describe("HttpTransport.flushQueued() and a send another request left behind (#171)", () => {
+  const base = { endpoint: "http://test/v1/events", apiKey: "yav_test", sdkVersion: "0.0.1" };
+  const answer = (status: number, headers: Record<string, string> = {}) => ({
+    status,
+    headers: { get: (name: string) => headers[name] ?? null },
+    json: () => ({}),
+  });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("a fetch that never settles, not even on abort: the next flush takes the batch back and re-sends it, the queue behind it goes out, and the dead fetch's late answer is not counted", async () => {
+    const bodies: string[][] = [];
+    let answerLate: (() => void) | undefined;
+    const fetch = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      bodies.push(
+        (JSON.parse(init.body as string) as { events: Array<{ event_id: string }> }).events.map(
+          (e) => e.event_id,
+        ),
+      );
+      if (bodies.length === 1) {
+        // The request that started it has ended: no answer, no abort.
+        return new Promise((resolve) => {
+          answerLate = () => resolve(answer(200));
+        });
+      }
+      return Promise.resolve(answer(200));
+    });
+    const transport = new HttpTransport({ ...base, flushIntervalMs: 60_000, fetch });
+    transport.send([fakeEvent(), fakeEvent()]);
+    const first = transport.flushQueued(100);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await first).toBe("deadline");
+    vi.setSystemTime(new Date("2026-01-01T00:00:05.000Z")); // the next request, no timer ran
+    transport.send([fakeEvent()]);
+    const second = transport.flushQueued(100);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await second).toBe("done");
+    expect(bodies).toHaveLength(3);
+    expect(bodies[1]).toEqual(bodies[0]); // re-sent as it was, first
+    expect(bodies[2]).toHaveLength(1);
+    expect(transport.deliveredEvents()).toBe(3);
+    expect(transport.pendingEvents()).toBe(0);
+    answerLate?.(); // the dead fetch answers after all (in Node; on Workers never)
+    await vi.advanceTimersByTimeAsync(0);
+    expect(transport.deliveredEvents()).toBe(3);
+    expect(transport.pendingEvents()).toBe(0);
+    transport.send([fakeEvent()]); // the slot is free: the next event goes out
+    expect(await transport.flushQueued(100)).toBe("done");
+    expect(transport.deliveredEvents()).toBe(4);
+  });
+
+  it("a retry wait whose timer never fires (a Retry-After a flush may not cut): once its end has passed, the next flush sends the retry itself", async () => {
+    let calls = 0;
+    const fetch = vi.fn().mockImplementation(() => {
+      calls++;
+      return Promise.resolve(calls === 1 ? answer(429, { "Retry-After": "2" }) : answer(200));
+    });
+    const transport = new HttpTransport({ ...base, flushIntervalMs: 60_000, fetch });
+    transport.send([fakeEvent()]);
+    expect(await transport.flushQueued(100)).toBe("retrying");
+    vi.setSystemTime(new Date("2026-01-01T00:00:05.000Z")); // its timer never ran
+    const next = transport.flushQueued(100);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await next).toBe("done");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(transport.deliveredEvents()).toBe(1);
+    await vi.advanceTimersByTimeAsync(10_000); // the old timer, had it survived: nothing more
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(transport.deliveredEvents()).toBe(1);
+  });
+});

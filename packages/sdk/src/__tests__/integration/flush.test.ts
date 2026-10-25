@@ -184,6 +184,35 @@ describe("flush() (#171)", () => {
     expect(flushLines()).toHaveLength(1);
   });
 
+  it("an ingest that answers, only slower than flushTimeoutMs, and a host that flushes after every request: calls keep getting through — the head batch is not re-sent forever (#171 review round 1)", async () => {
+    ingest.respondAfterMs = 600;
+    const analytics = createYavio({
+      apiKey: "yav_slow",
+      endpoint: ingest.endpoint,
+      serverOnly: true,
+      flushTimeoutMs: 400,
+    });
+    const flushes: Promise<void>[] = [];
+    const t0 = Date.now();
+    let requests = 0;
+    while (Date.now() - t0 < 3_000) {
+      await invoke(analytics);
+      requests++;
+      flushes.push(analytics.flush());
+      await sleep(100);
+    }
+    // What ingest has answered while the requests came: no batch it was
+    // still answering when a flush aborted it counts.
+    const answered = new Set(
+      ingest.batches
+        .filter((b) => b.status === 200 && b.abortedAt === undefined)
+        .flatMap((b) => b.events.filter((e) => e.event_type === "tool_call"))
+        .map((e) => e.event_id),
+    );
+    expect(answered.size).toBeGreaterThanOrEqual(Math.floor(requests / 2));
+    await Promise.all(flushes);
+  }, 20_000);
+
   it("concurrent flush() calls send each event once", async () => {
     const analytics = createYavio({
       apiKey: "yav_f6",
