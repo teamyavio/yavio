@@ -56,6 +56,22 @@ function createMockTransport(): Transport & { sent: BaseEvent[][] } {
   };
 }
 
+/**
+ * The JSON a leak check reads: the event without `event_id`, `trace_id`,
+ * `session_id` and `timestamp`, each checked for its shape first. The SDK
+ * makes those up, and a random id holds any short string now and then
+ * (`leakScan()` in proxy.test.ts). Everything left is fixed by the test's
+ * inputs.
+ */
+function leakScan(event: Record<string, unknown> | undefined): string {
+  const { event_id, trace_id, session_id, timestamp, ...fixed } = event ?? {};
+  expect(event_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  expect(trace_id).toMatch(/^tr_[\w-]{21}$/);
+  expect(session_id).toMatch(/^ses_[\w-]{21}$/);
+  expect(timestamp).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+  return JSON.stringify(fixed);
+}
+
 const makeConfig = (overrides: Partial<YavioConfig> = {}): YavioConfig => ({
   apiKey: "yav_test",
   endpoint: "http://localhost:3001/v1/events",
@@ -1336,7 +1352,7 @@ describe("MCP SDK v2 — SEP-414 trace context in _meta (#173)", () => {
     const inputValues = call?.input_values as Record<string, unknown>;
     expect(inputValues._meta).toEqual({ "openai/locale": "de-DE" });
     expect(inputValues._metaDroppedKeys).toEqual(["baggage", "tracestate"]);
-    const serialized = JSON.stringify(call);
+    const serialized = leakScan(call);
     for (const value of ["u-48213", "acme-gmbh", "t61rcWkgMzE"]) {
       expect(serialized, value).not.toContain(value);
     }
@@ -1385,7 +1401,7 @@ describe("MCP SDK v2 — SEP-414 trace context in _meta (#173)", () => {
     const requestInfo = (call?.input_values as { _requestInfo?: { headers?: object } })
       ._requestInfo;
     expect(requestInfo?.headers).not.toHaveProperty("traceparent");
-    expect(JSON.stringify({ ...call, metadata: undefined })).not.toContain("0af7651916cd43dd");
+    expect(leakScan({ ...call, metadata: undefined })).not.toContain("0af7651916cd43dd");
   });
 
   it("2026-07-28 over serveStdio: _meta is the only carrier, and the traceparent survives", async () => {

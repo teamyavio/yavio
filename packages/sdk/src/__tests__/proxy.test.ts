@@ -2686,7 +2686,7 @@ describe("SEP-414 trace context: traceparent, tracestate, baggage (#173)", () =>
         },
         { geo },
       );
-      const serialized = JSON.stringify(event);
+      const serialized = leakScan(event);
       for (const value of ["u-48213", "acme-gmbh", "alice", "t61rcWkgMzE"]) {
         expect(serialized, value).not.toContain(value);
       }
@@ -2724,7 +2724,7 @@ describe("SEP-414 trace context: traceparent, tracestate, baggage (#173)", () =>
       const requestInfo = inputValuesOf(event)._requestInfo as { headers: Record<string, string> };
       expect(requestInfo.headers).toEqual({ "user-agent": "probe/1.0" });
     }
-    expect(JSON.stringify({ ...both, metadata: undefined })).not.toContain("4bf92f3577b34da6");
+    expect(leakScan({ ...both, metadata: undefined })).not.toContain("4bf92f3577b34da6");
   });
 
   it.each([
@@ -2812,7 +2812,7 @@ describe("SEP-414 trace context: traceparent, tracestate, baggage (#173)", () =>
     "stores no other baggage carrier under geo %s: names Correlation-Context, Baggage and TraceState, counts the per-key ones",
     async (geo) => {
       const event = await call({ _meta: { "openai/locale": "de-DE", ...OTHER_CARRIERS } }, { geo });
-      const serialized = JSON.stringify(event);
+      const serialized = leakScan(event);
       for (const value of ["u-48213", "acme-gmbh", "t61rcWkgMzE", "gold-tier", "user.id", "plan"]) {
         expect(serialized, value).not.toContain(value);
       }
@@ -2844,7 +2844,7 @@ describe("SEP-414 trace context: traceparent, tracestate, baggage (#173)", () =>
     });
     expect(both.metadata).toEqual({ traceparent: META_TRACEPARENT });
     expect(inputValuesOf(both)._metaDroppedKeys).toEqual(["TRACEPARENT"]);
-    expect(JSON.stringify({ ...both, metadata: undefined })).not.toContain("0af7651916cd43dd");
+    expect(leakScan({ ...both, metadata: undefined })).not.toContain("0af7651916cd43dd");
   });
 
   // Review round 2: Datadog's MCP instrumentation (dd-trace-js and
@@ -2870,7 +2870,7 @@ describe("SEP-414 trace context: traceparent, tracestate, baggage (#173)", () =>
         { _meta: { "openai/locale": "de-DE", _dd_trace_context: DD_TRACE_CONTEXT } },
         { geo },
       );
-      const serialized = JSON.stringify({ ...event, metadata: undefined });
+      const serialized = leakScan({ ...event, metadata: undefined });
       for (const value of [
         "dXNlci00ODIxMw",
         "u-48213-dd",
@@ -2944,7 +2944,7 @@ describe("SEP-414 trace context: traceparent, tracestate, baggage (#173)", () =>
       },
     });
     expect(event.metadata).toEqual({ input_retry: true, traceparent: META_TRACEPARENT });
-    expect(JSON.stringify(event)).not.toContain("u-48213");
+    expect(leakScan(event)).not.toContain("u-48213");
   });
 
   it("stores none of it under a per-tool inputValues: false", async () => {
@@ -2957,7 +2957,7 @@ describe("SEP-414 trace context: traceparent, tracestate, baggage (#173)", () =>
     );
     expect(event.metadata).toBeUndefined();
     expect(event.input_values).toBeUndefined();
-    const serialized = JSON.stringify(event);
+    const serialized = leakScan(event);
     for (const value of ["4bf92f3577b34da6", "0af7651916cd43dd", "u-48213", "t61rcWkgMzE"]) {
       expect(serialized, value).not.toContain(value);
     }
