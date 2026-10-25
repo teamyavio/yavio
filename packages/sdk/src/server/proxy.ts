@@ -215,7 +215,13 @@ function openCallContext(
     clientName: () => clientIdentity().info?.name,
     sessionKey: config.sessionKey,
   });
+  // The state of the call this one runs inside, if any: a wrapped handler
+  // invoked directly from another's. A store exists only inside a call
+  // whose own openCallContext() already settled the connection event.
+  const enclosing = getStore()?.session;
   const session = callSessions.resolve(sessionKey, ex.requestHeaders !== undefined);
+  // Joined the enclosing call's state (#169): its connection event is settled.
+  const nested = enclosing === session;
 
   // Lazy platform detection — must run before the connection event is
   // built so the event carries the resolved platform, not "unknown", and
@@ -248,7 +254,9 @@ function openCallContext(
   // per client instead (#144, decision C), keyed by what the event says —
   // with the identity computed before the check, which needs it. `get`, not
   // `has`: a hit refreshes the mark's recency, so an active conversation is
-  // never aged out of the dedup by newer ones.
+  // never aged out of the dedup by newer ones. A nested call on its enclosing
+  // call's state adds none: its context may name another client or no
+  // protocol version, which would be a second per-client mark (#169).
   const connectionKey =
     session.sessionSource === "per_request"
       ? dedupKey(
@@ -261,7 +269,7 @@ function openCallContext(
           ),
         )
       : dedupKey(config.apiKey, session.sessionId);
-  if (emittedConnections.get(connectionKey) !== true) {
+  if (!nested && emittedConnections.get(connectionKey) !== true) {
     emittedConnections.set(connectionKey, true);
     const { info, source } = clientIdentity();
     const connectionEvent = buildConnectionEvent(
