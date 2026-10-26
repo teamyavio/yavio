@@ -11,8 +11,8 @@
  * 3. UUID-shaped and traceparent-shaped tokens standing alone are masked: the
  *    next patterns run on the text between them, never inside them.
  * 4. Between the masked tokens: IBANs (mod-97 checked), card numbers (13-19
- *    digits, Luhn checked), US SSNs, US ITINs (ingest only), and phone
- *    numbers.
+ *    digits, Luhn checked; and any 16 digits in a row standing alone, without
+ *    a Luhn check), US SSNs, US ITINs (ingest only), and phone numbers.
  * 5. US street addresses, over the whole string (ingest only).
  *
  * What is not matched (follow-ups): phone numbers grouped other than 3/4/5 +
@@ -24,7 +24,7 @@
  * `\u00a0`-style escape (A1); a phone number glued to a word of letters a-f
  * only unless it has a phone's shape (`cafe5551234567`), a Luhn-invalid
  * 16-digit run glued to one (`cafe4111111111111112`), a number glued to a
- * token of letters and digits (`ref15551234567`) or to a word of more than
+ * token of letters and digits (`ref1x5551234567`) or to a word of more than
  * 24 letters: the price of not cutting hex ids (see START). Wrongly matched:
  * a standalone 10-digit number such as an epoch second (#192), a
  * 12-15-digit number that does not start with 1 (an EAN-13), any 16 digits
@@ -33,7 +33,7 @@
  * (`XBG109-09-1527`), a word glued to a number after an escape (an encoded
  * path, `%2Fuser1234567890`), and an escape's own digits taken into a number
  * (`%20` + `5551234567` becomes `%[PHONE_REDACTED]`; a Luhn-valid card run
- * starting inside a `\u` escape leaves the card's last group: see
+ * starting inside an escape leaves the card's last group: see
  * applyRetrying for why that start is not forbidden).
  *
  * No regular expression with a lookbehind is written as a literal: a browser
@@ -152,7 +152,8 @@ const AFTER_ESCAPE = [
 const STANDALONE = `(?:${[NOT_GLUED, ...AFTER_ESCAPE].join("|")})`;
 
 /**
- * Where a card, SSN, ITIN or phone number may start (#182). The digit run may
+ * Where an SSN, ITIN, phone number or 16-digit run may start (#182; a card
+ * checked by Luhn starts at START_CARD). The digit run may
  * not follow a letter or digit, so the digits inside a hex id (`…b7ad6b7169203331`)
  * are not a number. It may still follow:
  * - a word of 1-24 letters only that has a letter outside a-f, the word
@@ -161,8 +162,9 @@ const STANDALONE = `(?:${[NOT_GLUED, ...AFTER_ESCAPE].join("|")})`;
  * - an escape (AFTER_ESCAPE);
  * - a word of letters a-f only, standing alone or right after an escape, when
  *   the number has a phone's shape: a `+`, a `(`, or a separator after its
- *   first 2-4 digits (`cafe555-123-4567`), which a hex id never has
- *   (`deadbeef5551234567` stays).
+ *   first 2-4 digits (`cafe555-123-4567`) or after a 5-digit group starting
+ *   with a trunk 0 (`cafe07141 1234567`, review round 4), which a hex id
+ *   never has (`deadbeef5551234567` stays).
  * The leading lookahead keeps the lookbehinds off every position that cannot
  * start a number.
  */
@@ -170,7 +172,7 @@ const START = `(?=[\\d+(])(?:${[
   NOT_GLUED,
   String.raw`(?<=${STANDALONE}(?=[A-Za-z]{0,23}[G-Zg-z])[A-Za-z]{1,24})`,
   ...AFTER_ESCAPE,
-  String.raw`(?<=${STANDALONE}[A-Fa-f]{1,24})(?=[+(]|\d{2,4}\)?[-.\s])`,
+  String.raw`(?<=${STANDALONE}[A-Fa-f]{1,24})(?=[+(]|\d{2,4}\)?[-.\s]|0\d{4}\)?[-.\s])`,
 ].join("|")})`;
 /**
  * Where a card number may start: as START, but after any word of 1-24 letters
@@ -355,8 +357,8 @@ function getEngine(): Engine {
  */
 const DIGIT = /\d/;
 
-/** A "%" or a "\u" with up to three hex digits right before a candidate. */
-const INSIDE_ESCAPE = /(?:%|\\u[0-9A-Fa-f]{0,3})$/;
+/** A "%", a "%25" (review round 4) or a "\u" with up to three hex digits right before a candidate. */
+const INSIDE_ESCAPE = /(?:%(?:25)?|\\u[0-9A-Fa-f]{0,3})$/;
 
 /**
  * A validated rule whose candidate began inside an escape and failed its

@@ -48,6 +48,10 @@ const PHONES: Row[] = [
   ["Tel. 07141 123 4567", `Tel. ${P}`],
   ["(07141) 1234567", P],
   ["+49 7141 1234567", P],
+  // After a word of letters a-f, a 5-digit group starting with a trunk 0 and
+  // a separator is a phone's shape too (review round 4).
+  ["Bad07141 123-4567", `Bad${P}`],
+  ["cafe07141 1234567", `cafe${P}`],
 ];
 
 const CARDS: Row[] = [
@@ -150,6 +154,11 @@ const ESCAPES: Row[] = [
   // is masked like after a single escape.
   ["%252B4917612345678", `%252B${P}`],
   ["%252F47e16ee3-3d22-430b-acb1-959114949231", "%252F47e16ee3-3d22-430b-acb1-959114949231"],
+  // A card right after a double-encoded escape whose hex is digits: the
+  // candidate that starts inside the escape fails Luhn and is tried again one
+  // character later, as after a single one (review round 4).
+  ["Card%253A%25204111-1111-1111-1111", `Card%253A%2520${CC}`],
+  ["%25203782-822463-10005", `%2520${CC}`],
 ];
 
 const OTHER: Row[] = [
@@ -208,6 +217,8 @@ const DOCUMENTED: Row[] = [
   // it: the last group stays (better than before #182, which left two).
   ['{"t":"\\u00224111 1111 1111 1111\\u0022"}', `{"t":"\\u${CC} 1111\\u0022"}`],
   ['{"t":"Card\\u00204799 56605796 5730"}', `{"t":"Card\\u${CC} 5730"}`],
+  // The same inside a URL escape, as before #182 (review round 4).
+  ["Card%3A%205555-5555-5555-4444", `Card%3A%${CC}-4444`],
   // A bare nine-digit SSN or ITIN, or one with a single separator, keeps its
   // `\b` boundaries (A1): after `\u00a0` it is not redacted. Before #182 the
   // phone pattern caught it by taking the escape's last `0`.
@@ -375,6 +386,9 @@ describe("pathological input (#182)", () => {
     ["17 digits and a space, repeated", repeat("12345678901234567 ")],
     ["letters and 16 digits, repeated", repeat("cafe1234567890123456 ")],
     ["%25 and hex pairs, repeated", repeat("%252B%2520")],
+    // Review round 4: the retry after `%25`, the a-f word before a 5-digit group.
+    ["%2520 and 18 digits, repeated", repeat(`%2520${"7".repeat(18)} `)],
+    ["a-f word and 0 + 4 digits, repeated", repeat("cafe01234 ")],
   ])("%s (100 KB) in under 1 s per flavor", (_case, value) => {
     for (const flavor of ["sdk", "ingest"] as const) {
       const start = performance.now();
