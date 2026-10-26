@@ -44,6 +44,12 @@ If a flush cannot deliver within `flushTimeoutMs` (1 s), it leaves the events qu
 
 On a stdio server stdout carries JSON-RPC only. SDK 0.5.4 and earlier wrote `[yavio] Server-only mode: …`, `[yavio] Intent capture enabled: …` and a few other informational lines there, and clients report each one (Claude Code logs it as a non-JSON line it ignores). Since 0.5.5 every SDK line goes to stderr.
 
+### Unknown errors from elicitInput() on MCP 2026-07-28
+
+A tool on MCP SDK v2 that calls `ctx.mcpReq.elicitInput()`, `ctx.mcpReq.requestSampling()`, `server.server.listRoots()` or `server.server.ping()` fails for every client that negotiates the 2026-07-28 revision through `createMcpHandler` or `serveStdio`. That revision has no requests from the server to the client, and v2 throws `Server-to-client requests are not available on protocol revision 2026-07-28: …`. The client gets an `isError` result, and the SDK records the call as `status: error`, `error_category: unknown`, with that text as its error message.
+
+The fix is in the tool: return `inputRequired(...)`. It works on 2026-07-28, and on the 2025 era through v2's shim, and the call stays one tool call (SDK 0.5.5 and later). On a per-request host a 2025-era client cannot be asked either way: `elicitInput()` fails at once, the other three after the MCP SDK's request timeout (60 s by default), and `inputRequired()` is recorded with `error_category: server`.
+
 ### Buffer overflow
 
 If events are generated faster than they can be flushed, the SDK caps its buffer at 10,000 events. Oldest events are dropped. A `YAVIO-1206` warning is logged when this happens.

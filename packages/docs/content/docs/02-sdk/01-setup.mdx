@@ -32,6 +32,16 @@ A per-request server has no session of its own: a stateless transport never issu
 
 Keys 3 and 4 apply on stdio too: a VS Code stdio server gets one session per conversation since 0.5.4 instead of one per client process — more sessions, and `identify()` no longer carries across its conversations. Claude Code, claude.ai connectors, Cursor and Zed send no conversation key; if your host knows the conversation, return its id from `sessionKey` — a conversation id, never a per-user id on its own (see [Configuration](/docs/02-sdk/03-configuration#session-key)). A key-less HTTP call (`per_request`) is not counted as a session on the dashboard — the Sessions KPI says how many such calls there were — and its `connection` event is emitted once per process per client instead of once per call.
 
+### MCP 2026-07-28
+
+MCP SDK v2's `createMcpHandler` and `serveStdio` serve the stateless 2026-07-28 protocol revision to a client that asks for it (the v2 client's `versionNegotiation: { mode: "auto" }`, or a pin), and 2025-11-25 to every other client. `McpServer.connect()`, `InMemoryTransport` included, and MCP SDK v1 stay on 2025-11-25. On 2026-07-28 the SDK takes the client's name, version, capabilities and protocol version from the request envelope (`metadata.client_info_source: "envelope"`) and the session from the keys above, since there is no `Mcp-Session-Id`. What else differs there:
+
+- `elicitInput()`, `requestSampling()`, `listRoots()` and `ping()` from inside a handler throw, and such a call is recorded as an `error` with `error_category: unknown`; return `inputRequired()` instead (see [Troubleshooting](/docs/02-sdk/05-troubleshooting#unknown-errors-from-elicitinput-on-mcp-2026-07-28)).
+- A call the client sends again after a broken stream or a restarted server is a second tool call; nothing links the two.
+- Tools registered with MCP SDK v1's `server.experimental.tasks.registerToolTask()` are not tracked, on any revision.
+
+The package README's "MCP 2026-07-28" section has the details.
+
 ## Wrapping your server
 
 The `withYavio()` function takes your `McpServer` instance and returns an instrumented version. All tool registrations and connections are intercepted transparently.

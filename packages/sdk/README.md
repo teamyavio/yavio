@@ -277,6 +277,25 @@ Without a handler the SDK drains everything on `SIGTERM`/`SIGINT` within the dea
 
 A value that is not an `McpServer` (no `registerTool()` / `connect()`) comes back unwrapped with one `YAVIO-1107` error per process — in no-op mode too — so a mis-wired integration keeps serving. After `SIGTERM`/`SIGINT` requests still served during the graceful-shutdown window send their events at once; a `shutdown()` after them waits for those sends too.
 
+### MCP 2026-07-28
+
+MCP 2026-07-28 is the stateless protocol revision: the client opens with `server/discover` instead of `initialize`, every request carries the client's name, version, capabilities and protocol version in an envelope in its `_meta`, there is no `Mcp-Session-Id`, and the server cannot send requests to the client. Which revision a connection gets depends on the server's entry point and on what the client asks for, not on the transport:
+
+| Server | Client | Revision |
+|---|---|---|
+| MCP SDK v2 `createMcpHandler` (Streamable HTTP) or `serveStdio` | asks for 2026-07-28: `versionNegotiation: { mode: "auto" }` on the v2 client, or a pin | 2026-07-28 |
+| MCP SDK v2 `createMcpHandler` or `serveStdio` | anything else, the v2 client's default included | 2025-11-25 or older |
+| MCP SDK v2 `McpServer.connect()` (`InMemoryTransport`, a long-lived Streamable HTTP transport) | any | 2025-11-25 or older |
+| MCP SDK v1 | any | 2025-11-25 or older: v1 has no 2026-07-28 |
+
+On 2026-07-28 the SDK takes the `connection` event's client name and version, `protocol_version` and `metadata.client_capabilities` from the envelope, with `metadata.client_info_source: "envelope"` (see [Inputs](#inputs)). Sessions come from the keys in the [Sessions](#stateless--per-request-servers) table or your `sessionKey`; without one, a call over HTTP is a session of its own (`per_request`), and the calls on a stdio connection share its session (`connection`), as on the 2025 era. A tool that asks for input with `inputRequired()` is one `tool_call` (since 0.5.5), from the client's final retry (see [Tools that ask for input](#tools-that-ask-for-input)).
+
+**Server-to-client requests throw on 2026-07-28.** Inside a 2026-07-28 request, `ctx.mcpReq.elicitInput()`, `ctx.mcpReq.requestSampling()` (`server.server.createMessage()`), `server.server.listRoots()` and `server.server.ping()` throw `Server-to-client requests are not available on protocol revision 2026-07-28: …`. Unless the handler catches it, the client gets an `isError` result, and the call is one `error` / `unknown` event with that text as its `error_message` (stored while `inputValues` is on). So a tool that moves to `createMcpHandler` or `serveStdio` shows `unknown` errors from every client that negotiates 2026-07-28. Return `inputRequired()` instead: it works on both revisions, because on the 2025 era v2's shim asks the client within the same request. On a per-request host neither style reaches a 2025-era client, whose `tools/call` lands on an instance that never saw its `initialize`: `elicitInput()` fails at once, the other three fail after the MCP SDK's request timeout (60 s by default), each one `error` / `unknown` event, and `inputRequired()` is one `error` / `server` event.
+
+**A re-sent call counts again.** 2026-07-28 has no stream resumption (no `Last-Event-ID`; a closed response stream cancels the request), and on stdio a request in flight when the server process dies is lost, for the client to send again to the new process. A client that sends a call again after a broken stream or a restarted server makes a second `tool_call` event. Nothing links the two: the second request may reach another instance, and `is_retry` is never set.
+
+**Task-based tools are not tracked**, on any revision. A tool registered with MCP SDK v1's `server.experimental.tasks.registerToolTask()` (the experimental tasks of MCP 2025-11-25) records nothing under `withYavio()` or `wrap()`: no `tool_call` for the task call, none for a call the MCP SDK refuses because it lacks task augmentation, and no `tool_discovery`. MCP SDK v2 has no server-side task API; a task handle that a v2 `registerTool()` handler returns fails v2's own result validation and is one `error` / `server` event.
+
 ### Serverless and edge runtimes
 
 The SDK runs on Node.js ≥ 20 hosts with the recipes below. How far each runtime has been checked differs, and the table's last column says:
@@ -443,7 +462,7 @@ A `withYavio()` host creates one `createYavio()` client at startup for the same 
 
 ## Captured data
 
-Every call to a tool registered through the wrapped server produces one `tool_call` event with the tool name, latency, status and — subject to the `capture` flags — the inputs and the output. That holds when the tool asks the user for input over several rounds too: the event comes from the round whose result is final (see [Tools that ask for input](#tools-that-ask-for-input)).
+Every call to a tool registered through the wrapped server produces one `tool_call` event with the tool name, latency, status and — subject to the `capture` flags — the inputs and the output. That holds when the tool asks the user for input over several rounds too: the event comes from the round whose result is final (see [Tools that ask for input](#tools-that-ask-for-input)). Task-based tools (MCP SDK v1's `experimental.tasks`) are the exception: they are not tracked (see [MCP 2026-07-28](#mcp-2026-07-28)).
 
 Every event the SDK sends to `events` — `tool_call`, `connection`, `identify`, `step`, `track`, `conversion` — also carries `session_source`, how its `session_id` was derived: `mcp_session_id`, `openai_session`, `vscode_conversation`, `codex_thread`, `custom` (your `sessionKey`), `connection` (no key, not HTTP) or `per_request` (no key on an HTTP request) — see [Sessions](#stateless--per-request-servers). It names a source, never a key, and is recorded whatever the `capture` flags. The React widget stamps its server session's source on its own events too (from `_meta.yavio.sessionSource`). `tool_discovery` carries none: ingest writes it to the tool registry, which keeps no session fields. Events from SDKs before 0.5.4, server or widget, have none.
 
@@ -461,7 +480,7 @@ A call is an error when the handler **throws** or when it **returns a result wit
 
 Only the literal boolean `true` counts as `isError`. On v1 the client sees the same shape in all four error cases (the MCP SDK converts throws and pre-handler failures into `isError` results), so the distinction is server-side only. On v2 an unknown or disabled tool is a thrown JSON-RPC error instead of an `isError` result; it is still counted as `validation` (`server` on a 2026-07-28 retry, whose handler ran in an earlier round).
 
-Every `tools/call` request the wrapped server receives is counted, including the ones the MCP SDK rejects before your handler runs — a call to a tool name that does not exist shows up as that name with a 100 % error rate, which is the honest signal. Under `withYavio()` a tool registered on the original, unwrapped server stays untracked either way; `createYavio().wrap()` instruments every tool on the server (see [Stateless / per-request servers](#stateless--per-request-servers)).
+Every `tools/call` request the wrapped server receives is counted, including the ones the MCP SDK rejects before your handler runs — a call to a tool name that does not exist shows up as that name with a 100 % error rate, which is the honest signal. Under `withYavio()` a tool registered on the original, unwrapped server stays untracked either way; `createYavio().wrap()` instruments every tool on the server (see [Stateless / per-request servers](#stateless--per-request-servers)). A task-based tool stays untracked under both, its refused calls included (see [MCP 2026-07-28](#mcp-2026-07-28)).
 
 `error_message` is the exception's message, or for an `isError` result the first `text` content item. Both are PII-stripped and clamped to 500 characters. The result text is output, so it is stored only while `outputValues` is on. A thrown message is developer-written, but messages routinely interpolate the arguments (`IBAN ${iban} rejected`) and the PII stripper does not recognise IBANs or customer numbers, so it is stored only while `inputValues` is on. `status` and `error_category` are recorded regardless.
 

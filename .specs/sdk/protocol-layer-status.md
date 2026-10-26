@@ -131,5 +131,5 @@ Status must be the inner wrapper: it then runs inside the intent store (so a pre
 
 ## Open Questions
 
-- Task-based tools (`registerToolTask`) are not intercepted by the proxy at all today; their pre-handler failures are therefore not counted either (rule: no callback event + not instrumented → nothing). Separate issue if task tools ever ship in a Yavio-instrumented app.
+- Task-based tools (`registerToolTask`) are not intercepted by the proxy at all today; their pre-handler failures are therefore not counted either (rule: no callback event + not instrumented → nothing). Separate issue if task tools ever ship in a Yavio-instrumented app. Documented in the README ("MCP 2026-07-28") and [server-sdk.md §3.1.3](./server-sdk.md#313-proxy-internals), and pinned by `integration/protocol.test.ts` on the v1 legs, refused call included (#172).
 - A `context` sent from a cached schema **after intent capture was turned off** reaches the raw arguments of a validation-failure event (there is no intent wrapper to strip it). Edge of an edge; the text is PII-stripped like everything else. Noted, not handled.

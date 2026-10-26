@@ -7,7 +7,8 @@
  * through `createMcpHandler` (Streamable HTTP) and `serveStdio` when the
  * client asks for it, while a bare `connect()` (InMemoryTransport) stays on
  * 2025-11-25 (#172). Every one of those shows up here against the real
- * packages, not a fake; `serveStdio` in protocol-version.test.ts (#170).
+ * packages, not a fake; `serveStdio` over a real stdio child in
+ * protocol-version.test.ts (#170, #172), push-style requests by era at the end.
  */
 import { randomUUID } from "node:crypto";
 import { type IncomingMessage, type ServerResponse, createServer } from "node:http";
