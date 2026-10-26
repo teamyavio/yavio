@@ -15,19 +15,25 @@
  *    numbers.
  * 5. US street addresses, over the whole string (ingest only).
  *
- * What is not matched (follow-ups): phone numbers grouped other than 3/4 + 3
- * + 4 digits, such as `030 12345678`, `+33 6 12 34 56 78` or `0171 123 45 67`,
- * and extensions (#189); 19-digit cards (#190); the SDK's spaced and bare
- * SSNs (#193); a number glued to a word of letters a-f only unless it has a
- * phone's shape (`cafe5551234567`), to a token of letters and digits
- * (`ref15551234567`), to a word of more than 24 letters, or after a
- * double-encoded escape (`%252B…`): the price of not cutting hex ids (see
- * START); a card grouped other than in fours with Unicode spaces. Wrongly
- * matched: a standalone 10-digit number such as an epoch second (#192), a
- * 12-15-digit number that does not start with 1 (an EAN-13), a Luhn-valid
- * 13-19-digit number (#190), IBAN-shaped hex (#191), a fully separated SSN
- * glued to a word (`XBG109-09-1527`), and an escape's own digits taken into a
- * phone number (`%20` + `5551234567` becomes `%[PHONE_REDACTED]`; see
+ * What is not matched (follow-ups): phone numbers grouped other than 3/4/5 +
+ * 3 + 4 digits, such as `030 12345678`, `+33 6 12 34 56 78`, `0171 123 45 67`
+ * or `07700 900 123`, a `/` between groups, and extensions (#189); 19-digit
+ * cards and cards grouped with other spaces (no-break spaces), and a
+ * Luhn-invalid card in groups (`4111 1111 1111 1112`; #190); the SDK's spaced
+ * and bare SSNs (#193); in ingest, a bare or one-separator SSN/ITIN after a
+ * `\u00a0`-style escape (A1); a phone number glued to a word of letters a-f
+ * only unless it has a phone's shape (`cafe5551234567`), a Luhn-invalid
+ * 16-digit run glued to one (`cafe4111111111111112`), a number glued to a
+ * token of letters and digits (`ref15551234567`) or to a word of more than
+ * 24 letters: the price of not cutting hex ids (see START). Wrongly matched:
+ * a standalone 10-digit number such as an epoch second (#192), a
+ * 12-15-digit number that does not start with 1 (an EAN-13), any 16 digits
+ * in a row (an epoch in microseconds) and a Luhn-valid 13-19-digit number
+ * (#190), IBAN-shaped hex (#191), a fully separated SSN glued to a word
+ * (`XBG109-09-1527`), a word glued to a number after an escape (an encoded
+ * path, `%2Fuser1234567890`), and an escape's own digits taken into a number
+ * (`%20` + `5551234567` becomes `%[PHONE_REDACTED]`; a Luhn-valid card run
+ * starting inside a `\u` escape leaves the card's last group: see
  * applyRetrying for why that start is not forbidden).
  *
  * No regular expression with a lookbehind is written as a literal: a browser
@@ -137,6 +143,8 @@ const NOT_GLUED = String.raw`(?<![A-Za-z0-9])`;
  */
 const AFTER_ESCAPE = [
   String.raw`(?<=%[0-9A-Fa-f]{2})`,
+  // A double-encoded one, `%252B4917612345678` (review round 3).
+  String.raw`(?<=%25[0-9A-Fa-f]{2})`,
   String.raw`(?<=\\u[0-9A-Fa-f]{4})`,
   String.raw`(?<=\\[bfnrt])`,
 ];
@@ -164,6 +172,17 @@ const START = `(?=[\\d+(])(?:${[
   ...AFTER_ESCAPE,
   String.raw`(?<=${STANDALONE}[A-Fa-f]{1,24})(?=[+(]|\d{2,4}\)?[-.\s])`,
 ].join("|")})`;
+/**
+ * Where a card number may start: as START, but after any word of 1-24 letters
+ * only, a-f included and without a phone's shape (`cafe4367063062371650`,
+ * `a4666960593450200`). Luhn already tells a card from a hex id there (review
+ * round 3).
+ */
+const START_CARD = `(?=[\\d+(])(?:${[
+  NOT_GLUED,
+  String.raw`(?<=${STANDALONE}[A-Za-z]{1,24})`,
+  ...AFTER_ESCAPE,
+].join("|")})`;
 /** Where it must end: not followed by a letter or digit. */
 const END = "(?![A-Za-z0-9])";
 
@@ -181,7 +200,7 @@ interface Rule {
   validate?: (match: string) => boolean;
   /**
    * A candidate that fails validate() and began inside an escape is tried
-   * again one character later (see applyRules).
+   * again one character later (see applyRetrying).
    */
   retryInsideEscape?: boolean;
 }
@@ -225,10 +244,18 @@ function currentEngine(): Engine {
   const iban: Rule = { ...IBAN, retryInsideEscape: true };
   // 13-19 digits with optional space or dash separators, Luhn checked.
   const card: Rule = {
-    pattern: rx(`${START}(?:\\d[ -]*?){13,19}${END}`),
+    pattern: rx(`${START_CARD}(?:\\d[ -]*?){13,19}${END}`),
     replacement: CARD_TOKEN,
     validate: passesCardCheck,
     retryInsideEscape: true,
+  };
+  // Exactly 16 digits in a row, standing alone, whether or not they pass
+  // Luhn: a card number with one mistyped digit always fails it, and so do
+  // 16-digit gift card, loyalty and account numbers (review round 3). Grouped
+  // `4-4-4-4` is not taken: "2022 2023 2024 2025" is a list of years.
+  const card16: Rule = {
+    pattern: rx(`${START}\\d{16}${END}`),
+    replacement: CARD_TOKEN,
   };
   // SDK: dashed SSNs only, any area number (aligning with ingest: #193).
   const ssnSdk: Rule = {
@@ -257,18 +284,22 @@ function currentEngine(): Engine {
   };
   // Phone numbers: an optional `+CC` or `00CC` and `(0)`, a first group of
   // 3-4 digits (so a trunk 0 or a leading 1 belongs to it: `0171 1234567`,
-  // `(0171) 1234567`, `15551234567`), then 3 and 4 digits, each group
+  // `(0171) 1234567`, `15551234567`) or of 5 digits starting with a trunk 0
+  // (`07141 1234567`, review round 3), then 3 and 4 digits, each group
   // optionally separated by `-`, `.` or whitespace. Or a bare run of 12-15
   // digits that does not start with 1 (E.164 without the `+`: `491711234567`).
   const phone: Rule = {
     pattern: rx(
-      `${START}(?:(?:\\+|00)\\d{1,3}[-.\\s]?(?:\\(0\\)[-.\\s]?)?)?\\(?\\d{3,4}\\)?[-.\\s]?\\d{3}[-.\\s]?\\d{4}${END}|${START}(?:0|[2-9])\\d{11,14}${END}`,
+      `${START}(?:(?:\\+|00)\\d{1,3}[-.\\s]?(?:\\(0\\)[-.\\s]?)?)?\\(?(?:0\\d{4}|\\d{3,4})\\)?[-.\\s]?\\d{3}[-.\\s]?\\d{4}${END}|${START}(?:0|[2-9])\\d{11,14}${END}`,
     ),
     replacement: PHONE_TOKEN,
   };
   return {
     mask: new RegExp(ID_MASK, "gi"),
-    rules: { sdk: [iban, card, ssnSdk, phone], ingest: [iban, card, ssnIngest, itin, phone] },
+    rules: {
+      sdk: [iban, card, card16, ssnSdk, phone],
+      ingest: [iban, card, card16, ssnIngest, itin, phone],
+    },
   };
 }
 

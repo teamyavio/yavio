@@ -41,6 +41,13 @@ const PHONES: Row[] = [
   ["cafe555-123-4567", `cafe${P}`],
   ["Ad+49 171 1234567", `Ad${P}`],
   ["ab(555) 123-4567", `ab${P}`],
+  // A five-digit area code with its trunk 0 (review round 3): before, the
+  // whole number was shown.
+  ["07141 1234567", P],
+  ["07141 123-4567", P],
+  ["Tel. 07141 123 4567", `Tel. ${P}`],
+  ["(07141) 1234567", P],
+  ["+49 7141 1234567", P],
 ];
 
 const CARDS: Row[] = [
@@ -52,6 +59,14 @@ const CARDS: Row[] = [
   ["ab4111 1111 1111 1111", `ab${CC}`],
   // Luhn-invalid, 13 digits starting with 1: neither a card nor a phone.
   ["ID: 1234567890123", "ID: 1234567890123"],
+  // Sixteen digits in a row, standing alone, Luhn or not: a mistyped card
+  // (one wrong digit always fails Luhn), a gift card (review round 3).
+  ["4111111111111112", CC],
+  ["Gift card 6274019958234411", `Gift card ${CC}`],
+  // A Luhn-valid card after any letters-only word, a-f included (review round 3).
+  ["a4666960593450200", `a${CC}`],
+  ["Bad4444127800745918", `Bad${CC}`],
+  ["cafe4367063062371650", `cafe${CC}`],
 ];
 
 const SSNS: Row[] = [
@@ -131,6 +146,10 @@ const ESCAPES: Row[] = [
   // JSON letter escapes; \f and \b are a-f letters (review round 2).
   ['{"t":"Jane\\f5551234567"}', `{"t":"Jane\\f${P}"}`],
   ['{"t":"Jane\\b5551234567"}', `{"t":"Jane\\b${P}"}`],
+  // A double-encoded escape, `%25` + `2B` (review round 3); an id after one
+  // is masked like after a single escape.
+  ["%252B4917612345678", `%252B${P}`],
+  ["%252F47e16ee3-3d22-430b-acb1-959114949231", "%252F47e16ee3-3d22-430b-acb1-959114949231"],
 ];
 
 const OTHER: Row[] = [
@@ -158,8 +177,20 @@ const DOCUMENTED: Row[] = [
   ["5551234567x12", "5551234567x12"],
   ["abc5551234567", "abc5551234567"],
   ["cafe5551234567", "cafe5551234567"],
-  // A double-encoded escape (`%25` + `2B`) is not one.
-  ["%252B4917612345678", "%252B4917612345678"],
+  ["cafe4111111111111112", "cafe4111111111111112"],
+  // ... while a Luhn-valid card after one is a card, also one ending a hex id.
+  ["deadbeef4111111111111111", `deadbeef${CC}`],
+  // Sixteen digits in a row are a card whatever they mean: an epoch in
+  // microseconds, an order number, a 16-digit run starting with `00`.
+  ["1700000000000000", CC],
+  ["order 1234567890123456 shipped", `order ${CC} shipped`],
+  ["0012345678901234", CC],
+  // A Luhn-invalid 16-digit number in groups is not (`2022 2023 2024 2025`
+  // above is a list of years).
+  ["card 4111 1111 1111 1112", "card 4111 1111 1111 1112"],
+  // Numbers with digits after a double-encoded escape are cut as after a
+  // single one: an encoded path id.
+  ["%252Forders%252F1234567890", `%252Forders%252F${P}`],
   // A UUID glued to a letter is not masked.
   ["x21165216-7349-4227-981e-df7d3bf851dc", `x${CC}-981e-df7d3bf851dc`],
   // A fully separated SSN glued to a word is still an SSN.
@@ -176,8 +207,14 @@ const DOCUMENTED: Row[] = [
   // A Luhn-valid card candidate inside an escape wins over the card after
   // it: the last group stays (better than before #182, which left two).
   ['{"t":"\\u00224111 1111 1111 1111\\u0022"}', `{"t":"\\u${CC} 1111\\u0022"}`],
-  // A Luhn-invalid 16-digit number is no longer partly cut as a phone number.
-  ["4111111111111112", "4111111111111112"],
+  ['{"t":"Card\\u00204799 56605796 5730"}', `{"t":"Card\\u${CC} 5730"}`],
+  // A bare nine-digit SSN or ITIN, or one with a single separator, keeps its
+  // `\b` boundaries (A1): after `\u00a0` it is not redacted. Before #182 the
+  // phone pattern caught it by taking the escape's last `0`.
+  ['{"t":"SSN\\u00a0912345678"}', '{"t":"SSN\\u00a0912345678"}'],
+  ['{"t":"SSN\\u00a012345-6789"}', '{"t":"SSN\\u00a012345-6789"}'],
+  // Separators other than `-`, `.` and whitespace are not taken (#189).
+  ["Tel. 07141/1234567", "Tel. 07141/1234567"],
   // Groupings other than 3/4 + 3 + 4 are not matched (#189).
   ["Tel: 030 12345678", "Tel: 030 12345678"],
   ["0171 123 45 67", "0171 123 45 67"],
@@ -332,6 +369,12 @@ describe("pathological input (#182)", () => {
     ["%2B and 13 digits, repeated", repeat("%2B4917612345678")],
     // Every card candidate starts inside the escape, fails Luhn and is retried.
     ["%20 and 18 digits, repeated", repeat(`%20${"7".repeat(18)} `)],
+    // Review round 3: the five-digit trunk-0 group, the bare 16-digit run,
+    // any letters before a card, double-encoded escapes.
+    ["(01234) 123, repeated", repeat("(01234) 123 ")],
+    ["17 digits and a space, repeated", repeat("12345678901234567 ")],
+    ["letters and 16 digits, repeated", repeat("cafe1234567890123456 ")],
+    ["%25 and hex pairs, repeated", repeat("%252B%2520")],
   ])("%s (100 KB) in under 1 s per flavor", (_case, value) => {
     for (const flavor of ["sdk", "ingest"] as const) {
       const start = performance.now();
