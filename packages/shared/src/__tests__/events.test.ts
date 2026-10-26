@@ -539,3 +539,69 @@ describe("IngestBatch", () => {
     expect(() => IngestBatch.parse({ events })).toThrow();
   });
 });
+
+// zod 4 is stricter than zod 3 in places, and counts string length in code
+// points; ingest keeps accepting exactly what it accepted before the upgrade.
+describe("zod 3 acceptance", () => {
+  const accepts = (overrides: Record<string, unknown>) =>
+    IngestEvent.safeParse(base({ event_type: "track", ...overrides })).success;
+
+  it("takes UUID-shaped event ids of any version and variant", () => {
+    for (const id of [
+      "11111111-1111-1111-1111-111111111111",
+      "00000000-0000-0000-0000-000000000001",
+      "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+    ]) {
+      expect(accepts({ event_id: id })).toBe(true);
+    }
+    for (const id of [
+      "550e8400e29b41d4a716446655440000",
+      "{550e8400-e29b-41d4-a716-446655440000}",
+    ]) {
+      expect(accepts({ event_id: id })).toBe(false);
+    }
+  });
+
+  it("takes a UTC timestamp without seconds, and still no offset", () => {
+    expect(accepts({ timestamp: "2026-10-26T10:00Z" })).toBe(true);
+    expect(accepts({ timestamp: "2026-10-26T10:00:00+02:00" })).toBe(false);
+  });
+
+  it("takes ±Infinity (JSON 1e999) in a number without a bound, never NaN", () => {
+    const event = JSON.parse(
+      `{"event_id":"550e8400-e29b-41d4-a716-446655440000","event_type":"tool_call","trace_id":"t","session_id":"s","timestamp":"2026-10-26T10:00:00Z","source":"server","latency_ms":1e999}`,
+    );
+    expect(event.latency_ms).toBe(Number.POSITIVE_INFINITY);
+    expect(IngestEvent.safeParse(event).success).toBe(true);
+    expect(accepts({ event_type: "tool_call", latency_ms: Number.NEGATIVE_INFINITY })).toBe(true);
+    expect(accepts({ event_type: "tool_call", latency_ms: Number.NaN })).toBe(false);
+    expect(accepts({ event_type: "tool_call", latency_ms: "5" })).toBe(false);
+    // A bound of its own still rejects it.
+    expect(
+      accepts({ event_type: "widget_scroll", scroll_depth_pct: Number.POSITIVE_INFINITY }),
+    ).toBe(false);
+  });
+
+  it("takes integers beyond 2^53 in an integer without a bound, never fractions", () => {
+    expect(accepts({ event_type: "tool_call", tokens_in: 2 ** 53 })).toBe(true);
+    expect(accepts({ event_type: "widget_click", click_count: 1e20 })).toBe(true);
+    expect(accepts({ event_type: "tool_call", tokens_in: 1.5 })).toBe(false);
+    expect(accepts({ event_type: "tool_call", tokens_in: Number.POSITIVE_INFINITY })).toBe(false);
+    expect(accepts({ event_type: "tool_call", is_retry: 2 })).toBe(false);
+  });
+
+  it("bounds strings in UTF-16 code units, as String.length counts them", () => {
+    expect(accepts({ event_type: "tool_call", subject_id: "😀".repeat(128) })).toBe(true);
+    expect(accepts({ event_type: "tool_call", subject_id: "😀".repeat(129) })).toBe(false);
+    expect(accepts({ event_type: "tool_call", country_code: "😀" })).toBe(true);
+    expect(accepts({ event_type: "tool_call", country_code: "😀😀" })).toBe(false);
+    expect(accepts({ session_source: "😀".repeat(17) })).toBe(false);
+    expect(accepts({ event_type: "tool_discovery", tool_name: "😀".repeat(129) })).toBe(false);
+    expect(accepts({ event_type: "tool_discovery", tool_name: "" })).toBe(false);
+  });
+
+  it("takes records with values of any type, but not arrays", () => {
+    expect(accepts({ metadata: { a: 1, b: null, c: [1], d: { e: "x" }, f: "g" } })).toBe(true);
+    expect(accepts({ metadata: [] })).toBe(false);
+  });
+});

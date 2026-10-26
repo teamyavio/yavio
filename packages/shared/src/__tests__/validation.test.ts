@@ -3,6 +3,7 @@ import {
   ApiKeyFormat,
   ApiKeyPrefix,
   CurrencyCode,
+  IsoDatetime,
   PaginationParams,
   ProjectSlug,
   SessionId,
@@ -22,6 +23,11 @@ describe("Uuid", () => {
   it("rejects non-UUID strings", () => {
     expect(() => Uuid.parse("not-a-uuid")).toThrow();
     expect(() => Uuid.parse("")).toThrow();
+  });
+
+  it("accepts UUID-shaped ids of any version and variant, as zod 3's .uuid() did", () => {
+    expect(Uuid.safeParse("11111111-1111-1111-1111-111111111111").success).toBe(true);
+    expect(Uuid.safeParse("00000000-0000-0000-0000-000000000001").success).toBe(true);
   });
 });
 
@@ -189,6 +195,31 @@ describe("TimeRange", () => {
   it("rejects missing fields", () => {
     expect(() => TimeRange.parse({ from: "2025-01-01T00:00:00Z" })).toThrow();
     expect(() => TimeRange.parse({ to: "2025-01-31T00:00:00Z" })).toThrow();
+  });
+});
+
+describe("IsoDatetime", () => {
+  it("accepts UTC datetimes with or without seconds, and any fraction", () => {
+    for (const v of [
+      "2026-10-26T10:00Z",
+      "2026-10-26T10:00:00Z",
+      "2026-10-26T10:00:00.123Z",
+      "2026-10-26T10:00:00.123456789Z",
+    ]) {
+      expect(IsoDatetime.safeParse(v).success).toBe(true);
+    }
+  });
+
+  it("rejects offsets, a missing zone, and anything short of minutes", () => {
+    for (const v of [
+      "2026-10-26T10:00:00+02:00",
+      "2026-10-26T10:00:00",
+      "2026-10-26",
+      "2026-10-26T10Z",
+      "2026-02-30T10:00:00Z",
+    ]) {
+      expect(IsoDatetime.safeParse(v).success).toBe(false);
+    }
   });
 });
 
