@@ -44,6 +44,23 @@ describe("timestamp clamping (#90)", () => {
     expect(r.events.map((e) => e.timestamp)).toEqual(inside);
     expect(r.clampedTimestamps).toBe(0);
   });
+
+  it("writes every timestamp in milliseconds, the column's precision, without counting it as clamped", () => {
+    const r = normalizeEvents(
+      [
+        event({ timestamp: "2026-10-14T11:59:00.12345678901234567890Z" }),
+        event({ timestamp: "2026-10-14T11:59:00Z" }),
+        event({ timestamp: "2026-10-14T11:59:00.5Z" }),
+      ],
+      NOW,
+    );
+    expect(r.events.map((e) => e.timestamp)).toEqual([
+      "2026-10-14T11:59:00.123Z",
+      "2026-10-14T11:59:00.000Z",
+      "2026-10-14T11:59:00.500Z",
+    ]);
+    expect(r.clampedTimestamps).toBe(0);
+  });
 });
 
 describe("format checks (#90) — invalid becomes NULL, the event is kept", () => {

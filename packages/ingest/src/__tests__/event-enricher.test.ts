@@ -1,8 +1,22 @@
 import { randomUUID } from "node:crypto";
-import type { BaseEvent } from "@yavio/shared/events";
+import { BaseEvent, IngestEvent } from "@yavio/shared/events";
 import { describe, expect, it } from "vitest";
-import { enrichEvents } from "../lib/event-enricher.js";
+import { EVENTS_COLUMNS, enrichEvents } from "../lib/event-enricher.js";
 import type { AuthContext } from "../types.js";
+
+describe("EVENTS_COLUMNS", () => {
+  it("lists every field an event can carry into events, and no other", () => {
+    // tool_discovery's own fields go to tool_registry (tool-registry.ts).
+    const fields = new Set<string>(["workspace_id", "project_id"]);
+    for (const option of IngestEvent.options) {
+      const discovery = option.shape.event_type.value === "tool_discovery";
+      for (const field of Object.keys(option.shape)) {
+        if (!discovery || field in BaseEvent.shape) fields.add(field);
+      }
+    }
+    expect(Object.keys(EVENTS_COLUMNS).sort()).toEqual([...fields].sort());
+  });
+});
 
 function makeEvent(overrides: Record<string, unknown> = {}): BaseEvent {
   return {
@@ -77,5 +91,31 @@ describe("enrichEvents", () => {
     const events = [makeEvent({ metadata: undefined })];
     const enriched = enrichEvents(events, authContext);
     expect(enriched[0].metadata).toBeUndefined();
+  });
+
+  it("puts U+FFFD in place of a lone surrogate, which ClickHouse refuses in a String column", () => {
+    const [event] = enrichEvents(
+      [
+        makeEvent({
+          event_name: "a\ud800b",
+          error_message: "\udc00 at the start, a pair 😀 kept",
+          user_id: "\ud83d",
+          metadata: { note: "x\ud800" },
+        }),
+      ],
+      authContext,
+    );
+    expect(event.event_name).toBe("a�b");
+    expect(event.error_message).toBe("� at the start, a pair 😀 kept");
+    expect(event.user_id).toBe("�");
+    // Inside a JSON field JSON.stringify escapes it as text, which ClickHouse stores.
+    expect(event.metadata).toBe('{"note":"x\\ud800"}');
+  });
+
+  it("leaves well-formed strings as they are", () => {
+    const original = makeEvent({ event_name: "ünïcödé 😀 ✓" });
+    const [event] = enrichEvents([original], authContext);
+    expect(event.event_name).toBe("ünïcödé 😀 ✓");
+    expect(event.trace_id).toBe(original.trace_id);
   });
 });

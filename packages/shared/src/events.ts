@@ -131,6 +131,35 @@ const exactUnits = (n: number) =>
     .string()
     .refine((v) => v.length === n, `Invalid input: expected string to have ${n} characters`);
 
+// Numeric fields are bounded by their ClickHouse columns
+// (packages/db/migrations/clickhouse/0002_events_table.sql), on top of the
+// helpers above: an event with a value its column cannot store is rejected
+// on its own here, instead of reaching ClickHouse, which refuses the insert
+// of the whole batch (UInt*: a negative, a fraction, or 1e21 and up, which
+// JSON.stringify writes in exponent notation) or stores another value
+// (UInt*: an integer beyond the type wraps around; Float32: beyond its range
+// becomes inf; ±Infinity, what JSON.parse makes of 1e999, is serialised as
+// null).
+
+/** A Float64 column: a finite number. */
+const float64 = () =>
+  jsonNumber().refine(Number.isFinite, "Invalid input: expected a finite number");
+
+const FLOAT32_MAX = 3.4028234663852886e38;
+
+/** A Float32 column: a number within its finite range. */
+const float32 = () =>
+  jsonNumber().refine(
+    (v) => v >= -FLOAT32_MAX && v <= FLOAT32_MAX,
+    `Invalid input: expected a number within ±${FLOAT32_MAX}`,
+  );
+
+/** A UInt16 column. */
+const uint16 = () => jsonInt().min(0).max(65_535);
+
+/** A UInt32 column. */
+const uint32 = () => jsonInt().min(0).max(4_294_967_295);
+
 // ---------------------------------------------------------------------------
 // Base event (fields present on every event)
 // ---------------------------------------------------------------------------
@@ -163,7 +192,7 @@ export type BaseEvent = z.infer<typeof BaseEvent>;
 /** tool_call — fires on every tool invocation. */
 export const ToolCallEvent = BaseEvent.extend({
   event_type: z.literal("tool_call"),
-  latency_ms: jsonNumber().optional(),
+  latency_ms: float64().optional(), // Nullable(Float64)
   status: z.enum(["success", "error"]).optional(),
   // `tool_error`: the handler returned a result with `isError: true` (MCP's
   // in-band tool failure). `unknown`: the handler threw. The client sees the
@@ -186,8 +215,8 @@ export const ToolCallEvent = BaseEvent.extend({
   // `context` or an unextendable schema, an unknown tool). Absent on events
   // from SDKs before 0.4.0.
   intent_context: z.enum(["required", "optional", "none"]).optional(),
-  tokens_in: jsonInt().optional(),
-  tokens_out: jsonInt().optional(),
+  tokens_in: uint32().optional(), // Nullable(UInt32)
+  tokens_out: uint32().optional(), // Nullable(UInt32)
   country_code: exactUnits(2).optional(),
   // State or province as the platform names it (ChatGPT: the English name in
   // openai/userLocation.region, e.g. "North Rhine-Westphalia"; not ISO
@@ -213,7 +242,7 @@ export const ConnectionEvent = BaseEvent.extend({
   protocol_version: maxUnits(64).optional(),
   client_name: maxUnits(256).optional(),
   client_version: maxUnits(128).optional(),
-  connection_duration_ms: jsonNumber().optional(),
+  connection_duration_ms: float64().optional(), // Nullable(Float64)
 });
 export type ConnectionEvent = z.infer<typeof ConnectionEvent>;
 
@@ -232,16 +261,16 @@ export type PromptUsageEvent = z.infer<typeof PromptUsageEvent>;
 /** sampling_call — fires on sampling/createMessage interception. */
 export const SamplingCallEvent = BaseEvent.extend({
   event_type: z.literal("sampling_call"),
-  latency_ms: jsonNumber().optional(),
-  tokens_in: jsonInt().optional(),
-  tokens_out: jsonInt().optional(),
+  latency_ms: float64().optional(), // Nullable(Float64)
+  tokens_in: uint32().optional(), // Nullable(UInt32)
+  tokens_out: uint32().optional(), // Nullable(UInt32)
 });
 export type SamplingCallEvent = z.infer<typeof SamplingCallEvent>;
 
 /** elicitation — fires on elicitation/requestInput interception. */
 export const ElicitationEvent = BaseEvent.extend({
   event_type: z.literal("elicitation"),
-  latency_ms: jsonNumber().optional(),
+  latency_ms: float64().optional(), // Nullable(Float64)
 });
 export type ElicitationEvent = z.infer<typeof ElicitationEvent>;
 
@@ -267,7 +296,7 @@ export type ToolDiscoveryEvent = z.infer<typeof ToolDiscoveryEvent>;
 /** step — funnel progression point. */
 export const StepEvent = BaseEvent.extend({
   event_type: z.literal("step"),
-  step_sequence: jsonInt().optional(),
+  step_sequence: uint32().optional(), // Nullable(UInt32)
 });
 export type StepEvent = z.infer<typeof StepEvent>;
 
@@ -280,7 +309,7 @@ export type TrackEvent = z.infer<typeof TrackEvent>;
 /** conversion — revenue attribution event. */
 export const ConversionEvent = BaseEvent.extend({
   event_type: z.literal("conversion"),
-  conversion_value: jsonNumber().optional(),
+  conversion_value: float64().optional(), // Nullable(Float64)
   conversion_currency: exactUnits(3).optional(),
 });
 export type ConversionEvent = z.infer<typeof ConversionEvent>;
@@ -299,9 +328,9 @@ export type IdentifyEvent = z.infer<typeof IdentifyEvent>;
 /** widget_render — fires once on useYavio() first initialization. */
 export const WidgetRenderEvent = BaseEvent.extend({
   event_type: z.literal("widget_render"),
-  viewport_width: jsonInt().optional(),
-  viewport_height: jsonInt().optional(),
-  device_pixel_ratio: jsonNumber().optional(),
+  viewport_width: uint16().optional(), // Nullable(UInt16)
+  viewport_height: uint16().optional(), // Nullable(UInt16)
+  device_pixel_ratio: float32().optional(), // Nullable(Float32)
   device_touch: z.number().int().min(0).max(1).optional(),
   connection_type: maxUnits(32).optional(), // navigator.connection.effectiveType
 });
@@ -316,14 +345,14 @@ export type WidgetErrorEvent = z.infer<typeof WidgetErrorEvent>;
 /** widget_visibility — fires when widget enters or exits viewport. */
 export const WidgetVisibilityEvent = BaseEvent.extend({
   event_type: z.literal("widget_visibility"),
-  visible_duration_ms: jsonNumber().optional(),
+  visible_duration_ms: float64().optional(), // Nullable(Float64)
 });
 export type WidgetVisibilityEvent = z.infer<typeof WidgetVisibilityEvent>;
 
 /** widget_click — fires on every click/tap event. */
 export const WidgetClickEvent = BaseEvent.extend({
   event_type: z.literal("widget_click"),
-  click_count: jsonInt().optional(),
+  click_count: uint32().optional(), // Nullable(UInt32)
 });
 export type WidgetClickEvent = z.infer<typeof WidgetClickEvent>;
 
@@ -371,7 +400,7 @@ export type WidgetFocusEvent = z.infer<typeof WidgetFocusEvent>;
 /** widget_performance — fires via PerformanceObserver on widget load. */
 export const WidgetPerformanceEvent = BaseEvent.extend({
   event_type: z.literal("widget_performance"),
-  load_time_ms: jsonNumber().optional(),
+  load_time_ms: float64().optional(), // Nullable(Float64)
 });
 export type WidgetPerformanceEvent = z.infer<typeof WidgetPerformanceEvent>;
 

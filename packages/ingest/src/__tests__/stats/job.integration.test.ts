@@ -3,7 +3,12 @@ import { type ClickHouseClient, type ClickHouseSettings, createClient } from "@c
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { StatsJob } from "../../stats/job.js";
 import type { StatsJobSession, StatsJobStore } from "../../stats/store.js";
-import { disconnect, getClient, runMigrations } from "../integration/helpers/clickhouse-setup.js";
+import {
+  disconnect,
+  getClient,
+  runMigrations,
+  testClickHouseUrl,
+} from "../integration/helpers/clickhouse-setup.js";
 
 // #85 step 3 against a real ClickHouse, as the job's own user yavio_rollup —
 // so this also proves migration 0015 grants it enough, and nothing reads
@@ -80,7 +85,7 @@ describe("statistics job (#85)", { timeout: 30_000 }, () => {
     await getClient().command({
       query: `ALTER USER yavio_rollup IDENTIFIED BY '${ROLLUP_PASSWORD}'`,
     });
-    const url = new URL(process.env.CLICKHOUSE_URL ?? "http://localhost:8123");
+    const url = new URL(testClickHouseUrl());
     url.username = "yavio_rollup";
     url.password = ROLLUP_PASSWORD;
     rollup = createClient({ url: url.toString() });
