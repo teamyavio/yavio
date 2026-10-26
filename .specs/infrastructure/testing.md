@@ -103,7 +103,7 @@ Run against real Docker services using Testcontainers or a shared `docker-compos
 | SSN in traits | `{ "ssn": "123-45-6789" }` | `{ "ssn": "[SSN_REDACTED]" }` |
 | Phone in nested JSON | `{ "contact": { "phone": "+1-555-123-4567" } }` | `{ "contact": { "phone": "[PHONE_REDACTED]" } }` |
 | Clean data unchanged | `{ "tool": "search", "query": "flights" }` | Identical — no false positives |
-| Ids in input values (#182) | `{ "order": "47e16ee3-3d22-430b-acb1-959114949231", "hash": "b7ad6b7169203331" }` | Identical — UUIDs (any letter case), traceparent-shaped values and hex ids are never cut by the phone, card or SSN patterns (seeded 200 000-value corpus in `packages/shared/src/__tests__/pii-ids.test.ts`) |
+| Ids in input values (#182) | `{ "order": "47e16ee3-3d22-430b-acb1-959114949231", "hash": "b7ad6b7169203331" }` | Identical — standalone UUIDs (any letter case), traceparent-shaped values and hex ids of 24 or more characters are not cut by the phone, card or SSN patterns (seeded 200 000-value corpus in `packages/shared/src/__tests__/pii-ids.test.ts`). Short hex ids that happen to be all digits are numbers like any other (47 of 20 000 random hex-12), and a UUID glued to a letter is not masked |
 | Phone with a trunk 0 or `00` (#182) | `"call 0171-1234567"`, `"0049 171 1234567"` | `"call [PHONE_REDACTED]"`, `"[PHONE_REDACTED]"` — no leading digits left in front of the token |
 | Bulk redaction | Batch of 100 events with mixed PII | All PII patterns redacted, non-PII preserved |
 
