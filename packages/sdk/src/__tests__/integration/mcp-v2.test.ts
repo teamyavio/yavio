@@ -7,7 +7,8 @@
  * through `createMcpHandler` (Streamable HTTP) and `serveStdio` when the
  * client asks for it, while a bare `connect()` (InMemoryTransport) stays on
  * 2025-11-25 (#172). Every one of those shows up here against the real
- * packages, not a fake; `serveStdio` in protocol-version.test.ts (#170).
+ * packages, not a fake; `serveStdio` over a real stdio child in
+ * protocol-version.test.ts (#170, #172), push-style requests by era at the end.
  */
 import { randomUUID } from "node:crypto";
 import { type IncomingMessage, type ServerResponse, createServer } from "node:http";
@@ -1428,5 +1429,178 @@ describe("MCP SDK v2 — SEP-414 trace context in _meta (#173)", () => {
     const [call] = ingest.events.filter((e) => e.event_type === "tool_call");
     expectTraceContext(call, META_TRACEPARENT);
     expect(call?.input_values).not.toHaveProperty("_requestInfo");
+  });
+});
+
+describe("MCP SDK v2 — server-to-client requests from a handler, by era (#172)", () => {
+  let ingest: MockIngest;
+  let mcp: ReturnType<typeof createServer> | undefined;
+
+  beforeEach(async () => {
+    _resetGlobalState();
+    ingest = await startMockIngest();
+  });
+
+  afterEach(async () => {
+    await ingest.close();
+    if (mcp) {
+      mcp.closeAllConnections();
+      await new Promise<void>((resolve) => mcp?.close(() => resolve()));
+    }
+    mcp = undefined;
+    _resetGlobalState();
+  });
+
+  /** v2's guard (`_assertPushApiInServedEra`), which steers to `inputRequired()`. */
+  const NOT_ON_2026 =
+    /^Server-to-client requests are not available on protocol revision 2026-07-28: '(elicitation\/create|sampling\/createMessage|roots\/list|ping)' cannot be sent while serving a request on that revision\. Return inputRequired\(/;
+  const TOOLS = ["confirm", "summarize", "roots", "ping"] as const;
+  const firstText = (result: unknown) =>
+    (result as { content?: Array<{ text?: string }> } | undefined)?.content?.[0]?.text;
+
+  /** One tool per push-style API; each returns what the client answered. */
+  const buildServer = () => {
+    const server = new McpServer({ name: "push-v2", version: "1.0" });
+    server.registerTool("confirm", { inputSchema: z.object({}) }, async (_args, ctx) => {
+      const answer = await ctx.mcpReq.elicitInput({
+        message: "Deploy to prod?",
+        requestedSchema: { type: "object", properties: { confirm: { type: "boolean" } } },
+      });
+      return ok(JSON.stringify(answer));
+    });
+    server.registerTool("summarize", { inputSchema: z.object({}) }, async (_args, ctx) => {
+      const answer = await ctx.mcpReq.requestSampling({
+        messages: [{ role: "user", content: { type: "text", text: "Summarize" } }],
+        maxTokens: 10,
+      });
+      return ok(JSON.stringify(answer));
+    });
+    server.registerTool("roots", { inputSchema: z.object({}) }, async () =>
+      ok(JSON.stringify(await server.server.listRoots())),
+    );
+    server.registerTool("ping", { inputSchema: z.object({}) }, async () =>
+      ok(JSON.stringify(await server.server.ping())),
+    );
+    return server;
+  };
+
+  /** A client that declares and answers elicitation, sampling and roots. */
+  function answeringClient(negotiate: boolean) {
+    const client = new Client(
+      { name: "push-client", version: "1.0" },
+      {
+        capabilities: { elicitation: { form: {} }, sampling: {}, roots: {} },
+        ...(negotiate ? { versionNegotiation: { mode: "auto" as const } } : {}),
+      },
+    );
+    client.setRequestHandler("elicitation/create", async () => ({
+      action: "accept" as const,
+      content: { confirm: true },
+    }));
+    client.setRequestHandler("sampling/createMessage", async () => ({
+      role: "assistant" as const,
+      content: { type: "text" as const, text: "a summary" },
+      model: "test-model",
+    }));
+    client.setRequestHandler("roots/list", async () => ({
+      roots: [{ uri: "file:///work", name: "work" }],
+    }));
+    return client;
+  }
+
+  type Entry = "createMcpHandler" | "serveStdio" | "connect";
+
+  /** Calls each tool once through `entry`: the era, the results, the tool_call events. */
+  async function callAll(entry: Entry, negotiate: boolean, tools: readonly string[] = TOOLS) {
+    const yavio = createYavio({
+      apiKey: `yav_push_${entry}`,
+      endpoint: ingest.endpoint,
+      serverOnly: true,
+    });
+    const client = answeringClient(negotiate);
+    let closeServer = async () => {};
+    if (entry === "createMcpHandler") {
+      const nodeHandler = toNodeHandler(createMcpHandler(() => yavio.wrap(buildServer())));
+      const httpServer = createServer((req, res) => {
+        void nodeHandler(req, res);
+      });
+      mcp = httpServer;
+      await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+      const url = new URL(`http://127.0.0.1:${(httpServer.address() as AddressInfo).port}/mcp`);
+      await client.connect(new StreamableHTTPClientTransport(url));
+    } else {
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      if (entry === "serveStdio") {
+        // The stdio entry with its era decision, over a caller-supplied transport.
+        const handle = serveStdio(() => yavio.wrap(buildServer()), { transport: serverTransport });
+        closeServer = () => handle.close();
+      } else {
+        await yavio.wrap(buildServer()).connect(serverTransport);
+      }
+      await client.connect(clientTransport);
+    }
+    const era = client.getNegotiatedProtocolVersion();
+    const results = [];
+    for (const name of tools) results.push(await client.callTool({ name, arguments: {} }));
+    await client.close();
+    await closeServer();
+    await yavio.shutdown();
+    return { era, results, calls: ingest.ofType("tool_call") as unknown as ToolCallEvent[] };
+  }
+
+  it.each(["createMcpHandler", "serveStdio"] as const)(
+    "on 2026-07-28 (%s) elicitInput(), requestSampling(), listRoots() and ping() throw: the client gets isError, each call is one error / unknown event",
+    async (entry) => {
+      const { era, results, calls } = await callAll(entry, true);
+      expect(era).toBe("2026-07-28");
+      expect(results).toHaveLength(4);
+      for (const result of results) {
+        expect(result.isError).toBe(true);
+        expect(firstText(result)).toMatch(NOT_ON_2026);
+      }
+      expect(calls.map((e) => e.event_name)).toEqual([...TOOLS]);
+      for (const call of calls) {
+        expect(call.status).toBe("error");
+        expect(call.error_category).toBe("unknown");
+        expect(call.error_message).toMatch(NOT_ON_2026);
+        // A handler that threw, not a call that asked for input.
+        expect(call.metadata ?? {}).not.toHaveProperty("input_rounds");
+        expect(call.metadata ?? {}).not.toHaveProperty("input_retry");
+      }
+    },
+  );
+
+  it("on the 2025 era over InMemoryTransport the same handlers reach the client: one success event per call, with the answer", async () => {
+    // connect() stays on 2025-11-25 even for a client that asks for 2026-07-28.
+    const { era, results, calls } = await callAll("connect", true);
+    expect(era).toBe("2025-11-25");
+    expect(results.map((r) => r.isError)).toEqual([undefined, undefined, undefined, undefined]);
+    expect(JSON.parse(firstText(results[0]) ?? "")).toEqual({
+      action: "accept",
+      content: { confirm: true },
+    });
+    expect(JSON.parse(firstText(results[1]) ?? "")).toMatchObject({
+      content: { text: "a summary" },
+    });
+    expect(JSON.parse(firstText(results[2]) ?? "")).toEqual({
+      roots: [{ uri: "file:///work", name: "work" }],
+    });
+    expect(calls.map((e) => [e.event_name, e.status])).toEqual(
+      TOOLS.map((name) => [name, "success"]),
+    );
+    expect(firstText(calls[0]?.output_content)).toBe(firstText(results[0]));
+  });
+
+  it("a 2025-era client of a per-request host: elicitInput() fails at once, one error / unknown event", async () => {
+    // The instance serving tools/call never saw initialize, so v2 knows no
+    // elicitation capability. (requestSampling(), listRoots() and ping()
+    // have no channel back either: they wait for v2's request timeout.)
+    const { era, results, calls } = await callAll("createMcpHandler", false, ["confirm"]);
+    expect(era).toBe("2025-11-25");
+    expect(results[0]?.isError).toBe(true);
+    expect(firstText(results[0])).toMatch(/does not support/);
+    expect(calls.map((e) => [e.event_name, e.status, e.error_category])).toEqual([
+      ["confirm", "error", "unknown"],
+    ]);
   });
 });
