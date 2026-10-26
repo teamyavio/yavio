@@ -10,6 +10,7 @@ import {
   RESOURCE_ERROR_CODES,
   ROW_ERROR_CODES,
   SERVER_ERROR_CODES,
+  namedRow,
 } from "../../lib/batch-writer.js";
 import type { EnrichedEvent } from "../../lib/event-enricher.js";
 import { mapToolRegistryRow } from "../../lib/tool-registry.js";
@@ -117,19 +118,51 @@ describe("an event a column cannot store, buffered with valid events", () => {
     expect(names).toEqual([...map.values()]);
   });
 
-  it("names the first refused row in its message, also with parallel parsing over 10 MiB", async () => {
+  it("names the first refused row of an insert over 10 MiB without parallel parsing, as the writer sends it", async () => {
     const workspace = `ws-isolation-named-${randomUUID()}`;
-    const pad = "x".repeat(400);
+    const pad = "x".repeat(800);
     const rows = Array.from({ length: 30_000 }, (_, i) =>
-      row(workspace, i === 25_000 ? { tokens_in: -1, error_message: pad } : { error_message: pad }),
+      row(
+        workspace,
+        i === 20_000 || i === 29_000
+          ? { tokens_in: -1, error_message: pad }
+          : { error_message: pad },
+      ),
     );
     const error = await getClient()
-      .insert({ table: "events", values: rows, format: "JSONEachRow" })
+      .insert({
+        table: "events",
+        values: rows,
+        format: "JSONEachRow",
+        clickhouse_settings: { async_insert: 0, input_format_parallel_parsing: 0 },
+      })
       .then(() => null)
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ClickHouseError);
-    expect((error as ClickHouseError).message).toMatch(/\(at row 25001\)/);
+    expect(namedRow(error, rows.length)).toBe(20_001);
   }, 60_000);
+
+  it("reads the position from ClickHouse's own '(at row N)', not from a quoted value holding one", async () => {
+    const workspace = `ws-isolation-quoted-${randomUUID()}`;
+    // 1e21 fails as "1e+21", and ClickHouse quotes the input after it,
+    // the error_message of the same row included.
+    const rows = Array.from({ length: 60 }, (_, i) =>
+      i === 49
+        ? row(workspace, { tokens_in: 1e21, error_message: "x (at row 1) y (at row 2)" })
+        : row(workspace),
+    );
+    const error = await getClient()
+      .insert({
+        table: "events",
+        values: rows,
+        format: "JSONEachRow",
+        clickhouse_settings: { async_insert: 0, input_format_parallel_parsing: 0 },
+      })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect((error as ClickHouseError).message).toContain("(at row 1)");
+    expect(namedRow(error, rows.length)).toBe(50);
+  });
 
   it("bounds each numeric field by the type its column has", async () => {
     // The column side of the table in @yavio/shared numeric-bounds.test.ts.

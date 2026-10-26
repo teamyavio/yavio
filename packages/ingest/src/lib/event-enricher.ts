@@ -18,6 +18,72 @@ export interface EnrichedEvent extends Record<string, unknown> {
 }
 
 /**
+ * Every column of `events` ingest writes, with its type as ClickHouse
+ * reports it (system.columns): the fields of every event type of the schema
+ * (@yavio/shared/events) except tool_discovery's own, which go to
+ * tool_registry (tool-registry.ts), plus the tenant columns. Checked at
+ * startup (schema-guard.ts): a missing column or another type stops ingest,
+ * because ClickHouse would silently skip a field it has no column for
+ * (input_format_skip_unknown_fields) or refuse every row. Kept in step with
+ * the schema by event-enricher.test.ts and with the migrations by
+ * insert-isolation.test.ts.
+ */
+export const EVENTS_COLUMNS: Readonly<Record<string, string>> = {
+  event_id: "String",
+  workspace_id: "String",
+  project_id: "String",
+  trace_id: "String",
+  session_id: "String",
+  event_type: "LowCardinality(String)",
+  event_name: "Nullable(String)",
+  timestamp: "DateTime64(3, 'UTC')",
+  platform: "LowCardinality(Nullable(String))",
+  source: "LowCardinality(String)",
+  user_id: "Nullable(String)",
+  user_traits: "String",
+  latency_ms: "Nullable(Float64)",
+  status: "LowCardinality(Nullable(String))",
+  error_category: "LowCardinality(Nullable(String))",
+  error_message: "Nullable(String)",
+  is_retry: "UInt8",
+  input_keys: "String",
+  input_types: "String",
+  intent_signals: "String",
+  tokens_in: "Nullable(UInt32)",
+  tokens_out: "Nullable(UInt32)",
+  conversion_value: "Nullable(Float64)",
+  conversion_currency: "LowCardinality(Nullable(String))",
+  viewport_width: "Nullable(UInt16)",
+  viewport_height: "Nullable(UInt16)",
+  country_code: "LowCardinality(Nullable(String))",
+  protocol_version: "Nullable(String)",
+  client_name: "Nullable(String)",
+  client_version: "Nullable(String)",
+  connection_duration_ms: "Nullable(Float64)",
+  scroll_depth_pct: "Nullable(Float64)",
+  click_count: "Nullable(UInt32)",
+  visible_duration_ms: "Nullable(Float64)",
+  field_name: "Nullable(String)",
+  nav_from: "Nullable(String)",
+  nav_to: "Nullable(String)",
+  device_touch: "Nullable(UInt8)",
+  device_pixel_ratio: "Nullable(Float32)",
+  connection_type: "LowCardinality(Nullable(String))",
+  load_time_ms: "Nullable(Float64)",
+  step_sequence: "Nullable(UInt32)",
+  metadata: "String",
+  sdk_version: "Nullable(String)",
+  input_values: "String",
+  output_content: "String",
+  locale: "LowCardinality(Nullable(String))",
+  end_user_agent: "Nullable(String)",
+  subject_id: "Nullable(String)",
+  intent_context: "LowCardinality(Nullable(String))",
+  region: "LowCardinality(Nullable(String))",
+  session_source: "LowCardinality(Nullable(String))",
+};
+
+/**
  * ClickHouse String columns require pre-serialized JSON — passing JS objects
  * via JSONEachRow silently drops the row. Stringify any object-valued fields
  * that map to String columns in the events table.

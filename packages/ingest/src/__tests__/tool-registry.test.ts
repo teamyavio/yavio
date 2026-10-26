@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EnrichedEvent } from "../lib/event-enricher.js";
-import { mapToolRegistryRow } from "../lib/tool-registry.js";
+import { TOOL_REGISTRY_COLUMNS, mapToolRegistryRow } from "../lib/tool-registry.js";
 
 function discovery(extra: Record<string, unknown> = {}): EnrichedEvent {
   return {
@@ -40,5 +40,11 @@ describe("mapToolRegistryRow", () => {
     );
     expect(mapToolRegistryRow(discovery({ tool_name: undefined })).tool_name).toBe("");
     expect(mapToolRegistryRow(discovery()).description).toBeNull();
+  });
+
+  it("writes exactly the columns of TOOL_REGISTRY_COLUMNS", () => {
+    expect(Object.keys(mapToolRegistryRow(discovery())).sort()).toEqual(
+      Object.keys(TOOL_REGISTRY_COLUMNS).sort(),
+    );
   });
 });

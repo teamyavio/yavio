@@ -1,8 +1,22 @@
 import { randomUUID } from "node:crypto";
-import type { BaseEvent } from "@yavio/shared/events";
+import { BaseEvent, IngestEvent } from "@yavio/shared/events";
 import { describe, expect, it } from "vitest";
-import { enrichEvents } from "../lib/event-enricher.js";
+import { EVENTS_COLUMNS, enrichEvents } from "../lib/event-enricher.js";
 import type { AuthContext } from "../types.js";
+
+describe("EVENTS_COLUMNS", () => {
+  it("lists every field an event can carry into events, and no other", () => {
+    // tool_discovery's own fields go to tool_registry (tool-registry.ts).
+    const fields = new Set<string>(["workspace_id", "project_id"]);
+    for (const option of IngestEvent.options) {
+      const discovery = option.shape.event_type.value === "tool_discovery";
+      for (const field of Object.keys(option.shape)) {
+        if (!discovery || field in BaseEvent.shape) fields.add(field);
+      }
+    }
+    expect(Object.keys(EVENTS_COLUMNS).sort()).toEqual([...fields].sort());
+  });
+});
 
 function makeEvent(overrides: Record<string, unknown> = {}): BaseEvent {
   return {

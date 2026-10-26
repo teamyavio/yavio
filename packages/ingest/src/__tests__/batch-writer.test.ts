@@ -68,9 +68,11 @@ describe("BatchWriter", () => {
       format: "JSONEachRow",
       // async_insert is on by default from ClickHouse 26.3; this writer batches
       // itself and must stay on the regular insert path (#95, #90). The token
-      // lets ClickHouse drop a retried batch it already stored (#90).
+      // lets ClickHouse drop a retried batch it already stored (#90). Without
+      // parallel parsing the row ClickHouse names is the first refused one.
       clickhouse_settings: {
         async_insert: 0,
+        input_format_parallel_parsing: 0,
         insert_deduplication_token: expect.stringMatching(/^[0-9a-f]{64}$/),
       },
     });
@@ -303,8 +305,12 @@ interface InsertArgs {
 }
 
 interface FakeOptions {
-  /** ClickHouse names the first failing row ("(at row N)"), as 26.8 does. Default true. */
-  namesRow?: boolean;
+  /**
+   * ClickHouse names the first failing row ("(at row N)"), as 26.8 does
+   * without parallel parsing. "last": it names the last one, as it can with
+   * parallel parsing. Default true (the first).
+   */
+  namesRow?: boolean | "last";
   /** Whether ClickHouse answers a ping. Default: it does. */
   answers?: () => boolean;
   /** An error for the whole insert, before any row is read (an outage, a resource limit). */
@@ -313,13 +319,24 @@ interface FakeOptions {
   idOf?: (value: Record<string, unknown>) => string;
 }
 
-function rowError(failure: Exclude<Failure, null>, at: number | null): ClickHouseError {
-  const where = at === null ? "" : `: (at row ${at})`;
+/**
+ * ClickHouse's message for a refused row, as on 26.8: a refused number
+ * ("…before: '<the input after the error>'") ends with its own "(at row
+ * N)" and a new line. `quoted`: the input it quotes, which a row's own text
+ * can make contain "(at row 1)".
+ */
+function rowError(
+  failure: Exclude<Failure, null>,
+  at: number | null,
+  quoted = '1e+21,"source":"server"}',
+): ClickHouseError {
+  const where =
+    at === null ? "" : `: (at row ${at})\n: While executing JSONEachRowRowInputFormat. `;
   return failure === "refused"
     ? new ClickHouseError({
-        message: `Unsigned type must not contain '-' symbol: (while reading the value of key tokens_in)${where}`,
-        code: "72",
-        type: "CANNOT_PARSE_NUMBER",
+        message: `Cannot parse input: expected ',' before: '${quoted}'${where}`,
+        code: "27",
+        type: "CANNOT_PARSE_INPUT_ASSERTION_FAILED",
       })
     : new ClickHouseError({
         message: `Unexpected condition${where}`,
@@ -348,9 +365,19 @@ function fakeClickHouse(fails: (id: string) => Failure, options: FakeOptions = {
     calls.push({ ids, token: params.clickhouse_settings.insert_deduplication_token });
     const whole = options.insertError?.(params.values);
     if (whole) throw whole;
-    for (let i = 0; i < ids.length; i++) {
-      const failure = fails(ids[i]);
-      if (failure) throw rowError(failure, namesRow ? i + 1 : null);
+    const failing = ids.flatMap((id, i) => (fails(id) ? [i] : []));
+    if (failing.length > 0) {
+      const first = failing[0];
+      const named = namesRow === "last" ? (failing.at(-1) ?? first) : first;
+      // A row whose text holds "(at row 1)", quoted after the refused value.
+      const quoted = ids[first].includes("spoof")
+        ? '1e+21,"error_message":"x (at row 1) y"}\\n{"event_id":"…'
+        : undefined;
+      throw rowError(
+        fails(ids[first]) as Exclude<Failure, null>,
+        namesRow ? named + 1 : null,
+        quoted,
+      );
     }
     stored.push(...ids);
     for (const id of ids) storedSet.add(id);
@@ -439,7 +466,7 @@ describe("BatchWriter: rows ClickHouse refuses", () => {
         dropped: 1,
         event_ids: ["evt-637"],
         project_ids: ["proj-1"],
-        errors: ["CANNOT_PARSE_NUMBER"],
+        errors: ["CANNOT_PARSE_INPUT_ASSERTION_FAILED"],
       },
     ]);
   });
@@ -579,7 +606,7 @@ describe("BatchWriter: rows ClickHouse refuses", () => {
   });
 
   it("names only ClickHouse errors about the rows as such", () => {
-    expect(rowErrorName(rowError("refused", 1))).toBe("CANNOT_PARSE_NUMBER");
+    expect(rowErrorName(rowError("refused", 1))).toBe("CANNOT_PARSE_INPUT_ASSERTION_FAILED");
     expect(rowErrorName(rowError("unrecognised", null))).toBeNull();
     expect(
       rowErrorName(new ClickHouseError({ message: "x", code: "252", type: "TOO_MANY_PARTS" })),
@@ -588,18 +615,131 @@ describe("BatchWriter: rows ClickHouse refuses", () => {
     expect(rowErrorName("CANNOT_PARSE_NUMBER")).toBeNull();
   });
 
-  it("keeps the rows, counted, when the row mapper throws", async () => {
-    const ch = fakeClickHouse(() => null, { answers: () => false });
+  it("sets apart a row the row mapper cannot map, and writes the others", async () => {
+    const ch = fakeClickHouse(() => null);
+    const warn = vi.fn();
     const writer = new BatchWriter({
       clickhouse: ch.client,
-      mapRow: () => {
-        throw new TypeError("unexpected row");
+      logger: { warn },
+      mapRow: (event) => {
+        if (event.event_id === "evt-odd") throw new TypeError("unexpected row");
+        return event;
       },
     });
-    writer.enqueue([ev("evt-1")]);
+    writer.enqueue([ev("evt-1"), ev("evt-odd"), ev("evt-2")]);
     await flushThrough(writer);
-    expect(ch.insert).not.toHaveBeenCalled();
-    expect(writer.bufferedCount).toBe(1);
+    expect(ch.stored).toEqual(["evt-1", "evt-2"]);
+    expect(writer.bufferedCount).toBe(0);
+    expect(writer.keptCount).toBe(1);
+    expect(warn.mock.calls[0][1]).toMatchObject({ event_ids: ["evt-odd"], errors: ["TypeError"] });
+  });
+
+  it("takes the last row named in the message: a row's own text quoted before it cannot choose it", async () => {
+    // spoof-bad-49's value is quoted in the message with "(at row 1)" in it,
+    // before ClickHouse's own "(at row 50)".
+    const ch = fakeClickHouse(isBad);
+    const warn = vi.fn();
+    const writer = new BatchWriter({ clickhouse: ch.client, flushSize: 100, logger: { warn } });
+    const rows = events("ok", 60);
+    rows[49] = ev("bad-spoof-49");
+    writer.enqueue(rows);
+    await writer.flush();
+
+    // The batch, the 49 rows before row 50, row 50 alone, the 10 after it.
+    expect(ch.calls.map((c) => c.ids.length)).toEqual([60, 49, 1, 10]);
+    expect(ch.stored).toHaveLength(59);
+    expect(droppedCount(warn)).toBe(1);
+  });
+
+  it("sorts out the rows before a named row within the budget when they fail anyway", async () => {
+    // ClickHouse names the last refused row (as it can with parallel
+    // parsing): the rows before it hold refused rows too — 200 of them.
+    const rows = events("ok", 1_000).map((r, i) => (i % 5 === 2 ? ev(`bad-${i}`) : r));
+    const ch = fakeClickHouse(isBad, { namesRow: "last" });
+    const warn = vi.fn();
+    const writer = new BatchWriter({ clickhouse: ch.client, flushSize: 2_000, logger: { warn } });
+    writer.enqueue(rows);
+    await writer.flush();
+
+    // Outside the budget: the batch, and the rows before a named row once per
+    // part that was not itself such rows — at most one per budgeted insert.
+    expect(ch.insert.mock.calls.length).toBeLessThanOrEqual(2 + 2 * ISOLATION_INSERTS_PER_FLUSH);
+    expect(writer.bufferedCount).toBe(0);
+
+    for (let f = 0; f < 40 && writer.keptCount > 0; f++) await writer.flush();
+    expect(writer.keptCount).toBe(0);
+    expect(ch.stored).toHaveLength(800);
+    expect(droppedCount(warn)).toBe(200);
+  });
+
+  it("re-splits by project a group of small projects put together, so their rows are stored", async () => {
+    // V4b: 15 large projects take their own groups; 5 small valid projects
+    // and 3 projects of refused rows share the last group.
+    const ch = fakeClickHouse(isBad);
+    const writer = new BatchWriter({ clickhouse: ch.client });
+    const result = await load(writer, ch, 120, (f) => {
+      const out: EnrichedEvent[][] = [];
+      for (let p = 0; p < 15; p++) out.push(events(`ok-big-${f}-${p}`, 100, `proj-big-${p}`));
+      for (let p = 0; p < 5; p++) {
+        out.push(events(`ok-small-${f}-${p}`, 3, `proj-small-${p}`));
+        out.push(events(`bad-${f}-${p}`, 12, `proj-refused-${p % 3}`));
+      }
+      return out;
+    });
+    expect(result.validMissing).toEqual([]);
+    expect(result.backpressure).toEqual([]);
+    expect(result.maxCounted).toBe(0);
+  });
+
+  it("drops over the cap from the project with the most rows set apart, not the oldest rows", async () => {
+    const ch = fakeClickHouse(
+      (id) => (id.startsWith("odd") ? "unrecognised" : id.startsWith("bad") ? "refused" : null),
+      { namesRow: false },
+    );
+    const warn = vi.fn();
+    const writer = new BatchWriter({
+      clickhouse: ch.client,
+      flushSize: 2_000,
+      maxKeptRows: 100,
+      logger: { warn },
+    });
+    // First 10 rows of one project set apart (unrecognised error, retried
+    // with a backoff), then 300 refused rows of another.
+    writer.enqueue(events("odd", 10, "proj-few"));
+    await flushThrough(writer);
+    expect(writer.keptCount).toBe(10);
+    writer.enqueue(events("bad-noisy", 300, "proj-noisy"));
+    await flushThrough(writer);
+
+    expect(writer.keptCount).toBe(100);
+    const eviction = warn.mock.calls.find(([m]) => String(m).includes("over the 100-event limit"));
+    expect(eviction?.[1]).toMatchObject({ dropped: 210, project_ids: ["proj-noisy"] });
+  });
+
+  it("logs a drop at error level when the flush stored nothing and the rows come from several projects", async () => {
+    const ch = fakeClickHouse(isBad);
+    const warn = vi.fn();
+    const error = vi.fn();
+    const writer = new BatchWriter({ clickhouse: ch.client, logger: { warn, error } });
+    writer.enqueue([...events("bad-a", 2, "proj-a"), ...events("bad-b", 2, "proj-b")]);
+    await writer.flush();
+    // The first of each project: refused in its group and alone.
+    expect(error).toHaveBeenCalledWith(
+      "Dropped 2 events ClickHouse refused twice",
+      expect.objectContaining({ dropped: 2, project_ids: ["proj-a", "proj-b"] }),
+    );
+    expect(warn).not.toHaveBeenCalled();
+    await writer.flush(); // the second of each, refused alone twice
+    expect(error).toHaveBeenCalledTimes(2);
+
+    // One project: a warning.
+    writer.enqueue(events("bad-c", 2, "proj-c"));
+    await writer.flush();
+    expect(warn).toHaveBeenCalledWith(
+      "Dropped 1 events ClickHouse refused twice",
+      expect.objectContaining({ project_ids: ["proj-c"] }),
+    );
+    expect(error).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -722,16 +862,57 @@ describe("BatchWriter: unrecognised errors and outages", () => {
     expect(writer.bufferedCount + writer.keptCount).toBe(0);
   });
 
-  it("splits a batch with a client-side timeout while ClickHouse answers", async () => {
-    const timeout = Object.assign(new Error("Timeout error."), { code: "ETIMEDOUT" });
+  it("keeps a batch with a client-side timeout counted, as the same batch, while ClickHouse answers; splits it after RESOURCE_ERROR_FLUSHES flushes", async () => {
+    // @clickhouse/client raises its request timeout as a plain Error, no code.
     const ch = fakeClickHouse(() => null, {
-      insertError: (values) => (values.length > 2 ? timeout : null),
+      insertError: (values) => (values.length > 2 ? new Error("Timeout error.") : null),
     });
     const writer = new BatchWriter({ clickhouse: ch.client, flushSize: 100 });
     writer.enqueue(events("evt", 4));
+    for (let f = 1; f < RESOURCE_ERROR_FLUSHES; f++) {
+      await flushThrough(writer);
+      expect(writer.bufferedCount).toBe(4);
+      expect(writer.keptCount).toBe(0);
+    }
+    expect(ch.calls.every((c) => c.ids.length === 4)).toBe(true);
+    expect(new Set(ch.calls.map((c) => c.token)).size).toBe(1);
+
     await flushThrough(writer);
     expect(ch.stored).toHaveLength(4);
-    expect(ch.calls.map((c) => c.ids.length)).toEqual([4, 4, 4, 2, 2]);
+    expect(ch.calls.slice(-2).map((c) => c.ids.length)).toEqual([2, 2]);
+  });
+
+  it("stores a batch once when its insert reached ClickHouse but timed out on the way back", async () => {
+    // A ClickHouse that stores each block once per token (the deduplication
+    // window, migration 0014), and whose answers time out for two flushes.
+    let slowFlushes = 2;
+    const tokens = new Set<string>();
+    const copies = new Map<string, number>();
+    const insert = vi.fn(async (params: InsertArgs) => {
+      const token = params.clickhouse_settings.insert_deduplication_token;
+      if (!tokens.has(token)) {
+        tokens.add(token);
+        for (const v of params.values) {
+          const id = String(v.event_id);
+          copies.set(id, (copies.get(id) ?? 0) + 1);
+        }
+      }
+      if (slowFlushes > 0) throw new Error("Timeout error.");
+    });
+    const client = {
+      insert,
+      ping: async () => ({ success: true as const }),
+    } as unknown as ClickHouseClient;
+    const writer = new BatchWriter({ clickhouse: client, flushSize: 2_000 });
+    writer.enqueue(events("evt", 1_000));
+    for (; slowFlushes > 0; slowFlushes--) await flushThrough(writer);
+    await flushThrough(writer);
+
+    const storedMoreThanOnce = [...copies.values()].filter((n) => n > 1).length;
+    expect(storedMoreThanOnce).toBe(0);
+    expect(tokens.size).toBe(1);
+    expect(copies.size).toBe(1_000);
+    expect(writer.bufferedCount + writer.keptCount).toBe(0);
   });
 
   it("splits a failing batch of more than 16 projects into 16 groups, the smallest together", async () => {

@@ -11,17 +11,22 @@ const MAX_RETRIES = 3;
 /**
  * Inserts a flush may spend sorting out rows whose insert failed because of
  * their content (`write`): about two per row ClickHouse refuses, when it
- * names the row, as it does on 26.8 ("at row N"). The inserts of rows known
- * to be good — the rows before the one ClickHouse named, a project's rows
- * split from the others — are not counted. What a flush cannot sort out
- * within the budget is kept apart for the next one.
+ * names the row ("(at row N)"). The rows before a named row, and the
+ * project groups of a failing batch (within PROJECT_GROUP_INSERTS_PER_FLUSH),
+ * are inserted outside it. What a flush cannot sort out within the budget is
+ * set apart for the next one.
  */
 export const ISOLATION_INSERTS_PER_FLUSH = 64;
 
+/** Project-group inserts a flush may make outside the isolation budget. */
+export const PROJECT_GROUP_INSERTS_PER_FLUSH = 48;
+
 /**
  * Flushes in a row a batch may fail with a resource error (memory, a time
- * limit) while ClickHouse answers before it is treated as too large or
- * otherwise specific to its rows, and split.
+ * limit) or an error without a ClickHouse code (a client-side timeout, a
+ * reset connection) while ClickHouse answers a ping, before it is treated as
+ * specific to its rows and split. Until then it is retried as it is, with
+ * the same deduplication token: such an insert may have been stored.
  */
 export const RESOURCE_ERROR_FLUSHES = 5;
 
@@ -34,6 +39,17 @@ const MAX_UNRECOGNISED_BACKOFF_FLUSHES = 64;
 /** How many event ids, and project ids, a warning names. */
 const LOGGED_IDS = 5;
 const LOGGED_PROJECTS = 10;
+
+/**
+ * Settings of every insert. `async_insert: 0`: regular inserts only;
+ * async_insert is on by default from ClickHouse 26.3 (#95), this writer
+ * batches itself, and async inserts deduplicate under different rules
+ * (#90). `input_format_parallel_parsing: 0`: the row ClickHouse names in a
+ * parse error ("(at row N)") is then the first refused row; with parallel
+ * parsing it can be a later one. Not slower on 10,000-row inserts of 1 and
+ * 5 KB rows (median 474 vs 490 ms, 1,070 vs 1,086 ms on 26.8).
+ */
+const INSERT_SETTINGS = { async_insert: 0, input_format_parallel_parsing: 0 } as const;
 
 /**
  * ClickHouse errors about the inserted rows themselves: a value a column
@@ -89,6 +105,7 @@ export const SERVER_ERROR_CODES: ReadonlyMap<number, string> = new Map([
   [194, "REQUIRED_PASSWORD"],
   [201, "QUOTA_EXCEEDED"],
   [202, "TOO_MANY_SIMULTANEOUS_QUERIES"],
+  [203, "NO_FREE_CONNECTION"],
   [209, "SOCKET_TIMEOUT"],
   [210, "NETWORK_ERROR"],
   [218, "TABLE_IS_DROPPED"],
@@ -99,6 +116,8 @@ export const SERVER_ERROR_CODES: ReadonlyMap<number, string> = new Map([
   [279, "ALL_CONNECTION_TRIES_FAILED"],
   [394, "QUERY_WAS_CANCELLED"],
   [425, "SYSTEM_ERROR"],
+  [439, "CANNOT_SCHEDULE_TASK"],
+  [473, "DEADLOCK_AVOIDED"],
   [497, "ACCESS_DENIED"],
   [516, "AUTHENTICATION_FAILED"],
   [700, "USER_SESSION_LIMIT_EXCEEDED"],
@@ -135,16 +154,22 @@ export function rowErrorName(err: unknown): string | null {
 }
 
 /**
- * The 1-based position of the row ClickHouse names in its message ("(at row
- * 25001)"; the first refused row, also with parallel parsing on 26.8), or
- * null when there is none or it is outside the batch. Only the number is
- * read: the rest of the message can quote the row.
+ * The 1-based position of the row ClickHouse names in its message, or null
+ * when there is none or it is outside the batch. Only the number is read.
+ *
+ * The message can quote the input after the error position ("before:
+ * '…'"), so a row's own text may contain "(at row 1)". ClickHouse puts its
+ * own "(at row N)" after the quote and ends that line there (": (at row
+ * 50)\n: While executing …"); a quoted newline is escaped ("\n" as two
+ * characters). So the position is the last "(at row N)" that ends a line.
+ * With parallel parsing off (INSERT_SETTINGS) it is the first refused row.
  */
-function namedRow(err: unknown, rows: number): number | null {
+export function namedRow(err: unknown, rows: number): number | null {
   if (!(err instanceof ClickHouseError)) return null;
-  const match = /\(at row (\d+)\)/.exec(err.message);
-  if (!match) return null;
-  const at = Number(match[1]);
+  const matches = [...err.message.matchAll(/\(at row (\d+)\)(?=\n|$)/g)];
+  const last = matches.at(-1);
+  if (!last) return null;
+  const at = Number(last[1]);
   return at >= 1 && at <= rows ? at : null;
 }
 
@@ -187,12 +212,16 @@ function errorLabel(err: unknown): string {
  *
  * A part of a batch split to sort out its rows (`split`) is a batch of its
  * own: its token is hashed from its own rows, and rows kept for a later
- * flush are kept together, so their retry carries the same token. A refused
- * insert has stored nothing: ClickHouse squashes an insert into blocks of up
- * to 1,048,449 rows or 256 MiB, a batch below that is one block, and a block
- * is refused whole. A batch above 256 MiB can have its first blocks stored
- * before a later row is refused; its parts then carry new tokens, so those
- * rows are stored twice until a merge (or FINAL) collapses them.
+ * flush are kept together, so their retry carries the same token. A batch
+ * whose insert failed without a ClickHouse code (a client-side timeout) may
+ * have been stored; it is retried as it is, with its token, for
+ * RESOURCE_ERROR_FLUSHES flushes before it is split. A refused insert has
+ * stored nothing: ClickHouse squashes an insert into blocks of up to
+ * 1,048,449 rows or 256 MiB, a batch below that is one block, and a block is
+ * refused whole. A batch above 256 MiB can have its first blocks stored
+ * before a later row is refused, and a batch split after timeouts may have
+ * been stored; their parts carry new tokens, so those rows are stored twice
+ * until a merge (or FINAL) collapses them.
  */
 function batchToken(batch: ReadonlyArray<EnrichedEvent>): string {
   const hash = createHash("sha256");
@@ -204,6 +233,8 @@ function batchToken(batch: ReadonlyArray<EnrichedEvent>): string {
 
 export interface BatchWriterLogger {
   warn: (msg: string, ...args: unknown[]) => void;
+  /** For drops that may point at the table rather than the rows; falls back to `warn`. */
+  error?: (msg: string, ...args: unknown[]) => void;
 }
 
 export interface BatchWriterOptions {
@@ -225,13 +256,14 @@ interface Piece {
   rows: EnrichedEvent[];
   /**
    * Flushes in a row whose insert of these rows failed without ClickHouse
-   * naming the rows: with a server or resource error (`retry`), or with an
-   * unrecognised error while ClickHouse answers (`kept`, for the backoff).
+   * naming the rows: with a server or resource error, or without a code
+   * (`retry`), or with an unrecognised error while ClickHouse answers
+   * (`kept`, for the backoff).
    */
   failures: number;
   /** A single row: times ClickHouse refused it with a row error. */
   refusals: number;
-  /** Split by project already, or of one project. */
+  /** Of one project, or split by project already. */
   grouped: boolean;
   /** The flush from which a kept piece is tried again. */
   due: number;
@@ -246,6 +278,11 @@ interface How {
   budgeted: boolean;
   /** Where its rows go back to after a server error: `retry` (counted) or `kept`. */
   origin: "retry" | "kept";
+  /**
+   * Inserted outside the budget because it should succeed: the rows before
+   * a named row. When it fails anyway, it is split within the budget.
+   */
+  expected?: boolean;
 }
 
 /** What one flush did. */
@@ -253,6 +290,8 @@ interface FlushRun {
   flush: number;
   /** Inserts left for sorting out rows. */
   budget: number;
+  /** Project-group inserts left outside the budget. */
+  groupInserts: number;
   /** Rows stored. */
   stored: number;
   /** An insert failed with a server error: nothing more is tried. */
@@ -270,6 +309,10 @@ function summary(rows: EnrichedEvent[]) {
     event_ids: rows.slice(0, LOGGED_IDS).map((r) => String(r.event_id)),
     project_ids: [...new Set(rows.map((r) => r.project_id))].slice(0, LOGGED_PROJECTS),
   };
+}
+
+function oneProject(rows: EnrichedEvent[]): boolean {
+  return rows.every((r) => r.project_id === rows[0].project_id);
 }
 
 /** Rows by project, in order of first appearance; beyond MAX_PROJECT_GROUPS the smallest go together. */
@@ -308,20 +351,24 @@ function byProject(rows: EnrichedEvent[]): EnrichedEvent[][] {
  *   kept apart and dropped when it is refused a second time, with one
  *   warning per flush (count, event ids, project ids, error names; never a
  *   value).
- * - A server error (`SERVER_ERROR_CODES`, a resource error for up to
- *   RESOURCE_ERROR_FLUSHES flushes), or any failure while ClickHouse does
- *   not answer a ping: the batch is kept in `retry` and the flush ends;
- *   everything not tried yet stays where it is, and the buffer fills until
- *   `maxBufferSize`, where ingest answers 503 (backpressure). Nothing is
- *   split or dropped.
- * - Any other failure while ClickHouse answers a ping: it is treated as
- *   specific to the batch and split like a row error; a single row that
- *   keeps failing is kept apart (not dropped), retried with a backoff of up
- *   to MAX_UNRECOGNISED_BACKOFF_FLUSHES flushes, and logged with its error.
+ * - A server error (`SERVER_ERROR_CODES`), any failure while ClickHouse
+ *   does not answer a ping, and — for up to RESOURCE_ERROR_FLUSHES flushes
+ *   in a row — a resource error or an error without a ClickHouse code (a
+ *   client-side timeout): the batch is kept in `retry`, with its token, and
+ *   the flush ends; everything not tried yet stays where it is, and the
+ *   buffer fills until `maxBufferSize`, where ingest answers 503
+ *   (backpressure). Nothing is split or dropped.
+ * - An unlisted ClickHouse code while ClickHouse answers a ping, a resource
+ *   or code-less error after RESOURCE_ERROR_FLUSHES flushes, or a row the
+ *   row mapper cannot map: it is treated as specific to the batch and split
+ *   like a row error; a single row that keeps failing is kept apart (not
+ *   dropped for it), retried with a backoff of up to
+ *   MAX_UNRECOGNISED_BACKOFF_FLUSHES flushes, and logged with its error.
  *
  * Rows kept apart never count towards backpressure, so they cannot make
  * ingest refuse other events. They are capped at `maxKeptRows`; beyond it
- * the oldest are dropped, with a warning.
+ * rows of the project with the most kept rows are dropped first, oldest
+ * first, with a warning.
  *
  * When every insert succeeds, a flush is one insert of the next batch, as
  * before: nothing is serialised or hashed twice.
@@ -412,6 +459,7 @@ export class BatchWriter {
     const run: FlushRun = {
       flush: this.flushes,
       budget: ISOLATION_INSERTS_PER_FLUSH,
+      groupInserts: PROJECT_GROUP_INSERTS_PER_FLUSH,
       stored: 0,
       halted: false,
       dropped: [],
@@ -475,7 +523,7 @@ export class BatchWriter {
       return;
     }
 
-    const kind = await this.classify(failed.error, piece, run);
+    const kind = failed.mapping ? "batch" : await this.classify(failed.error, piece, run);
     if (kind === "server") {
       run.halted = true;
       this.putBack({ ...piece, failures: piece.failures + 1 }, how.origin);
@@ -485,13 +533,15 @@ export class BatchWriter {
       this.settleRow(piece, kind, errorLabel(failed.error), run);
       return;
     }
-    await this.split(piece, failed.error, kind, run, how.origin);
+    await this.split(piece, failed.error, kind, run, how);
   }
 
   /**
    * "row": ClickHouse refused the rows (ROW_ERROR_CODES). "server": the
-   * server, the connection or the table failed — or ClickHouse does not
-   * answer. "batch": any other failure while ClickHouse answers.
+   * server, the connection or the table failed, ClickHouse does not answer,
+   * or — for RESOURCE_ERROR_FLUSHES flushes — a resource error or an error
+   * without a ClickHouse code. "batch": an unlisted ClickHouse code while
+   * ClickHouse answers, or a resource or code-less error after that.
    */
   private async classify(
     err: unknown,
@@ -502,7 +552,10 @@ export class BatchWriter {
     const code = clickhouseCode(err);
     if (code !== null && SERVER_ERROR_CODES.has(code)) return "server";
     if (!(await this.answers(run))) return "server";
-    if (code !== null && RESOURCE_ERROR_CODES.has(code)) {
+    // No code (a client-side timeout: @clickhouse/client raises a plain
+    // Error) or a resource error: the server may be slow, and the insert may
+    // even have been stored. Retried as it is, with its token, first.
+    if (code === null || RESOURCE_ERROR_CODES.has(code)) {
       return piece.failures + 1 < RESOURCE_ERROR_FLUSHES ? "server" : "batch";
     }
     return "batch";
@@ -521,42 +574,57 @@ export class BatchWriter {
   }
 
   /**
-   * Split a failed batch: by project (once), then at the row ClickHouse
-   * names, else in halves. The rows before a named row parsed and are
-   * inserted at once, outside the budget; the named row and the rest are
-   * budgeted.
+   * Split a failed batch: by project (when it holds more than one), then at
+   * the row ClickHouse names, else in halves. The project groups (within
+   * PROJECT_GROUP_INSERTS_PER_FLUSH) and the rows before a named row are
+   * inserted outside the budget — the rows before it, because they parsed;
+   * when they fail anyway, they are split within the budget. The named row
+   * and the rest are budgeted.
    */
   private async split(
     piece: Piece,
     err: unknown,
     kind: "row" | "batch",
     run: FlushRun,
-    origin: How["origin"],
+    how: How,
   ): Promise<void> {
     const part = (rows: EnrichedEvent[], refusals = 0): Piece => ({
       rows,
       failures: 0,
       refusals,
-      grouped: true,
+      grouped: oneProject(rows),
       due: 0,
       since: piece.since,
     });
-    const free: How = { attempts: 1, budgeted: false, origin };
+    const origin = how.origin;
     const budgeted: How = { attempts: 1, budgeted: true, origin };
 
-    if (!piece.grouped) {
-      const groups = byProject(piece.rows);
-      if (groups.length > 1) {
-        for (const group of groups) await this.write(part(group), run, free);
-        return;
+    if (!piece.grouped && !oneProject(piece.rows)) {
+      for (const group of byProject(piece.rows)) {
+        const free = run.groupInserts > 0;
+        if (free) run.groupInserts--;
+        await this.write(
+          part(group),
+          run,
+          free ? { attempts: 1, budgeted: false, origin } : budgeted,
+        );
       }
+      return;
     }
 
     const at = namedRow(err, piece.rows.length);
     if (at !== null) {
       const before = piece.rows.slice(0, at - 1);
       const after = piece.rows.slice(at);
-      if (before.length > 0) await this.write(part(before), run, free);
+      if (before.length > 0) {
+        // Outside the budget, once: a part that was itself expected to
+        // succeed and failed is sorted out within the budget.
+        await this.write(
+          part(before),
+          run,
+          how.expected ? budgeted : { attempts: 1, budgeted: false, origin, expected: true },
+        );
+      }
       // Refused once in the batch: refused alone, it is dropped.
       await this.write(part([piece.rows[at - 1]], kind === "row" ? 1 : 0), run, budgeted);
       if (after.length > 0) await this.write(part(after), run, budgeted);
@@ -593,11 +661,26 @@ export class BatchWriter {
     }
   }
 
+  /**
+   * A drop warning. At error level when the flush stored nothing and the
+   * dropped rows come from more than one project: ClickHouse refusing rows
+   * of several projects and storing none may point at the table, not at
+   * the rows.
+   */
+  private warnDrop(run: FlushRun, rows: EnrichedEvent[], message: string, details: object): void {
+    const projects = new Set(rows.map((r) => r.project_id)).size;
+    if (run.stored === 0 && projects > 1 && this.logger?.error) {
+      this.logger.error(message, details);
+    } else {
+      this.logger?.warn(message, details);
+    }
+  }
+
   /** One warning per kind per flush; the cap on rows kept apart. */
   private settle(run: FlushRun): void {
     if (run.dropped.length > 0) {
       const rows = run.dropped.map((d) => d.row);
-      this.logger?.warn(`Dropped ${rows.length} events ClickHouse refused twice`, {
+      this.warnDrop(run, rows, `Dropped ${rows.length} events ClickHouse refused twice`, {
         dropped: rows.length,
         ...summary(rows),
         errors: [...new Set(run.dropped.map((d) => d.error))],
@@ -615,38 +698,79 @@ export class BatchWriter {
       );
     }
 
-    let over = this.keptCount - this.maxKeptRows;
-    if (over <= 0) return;
-    this.kept.sort((a, b) => a.since - b.since);
-    const evicted: EnrichedEvent[] = [];
-    while (over > 0) {
-      const oldest = this.kept[0];
-      if (oldest.rows.length <= over) {
-        this.kept.shift();
-        evicted.push(...oldest.rows);
-        over -= oldest.rows.length;
-      } else {
-        evicted.push(...oldest.rows.slice(0, over));
-        this.kept[0] = { ...oldest, rows: oldest.rows.slice(over) };
-        over = 0;
-      }
+    const evicted = this.evict();
+    if (evicted.length > 0) {
+      this.warnDrop(
+        run,
+        evicted,
+        `Dropped ${evicted.length} events kept apart after failed inserts: over the ${this.maxKeptRows}-event limit`,
+        { dropped: evicted.length, ...summary(evicted) },
+      );
     }
-    this.logger?.warn(
-      `Dropped ${evicted.length} events kept apart after failed inserts: over the ${this.maxKeptRows}-event limit`,
-      { dropped: evicted.length, ...summary(evicted) },
-    );
   }
 
-  /** Insert `rows` with up to `attempts` tries; the last error, or undefined once stored. */
+  /**
+   * Over `maxKeptRows`: drop rows of the project with the most kept rows,
+   * its oldest first, until within the cap — so one project's stream of
+   * refused rows does not push out another project's few.
+   */
+  private evict(): EnrichedEvent[] {
+    let over = this.keptCount - this.maxKeptRows;
+    if (over <= 0) return [];
+    this.kept.sort((a, b) => a.since - b.since);
+    const byProjectRows = new Map<string, EnrichedEvent[]>();
+    for (const piece of this.kept) {
+      for (const row of piece.rows) {
+        const list = byProjectRows.get(row.project_id);
+        if (list) list.push(row);
+        else byProjectRows.set(row.project_id, [row]);
+      }
+    }
+    const evicted = new Set<EnrichedEvent>();
+    const taken = new Map<string, number>();
+    while (over > 0) {
+      let top: string | null = null;
+      let topLeft = 0;
+      let second = 0;
+      for (const [project, list] of byProjectRows) {
+        const left = list.length - (taken.get(project) ?? 0);
+        if (left > topLeft) {
+          second = topLeft;
+          topLeft = left;
+          top = project;
+        } else if (left > second) {
+          second = left;
+        }
+      }
+      if (top === null) break;
+      const n = Math.min(over, topLeft - second + 1);
+      const from = taken.get(top) ?? 0;
+      for (const row of (byProjectRows.get(top) ?? []).slice(from, from + n)) evicted.add(row);
+      taken.set(top, from + n);
+      over -= n;
+    }
+    this.kept = this.kept
+      .map((piece) => {
+        const rows = piece.rows.filter((r) => !evicted.has(r));
+        return rows.length === piece.rows.length ? piece : { ...piece, rows };
+      })
+      .filter((piece) => piece.rows.length > 0);
+    return [...evicted];
+  }
+
+  /**
+   * Insert `rows` with up to `attempts` tries; the last error, or undefined
+   * once stored. `mapping`: the row mapper threw, before any insert.
+   */
   private async insert(
     rows: EnrichedEvent[],
     attempts: number,
-  ): Promise<{ error: unknown } | undefined> {
+  ): Promise<{ error: unknown; mapping?: true } | undefined> {
     let values: ReadonlyArray<Record<string, unknown>>;
     try {
       values = this.mapRow ? rows.map(this.mapRow) : rows;
     } catch (error) {
-      return { error }; // not a ClickHouse error: classified like a network failure
+      return { error, mapping: true };
     }
     const dedupToken = batchToken(rows);
     let lastError: unknown;
@@ -657,10 +781,7 @@ export class BatchWriter {
           table: this.table,
           values,
           format: "JSONEachRow",
-          // Regular inserts only. async_insert is on by default from ClickHouse
-          // 26.3 (#95); this writer already batches, so it gains nothing, and
-          // async inserts deduplicate under different rules (#90).
-          clickhouse_settings: { async_insert: 0, insert_deduplication_token: dedupToken },
+          clickhouse_settings: { ...INSERT_SETTINGS, insert_deduplication_token: dedupToken },
         });
         return undefined;
       } catch (err) {

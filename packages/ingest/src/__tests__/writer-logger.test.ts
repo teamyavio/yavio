@@ -18,10 +18,11 @@ describe("deferredWriterLogger", () => {
     logger.warn("Dropped 1 events", { dropped: 1, event_ids: ["e-1"], project_ids: ["p-1"] });
     logger.warn("Background flush failed", new Error("boom"));
     logger.warn("Shutdown timeout: 2 events dropped");
+    logger.error("Dropped 2 events ClickHouse refused twice", { dropped: 2 });
     await app.close();
 
     const logged = lines.map((line) => JSON.parse(line));
-    expect(logged).toHaveLength(3);
+    expect(logged).toHaveLength(4);
     expect(logged[0]).toMatchObject({
       level: 40,
       msg: "Dropped 1 events",
@@ -31,6 +32,11 @@ describe("deferredWriterLogger", () => {
     });
     expect(logged[1]).toMatchObject({ msg: "Background flush failed", err: { message: "boom" } });
     expect(logged[2]).toMatchObject({ level: 40, msg: "Shutdown timeout: 2 events dropped" });
+    expect(logged[3]).toMatchObject({
+      level: 50,
+      msg: "Dropped 2 events ClickHouse refused twice",
+      dropped: 2,
+    });
   });
 
   it("carries a batch writer's warning about a refused row into the log", async () => {
@@ -43,7 +49,7 @@ describe("deferredWriterLogger", () => {
         const at = values.findIndex((v) => v.event_id === "evt-bad");
         if (at >= 0) {
           throw new ClickHouseError({
-            message: `Unsigned type must not contain '-' symbol: (at row ${at + 1})`,
+            message: `Unsigned type must not contain '-' symbol: (at row ${at + 1})\n: While executing JSONEachRowRowInputFormat. `,
             code: "72",
             type: "CANNOT_PARSE_NUMBER",
           });

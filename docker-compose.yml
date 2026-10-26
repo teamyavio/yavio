@@ -109,9 +109,18 @@ services:
       context: .
       dockerfile: packages/ingest/Dockerfile
     restart: unless-stopped
+    # An init process as PID 1 passes SIGTERM on to Node, whose handler
+    # (src/server.ts) stops taking requests and writes the buffered events
+    # within 15 s; Node as PID 1 would ignore it, and Docker would kill it
+    # after the grace period with the buffer unwritten.
+    init: true
+    stop_grace_period: 20s
     environment:
       DATABASE_URL: postgres://yavio_api:${POSTGRES_API_PASSWORD:?POSTGRES_API_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default.}@postgres:5432/yavio
       CLICKHOUSE_URL: http://default:${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default. This user is unrestricted and can manage access.}@clickhouse:8123
+      # Set to 1 to start without checking the ClickHouse columns ingest
+      # writes (src/lib/schema-guard.ts) — for an emergency only.
+      INGEST_SKIP_SCHEMA_CHECK: ${INGEST_SKIP_SCHEMA_CHECK:-}
       # This service narrows the ClickHouse username; when set it uses that
       # user's own password instead of the default user's.
       CLICKHOUSE_INGEST_PASSWORD: ${CLICKHOUSE_INGEST_PASSWORD:-}

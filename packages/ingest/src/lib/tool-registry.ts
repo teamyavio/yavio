@@ -1,6 +1,20 @@
 import { type EnrichedEvent, toClickHouseDateTime } from "./event-enricher.js";
 
 /**
+ * Every column of `tool_registry` mapToolRegistryRow writes, with its type
+ * as ClickHouse reports it; checked at startup like EVENTS_COLUMNS
+ * (schema-guard.ts), and against the mapper by tool-registry.test.ts.
+ */
+export const TOOL_REGISTRY_COLUMNS: Readonly<Record<string, string>> = {
+  project_id: "String",
+  tool_name: "String",
+  description: "Nullable(String)",
+  input_schema: "String",
+  registered_at: "DateTime64(3, 'UTC')",
+  updated_at: "DateTime64(3, 'UTC')",
+};
+
+/**
  * A `tool_discovery` event as a `tool_registry` row (migration 0006).
  *
  * The two DateTime64(3) columns get milliseconds: `registered_at` is the

@@ -136,6 +136,14 @@ The project limit is a ceiling for all of a project's widgets. It protects the i
 | `APP_URL` | `http://localhost:3000` | Public-facing URL used in emails and links |
 | `ERASURE_WORKER` | `on` | `off` only for a **non-production copy that shares a production ClickHouse**: the dashboard then boots without `CLICKHOUSE_ERASER_PASSWORD`, deletions stay queued in Postgres and nothing is erased from ClickHouse. A dev dashboard seeded from a production Postgres dump carries the production workspace and project ids, so without this a deletion there would erase the production tenant's analytics. Never set it in production. Any other value stops the boot |
 
+## Ingest Settings
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `INGEST_SKIP_SCHEMA_CHECK` | unset | At startup ingest checks that every ClickHouse column it writes exists with the type it writes, and exits with an error naming the columns when one does not — the ClickHouse migrations were not applied, or not the ones this ingest expects. `1` skips the check, for an emergency only: ingest may then write events whose fields ClickHouse drops or refuses |
+
+On `docker compose stop` (SIGTERM) ingest stops taking requests and writes the events it holds, within 15 seconds; the compose file gives it 20 (`stop_grace_period`) and runs it under an init process (`init: true`) so that the signal reaches it.
+
 ## OAuth Providers (Optional)
 
 Enable social login by setting provider credentials. Omit to disable.
