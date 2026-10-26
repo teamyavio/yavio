@@ -1,6 +1,9 @@
 import { isIP } from "node:net";
 import { ErrorCode, YavioError } from "@yavio/shared/errors";
+import { MIN_WIDGET_BURST } from "./lib/body-limits.js";
 import type { RateLimiterConfig } from "./lib/rate-limiter.js";
+
+const WIDGET_FLOOR_REASON = "a batch of 1,000 events, and a JSON body without a Content-Length";
 
 export interface AppConfig {
   port: number;
@@ -17,6 +20,8 @@ export interface AppConfig {
   rollupClickhouseUrl: string | undefined;
   /** Rate limits set in the environment (RATE_LIMIT_*); unset ones keep their defaults. */
   rateLimits: RateLimitOverrides;
+  /** REQUEST_TIMEOUT_MS; undefined keeps the default. */
+  requestTimeoutMs: number | undefined;
 }
 
 type Limit = Partial<Pick<RateLimiterConfig, "burstCapacity" | "ratePerSecond">>;
@@ -28,22 +33,39 @@ export interface RateLimitOverrides {
   beacon?: Limit;
 }
 
-/** The RATE_LIMIT_<name>_BURST / _PER_SECOND pairs, and what they configure. */
-const RATE_LIMIT_VARS: Array<[keyof RateLimitOverrides, string]> = [
-  ["widgetToken", "RATE_LIMIT_WIDGET_TOKEN"],
-  ["widgetAddress", "RATE_LIMIT_WIDGET_ADDRESS"],
-  ["widgetProject", "RATE_LIMIT_WIDGET_PROJECT"],
-  ["beacon", "RATE_LIMIT_BEACON"],
+/**
+ * The RATE_LIMIT_<name>_BURST / _PER_SECOND pairs, what they configure, and
+ * the smallest burst each accepts: a widget bucket must hold one full
+ * request (MIN_WIDGET_BURST), a beacon bucket one beacon.
+ */
+const RATE_LIMIT_VARS: Array<[keyof RateLimitOverrides, string, number, string]> = [
+  ["widgetToken", "RATE_LIMIT_WIDGET_TOKEN", MIN_WIDGET_BURST, WIDGET_FLOOR_REASON],
+  ["widgetAddress", "RATE_LIMIT_WIDGET_ADDRESS", MIN_WIDGET_BURST, WIDGET_FLOOR_REASON],
+  ["widgetProject", "RATE_LIMIT_WIDGET_PROJECT", MIN_WIDGET_BURST, WIDGET_FLOOR_REASON],
+  ["beacon", "RATE_LIMIT_BEACON", 1, "one beacon"],
 ];
+
+function invalid(variable: string, message: string): YavioError {
+  return new YavioError(ErrorCode.INFRA.INVALID_ENV_VAR, `${variable} ${message}`, 500, {
+    variable,
+  });
+}
 
 function positiveNumber(variable: string, raw: string): number {
   const value = Number(raw);
   if (raw.trim() === "" || !Number.isFinite(value) || value <= 0) {
-    throw new YavioError(
-      ErrorCode.INFRA.INVALID_ENV_VAR,
-      `${variable} must be a positive number, got "${raw}"`,
-      500,
-      { variable },
+    throw invalid(variable, `must be a positive number, got "${raw}"`);
+  }
+  return value;
+}
+
+/** A whole number of at least `floor`; `reason` says what the floor holds. */
+function wholeNumber(variable: string, raw: string, floor: number, reason: string): number {
+  const value = Number(raw);
+  if (raw.trim() === "" || !Number.isInteger(value) || value < floor) {
+    throw invalid(
+      variable,
+      `must be a whole number of at least ${floor} (${reason}), got "${raw}"`,
     );
   }
   return value;
@@ -52,24 +74,35 @@ function positiveNumber(variable: string, raw: string): number {
 /**
  * Rate limits from RATE_LIMIT_<name>_BURST and RATE_LIMIT_<name>_PER_SECOND
  * (the bucket's capacity, and what it refills per second). Unset or empty
- * keeps the default (lib/rate-limiter.ts); anything but a positive number
+ * keeps the default (lib/rate-limiter.ts). A burst must be a whole number
+ * that holds one full request; a rate any positive number. Anything else
  * stops the start.
  */
 export function parseRateLimits(env: NodeJS.ProcessEnv): RateLimitOverrides {
   const overrides: RateLimitOverrides = {};
-  for (const [name, prefix] of RATE_LIMIT_VARS) {
+  for (const [name, prefix, floor, reason] of RATE_LIMIT_VARS) {
     const limit: Limit = {};
-    const burst = env[`${prefix}_BURST`];
-    const rate = env[`${prefix}_PER_SECOND`];
-    if (burst !== undefined && burst !== "") {
-      limit.burstCapacity = positiveNumber(`${prefix}_BURST`, burst);
+    const rawBurst = env[`${prefix}_BURST`];
+    const rawRate = env[`${prefix}_PER_SECOND`];
+    if (rawBurst !== undefined && rawBurst !== "") {
+      limit.burstCapacity = wholeNumber(`${prefix}_BURST`, rawBurst, floor, reason);
     }
-    if (rate !== undefined && rate !== "") {
-      limit.ratePerSecond = positiveNumber(`${prefix}_PER_SECOND`, rate);
+    if (rawRate !== undefined && rawRate !== "") {
+      limit.ratePerSecond = positiveNumber(`${prefix}_PER_SECOND`, rawRate);
     }
     if (Object.keys(limit).length > 0) overrides[name] = limit;
   }
   return overrides;
+}
+
+/**
+ * REQUEST_TIMEOUT_MS: how long a client has to send a whole request
+ * (index.ts). Unset or empty keeps DEFAULT_REQUEST_TIMEOUT_MS; anything but
+ * a whole number of at least 1,000 stops the start.
+ */
+export function parseRequestTimeout(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  return wholeNumber("REQUEST_TIMEOUT_MS", raw, 1_000, "one second");
 }
 
 /** The least-privileged ClickHouse user ingest can do its job as. */
@@ -201,6 +234,7 @@ export function loadConfig(): AppConfig {
   const trustProxy = parseTrustProxy(process.env.TRUST_PROXY);
   const rollupClickhouseUrl = rollupUrl(process.env.CLICKHOUSE_URL);
   const rateLimits = parseRateLimits(process.env);
+  const requestTimeoutMs = parseRequestTimeout(process.env.REQUEST_TIMEOUT_MS);
 
   return {
     port,
@@ -211,5 +245,6 @@ export function loadConfig(): AppConfig {
     trustProxy,
     rollupClickhouseUrl,
     rateLimits,
+    requestTimeoutMs,
   };
 }

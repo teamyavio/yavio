@@ -2,6 +2,7 @@ import { ErrorCode, YavioError } from "@yavio/shared/errors";
 import { MAX_BATCH_EVENTS } from "@yavio/shared/events";
 import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
+import { BEACON_BODY_LIMIT, JSON_BODY_LIMIT } from "../lib/body-limits.js";
 import { enrichEvents } from "../lib/event-enricher.js";
 import { normalizeEvents } from "../lib/event-normalizer.js";
 import { enforceFieldLimits, isBatchTooLarge } from "../lib/field-limits.js";
@@ -13,7 +14,13 @@ import {
   validateBatch,
 } from "../lib/schema-validator.js";
 import { authenticateBodyToken, authenticateHeader } from "./auth.js";
-import { type ChargeOptions, chargeOnArrival, settleCharge, settleUnhandled } from "./charge.js";
+import {
+  type ChargeOptions,
+  chargeOnArrival,
+  settleAborted,
+  settleCharge,
+  settleUnhandled,
+} from "./charge.js";
 
 export interface EventsPluginOptions {
   /**
@@ -67,21 +74,7 @@ function parseTextAsJson(
   }
 }
 
-/**
- * The largest text/plain body the events route reads: sendBeacon's own
- * quota. Only a beacon may carry its token in the body, and only as
- * text/plain, so this is also the most a request that has not yet
- * authenticated can make ingest read. The React SDK splits beacons at
- * 60,000 bytes.
- */
-export const BEACON_BODY_LIMIT = 64 * 1024;
-
-/**
- * The largest JSON body the events route reads: the 500 KB batch limit
- * (field-limits.ts, checked on the parsed batch) plus room for formatting.
- * Longer bodies get 413 (YAVIO-2111) without being read in full.
- */
-export const JSON_BODY_LIMIT = 600_000;
+export { BEACON_BODY_LIMIT, JSON_BODY_LIMIT };
 
 const eventsRoute: FastifyPluginAsync<EventsPluginOptions> = async (root, opts) => {
   // An encapsulated scope, so these parsers apply to this route only; every
@@ -125,6 +118,7 @@ function registerEventsRoute(app: FastifyInstance, opts: EventsPluginOptions): v
       onRequest: [authenticateHeader, chargeOnArrival(app, charge)],
       preHandler: [authenticateBodyToken],
       onResponse: [settleUnhandled(app, charge)],
+      onRequestAbort: [settleAborted(app, charge)],
       config: { rawBody: true },
     },
     async (request, reply) => {

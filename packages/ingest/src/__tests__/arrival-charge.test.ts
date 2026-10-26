@@ -338,6 +338,34 @@ describe(
       expect(responses.map((r) => r.statusCode)).toEqual(Array(50).fill(200));
     });
 
+    it("gives a beacon's arrival charge back only when it is accepted, so a token with an empty widget bucket reads 100 beacons, not more", async () => {
+      await build(
+        new RateLimiter(undefined, undefined, { burstCapacity: 1, ratePerSecond: 0.001 }),
+      );
+      const parse = vi.spyOn(JSON, "parse");
+      const send = (marker: string, n: number) =>
+        beacon(
+          JSON.stringify({
+            token: widgetToken("trace-empty"),
+            events: events("trace-empty", n),
+            sdk_version: marker,
+          }),
+          "203.0.113.63",
+        );
+
+      // The token's one unit goes to the first beacon, which is accepted.
+      expect((await send("marker-first-beacon", 1)).statusCode).toBe(200);
+      const statuses: number[] = [];
+      for (let i = 0; i < 130; i++) {
+        statuses.push((await send(`marker-refused-beacon-${i}`, 1)).statusCode);
+      }
+
+      expect(statuses.every((s) => s === 429)).toBe(true);
+      // Refused at the token's bucket after being read: 100 of them, the
+      // beacon bucket's burst; the rest are refused on arrival, unread.
+      expect(parsedWith(parse, "marker-refused-beacon-")).toBe(100);
+    });
+
     it("refuses header-less requests beyond its burst unread, and keeps the auth-failure bucket for failures", async () => {
       await build(new RateLimiter());
       const parse = vi.spyOn(JSON, "parse");

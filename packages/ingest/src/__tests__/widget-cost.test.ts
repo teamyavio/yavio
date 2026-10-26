@@ -85,6 +85,24 @@ describe("addressBucket", () => {
     expect(addressBucket("64:ff9b::203.0.113.5")).toBe("64:ff9b:0:0::/64");
     expect(addressBucket("::ffff:203.0.113.5")).toBe("203.0.113.5");
   });
+
+  it("maps an IPv4-mapped IPv6 address to its IPv4 address in any notation", () => {
+    for (const ip of [
+      "::ffff:198.51.100.7",
+      "::FFFF:198.51.100.7",
+      "::ffff:c633:6407",
+      "0:0:0:0:0:ffff:c633:6407",
+      "0000:0000:0000:0000:0000:ffff:c633:6407",
+      "0:0:0:0:0:ffff:198.51.100.7",
+      "::0:ffff:c633:6407",
+    ]) {
+      expect(addressBucket(ip)).toBe("198.51.100.7");
+    }
+    // Not mapped: their /64.
+    expect(addressBucket("::fffe:c633:6407")).toBe("0:0:0:0::/64");
+    expect(addressBucket("1::ffff:c633:6407")).toBe("1:0:0:0::/64");
+    expect(addressBucket("2001:DB8:0001:0002::0001")).toBe("2001:db8:1:2::/64");
+  });
 });
 
 describe("RateLimiter.consumeWidget", () => {
@@ -333,10 +351,13 @@ describe("POST /v1/events — widget cost", () => {
     expect(keyed.statusCode).toBe(200);
   });
 
-  it("passes a widget's normal traffic with the default limits", async () => {
+  it.each([
+    ["with TRUST_PROXY", true],
+    ["without TRUST_PROXY", false],
+  ])("passes a widget's normal traffic with the default limits, %s", async (_mode, trusted) => {
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
-      await build(new RateLimiter(), [PROXY]);
+      await build(new RateLimiter(), trusted ? [PROXY] : undefined);
       // One user's widget, as the React SDK sends: fetch batches of 20 events
       // (JSON, token in the header) and a teardown beacon of 200 events in
       // 60,000 bytes (text/plain;charset=UTF-8, token in the body).

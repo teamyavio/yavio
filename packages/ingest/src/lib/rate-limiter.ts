@@ -20,8 +20,8 @@
  *   - requests that carry no credential at all: 10 req/sec, burst 20;
  *   - requests that carry one and fail authentication: 10 req/sec, burst 20;
  *   - header-less events requests (widget beacons), with TRUST_PROXY: 50
- *     req/sec, burst 100, charged on arrival and refunded once they
- *     authenticate.
+ *     req/sec, burst 100, charged on arrival and refunded once they are
+ *     accepted (a status below 400).
  * Authenticated traffic is bounded by the per-key or widget buckets instead (#94).
  *
  * Each scope's limits are a constructor argument over these defaults; the

@@ -1,5 +1,5 @@
 import { ErrorCode, YavioError } from "@yavio/shared/errors";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { RateLimiter, WidgetLimit } from "../lib/rate-limiter.js";
 import type { AuthContext } from "../types.js";
 import { isTextPlain } from "./auth.js";
@@ -107,7 +107,46 @@ export function chargeOnArrival(app: FastifyInstance, opts: ChargeOptions) {
     const result = limiter.consumeWidget(keysFor(request, ctx, opts), units);
     if (!result.allowed) throw widgetLimit(request, ctx, result);
     request.reservedUnits = units;
+    // What the socket has read so far, to tell later how much body came in
+    // when no parser ran (an aborted or timed-out request, a body refused
+    // before parsing). No count without a real socket.
+    const bytesRead = request.raw.socket?.bytesRead;
+    request.bytesAtArrival = typeof bytesRead === "number" ? bytesRead : -1;
   };
+}
+
+/**
+ * Bytes the socket read since the arrival charge: the body received (it
+ * misses the part read together with the headers). Undefined without a
+ * socket count.
+ */
+function bytesSinceArrival(request: FastifyRequest): number | undefined {
+  const now = request.raw.socket?.bytesRead;
+  if (typeof now !== "number" || request.bytesAtArrival < 0) return undefined;
+  return Math.max(0, now - request.bytesAtArrival);
+}
+
+/** Settle a widget token's arrival charge to `units`, giving back what was charged above it. */
+function settleWidgetTo(
+  limiter: RateLimiter,
+  request: FastifyRequest,
+  ctx: AuthContext,
+  units: number,
+  opts: ChargeOptions,
+): void {
+  request.chargeSettled = true;
+  if (request.reservedUnits > units) {
+    limiter.refundWidget(keysFor(request, ctx, opts), request.reservedUnits - units);
+  }
+}
+
+/** A widget-token request charged on arrival that its handler did not settle. */
+function unsettledWidget(app: FastifyInstance, request: FastifyRequest) {
+  const limiter = app.rateLimiter;
+  const ctx = request.authContext;
+  if (!limiter || !ctx || ctx.source !== "jwt" || request.chargeSettled) return undefined;
+  if (request.reservedUnits === 0) return undefined;
+  return { limiter, ctx };
 }
 
 /**
@@ -148,20 +187,46 @@ export function settleCharge(
 
 /**
  * Route onResponse hook: a widget-token request charged on arrival whose
- * handler never ran is settled to the KiB its parser read (a body that
- * failed to parse, or nested too deep). When no parser ran (a body over a
- * limit, an unsupported type), how much was read is unknown and the arrival
- * charge stays. An API key keeps its one event, as before.
+ * handler never ran is settled to what it made ingest read:
+ * - a body its parser read (it failed to parse, or nested too deep): the KiB
+ *   read;
+ * - an unsupported type (415): one unit, nothing was read;
+ * - otherwise (a body over a limit): the KiB the socket received since
+ *   arrival, or, without a socket count, the arrival charge.
+ * An API key keeps its one event, as before.
  */
 export function settleUnhandled(app: FastifyInstance, opts: ChargeOptions) {
-  return async (request: FastifyRequest): Promise<void> => {
-    const limiter = app.rateLimiter;
-    const ctx = request.authContext;
-    if (!limiter || !ctx || request.chargeSettled || ctx.source !== "jwt") return;
-    if (request.bodyBytes === 0) return;
-    const units = widgetUnits(1, request.bodyBytes);
-    if (request.reservedUnits > units) {
-      limiter.refundWidget(keysFor(request, ctx, opts), request.reservedUnits - units);
+  return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const unsettled = unsettledWidget(app, request);
+    if (!unsettled) return;
+    let units: number;
+    if (request.bodyBytes > 0) {
+      units = widgetUnits(1, request.bodyBytes);
+    } else if (reply.statusCode === 415) {
+      units = 1;
+    } else {
+      const received = bytesSinceArrival(request);
+      if (received === undefined) return;
+      units = widgetUnits(1, received);
     }
+    settleWidgetTo(unsettled.limiter, request, unsettled.ctx, units, opts);
+  };
+}
+
+/**
+ * Route onRequestAbort hook: a widget-token request whose client went away,
+ * or whose body did not arrive within the request timeout (index.ts), gets
+ * no response hook. It is settled to the KiB received: the bytes the socket
+ * read since arrival, or its parser's count when that is more. Without
+ * either, the arrival charge stays.
+ */
+export function settleAborted(app: FastifyInstance, opts: ChargeOptions) {
+  return async (request: FastifyRequest): Promise<void> => {
+    const unsettled = unsettledWidget(app, request);
+    if (!unsettled) return;
+    const received = bytesSinceArrival(request);
+    if (received === undefined && request.bodyBytes === 0) return;
+    const units = widgetUnits(1, Math.max(received ?? 0, request.bodyBytes));
+    settleWidgetTo(unsettled.limiter, request, unsettled.ctx, units, opts);
   };
 }

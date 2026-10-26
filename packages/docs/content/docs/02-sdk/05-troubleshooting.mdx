@@ -31,7 +31,7 @@ The ingestion API enforces rate limits:
 - **Per project, all widgets:** 1,000 events/second (10,000 burst)
 - **Per IP:** 10 requests/second
 
-Self-hosted deployments can change the widget limits with the `RATE_LIMIT_*` variables (see the configuration page). If you're hitting limits, the SDK retries automatically with exponential backoff (up to 5 attempts). Sustained rate limiting may indicate an event loop or misconfiguration.
+Self-hosted deployments can change the widget limits with the `RATE_LIMIT_*` variables (see the configuration page). If you're hitting limits, the SDKs retry automatically with exponential backoff, honouring `Retry-After`: the server SDK makes up to 6 attempts (1 + 5 retries), the React widget up to 4 (1 + 3). Sustained rate limiting usually means a client sends events in a loop (for example, a tracking call that runs on every render or retry), or a misconfiguration.
 
 ### Events lost when a stdio server exits
 

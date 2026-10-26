@@ -198,6 +198,24 @@ describe("RateLimiter", () => {
       expect(limiter.consumeWidget(keys("t2"), 1).allowed).toBe(false);
     });
 
+    it("gives a refund back to the address bucket too", () => {
+      const limiter = new RateLimiter(undefined, undefined, undefined, {
+        burstCapacity: 10,
+        ratePerSecond: 0.001,
+      });
+      const withAddress = { token: "t4", address: "203.0.113.1", project: "p4" };
+      expect(limiter.consumeWidget(withAddress, 10).allowed).toBe(true);
+      expect(limiter.consumeWidget({ ...withAddress, token: "t5" }, 1)).toMatchObject({
+        limit: "address",
+      });
+      limiter.refundWidget(withAddress, 6);
+      // The address holds 6 again: another token from it gets 6, then nothing.
+      expect(limiter.consumeWidget({ ...withAddress, token: "t5" }, 6).allowed).toBe(true);
+      expect(limiter.consumeWidget({ ...withAddress, token: "t6" }, 1)).toMatchObject({
+        limit: "address",
+      });
+    });
+
     it("cleans up stale widget buckets", () => {
       const limiter = new RateLimiter({ cleanupIntervalMs: 1_000, staleAfterMs: 500 });
       limiter.consumeWidget({ token: "t3", address: "a", project: "p" }, 1);

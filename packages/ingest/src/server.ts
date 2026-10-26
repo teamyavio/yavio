@@ -70,6 +70,7 @@ async function main() {
     toolRegistryWriter,
     rateLimiter,
     trustProxy: config.trustProxy,
+    requestTimeoutMs: config.requestTimeoutMs,
   });
 
   // Anonymous statistics (#85): daily, under a Postgres advisory lock.

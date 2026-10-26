@@ -42,7 +42,9 @@ declare module "fastify" {
      * key, the declared body size for a widget token (plugins/events.ts).
      */
     reservedUnits: number;
-    /** The events handler settled the arrival charge to the request's real charge. */
+    /** The arrival charge was settled to the request's real charge (plugins/charge.ts). */
     chargeSettled: boolean;
+    /** The socket's bytesRead at the arrival charge; -1 without a socket count. */
+    bytesAtArrival: number;
   }
 }

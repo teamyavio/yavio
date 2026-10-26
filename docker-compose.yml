@@ -135,6 +135,8 @@ services:
       RATE_LIMIT_WIDGET_PROJECT_PER_SECOND: ${RATE_LIMIT_WIDGET_PROJECT_PER_SECOND:-}
       RATE_LIMIT_BEACON_BURST: ${RATE_LIMIT_BEACON_BURST:-}
       RATE_LIMIT_BEACON_PER_SECOND: ${RATE_LIMIT_BEACON_PER_SECOND:-}
+      # A client's time to send a whole request, in ms; empty keeps 30000.
+      REQUEST_TIMEOUT_MS: ${REQUEST_TIMEOUT_MS:-}
     ports:
       # BIND_ADDRESS=127.0.0.1 when a reverse proxy on this host is the only
       # way in; the default publishes on all interfaces (#94).

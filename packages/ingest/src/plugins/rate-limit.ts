@@ -3,6 +3,7 @@ import { isIPv4, isIPv6 } from "node:net";
 import { ErrorCode, YavioError } from "@yavio/shared/errors";
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
+import { WIDGET_UNIT_BYTES } from "../lib/body-limits.js";
 import type { WidgetBucketKeys } from "../lib/rate-limiter.js";
 import type { AuthContext } from "../types.js";
 
@@ -28,7 +29,7 @@ import type { AuthContext } from "../types.js";
  *   parse is authenticated by then and is not charged here.
  * - With TRUST_PROXY set, a header-less events request (a widget beacon,
  *   which is read before it can authenticate) is also charged to a third,
- *   the beacon bucket, on arrival, and refunded once it authenticates
+ *   the beacon bucket, on arrival, and refunded once it is accepted
  *   (RateLimitPluginOptions).
  *
  * `request.ip` is the real client only when TRUST_PROXY names the proxy in
@@ -58,15 +59,20 @@ export function widgetTokenBucket(ctx: AuthContext): string {
 /**
  * A client address's bucket key: an IPv4 address as it is, an IPv6 address
  * by its /64 (one subscriber's network, which can hold many addresses). An
- * IPv4-mapped IPv6 address counts as its IPv4 address.
+ * IPv4-mapped IPv6 address (::ffff:0:0/96, in any notation) counts as its
+ * IPv4 address.
  */
 export function addressBucket(ip: string): string {
   const address = ip.split("%")[0];
   if (isIPv4(address)) return address;
   if (!isIPv6(address)) return address;
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
-  if (mapped && isIPv4(mapped[1])) return mapped[1];
-  return `${expandIPv6(address).slice(0, 4).join(":")}::/64`;
+  const hextets = expandIPv6(address);
+  if (hextets.slice(0, 5).every((h) => h === "0") && hextets[5] === "ffff") {
+    const high = Number.parseInt(hextets[6], 16);
+    const low = Number.parseInt(hextets[7], 16);
+    return `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
+  }
+  return `${hextets.slice(0, 4).join(":")}::/64`;
 }
 
 /** The eight hextets of a valid IPv6 address, lowercase, without leading zeros. */
@@ -104,12 +110,11 @@ export function widgetBuckets(ctx: AuthContext, ip: string | undefined): WidgetB
 
 /**
  * A widget-token request costs one unit per event, or one per KiB of body
- * when that is more: what it makes ingest read and parse, not only what it
- * stores. A widget's batch (20 events, a few KB) and its beacon chunks (up
- * to 200 events in at most 60,000 bytes) are charged by their events.
+ * (WIDGET_UNIT_BYTES) when that is more: what it makes ingest read and
+ * parse, not only what it stores. A widget's batch (20 events, a few KB) and
+ * its beacon chunks (up to 200 events in at most 60,000 bytes) are charged
+ * by their events.
  */
-export const WIDGET_UNIT_BYTES = 1024;
-
 export function widgetUnits(events: number, bodyBytes: number): number {
   return Math.max(events, Math.ceil(bodyBytes / WIDGET_UNIT_BYTES));
 }
@@ -137,14 +142,17 @@ export interface RateLimitPluginOptions {
   /**
    * `request.ip` is the client's address: TRUST_PROXY is set (index.ts).
    * Then header-less events requests are charged to the beacon bucket on
-   * arrival and refunded once they authenticate (by a body token): such a
-   * request is read before it can authenticate, so the up-front charge
-   * bounds how many of them per address are read at once. And widget
+   * arrival and refunded once they are accepted (a status below 400): such
+   * a request is read before it can authenticate, so the up-front charge
+   * bounds how many of them per address are read, and one that is read
+   * and then refused (429 at its widget buckets, 400) keeps it. And widget
    * requests are charged to their address's widget bucket too. Without it,
    * every client behind a proxy shares the proxy's address, and normal
    * beacons would be refused together; header-less requests are then
-   * charged only when they fail, after reading (at most BEACON_BODY_LIMIT
-   * each).
+   * charged only when they fail to authenticate, after reading (at most
+   * BEACON_BODY_LIMIT each), and the beacon path has no per-address
+   * accounting at all: an authenticated beacon is bounded only by its
+   * token's and project's widget buckets.
    */
   clientAddressTrusted?: boolean;
 }
@@ -157,6 +165,7 @@ const rateLimitHook: FastifyPluginAsync<RateLimitPluginOptions> = async (app, op
   app.decorateRequest("bodyBytes", 0);
   app.decorateRequest("reservedUnits", 0);
   app.decorateRequest("chargeSettled", false);
+  app.decorateRequest("bytesAtArrival", -1);
 
   const refuse = (request: FastifyRequest, retryAfterMs: number): YavioError => {
     request.arrivalRefused = true;
@@ -172,7 +181,7 @@ const rateLimitHook: FastifyPluginAsync<RateLimitPluginOptions> = async (app, op
       const peek = limiter.peekAuthFailure(address);
       if (!peek.allowed) throw refuse(request, peek.retryAfterMs);
       // Read before it can authenticate: charged on arrival to the beacon
-      // bucket, refunded once it does.
+      // bucket, refunded once it is accepted.
       if (opts.clientAddressTrusted && isHeaderlessEvents(request)) {
         request.beaconCharged = true;
         const result = limiter.consumeBeacon(address);
@@ -186,15 +195,17 @@ const rateLimitHook: FastifyPluginAsync<RateLimitPluginOptions> = async (app, op
     if (!result.allowed) throw tooMany(result.retryAfterMs);
   });
 
-  app.addHook("onResponse", async (request) => {
+  app.addHook("onResponse", async (request, reply) => {
     const limiter = app.rateLimiter;
     if (!limiter || isHealthCheck(request)) return;
     if (request.ipRateCharged || request.arrivalRefused) return;
     const address = addressBucket(request.ip);
     const ctx = request.authContext;
     if (ctx) {
-      // A beacon charged on arrival that authenticated gets its token back.
-      if (request.beaconCharged) limiter.refundBeacon(address);
+      // A beacon charged on arrival gets its token back only when it was
+      // accepted: one that authenticated and was then refused (429 at its
+      // widget buckets, 400) was read all the same.
+      if (request.beaconCharged && reply.statusCode < 400) limiter.refundBeacon(address);
       // Authenticated, but neither the events route charged it nor did its
       // handler run (another route, e.g. a widget token on /v1/widget-tokens).
       if (!request.eventsCharged) {

@@ -104,7 +104,7 @@ and start with the proxy override, which pins the Docker networks' subnets:
 docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d
 ```
 
-**Why `TRUST_PROXY`.** Ingest limits requests that don't authenticate per client address, and logs no addresses at all. Behind a proxy, every request arrives from the proxy, so without `TRUST_PROXY` all clients share one address. With it, ingest takes the client address from `X-Forwarded-For`, but only for requests whose direct peer is listed. Widget beacons, which carry their token in the body, are also charged to their client's address when they arrive (and refunded once they authenticate), and widget requests count towards a per-address widget budget, only with `TRUST_PROXY` set; without it, ingest cannot tell the clients behind the proxy apart, charges a beacon only when it fails to authenticate, and keeps no per-address widget budget.
+**Why `TRUST_PROXY`.** Ingest limits requests that don't authenticate per client address, and logs no addresses at all. Behind a proxy, every request arrives from the proxy, so without `TRUST_PROXY` all clients share one address. With it, ingest takes the client address from `X-Forwarded-For`, but only for requests whose direct peer is listed. Widget beacons, which carry their token in the body, are also charged to their client's address when they arrive (and refunded once they are accepted), and widget requests count towards a per-address widget budget, only with `TRUST_PROXY` set. Without it, ingest cannot tell the clients behind the proxy apart: it charges a beacon to its address only when it fails to authenticate, so beacons have no per-address accounting, and widget traffic is bounded per token and per project only.
 
 **Which address to list.** Not `127.0.0.1`: the proxy connects to a published port, and Docker's port forwarding hands the connection to the container from the **gateway of one of the container's networks**. Ingest is on two networks and Docker picks one, so list both gateways. `docker-compose.proxy.yml` pins them to `172.30.240.1` and `172.30.241.1` (override with `FRONTEND_SUBNET`/`FRONTEND_GATEWAY` and `BACKEND_SUBNET`/`BACKEND_GATEWAY`). Without pinning, the gateway could change whenever the networks are recreated.
 
@@ -116,14 +116,15 @@ docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d
 
 ## Ingest Rate Limits
 
-Widget traffic is limited in units: one per event, or one per KiB of body when that is more (a widget's own batches count by their events). Set these to change a limit; unset keeps the default. Anything but a positive number stops ingest at start.
+Widget traffic is limited in units: one per event, or one per KiB of body when that is more (a widget's own batches count by their events). Set these to change a limit; unset keeps the default. A burst must be a whole number that holds one full request: at least `1000` for the three widget limits (a batch of 1,000 events, and the charge of a JSON body sent without a Content-Length), at least `1` for beacons. A rate may be any positive number. Anything else stops ingest at start.
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `RATE_LIMIT_WIDGET_TOKEN_BURST` / `_PER_SECOND` | `1000` / `50` | Per widget token (one tool call's widget) |
 | `RATE_LIMIT_WIDGET_ADDRESS_BURST` / `_PER_SECOND` | `2000` / `200` | Per client address across all widget tokens; IPv6 by /64. Only with `TRUST_PROXY` set |
 | `RATE_LIMIT_WIDGET_PROJECT_BURST` / `_PER_SECOND` | `10000` / `1000` | Per project, all of its widgets together; separate from the project's API-key limit |
-| `RATE_LIMIT_BEACON_BURST` / `_PER_SECOND` | `100` / `50` | Widget beacons (token in the body) per client address, charged on arrival and given back once they authenticate. Only with `TRUST_PROXY` set |
+| `RATE_LIMIT_BEACON_BURST` / `_PER_SECOND` | `100` / `50` | Widget beacons (token in the body) per client address, charged on arrival and given back once they are accepted. Only with `TRUST_PROXY` set |
+| `REQUEST_TIMEOUT_MS` | `30000` | How long a client has to send a whole request; then ingest answers `408` and closes the connection. At least `1000` |
 
 The project limit is a ceiling for all of a project's widgets. It protects the instance and its other projects, at a price: someone holding that project's widget tokens (about 20 of them at their own limit, from 5 or more addresses with `TRUST_PROXY`) can use it up, and the project's other widgets then get `429` until it refills, so that project's widget telemetry is throttled. Raise it if a project legitimately sends more.
 
