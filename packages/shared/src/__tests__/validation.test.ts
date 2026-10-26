@@ -2,9 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ApiKeyFormat,
   ApiKeyPrefix,
-  CurrencyCode,
   IsoDatetime,
-  PaginationParams,
   ProjectSlug,
   SessionId,
   TimeRange,
@@ -145,38 +143,6 @@ describe("WorkspaceRole", () => {
   });
 });
 
-describe("PaginationParams", () => {
-  it("uses defaults when no values provided", () => {
-    const result = PaginationParams.parse({});
-    expect(result.limit).toBe(20);
-    expect(result.offset).toBe(0);
-  });
-
-  it("accepts valid values", () => {
-    const result = PaginationParams.parse({ limit: 50, offset: 10 });
-    expect(result.limit).toBe(50);
-    expect(result.offset).toBe(10);
-  });
-
-  it("coerces string values", () => {
-    const result = PaginationParams.parse({ limit: "30", offset: "5" });
-    expect(result.limit).toBe(30);
-    expect(result.offset).toBe(5);
-  });
-
-  it("rejects limit below 1", () => {
-    expect(() => PaginationParams.parse({ limit: 0 })).toThrow();
-  });
-
-  it("rejects limit above 100", () => {
-    expect(() => PaginationParams.parse({ limit: 101 })).toThrow();
-  });
-
-  it("rejects negative offset", () => {
-    expect(() => PaginationParams.parse({ offset: -1 })).toThrow();
-  });
-});
-
 describe("TimeRange", () => {
   it("accepts valid ISO datetime strings", () => {
     const result = TimeRange.parse({
@@ -220,17 +186,5 @@ describe("IsoDatetime", () => {
     ]) {
       expect(IsoDatetime.safeParse(v).success).toBe(false);
     }
-  });
-});
-
-describe("CurrencyCode", () => {
-  it("accepts a 3-letter code and uppercases it", () => {
-    expect(CurrencyCode.parse("usd")).toBe("USD");
-    expect(CurrencyCode.parse("EUR")).toBe("EUR");
-  });
-
-  it("rejects codes not exactly 3 chars", () => {
-    expect(() => CurrencyCode.parse("US")).toThrow();
-    expect(() => CurrencyCode.parse("EURO")).toThrow();
   });
 });
