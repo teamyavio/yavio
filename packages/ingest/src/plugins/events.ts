@@ -5,16 +5,15 @@ import fp from "fastify-plugin";
 import { enrichEvents } from "../lib/event-enricher.js";
 import { normalizeEvents } from "../lib/event-normalizer.js";
 import { enforceFieldLimits, isBatchTooLarge } from "../lib/field-limits.js";
-import { MAX_BODY_NESTING, exceedsNesting } from "../lib/nesting.js";
+import { MAX_BODY_NESTING, exceedsNestingText } from "../lib/nesting.js";
 import { EVENT_IDENTIFIER_FIELDS, stripPii } from "../lib/pii-stripper.js";
-import type { WidgetLimit } from "../lib/rate-limiter.js";
 import {
   MAX_REPORTED_ERRORS,
   type ValidationResult,
   validateBatch,
 } from "../lib/schema-validator.js";
 import { authenticateBodyToken, authenticateHeader } from "./auth.js";
-import { apiKeyBucket, widgetBuckets, widgetUnits } from "./rate-limit.js";
+import { type ChargeOptions, chargeOnArrival, settleCharge, settleUnhandled } from "./charge.js";
 
 export interface EventsPluginOptions {
   /**
@@ -24,14 +23,27 @@ export interface EventsPluginOptions {
   clientAddressTrusted?: boolean;
 }
 
-const WIDGET_LIMIT_MESSAGES: Record<WidgetLimit, string> = {
-  token: "Widget token rate limit exceeded",
-  address: "Widget rate limit exceeded for this address",
-  project: "Widget rate limit exceeded for this project",
-};
-
 function reportedErrors(errors: ValidationResult["errors"]): ValidationResult["errors"] {
   return errors.length > MAX_REPORTED_ERRORS ? errors.slice(0, MAX_REPORTED_ERRORS) : errors;
+}
+
+/** A body nested deeper than MAX_BODY_NESTING: rejected whole, like the batch cap. */
+function nestingError(): YavioError {
+  const issue = `Body nests deeper than ${MAX_BODY_NESTING} levels`;
+  const err = new YavioError(ErrorCode.INGEST.SCHEMA_VALIDATION_FAILED, issue, 400);
+  return Object.assign(err, {
+    responseData: { errors: [{ index: -1, issues: [issue] }], accepted: 0, rejected: 1 },
+  });
+}
+
+/**
+ * Before either parser runs JSON.parse: record the bytes read, and refuse a
+ * body nested deeper than MAX_BODY_NESTING (one pass over the text).
+ */
+function readBody(request: FastifyRequest, body: string | Buffer): string | YavioError {
+  const text = body.toString();
+  request.bodyBytes = Buffer.byteLength(body);
+  return exceedsNestingText(text, MAX_BODY_NESTING) ? nestingError() : text;
 }
 
 /**
@@ -43,9 +55,13 @@ function parseTextAsJson(
   body: string | Buffer,
   done: (err: Error | null, body?: unknown) => void,
 ): void {
-  request.bodyBytes = Buffer.byteLength(body);
+  const text = readBody(request, body);
+  if (text instanceof YavioError) {
+    done(text);
+    return;
+  }
   try {
-    done(null, JSON.parse(body.toString()));
+    done(null, JSON.parse(text));
   } catch {
     done(new YavioError(ErrorCode.INGEST.SCHEMA_VALIDATION_FAILED, "Body is not valid JSON", 400));
   }
@@ -87,8 +103,9 @@ const eventsRoute: FastifyPluginAsync<EventsPluginOptions> = async (root, opts) 
       "application/json",
       { parseAs: "string", bodyLimit: JSON_BODY_LIMIT },
       (request, body, done) => {
-        request.bodyBytes = Buffer.byteLength(body);
-        parseJson(request, body.toString(), done);
+        const text = readBody(request, body);
+        if (text instanceof YavioError) done(text);
+        else parseJson(request, text, done);
       },
     );
     registerEventsRoute(app, opts);
@@ -96,12 +113,18 @@ const eventsRoute: FastifyPluginAsync<EventsPluginOptions> = async (root, opts) 
 };
 
 function registerEventsRoute(app: FastifyInstance, opts: EventsPluginOptions): void {
+  const charge: ChargeOptions = {
+    clientAddressTrusted: opts.clientAddressTrusted,
+    limits: { json: JSON_BODY_LIMIT, text: BEACON_BODY_LIMIT },
+  };
   app.post(
     "/v1/events",
     {
-      // The header before parsing (#113), the body token after it (#96).
-      onRequest: [authenticateHeader],
+      // The header, and the arrival charge, before parsing (#113); the body
+      // token after it (#96).
+      onRequest: [authenticateHeader, chargeOnArrival(app, charge)],
       preHandler: [authenticateBodyToken],
+      onResponse: [settleUnhandled(app, charge)],
       config: { rawBody: true },
     },
     async (request, reply) => {
@@ -110,62 +133,19 @@ function registerEventsRoute(app: FastifyInstance, opts: EventsPluginOptions): v
         throw new YavioError(ErrorCode.INGEST.MISSING_AUTH_HEADER, "Auth context missing", 401);
       }
 
-      // 1. Rate limiting. API keys: by event count, per project. Widget
-      //    tokens: in units (widgetUnits), per token (project and trace), per
-      //    client address (with TRUST_PROXY) and per project, all or none.
-      //    A batch over the cap is charged as a full batch, so it is answered
-      //    with the cap's 400 below whenever the buckets can hold it, and
-      //    with 429 only while one is short.
+      // 1. Rate limiting: settle the arrival charge (plugins/charge.ts) to
+      //    the real one. API keys: by event count, per project. Widget
+      //    tokens: in units (widgetUnits), per token, per client address
+      //    (with TRUST_PROXY) and per project, all or none. A batch over the
+      //    cap is charged as a full batch, so it is answered with the cap's
+      //    400 below whenever the buckets can hold it, and with 429 only
+      //    while one is short.
       if (app.rateLimiter) {
         const body = request.body as Record<string, unknown> | null;
         const eventCount = Array.isArray(body?.events)
           ? Math.min(body.events.length, MAX_BATCH_EVENTS)
           : 1;
-        request.eventsCharged = true; // else the rate-limit plugin charges 1 on response
-        if (ctx.source === "api_key") {
-          const result = app.rateLimiter.consumeApiKey(apiKeyBucket(ctx), eventCount);
-          if (!result.allowed) {
-            const err = new YavioError(
-              ErrorCode.INGEST.API_KEY_RATE_LIMIT,
-              "API key rate limit exceeded",
-              429,
-            );
-            throw Object.assign(err, { retryAfterMs: result.retryAfterMs });
-          }
-        } else {
-          const result = app.rateLimiter.consumeWidget(
-            widgetBuckets(ctx, opts.clientAddressTrusted ? request.ip : undefined),
-            widgetUnits(eventCount, request.bodyBytes),
-          );
-          if (!result.allowed) {
-            if (result.warn) {
-              request.log.warn(
-                { project_id: ctx.projectId },
-                "Widget rate limit for the project reached",
-              );
-            }
-            const err = new YavioError(
-              ErrorCode.INGEST.WIDGET_TOKEN_RATE_LIMIT,
-              WIDGET_LIMIT_MESSAGES[result.limit],
-              429,
-            );
-            throw Object.assign(err, { retryAfterMs: result.retryAfterMs });
-          }
-        }
-      }
-
-      // 1b. Nesting depth: the size check below serializes the body again
-      if (exceedsNesting(request.body, MAX_BODY_NESTING)) {
-        const body = request.body as Record<string, unknown>;
-        const issue = `Body nests deeper than ${MAX_BODY_NESTING} levels`;
-        const err = new YavioError(ErrorCode.INGEST.SCHEMA_VALIDATION_FAILED, issue, 400);
-        throw Object.assign(err, {
-          responseData: {
-            errors: [{ index: -1, issues: [issue] }],
-            accepted: 0,
-            rejected: Array.isArray(body.events) ? body.events.length : 1,
-          },
-        });
+        settleCharge(app.rateLimiter, request, ctx, eventCount, charge);
       }
 
       // 2. Batch size check

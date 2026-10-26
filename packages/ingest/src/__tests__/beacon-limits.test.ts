@@ -177,7 +177,11 @@ describe("events route — reading bodies before authentication", { timeout: 20_
 
   it("with TRUST_PROXY, refuses concurrent header-less requests beyond the burst before parsing them", async () => {
     await build({
-      rateLimiter: new RateLimiter(undefined, { burstCapacity: 3, ratePerSecond: 0.001 }),
+      // The beacon bucket (sixth argument) is charged on arrival.
+      rateLimiter: new RateLimiter(undefined, undefined, undefined, undefined, undefined, {
+        burstCapacity: 3,
+        ratePerSecond: 0.001,
+      }),
       trustProxy: [PROXY],
     });
     const parse = vi.spyOn(JSON, "parse");

@@ -125,6 +125,16 @@ services:
       # With a proxy on the host, use docker-compose.proxy.yml and see the
       # self-hosting docs for which address to list.
       TRUST_PROXY: ${TRUST_PROXY:-}
+      # Widget rate limits; empty keeps the default. See the self-hosting
+      # docs, "Ingest Rate Limits".
+      RATE_LIMIT_WIDGET_TOKEN_BURST: ${RATE_LIMIT_WIDGET_TOKEN_BURST:-}
+      RATE_LIMIT_WIDGET_TOKEN_PER_SECOND: ${RATE_LIMIT_WIDGET_TOKEN_PER_SECOND:-}
+      RATE_LIMIT_WIDGET_ADDRESS_BURST: ${RATE_LIMIT_WIDGET_ADDRESS_BURST:-}
+      RATE_LIMIT_WIDGET_ADDRESS_PER_SECOND: ${RATE_LIMIT_WIDGET_ADDRESS_PER_SECOND:-}
+      RATE_LIMIT_WIDGET_PROJECT_BURST: ${RATE_LIMIT_WIDGET_PROJECT_BURST:-}
+      RATE_LIMIT_WIDGET_PROJECT_PER_SECOND: ${RATE_LIMIT_WIDGET_PROJECT_PER_SECOND:-}
+      RATE_LIMIT_BEACON_BURST: ${RATE_LIMIT_BEACON_BURST:-}
+      RATE_LIMIT_BEACON_PER_SECOND: ${RATE_LIMIT_BEACON_PER_SECOND:-}
     ports:
       # BIND_ADDRESS=127.0.0.1 when a reverse proxy on this host is the only
       # way in; the default publishes on all interfaces (#94).

@@ -114,6 +114,19 @@ docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d
   Switching an existing deployment to `docker-compose.proxy.yml` recreates its networks. Run `docker compose down` first; volumes are kept.
 </Callout>
 
+## Ingest Rate Limits
+
+Widget traffic is limited in units: one per event, or one per KiB of body when that is more (a widget's own batches count by their events). Set these to change a limit; unset keeps the default. Anything but a positive number stops ingest at start.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `RATE_LIMIT_WIDGET_TOKEN_BURST` / `_PER_SECOND` | `1000` / `50` | Per widget token (one tool call's widget) |
+| `RATE_LIMIT_WIDGET_ADDRESS_BURST` / `_PER_SECOND` | `2000` / `200` | Per client address across all widget tokens; IPv6 by /64. Only with `TRUST_PROXY` set |
+| `RATE_LIMIT_WIDGET_PROJECT_BURST` / `_PER_SECOND` | `10000` / `1000` | Per project, all of its widgets together; separate from the project's API-key limit |
+| `RATE_LIMIT_BEACON_BURST` / `_PER_SECOND` | `100` / `50` | Widget beacons (token in the body) per client address, charged on arrival and given back once they authenticate. Only with `TRUST_PROXY` set |
+
+The project limit is a ceiling for all of a project's widgets. It protects the instance and its other projects, at a price: someone holding that project's widget tokens (about 20 of them at their own limit, from 5 or more addresses with `TRUST_PROXY`) can use it up, and the project's other widgets then get `429` until it refills, so that project's widget telemetry is throttled. Raise it if a project legitimately sends more.
+
 ## Dashboard Settings
 
 | Variable | Default | Description |

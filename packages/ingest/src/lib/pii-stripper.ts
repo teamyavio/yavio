@@ -40,10 +40,10 @@ export const EVENT_IDENTIFIER_FIELDS: ReadonlySet<string> = new Set([
 
 /**
  * Levels of objects and arrays the PII walk descends: a container deeper
- * than this is replaced with PII_DEPTH_MARKER instead of being walked, so a
- * deeply nested value can neither make the walk fail nor pass unscanned. The
- * events route refuses bodies nested beyond MAX_BODY_NESTING (lib/nesting.ts),
- * which is below this, so there it never applies.
+ * than this is replaced with PII_DEPTH_MARKER instead of being walked, so
+ * the walk's recursion stays bounded and nothing deeper is stored unscanned.
+ * The events route refuses bodies nested beyond MAX_BODY_NESTING
+ * (lib/nesting.ts), which is below this, so there it never applies.
  */
 export const MAX_PII_WALK_DEPTH = 64;
 

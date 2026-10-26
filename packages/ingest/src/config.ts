@@ -1,5 +1,6 @@
 import { isIP } from "node:net";
 import { ErrorCode, YavioError } from "@yavio/shared/errors";
+import type { RateLimiterConfig } from "./lib/rate-limiter.js";
 
 export interface AppConfig {
   port: number;
@@ -14,6 +15,61 @@ export interface AppConfig {
    * when CLICKHOUSE_ROLLUP_PASSWORD is unset, which disables the job.
    */
   rollupClickhouseUrl: string | undefined;
+  /** Rate limits set in the environment (RATE_LIMIT_*); unset ones keep their defaults. */
+  rateLimits: RateLimitOverrides;
+}
+
+type Limit = Partial<Pick<RateLimiterConfig, "burstCapacity" | "ratePerSecond">>;
+
+export interface RateLimitOverrides {
+  widgetToken?: Limit;
+  widgetAddress?: Limit;
+  widgetProject?: Limit;
+  beacon?: Limit;
+}
+
+/** The RATE_LIMIT_<name>_BURST / _PER_SECOND pairs, and what they configure. */
+const RATE_LIMIT_VARS: Array<[keyof RateLimitOverrides, string]> = [
+  ["widgetToken", "RATE_LIMIT_WIDGET_TOKEN"],
+  ["widgetAddress", "RATE_LIMIT_WIDGET_ADDRESS"],
+  ["widgetProject", "RATE_LIMIT_WIDGET_PROJECT"],
+  ["beacon", "RATE_LIMIT_BEACON"],
+];
+
+function positiveNumber(variable: string, raw: string): number {
+  const value = Number(raw);
+  if (raw.trim() === "" || !Number.isFinite(value) || value <= 0) {
+    throw new YavioError(
+      ErrorCode.INFRA.INVALID_ENV_VAR,
+      `${variable} must be a positive number, got "${raw}"`,
+      500,
+      { variable },
+    );
+  }
+  return value;
+}
+
+/**
+ * Rate limits from RATE_LIMIT_<name>_BURST and RATE_LIMIT_<name>_PER_SECOND
+ * (the bucket's capacity, and what it refills per second). Unset or empty
+ * keeps the default (lib/rate-limiter.ts); anything but a positive number
+ * stops the start.
+ */
+export function parseRateLimits(env: NodeJS.ProcessEnv): RateLimitOverrides {
+  const overrides: RateLimitOverrides = {};
+  for (const [name, prefix] of RATE_LIMIT_VARS) {
+    const limit: Limit = {};
+    const burst = env[`${prefix}_BURST`];
+    const rate = env[`${prefix}_PER_SECOND`];
+    if (burst !== undefined && burst !== "") {
+      limit.burstCapacity = positiveNumber(`${prefix}_BURST`, burst);
+    }
+    if (rate !== undefined && rate !== "") {
+      limit.ratePerSecond = positiveNumber(`${prefix}_PER_SECOND`, rate);
+    }
+    if (Object.keys(limit).length > 0) overrides[name] = limit;
+  }
+  return overrides;
 }
 
 /** The least-privileged ClickHouse user ingest can do its job as. */
@@ -144,6 +200,7 @@ export function loadConfig(): AppConfig {
 
   const trustProxy = parseTrustProxy(process.env.TRUST_PROXY);
   const rollupClickhouseUrl = rollupUrl(process.env.CLICKHOUSE_URL);
+  const rateLimits = parseRateLimits(process.env);
 
   return {
     port,
@@ -153,5 +210,6 @@ export function loadConfig(): AppConfig {
     jwtSecret,
     trustProxy,
     rollupClickhouseUrl,
+    rateLimits,
   };
 }

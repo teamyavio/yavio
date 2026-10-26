@@ -13,12 +13,19 @@
  *     burst 2,000;
  *   - per project, separate from its API-key bucket: 1,000 units/sec, burst
  *     10,000, the ceiling for all of a project's widgets together.
- * Per-IP, two separate buckets of 10 req/sec, burst 20 (plugins/rate-limit.ts):
- *   - requests that carry no credential at all;
- *   - requests that carry one and fail authentication.
+ * A request authenticated by its header is charged before its body is read:
+ * an API key one event, a widget token its declared body size in units (the
+ * route then settles both to the real charge, plugins/events.ts).
+ * Per address (IPv6 by /64, plugins/rate-limit.ts addressBucket):
+ *   - requests that carry no credential at all: 10 req/sec, burst 20;
+ *   - requests that carry one and fail authentication: 10 req/sec, burst 20;
+ *   - header-less events requests (widget beacons), with TRUST_PROXY: 50
+ *     req/sec, burst 100, charged on arrival and refunded once they
+ *     authenticate.
  * Authenticated traffic is bounded by the per-key or widget buckets instead (#94).
  *
- * Each scope's limits are a constructor argument over these defaults.
+ * Each scope's limits are a constructor argument over these defaults; the
+ * server takes the widget and beacon ones from the environment (config.ts).
  */
 
 interface TokenBucket {
@@ -78,6 +85,13 @@ const DEFAULT_WIDGET_PROJECT_CONFIG: RateLimiterConfig = {
   burstCapacity: 10_000,
 };
 
+const DEFAULT_BEACON_CONFIG: RateLimiterConfig = {
+  ratePerSecond: 50,
+  burstCapacity: 100,
+};
+
+type Outcome = { allowed: true } | { allowed: false; retryAfterMs: number };
+
 export class RateLimiter {
   private readonly apiKeyBuckets = new Map<string, TokenBucket>();
   private readonly ipBuckets = new Map<string, TokenBucket>();
@@ -85,11 +99,13 @@ export class RateLimiter {
   private readonly widgetTokenBuckets = new Map<string, TokenBucket>();
   private readonly widgetAddressBuckets = new Map<string, TokenBucket>();
   private readonly widgetProjectBuckets = new Map<string, TokenBucket>();
+  private readonly beaconBuckets = new Map<string, TokenBucket>();
   private readonly apiKeyConfig: RateLimiterConfig;
   private readonly ipConfig: RateLimiterConfig;
   private readonly widgetTokenConfig: RateLimiterConfig;
   private readonly widgetAddressConfig: RateLimiterConfig;
   private readonly widgetProjectConfig: RateLimiterConfig;
+  private readonly beaconConfig: RateLimiterConfig;
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private readonly staleAfterMs: number;
 
@@ -99,12 +115,14 @@ export class RateLimiter {
     widgetTokenConfig?: Partial<RateLimiterConfig>,
     widgetAddressConfig?: Partial<RateLimiterConfig>,
     widgetProjectConfig?: Partial<RateLimiterConfig>,
+    beaconConfig?: Partial<RateLimiterConfig>,
   ) {
     this.apiKeyConfig = { ...DEFAULT_API_KEY_CONFIG, ...apiKeyConfig };
     this.ipConfig = { ...DEFAULT_IP_CONFIG, ...ipConfig };
     this.widgetTokenConfig = { ...DEFAULT_WIDGET_TOKEN_CONFIG, ...widgetTokenConfig };
     this.widgetAddressConfig = { ...DEFAULT_WIDGET_ADDRESS_CONFIG, ...widgetAddressConfig };
     this.widgetProjectConfig = { ...DEFAULT_WIDGET_PROJECT_CONFIG, ...widgetProjectConfig };
+    this.beaconConfig = { ...DEFAULT_BEACON_CONFIG, ...beaconConfig };
     this.staleAfterMs = apiKeyConfig?.staleAfterMs ?? 60_000;
   }
 
@@ -136,18 +154,6 @@ export class RateLimiter {
     tokens = 1,
   ): { allowed: true } | { allowed: false; retryAfterMs: number } {
     return this.consume(this.apiKeyBuckets, key, this.apiKeyConfig, tokens);
-  }
-
-  /**
-   * Consume tokens for a widget-token (JWT) request, keyed per token: the
-   * project and the token's trace. Separate from the API-key buckets, so
-   * widget traffic never draws on a project's server-side budget.
-   */
-  consumeWidgetToken(
-    key: string,
-    tokens = 1,
-  ): { allowed: true } | { allowed: false; retryAfterMs: number } {
-    return this.consume(this.widgetTokenBuckets, key, this.widgetTokenConfig, tokens);
   }
 
   /**
@@ -212,6 +218,33 @@ export class RateLimiter {
   }
 
   /**
+   * Give `units` back to the widget buckets a request was charged to (a
+   * reservation larger than the request's real charge), never above a
+   * bucket's burst.
+   */
+  refundWidget(keys: WidgetBucketKeys, units: number): void {
+    if (units <= 0) return;
+    this.refund(this.widgetTokenBuckets, keys.token, this.widgetTokenConfig, units);
+    if (keys.address !== undefined) {
+      this.refund(this.widgetAddressBuckets, keys.address, this.widgetAddressConfig, units);
+    }
+    this.refund(this.widgetProjectBuckets, keys.project, this.widgetProjectConfig, units);
+  }
+
+  /**
+   * Charge an address for a header-less events request on arrival: a widget
+   * beacon, read before it can authenticate. Refunded once it does.
+   */
+  consumeBeacon(address: string): Outcome {
+    return this.consume(this.beaconBuckets, address, this.beaconConfig, 1);
+  }
+
+  /** Give back the arrival charge of a beacon that authenticated. */
+  refundBeacon(address: string): void {
+    this.refund(this.beaconBuckets, address, this.beaconConfig, 1);
+  }
+
+  /**
    * Consume tokens for an IP-based request.
    */
   consumeIp(ip: string): { allowed: true } | { allowed: false; retryAfterMs: number } {
@@ -225,22 +258,6 @@ export class RateLimiter {
    */
   consumeAuthFailure(ip: string): { allowed: true } | { allowed: false; retryAfterMs: number } {
     return this.consume(this.authFailureBuckets, ip, this.ipConfig, 1);
-  }
-
-  /**
-   * Give back one auth-failure token charged on arrival to a request that
-   * then authenticated (a widget beacon, plugins/rate-limit.ts).
-   */
-  refundAuthFailure(ip: string): void {
-    const bucket = this.authFailureBuckets.get(ip);
-    if (!bucket) return;
-    const now = Date.now();
-    const elapsed = (now - bucket.lastRefill) / 1000;
-    bucket.tokens = Math.min(
-      this.ipConfig.burstCapacity,
-      bucket.tokens + elapsed * this.ipConfig.ratePerSecond + 1,
-    );
-    bucket.lastRefill = now;
   }
 
   /**
@@ -299,6 +316,18 @@ export class RateLimiter {
     return bucket;
   }
 
+  /** Add `tokens` back to an existing bucket, up to its burst. */
+  private refund(
+    buckets: Map<string, TokenBucket>,
+    key: string,
+    config: RateLimiterConfig,
+    tokens: number,
+  ): void {
+    if (!buckets.has(key)) return;
+    const bucket = this.bucket(buckets, key, config, Date.now());
+    bucket.tokens = Math.min(config.burstCapacity, bucket.tokens + tokens);
+  }
+
   private cleanup(): void {
     const now = Date.now();
     for (const [key, bucket] of this.apiKeyBuckets) {
@@ -312,6 +341,7 @@ export class RateLimiter {
       this.widgetTokenBuckets,
       this.widgetAddressBuckets,
       this.widgetProjectBuckets,
+      this.beaconBuckets,
     ]) {
       for (const [key, bucket] of buckets) {
         if (now - bucket.lastRefill > this.staleAfterMs) {
@@ -343,5 +373,9 @@ export class RateLimiter {
 
   get widgetProjectBucketCount(): number {
     return this.widgetProjectBuckets.size;
+  }
+
+  get beaconBucketCount(): number {
+    return this.beaconBuckets.size;
   }
 }

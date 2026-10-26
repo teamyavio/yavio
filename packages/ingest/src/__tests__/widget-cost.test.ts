@@ -106,9 +106,15 @@ describe("RateLimiter.consumeWidget", () => {
     const keys = { token: "t", address: "a", project: "p" };
     const refused = limiter.consumeWidget(keys, 20);
     expect(refused).toMatchObject({ allowed: false, limit: "project" });
-    // The token and address buckets were not charged for the refusal.
+    // The token and address buckets were not charged for the refusal: after
+    // these 10, the token still holds 90, which nine fresh projects use up.
     expect(limiter.consumeWidget(keys, 10).allowed).toBe(true);
-    expect(limiter.consumeWidgetToken("t", 90).allowed).toBe(true);
+    for (let i = 0; i < 9; i++) {
+      expect(limiter.consumeWidget({ token: "t", project: `p${i}` }, 10).allowed).toBe(true);
+    }
+    expect(limiter.consumeWidget({ token: "t", project: "p9" }, 1)).toMatchObject({
+      limit: "token",
+    });
   });
 
   it("names the first bucket short and waits for the slowest", () => {
@@ -331,24 +337,41 @@ describe("POST /v1/events — widget cost", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
       await build(new RateLimiter(), [PROXY]);
-      // One user's widget: 20-event batches and a 150-event teardown beacon (under 64 KiB).
+      // One user's widget, as the React SDK sends: fetch batches of 20 events
+      // (JSON, token in the header) and a teardown beacon of 200 events in
+      // 60,000 bytes (text/plain;charset=UTF-8, token in the body).
       for (let i = 0; i < 10; i++) {
         expect(
           (await send("trace-n", widgetEvents("trace-n", 20), { client: "203.0.113.9" }))
             .statusCode,
         ).toBe(200);
       }
+      const token = widgetToken("trace-n");
+      const events = Array.from({ length: 200 }, () => ({
+        event_id: randomUUID(),
+        event_type: "widget_click",
+        trace_id: "trace-n",
+        session_id: "ses_V1StGXR8_Z5jdHi6B-myT",
+        timestamp: new Date().toISOString(),
+        source: "widget",
+        metadata: { pad: "" },
+      }));
+      const short = 60_000 - Buffer.byteLength(JSON.stringify({ token, events }));
+      events.forEach((e, i) => {
+        const pad = Math.floor(short / 200) + (i === 199 ? short % 200 : 0);
+        e.metadata = { pad: "p".repeat(pad) };
+      });
+      const body = JSON.stringify({ token, events });
+      expect(Buffer.byteLength(body)).toBe(60_000);
       const beacon = await app.inject({
         method: "POST",
         url: "/v1/events",
         remoteAddress: PROXY,
         headers: { "content-type": "text/plain;charset=UTF-8", "x-forwarded-for": "203.0.113.9" },
-        payload: JSON.stringify({
-          token: widgetToken("trace-n"),
-          events: widgetEvents("trace-n", 150),
-        }),
+        payload: body,
       });
       expect(beacon.statusCode).toBe(200);
+      expect(beacon.json().accepted).toBe(200);
     } finally {
       vi.useRealTimers();
     }

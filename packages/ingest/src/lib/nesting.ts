@@ -4,27 +4,44 @@
  * four levels down to `metadata`, so an event's fields can nest about 60
  * levels; a tool's `input_schema` or `metadata` from our SDKs stays far below.
  *
- * The parsed body is serialized again further on (the batch size check, the
- * per-event size check, the ClickHouse insert), and JSON.stringify recurses,
- * so a body nested deeper than it can handle is refused up front (400).
- * The PII walk has its own limit (MAX_PII_WALK_DEPTH) above this one.
+ * The events route's parsers check it on the raw text, before JSON.parse, and
+ * answer a deeper body 400. Everything after them (the size checks, the PII
+ * walk, the ClickHouse insert) serializes or walks the parsed body by
+ * recursion, so the bound keeps that recursion shallow. The PII walk has its
+ * own limit (MAX_PII_WALK_DEPTH) above this one.
  */
 export const MAX_BODY_NESTING = 64;
 
+const QUOTE = 0x22; // "
+const BACKSLASH = 0x5c; // \
+const OPEN_BRACE = 0x7b; // {
+const OPEN_BRACKET = 0x5b; // [
+const CLOSE_BRACE = 0x7d; // }
+const CLOSE_BRACKET = 0x5d; // ]
+
 /**
- * Whether `value` holds objects or arrays nested more than `maxLevels` deep.
- * Iterative, so it answers for any depth, and it stops at the first
- * container past the limit.
+ * Whether JSON `text` opens objects and arrays more than `maxLevels` deep.
+ * One pass over the characters: brackets inside strings (escapes included)
+ * do not count. It stops at the first bracket past the limit. Malformed text
+ * may give any answer; JSON.parse rejects it afterwards either way.
  */
-export function exceedsNesting(value: unknown, maxLevels: number): boolean {
-  if (value === null || typeof value !== "object") return false;
-  const stack: Array<[object, number]> = [[value, 1]];
-  while (stack.length > 0) {
-    const [node, level] = stack.pop() as [object, number];
-    if (level > maxLevels) return true;
-    const children = Array.isArray(node) ? node : Object.values(node);
-    for (const child of children) {
-      if (child !== null && typeof child === "object") stack.push([child, level + 1]);
+export function exceedsNestingText(text: string, maxLevels: number): boolean {
+  let depth = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (inString) {
+      if (c === BACKSLASH) i++;
+      else if (c === QUOTE) inString = false;
+      continue;
+    }
+    if (c === QUOTE) {
+      inString = true;
+    } else if (c === OPEN_BRACE || c === OPEN_BRACKET) {
+      depth++;
+      if (depth > maxLevels) return true;
+    } else if (c === CLOSE_BRACE || c === CLOSE_BRACKET) {
+      depth--;
     }
   }
   return false;

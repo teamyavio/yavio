@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadConfig, parseTrustProxy } from "../config.js";
+import { loadConfig, parseRateLimits, parseTrustProxy } from "../config.js";
 
 const REQUIRED = {
   DATABASE_URL: "postgres://yavio_service:pw@localhost:5432/yavio",
@@ -122,6 +122,49 @@ describe("TRUST_PROXY (#94)", () => {
       expect(loadConfig().trustProxy).toEqual(["172.30.240.1"]);
     } finally {
       Reflect.deleteProperty(process.env, "TRUST_PROXY");
+    }
+  });
+});
+
+describe("rate limits from the environment", () => {
+  it("are empty when nothing is set", () => {
+    expect(parseRateLimits({})).toEqual({});
+    expect(parseRateLimits({ RATE_LIMIT_WIDGET_TOKEN_BURST: "" })).toEqual({});
+  });
+
+  it("read the burst and the per-second rate of each widget bucket and the beacon bucket", () => {
+    expect(
+      parseRateLimits({
+        RATE_LIMIT_WIDGET_TOKEN_BURST: "2000",
+        RATE_LIMIT_WIDGET_TOKEN_PER_SECOND: "100",
+        RATE_LIMIT_WIDGET_ADDRESS_BURST: "5000",
+        RATE_LIMIT_WIDGET_ADDRESS_PER_SECOND: "500",
+        RATE_LIMIT_WIDGET_PROJECT_PER_SECOND: "2500",
+        RATE_LIMIT_BEACON_BURST: "200",
+        RATE_LIMIT_BEACON_PER_SECOND: "0.5",
+      }),
+    ).toEqual({
+      widgetToken: { burstCapacity: 2000, ratePerSecond: 100 },
+      widgetAddress: { burstCapacity: 5000, ratePerSecond: 500 },
+      widgetProject: { ratePerSecond: 2500 },
+      beacon: { burstCapacity: 200, ratePerSecond: 0.5 },
+    });
+  });
+
+  it("stop the start on anything but a positive number", () => {
+    for (const raw of ["0", "-5", "abc", " ", "Infinity", "1e400"]) {
+      expect(() => parseRateLimits({ RATE_LIMIT_BEACON_BURST: raw })).toThrow(
+        "RATE_LIMIT_BEACON_BURST must be a positive number",
+      );
+    }
+  });
+
+  it("are read by loadConfig", () => {
+    process.env.RATE_LIMIT_WIDGET_PROJECT_BURST = "20000";
+    try {
+      expect(loadConfig().rateLimits).toEqual({ widgetProject: { burstCapacity: 20000 } });
+    } finally {
+      Reflect.deleteProperty(process.env, "RATE_LIMIT_WIDGET_PROJECT_BURST");
     }
   });
 });

@@ -15,7 +15,7 @@ import type { AuthContext } from "../types.js";
  * /.git/config) or simply the combined rate of all customers got every SDK a
  * 429.
  *
- * Two buckets per address:
+ * Buckets per address (addressBucket: IPv6 by its /64):
  * - A request that cannot carry a credential is charged to the first one up
  *   front, so a flood of them is refused before any work.
  * - A request that may carry one (an Authorization header, or the events
@@ -27,8 +27,8 @@ import type { AuthContext } from "../types.js";
  *   before the body is parsed (#113), so a keyed client whose body fails to
  *   parse is authenticated by then and is not charged here.
  * - With TRUST_PROXY set, a header-less events request (a widget beacon,
- *   which is parsed before it can authenticate) is charged to the second one
- *   on arrival instead, and refunded once it authenticates
+ *   which is read before it can authenticate) is also charged to a third,
+ *   the beacon bucket, on arrival, and refunded once it authenticates
  *   (RateLimitPluginOptions).
  *
  * `request.ip` is the real client only when TRUST_PROXY names the proxy in
@@ -136,15 +136,15 @@ function isHeaderlessEvents(request: FastifyRequest): boolean {
 export interface RateLimitPluginOptions {
   /**
    * `request.ip` is the client's address: TRUST_PROXY is set (index.ts).
-   * Then header-less events requests are charged to the auth-failure bucket
-   * on arrival and refunded once they authenticate (by a body token): such a
-   * request is parsed before it can authenticate, so the up-front charge
-   * bounds how many of them per address are parsed at once. And a widget
-   * request that never reached the handler is charged to its address's
-   * widget bucket too. Without it, every client behind a proxy shares the
-   * proxy's address, and normal beacons would be refused together;
-   * header-less requests are then charged only when they fail, after
-   * parsing (at most BEACON_BODY_LIMIT each).
+   * Then header-less events requests are charged to the beacon bucket on
+   * arrival and refunded once they authenticate (by a body token): such a
+   * request is read before it can authenticate, so the up-front charge
+   * bounds how many of them per address are read at once. And widget
+   * requests are charged to their address's widget bucket too. Without it,
+   * every client behind a proxy shares the proxy's address, and normal
+   * beacons would be refused together; header-less requests are then
+   * charged only when they fail, after reading (at most BEACON_BODY_LIMIT
+   * each).
    */
   clientAddressTrusted?: boolean;
 }
@@ -152,48 +152,56 @@ export interface RateLimitPluginOptions {
 const rateLimitHook: FastifyPluginAsync<RateLimitPluginOptions> = async (app, opts) => {
   app.decorateRequest("ipRateCharged", false);
   app.decorateRequest("eventsCharged", false);
-  app.decorateRequest("authFailureCharged", false);
+  app.decorateRequest("beaconCharged", false);
+  app.decorateRequest("arrivalRefused", false);
   app.decorateRequest("bodyBytes", 0);
+  app.decorateRequest("reservedUnits", 0);
+  app.decorateRequest("chargeSettled", false);
+
+  const refuse = (request: FastifyRequest, retryAfterMs: number): YavioError => {
+    request.arrivalRefused = true;
+    return tooMany(retryAfterMs);
+  };
 
   app.addHook("onRequest", async (request) => {
-    if (!app.rateLimiter || isHealthCheck(request)) return;
-
-    if (opts.clientAddressTrusted && isHeaderlessEvents(request)) {
-      request.authFailureCharged = true;
-      const result = app.rateLimiter.consumeAuthFailure(request.ip);
-      if (!result.allowed) throw tooMany(result.retryAfterMs);
-      return;
-    }
+    const limiter = app.rateLimiter;
+    if (!limiter || isHealthCheck(request)) return;
+    const address = addressBucket(request.ip);
 
     if (mayCarryCredential(request)) {
-      const peek = app.rateLimiter.peekAuthFailure(request.ip);
-      if (!peek.allowed) throw tooMany(peek.retryAfterMs);
+      const peek = limiter.peekAuthFailure(address);
+      if (!peek.allowed) throw refuse(request, peek.retryAfterMs);
+      // Read before it can authenticate: charged on arrival to the beacon
+      // bucket, refunded once it does.
+      if (opts.clientAddressTrusted && isHeaderlessEvents(request)) {
+        request.beaconCharged = true;
+        const result = limiter.consumeBeacon(address);
+        if (!result.allowed) throw refuse(request, result.retryAfterMs);
+      }
       return;
     }
 
     request.ipRateCharged = true;
-    const result = app.rateLimiter.consumeIp(request.ip);
+    const result = limiter.consumeIp(address);
     if (!result.allowed) throw tooMany(result.retryAfterMs);
   });
 
   app.addHook("onResponse", async (request) => {
-    if (!app.rateLimiter || isHealthCheck(request)) return;
-    if (request.ipRateCharged) return;
+    const limiter = app.rateLimiter;
+    if (!limiter || isHealthCheck(request)) return;
+    if (request.ipRateCharged || request.arrivalRefused) return;
+    const address = addressBucket(request.ip);
     const ctx = request.authContext;
     if (ctx) {
       // A beacon charged on arrival that authenticated gets its token back.
-      if (request.authFailureCharged) app.rateLimiter.refundAuthFailure(request.ip);
-      // Authenticated, but the route handler never ran — the body failed to
-      // parse (400) or was over the limit (413). Charged to the key's or the
-      // widget token's bucket like any request of that credential, so a
-      // flood of them is bounded there (#113); the handler charges per event
-      // when it does run.
+      if (request.beaconCharged) limiter.refundBeacon(address);
+      // Authenticated, but neither the events route charged it nor did its
+      // handler run (another route, e.g. a widget token on /v1/widget-tokens).
       if (!request.eventsCharged) {
         if (ctx.source === "api_key") {
-          app.rateLimiter.consumeApiKey(apiKeyBucket(ctx), 1);
+          limiter.consumeApiKey(apiKeyBucket(ctx), 1);
         } else {
-          // In the handler's units: one event, or the KiB of body that was read.
-          app.rateLimiter.consumeWidget(
+          limiter.consumeWidget(
             widgetBuckets(ctx, opts.clientAddressTrusted ? request.ip : undefined),
             widgetUnits(1, request.bodyBytes),
           );
@@ -201,11 +209,9 @@ const rateLimitHook: FastifyPluginAsync<RateLimitPluginOptions> = async (app, op
       }
       return;
     }
-    // Charged on arrival already (or refused there).
-    if (request.authFailureCharged) return;
     // May have carried a credential but did not authenticate (invalid or
     // missing credential on the events route, unknown route with a header).
-    app.rateLimiter.consumeAuthFailure(request.ip);
+    limiter.consumeAuthFailure(address);
   });
 };
 

@@ -98,8 +98,11 @@ paths:
         "429":
           description: |
             Rate limit exceeded: the API key's (YAVIO-2050) or the widget
-            token's (YAVIO-2053) event budget, or the per-IP limit for
-            requests that do not authenticate (YAVIO-2052).
+            token's (YAVIO-2053) event budget, or a per-address limit
+            (YAVIO-2052). A request with a credential in its header is
+            charged before its body is read (an API key one event, a
+            widget token its Content-Length in KiB), so this can come
+            before the body is sent in full.
           headers:
             Retry-After:
               schema:
