@@ -65,9 +65,20 @@ const rangeShape = {
 };
 
 const projectShape = {
-  project_id: z.string().uuid().describe("Project id from list_projects"),
+  project_id: z.guid().describe("Project id from list_projects"),
   ...rangeShape,
 };
+
+/**
+ * A tool's input object. tools/list sends its JSON Schema, and zod 4's
+ * converter leaves `additionalProperties` out of an object that strips
+ * unknown keys, where zod-to-json-schema (zod 3) wrote `false`. The meta puts
+ * `false` back, so the schema still tells the model not to invent arguments;
+ * validation strips unknown keys, as it did.
+ */
+function toolInput<Shape extends z.ZodRawShape>(shape: Shape) {
+  return z.object(shape).meta({ additionalProperties: false });
+}
 
 async function projectContext(
   auth: McpAuthContext,
@@ -138,7 +149,7 @@ const handler = createMcpHandler(
         title: "Overview KPIs",
         description:
           "Headline numbers for a project and date range: tool invocations, sessions (an HTTP call from a client that sends no session key, session_source 'per_request', is not a session; the Sessions KPI's hint then says how many such calls there were), error rate, latency (with previous-period comparison), a platform breakdown, and locations: tool calls and users for the 10 largest countries with up to 5 regions each (region null = Unknown region; moreCountries / moreRegions count what was cut), unknown = calls without a country (null when there were none), plus totalToolCalls and locatedToolCalls. A location comes from the client platform (in practice ChatGPT) and only reaches apps that capture tool arguments, so unknown is often most calls. locations is null when that part of the query failed. Same definitions as the dashboard.",
-        inputSchema: projectShape,
+        inputSchema: toolInput(projectShape),
         annotations: readOnly,
       },
       async (args, extra) => {
@@ -166,10 +177,10 @@ const handler = createMcpHandler(
         title: "Usage over time",
         description:
           "Tool invocations per time bucket for a project — how usage developed over the range.",
-        inputSchema: {
+        inputSchema: toolInput({
           ...projectShape,
           granularity: z.enum(["hour", "day", "week", "month"]).optional(),
-        },
+        }),
         annotations: readOnly,
       },
       async (args, extra) => {
@@ -188,10 +199,10 @@ const handler = createMcpHandler(
         title: "Top tools",
         description:
           "Rank a project's tools by call volume with success rate, error rate and average latency.",
-        inputSchema: {
+        inputSchema: toolInput({
           ...projectShape,
           limit: z.number().int().min(1).max(100).optional().describe("Max rows (default 25)"),
-        },
+        }),
         annotations: readOnly,
       },
       async (args, extra) => {
@@ -210,10 +221,10 @@ const handler = createMcpHandler(
         title: "Tool detail",
         description:
           "Drill into one tool of a project: KPIs vs previous period, error categories, and its registered description/schema.",
-        inputSchema: {
+        inputSchema: toolInput({
           ...projectShape,
           tool_name: z.string().min(1).describe("Tool name as reported by get_top_tools"),
-        },
+        }),
         annotations: readOnly,
       },
       async (args, extra) => {
@@ -240,11 +251,11 @@ const handler = createMcpHandler(
       {
         title: "Recent errors",
         description: "Recent failed tool calls of a project with category, message and platform.",
-        inputSchema: {
+        inputSchema: toolInput({
           ...projectShape,
           limit: z.number().int().min(1).max(100).optional().describe("Max rows (default 25)"),
           error_category: z.string().optional().describe("Filter to one error category"),
-        },
+        }),
         annotations: readOnly,
       },
       async (args, extra) => {
@@ -268,10 +279,10 @@ const handler = createMcpHandler(
         title: "Recent user intents",
         description:
           "What users were trying to do (captured intents) in a project, with coverage KPIs. Only meaningful where intent capture is enabled. kpis.coverage: share of calls where the model was required to state an intent that carried one; null when every call in the period had optional context (no required calls to measure). kpis.optionalCoverage: the same share over optional-context calls (widget-invoked tools or required:false), null without such calls; it mixes the widget's own calls, which never carry an intent, with model calls that skipped the parameter, so it is not a model coverage figure.",
-        inputSchema: {
+        inputSchema: toolInput({
           ...projectShape,
           limit: z.number().int().min(1).max(100).optional().describe("Max rows (default 25)"),
-        },
+        }),
         annotations: readOnly,
       },
       async (args, extra) => {
@@ -307,10 +318,10 @@ const handler = createMcpHandler(
         title: "Run analytics SQL",
         description:
           "Free-form read-only ClickHouse SELECT over the workspace's analytics data, for questions the other tools don't cover. Call get_schema first. Results are hard-limited to the authorized workspace by database row policies.",
-        inputSchema: {
-          project_id: z.string().uuid().describe("Project id from list_projects"),
+        inputSchema: toolInput({
+          project_id: z.guid().describe("Project id from list_projects"),
           sql: z.string().min(1).describe("A single SELECT statement (ClickHouse dialect)"),
-        },
+        }),
         annotations: readOnly,
       },
       async (args, extra) => {

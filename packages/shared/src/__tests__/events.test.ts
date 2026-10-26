@@ -539,3 +539,148 @@ describe("IngestBatch", () => {
     expect(() => IngestBatch.parse({ events })).toThrow();
   });
 });
+
+// zod 4 is stricter than zod 3 in places, and counts string length in code
+// points; ingest keeps accepting exactly what it accepted before the upgrade.
+describe("zod 3 acceptance", () => {
+  const accepts = (overrides: Record<string, unknown>) =>
+    IngestEvent.safeParse(base({ event_type: "track", ...overrides })).success;
+
+  it("takes UUID-shaped event ids of any version and variant", () => {
+    for (const id of [
+      "11111111-1111-1111-1111-111111111111",
+      "00000000-0000-0000-0000-000000000001",
+      "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+    ]) {
+      expect(accepts({ event_id: id })).toBe(true);
+    }
+    for (const id of [
+      "550e8400e29b41d4a716446655440000",
+      "{550e8400-e29b-41d4-a716-446655440000}",
+    ]) {
+      expect(accepts({ event_id: id })).toBe(false);
+    }
+  });
+
+  it("takes a UTC timestamp without seconds, and still no offset", () => {
+    expect(accepts({ timestamp: "2026-10-26T10:00Z" })).toBe(true);
+    expect(accepts({ timestamp: "2026-10-26T10:00:00+02:00" })).toBe(false);
+  });
+
+  // Every number field and every bounded string of every event type, read off
+  // the schemas, so a new field, or one switched back to a plain zod 4 form,
+  // fails here until the tables say which rule it follows.
+  describe("every number and bounded string field", () => {
+    type NumberRule = "number" | "int" | "own bound";
+    /** zod 3's `z.number()` (jsonNumber), zod 3's `.int()` (jsonInt), or a bound of its own. */
+    const NUMBER_RULES: Record<string, NumberRule> = {
+      latency_ms: "number",
+      connection_duration_ms: "number",
+      conversion_value: "number",
+      device_pixel_ratio: "number",
+      visible_duration_ms: "number",
+      load_time_ms: "number",
+      tokens_in: "int",
+      tokens_out: "int",
+      step_sequence: "int",
+      viewport_width: "int",
+      viewport_height: "int",
+      click_count: "int",
+      is_retry: "own bound",
+      device_touch: "own bound",
+      scroll_depth_pct: "own bound",
+    };
+    /** Bounds in UTF-16 code units (maxUnits, exactUnits). */
+    const STRING_BOUNDS: Record<string, { max: number } | { length: number }> = {
+      session_source: { max: MAX_SESSION_SOURCE_LENGTH },
+      locale: { max: 35 },
+      end_user_agent: { max: 512 },
+      subject_id: { max: 256 },
+      tool_name: { max: 256 },
+      description: { max: 2048 },
+      country_code: { length: 2 },
+      conversion_currency: { length: 3 },
+    };
+
+    type Def = { type: string; innerType?: { _zod: { def: Def } }; checks?: unknown[] };
+    type Field = { name: string; eventType: string; field: string };
+    const numberFields: Field[] = [];
+    const stringFields: Field[] = [];
+    for (const option of IngestEvent.options) {
+      const eventType: string = option.shape.event_type.value;
+      for (const [field, schema] of Object.entries(option.shape)) {
+        let def = (schema as { _zod: { def: Def } })._zod.def;
+        while (def.type === "optional" && def.innerType) def = def.innerType._zod.def;
+        const entry = { name: `${eventType}.${field}`, eventType, field };
+        // jsonNumber is a z.custom; every other number is a z.number.
+        if (def.type === "number" || def.type === "custom") numberFields.push(entry);
+        if (def.type === "string" && (def.checks?.length ?? 0) > 0) stringFields.push(entry);
+      }
+    }
+
+    const accepts = ({ eventType, field }: Field, value: unknown) =>
+      IngestEvent.safeParse(
+        base({
+          event_type: eventType,
+          ...(eventType === "tool_discovery" ? { tool_name: "t" } : {}),
+          [field]: value,
+        }),
+      ).success;
+    const INFINITY = JSON.parse("1e999") as number;
+    const MINUS_INFINITY = JSON.parse("-1e999") as number;
+    /** `units` UTF-16 code units, astral characters but for an odd last one: half the code points. */
+    const astral = (units: number) => "😀".repeat(Math.floor(units / 2)) + "a".repeat(units % 2);
+
+    it("knows every number field and every bounded string the schemas declare", () => {
+      expect(new Set(numberFields.map((f) => f.field))).toEqual(new Set(Object.keys(NUMBER_RULES)));
+      expect(new Set(stringFields.map((f) => f.field))).toEqual(
+        new Set(Object.keys(STRING_BOUNDS)),
+      );
+      const withRule = (rule: NumberRule) =>
+        numberFields.filter((f) => NUMBER_RULES[f.field] === rule).length;
+      expect(withRule("number")).toBe(8);
+      expect(withRule("int")).toBe(8);
+      // session_source is on every event type.
+      expect(stringFields).toHaveLength(IngestEvent.options.length + 7);
+    });
+
+    it.each(numberFields.map((f) => [f.name, f] as const))(
+      "%s keeps zod 3's number rule",
+      (_, f) => {
+        const rule = NUMBER_RULES[f.field];
+        if (rule === "number") {
+          expect(INFINITY).toBe(Number.POSITIVE_INFINITY);
+          expect(accepts(f, INFINITY)).toBe(true);
+          expect(accepts(f, MINUS_INFINITY)).toBe(true);
+          expect(accepts(f, 1.5)).toBe(true);
+          expect(accepts(f, Number.NaN)).toBe(false);
+          expect(accepts(f, "5")).toBe(false);
+        } else if (rule === "int") {
+          expect(accepts(f, 2 ** 53)).toBe(true);
+          expect(accepts(f, 2 ** 53 + 2)).toBe(true);
+          expect(accepts(f, 1.5)).toBe(false);
+          expect(accepts(f, INFINITY)).toBe(false);
+        } else {
+          expect(accepts(f, INFINITY)).toBe(false);
+          expect(accepts(f, 2 ** 53)).toBe(false);
+        }
+      },
+    );
+
+    it.each(stringFields.map((f) => [f.name, f] as const))(
+      "%s is bounded in UTF-16 code units",
+      (_, f) => {
+        const bound = STRING_BOUNDS[f.field];
+        const units = "max" in bound ? bound.max : bound.length;
+        expect(accepts(f, astral(units))).toBe(true);
+        expect(accepts(f, `${astral(units)}a`)).toBe(false);
+        if ("length" in bound) expect(accepts(f, astral(units - 1))).toBe(false);
+      },
+    );
+  });
+
+  it("takes records with values of any type, but not arrays", () => {
+    expect(accepts({ metadata: { a: 1, b: null, c: [1], d: { e: "x" }, f: "g" } })).toBe(true);
+    expect(accepts({ metadata: [] })).toBe(false);
+  });
+});

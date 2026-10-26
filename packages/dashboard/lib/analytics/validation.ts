@@ -6,6 +6,7 @@ export const granularityValues = ["hour", "day", "week", "month"] as const;
 export type Granularity = (typeof granularityValues)[number];
 
 import { type Platform, platformValues } from "@yavio/shared/platform";
+import { IsoDatetime } from "@yavio/shared/validation";
 
 export { platformValues, type Platform } from "@yavio/shared/platform";
 
@@ -13,16 +14,10 @@ export { platformValues, type Platform } from "@yavio/shared/platform";
 const clickHouseDateTime = (iso: string) => iso.replace("T", " ").replace("Z", "");
 
 export const analyticsFiltersSchema = z.object({
-  from: z
-    .string()
-    .datetime()
-    .default(() => new Date(Date.now() - SEVEN_DAYS_MS).toISOString())
-    .transform(clickHouseDateTime),
-  to: z
-    .string()
-    .datetime()
-    .default(() => new Date().toISOString())
-    .transform(clickHouseDateTime),
+  from: IsoDatetime.default(() => new Date(Date.now() - SEVEN_DAYS_MS).toISOString()).transform(
+    clickHouseDateTime,
+  ),
+  to: IsoDatetime.default(() => new Date().toISOString()).transform(clickHouseDateTime),
   // Unrecognised values are dropped rather than rejected — bookmarked URLs
   // may carry platform values from older releases (e.g. "claude-desktop"),
   // and a stale filter should degrade to "no filter", not a 400.

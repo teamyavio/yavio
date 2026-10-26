@@ -50,10 +50,10 @@ function validateIndividualEvents(events: unknown[]): ValidationResult {
 }
 
 function flattenZodError(error: {
-  issues: Array<{ path: (string | number)[]; message: string }>;
+  issues: Array<{ path: PropertyKey[]; message: string }>;
 }): string[] {
   return error.issues.map((issue) => {
-    const path = issue.path.length > 0 ? `${issue.path.join(".")}: ` : "";
+    const path = issue.path.length > 0 ? `${issue.path.map(String).join(".")}: ` : "";
     return `${path}${issue.message}`;
   });
 }
