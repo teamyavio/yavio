@@ -7,11 +7,16 @@ import { createApp } from "../../index.js";
 import type { ApiKeyResolver } from "../../lib/api-key-resolver.js";
 import { BatchWriter } from "../../lib/batch-writer.js";
 import type { EnrichedEvent } from "../../lib/event-enricher.js";
-import { disconnect, getClient, runMigrations } from "./helpers/clickhouse-setup.js";
+import {
+  disconnect,
+  getClient,
+  runMigrations,
+  testClickHouseUrl,
+} from "./helpers/clickhouse-setup.js";
 
 // #90 item 4 against a real ClickHouse (the CI service, 26.8).
 
-const CLICKHOUSE_URL = process.env.CLICKHOUSE_URL ?? "http://localhost:8123";
+const CLICKHOUSE_URL = testClickHouseUrl();
 
 function enriched(workspace: string): EnrichedEvent {
   const now = new Date().toISOString().replace("T", " ").replace("Z", "");

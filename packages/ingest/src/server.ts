@@ -17,13 +17,21 @@ import { StatsJob } from "./stats/job.js";
 import { PgStatsJobStore } from "./stats/store.js";
 
 /**
- * On SIGTERM or SIGINT the writers get this long to write what they hold;
- * the process exits at SHUTDOWN_EXIT_MS at the latest. Both stay below the
- * container's stop_grace_period (docker-compose.yml, 20 s), after which
- * Docker kills the process.
+ * Shutdown on SIGTERM or SIGINT, in ms after the signal. Fastify's close()
+ * waits for every open connection: a keep-alive connection that answered
+ * after the signal stays open, idle, and a request whose body is still
+ * arriving holds its connection. Idle connections are closed every half
+ * second from CLOSE_IDLE_AFTER_MS on, all of them at CLOSE_ALL_AFTER_MS.
+ * The writers then write what they hold until WRITERS_DONE_BY_MS, and the
+ * process exits at SHUTDOWN_EXIT_MS at the latest — below the container's
+ * stop_grace_period (docker-compose.yml, 20 s), after which Docker kills it.
  */
+const CLOSE_IDLE_AFTER_MS = 2_000;
+const CLOSE_ALL_AFTER_MS = 4_000;
+const WRITERS_DONE_BY_MS = 14_000;
+const SHUTDOWN_EXIT_MS = 16_000;
+/** The writers' time when ingest closes without a signal. */
 const WRITER_SHUTDOWN_MS = 12_000;
-const SHUTDOWN_EXIT_MS = 15_000;
 
 /** How long startup waits for ClickHouse to answer the schema check. */
 const SCHEMA_CHECK_ATTEMPTS = 10;
@@ -136,33 +144,50 @@ async function main() {
     );
   }
 
+  let signalledAt: number | null = null;
   app.addHook("onClose", async () => {
     statsJob?.stop();
     rateLimiter.stop();
-    await Promise.all([
-      batchWriter.shutdown(WRITER_SHUTDOWN_MS),
-      toolRegistryWriter.shutdown(WRITER_SHUTDOWN_MS),
-    ]);
+    const timeout =
+      signalledAt === null
+        ? WRITER_SHUTDOWN_MS
+        : Math.max(1_000, signalledAt + WRITERS_DONE_BY_MS - Date.now());
+    await Promise.all([batchWriter.shutdown(timeout), toolRegistryWriter.shutdown(timeout)]);
   });
 
-  // Without these handlers SIGTERM would not reach the writers: Node as PID 1
-  // ignores it (docker-compose.yml runs ingest with `init: true` so that it
-  // is not PID 1 and gets the signal), and Node's default for a signal is to
-  // exit at once, dropping every buffered event.
-  let stopping = false;
+  // The events not written yet. `in_flight`: in a flush still running, such
+  // as an insert ClickHouse has not answered.
+  const held = () => ({
+    buffered: batchWriter.bufferedCount + toolRegistryWriter.bufferedCount,
+    kept: batchWriter.keptCount + toolRegistryWriter.keptCount,
+    in_flight: batchWriter.inFlightCount + toolRegistryWriter.inFlightCount,
+  });
+
+  // Without these handlers a signal would end the process at once (Node's
+  // default), dropping every buffered event — or, Node being PID 1 in its
+  // container, SIGTERM would be ignored until Docker kills it.
+  // docker-compose.yml runs ingest with `init: true` as well: a signal that
+  // arrives before these handlers are registered still ends the process,
+  // and the init reaps any child process.
   const stop = (signal: NodeJS.Signals) => {
-    if (stopping) return;
-    stopping = true;
+    if (signalledAt !== null) return;
+    signalledAt = Date.now();
     app.log.info(
-      { signal, buffered: batchWriter.bufferedCount + toolRegistryWriter.bufferedCount },
+      { signal, ...held() },
       "Shutting down: no new requests; writing the buffered events",
     );
     setTimeout(() => {
-      app.log.error("Shutdown did not finish in time; exiting");
+      app.log.error(held(), "Shutdown did not finish in time; exiting");
       process.exit(1);
     }, SHUTDOWN_EXIT_MS).unref();
-    // close() stops accepting requests, waits for those in flight, then runs
-    // the onClose hook above.
+    // close() stops accepting requests and waits for the open connections,
+    // then runs the onClose hook above. A connection that is idle after
+    // answering, or still receiving a body, would hold it.
+    setTimeout(() => {
+      app.server.closeIdleConnections();
+      setInterval(() => app.server.closeIdleConnections(), 500).unref();
+    }, CLOSE_IDLE_AFTER_MS).unref();
+    setTimeout(() => app.server.closeAllConnections(), CLOSE_ALL_AFTER_MS).unref();
     app.close().then(
       () => {
         app.log.info("Shut down");

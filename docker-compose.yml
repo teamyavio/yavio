@@ -109,10 +109,11 @@ services:
       context: .
       dockerfile: packages/ingest/Dockerfile
     restart: unless-stopped
-    # An init process as PID 1 passes SIGTERM on to Node, whose handler
-    # (src/server.ts) stops taking requests and writes the buffered events
-    # within 15 s; Node as PID 1 would ignore it, and Docker would kill it
-    # after the grace period with the buffer unwritten.
+    # On SIGTERM ingest (src/server.ts) stops taking requests and writes the
+    # buffered events within 16 s, below the grace period. The init process
+    # as PID 1 passes signals on, ends Node on a signal that arrives before
+    # its handlers are registered (Node as PID 1 would ignore it until Docker
+    # kills it), and reaps child processes.
     init: true
     stop_grace_period: 20s
     environment:

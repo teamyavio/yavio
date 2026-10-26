@@ -26,7 +26,7 @@ export interface EnrichedEvent extends Record<string, unknown> {
  * because ClickHouse would silently skip a field it has no column for
  * (input_format_skip_unknown_fields) or refuse every row. Kept in step with
  * the schema by event-enricher.test.ts and with the migrations by
- * insert-isolation.test.ts.
+ * integration/startup-shutdown.test.ts.
  */
 export const EVENTS_COLUMNS: Readonly<Record<string, string>> = {
   event_id: "String",

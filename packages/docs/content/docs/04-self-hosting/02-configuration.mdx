@@ -142,7 +142,7 @@ The project limit is a ceiling for all of a project's widgets. It protects the i
 | --- | --- | --- |
 | `INGEST_SKIP_SCHEMA_CHECK` | unset | At startup ingest checks that every ClickHouse column it writes exists with the type it writes, and exits with an error naming the columns when one does not — the ClickHouse migrations were not applied, or not the ones this ingest expects. `1` skips the check, for an emergency only: ingest may then write events whose fields ClickHouse drops or refuses |
 
-On `docker compose stop` (SIGTERM) ingest stops taking requests and writes the events it holds, within 15 seconds; the compose file gives it 20 (`stop_grace_period`) and runs it under an init process (`init: true`) so that the signal reaches it.
+On `docker compose stop` (SIGTERM) ingest stops taking requests and writes the events it holds, within 16 seconds; the compose file gives it 20 (`stop_grace_period`). It also runs ingest under an init process (`init: true`), which passes the signal on, ends ingest on a signal that arrives while it is still starting, and reaps child processes.
 
 ## OAuth Providers (Optional)
 

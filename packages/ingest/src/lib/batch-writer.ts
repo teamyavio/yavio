@@ -12,26 +12,30 @@ const MAX_RETRIES = 3;
  * Inserts a flush may spend sorting out rows whose insert failed because of
  * their content (`write`): about two per row ClickHouse refuses, when it
  * names the row ("(at row N)"). The rows before a named row, and the
- * project groups of a failing batch (within PROJECT_GROUP_INSERTS_PER_FLUSH),
+ * project splits of a failing batch (within PROJECT_SPLIT_INSERTS_PER_FLUSH),
  * are inserted outside it. What a flush cannot sort out within the budget is
  * set apart for the next one.
  */
 export const ISOLATION_INSERTS_PER_FLUSH = 64;
 
-/** Project-group inserts a flush may make outside the isolation budget. */
-export const PROJECT_GROUP_INSERTS_PER_FLUSH = 48;
+/**
+ * Inserts of project splits a flush may make outside the isolation budget:
+ * a failing batch of several projects is split in two — the project of the
+ * row ClickHouse names, and all the others — two inserts per project with
+ * refused rows (the others, the named row alone), however many other
+ * projects the batch holds.
+ */
+export const PROJECT_SPLIT_INSERTS_PER_FLUSH = 48;
 
 /**
  * Flushes in a row a batch may fail with a resource error (memory, a time
  * limit) or an error without a ClickHouse code (a client-side timeout, a
  * reset connection) while ClickHouse answers a ping, before it is treated as
  * specific to its rows and split. Until then it is retried as it is, with
- * the same deduplication token: such an insert may have been stored.
+ * the same deduplication token: such an insert may have been stored. Other
+ * server errors (an outage) in between start the count again.
  */
 export const RESOURCE_ERROR_FLUSHES = 5;
-
-/** A failing batch with rows of more projects is split into at most this many project groups. */
-const MAX_PROJECT_GROUPS = 16;
 
 /** Longest wait, in flushes, before a row kept after an unrecognised error is tried again. */
 const MAX_UNRECOGNISED_BACKOFF_FLUSHES = 64;
@@ -220,8 +224,9 @@ function errorLabel(err: unknown): string {
  * 1,048,449 rows or 256 MiB, a batch below that is one block, and a block is
  * refused whole. A batch above 256 MiB can have its first blocks stored
  * before a later row is refused, and a batch split after timeouts may have
- * been stored; their parts carry new tokens, so those rows are stored twice
- * until a merge (or FINAL) collapses them.
+ * been stored; their parts carry new tokens, so those rows can be stored
+ * again — once per split level when the timeouts go on — until a merge (or
+ * FINAL) collapses them.
  */
 function batchToken(batch: ReadonlyArray<EnrichedEvent>): string {
   const hash = createHash("sha256");
@@ -261,6 +266,12 @@ interface Piece {
    * (`kept`, for the backoff).
    */
   failures: number;
+  /**
+   * Of those, the last ones in a row with a resource error or without a
+   * code while ClickHouse answered: RESOURCE_ERROR_FLUSHES of them split
+   * the piece. Any other server error sets it back to 0.
+   */
+  slow?: number;
   /** A single row: times ClickHouse refused it with a row error. */
   refusals: number;
   /** Of one project, or split by project already. */
@@ -290,10 +301,14 @@ interface FlushRun {
   flush: number;
   /** Inserts left for sorting out rows. */
   budget: number;
-  /** Project-group inserts left outside the budget. */
-  groupInserts: number;
+  /** Project-split inserts left outside the budget. */
+  splitInserts: number;
+  /** Rows the flush took from the buffer, `retry` and `kept`. */
+  taken: number;
   /** Rows stored. */
   stored: number;
+  /** Rows the flush put back in `retry` or `kept`. */
+  returned: number;
   /** An insert failed with a server error: nothing more is tried. */
   halted: boolean;
   /** Whether ClickHouse answered a ping, once asked in this flush. */
@@ -315,20 +330,101 @@ function oneProject(rows: EnrichedEvent[]): boolean {
   return rows.every((r) => r.project_id === rows[0].project_id);
 }
 
-/** Rows by project, in order of first appearance; beyond MAX_PROJECT_GROUPS the smallest go together. */
-function byProject(rows: EnrichedEvent[]): EnrichedEvent[][] {
-  const groups = new Map<string, EnrichedEvent[]>();
-  for (const row of rows) {
-    const group = groups.get(row.project_id);
-    if (group) group.push(row);
-    else groups.set(row.project_id, [row]);
+/**
+ * A failing batch of several projects in two: the project of the row
+ * ClickHouse names, and all the others (which, failing again, are split the
+ * same way); with no named row, the projects in two halves. Either way each
+ * insert either stores or narrows down the projects with refused rows, so
+ * the inserts follow the projects with refused rows, not all projects.
+ * Returns the named row's project first.
+ */
+function splitProjects(rows: EnrichedEvent[], named: number | null): EnrichedEvent[][] {
+  if (named !== null) {
+    const project = rows[named - 1].project_id;
+    return [
+      rows.filter((r) => r.project_id === project),
+      rows.filter((r) => r.project_id !== project),
+    ];
   }
-  const all = [...groups.values()];
-  if (all.length <= MAX_PROJECT_GROUPS) return all;
-  const largest = new Set(
-    [...all].sort((a, b) => b.length - a.length).slice(0, MAX_PROJECT_GROUPS - 1),
-  );
-  return [...all.filter((g) => largest.has(g)), all.filter((g) => !largest.has(g)).flat()];
+  const projects = [...new Set(rows.map((r) => r.project_id))];
+  const first = new Set(projects.slice(0, Math.ceil(projects.length / 2)));
+  return [
+    rows.filter((r) => first.has(r.project_id)),
+    rows.filter((r) => !first.has(r.project_id)),
+  ];
+}
+
+/** A piece set apart, as eviction sees it. */
+export interface KeptRows {
+  rows: EnrichedEvent[];
+  /** A single row ClickHouse refused once (row error). */
+  refusals: number;
+  /** A single row that failed with an unrecognised error. */
+  failures: number;
+  /** The flush in which its rows were first written. */
+  since: number;
+}
+
+/**
+ * The rows to drop to bring the rows set apart down by `over`, in this
+ * order: rows that failed on their own (refused once, or an unrecognised
+ * error); then other rows of projects with such rows (or with rows dropped
+ * as refused twice, `refusingProjects`); the rows of projects with none
+ * last — a clean project's rows set apart only because the flush could not
+ * sort a batch out. Within each, the project with the most of them first,
+ * its oldest first, so that one project's stream does not push out
+ * another's few.
+ */
+export function rowsToDrop(
+  pieces: readonly KeptRows[],
+  over: number,
+  refusingProjects: ReadonlySet<string> = new Set(),
+): Set<EnrichedEvent> {
+  const ordered = [...pieces].sort((a, b) => a.since - b.since);
+  const failedOnTheirOwn = (p: KeptRows) => p.refusals > 0 || p.failures > 0;
+  const refusing = new Set(refusingProjects);
+  for (const piece of ordered) {
+    if (failedOnTheirOwn(piece)) for (const row of piece.rows) refusing.add(row.project_id);
+  }
+  // Tier → project → rows, oldest first.
+  const tiers: Array<Map<string, EnrichedEvent[]>> = [new Map(), new Map(), new Map()];
+  for (const piece of ordered) {
+    for (const row of piece.rows) {
+      const tier = failedOnTheirOwn(piece) ? 0 : refusing.has(row.project_id) ? 1 : 2;
+      const list = tiers[tier].get(row.project_id);
+      if (list) list.push(row);
+      else tiers[tier].set(row.project_id, [row]);
+    }
+  }
+  const dropped = new Set<EnrichedEvent>();
+  let left = over;
+  for (const byProject of tiers) {
+    const taken = new Map<string, number>();
+    while (left > 0) {
+      let top: string | null = null;
+      let topLeft = 0;
+      let second = 0;
+      for (const [project, list] of byProject) {
+        const remaining = list.length - (taken.get(project) ?? 0);
+        if (remaining > topLeft) {
+          second = topLeft;
+          topLeft = remaining;
+          top = project;
+        } else if (remaining > second) {
+          second = remaining;
+        }
+      }
+      if (top === null) break;
+      // Down to one below the next project, so that they take turns.
+      const n = Math.min(left, topLeft, topLeft - second + 1);
+      const from = taken.get(top) ?? 0;
+      for (const row of (byProject.get(top) ?? []).slice(from, from + n)) dropped.add(row);
+      taken.set(top, from + n);
+      left -= n;
+    }
+    if (left <= 0) break;
+  }
+  return dropped;
 }
 
 /**
@@ -345,12 +441,12 @@ function byProject(rows: EnrichedEvent[]): EnrichedEvent[][] {
  *
  * When an insert fails, the error decides:
  *
- * - A row error (`ROW_ERROR_CODES`): the batch is split — by project, then
- *   at the row ClickHouse names, else in halves — and each part inserted on
- *   its own. The other rows are stored. A single row ClickHouse refuses is
- *   kept apart and dropped when it is refused a second time, with one
- *   warning per flush (count, event ids, project ids, error names; never a
- *   value).
+ * - A row error (`ROW_ERROR_CODES`): the batch is split — the other
+ *   projects from the project of the named row (`splitProjects`), then at
+ *   the row ClickHouse names, else in halves — and each part inserted on its
+ *   own. The other rows are stored. A single row ClickHouse refuses is kept
+ *   apart and dropped when it is refused a second time, with one warning
+ *   per flush (count, event ids, project ids, error names; never a value).
  * - A server error (`SERVER_ERROR_CODES`), any failure while ClickHouse
  *   does not answer a ping, and — for up to RESOURCE_ERROR_FLUSHES flushes
  *   in a row — a resource error or an error without a ClickHouse code (a
@@ -367,8 +463,8 @@ function byProject(rows: EnrichedEvent[]): EnrichedEvent[][] {
  *
  * Rows kept apart never count towards backpressure, so they cannot make
  * ingest refuse other events. They are capped at `maxKeptRows`; beyond it
- * rows of the project with the most kept rows are dropped first, oldest
- * first, with a warning.
+ * rows are dropped with a warning, in the order of `rowsToDrop`: rows that
+ * failed on their own first, a clean project's rows last.
  *
  * When every insert succeeds, a flush is one insert of the next batch, as
  * before: nothing is serialised or hashed twice.
@@ -391,6 +487,8 @@ export class BatchWriter {
   private readonly maxKeptRows: number;
   private readonly logger?: BatchWriterLogger;
   private inFlight: Promise<void> | null = null;
+  /** The flush in progress. */
+  private current: FlushRun | null = null;
 
   constructor(options: BatchWriterOptions) {
     this.clickhouse = options.clickhouse;
@@ -459,17 +557,21 @@ export class BatchWriter {
     const run: FlushRun = {
       flush: this.flushes,
       budget: ISOLATION_INSERTS_PER_FLUSH,
-      groupInserts: PROJECT_GROUP_INSERTS_PER_FLUSH,
+      splitInserts: PROJECT_SPLIT_INSERTS_PER_FLUSH,
+      taken: 0,
       stored: 0,
+      returned: 0,
       halted: false,
       dropped: [],
       unrecognised: [],
     };
+    this.current = run;
     this.inFlight = this.flushOnce(run);
     try {
       await this.inFlight;
     } finally {
       this.inFlight = null;
+      this.current = null;
     }
     return run;
   }
@@ -481,18 +583,24 @@ export class BatchWriter {
     this.retry = [];
     for (const piece of retry) {
       this.retryRows -= piece.rows.length;
+      run.taken += piece.rows.length;
       await this.write(piece, run, { attempts: MAX_RETRIES, budgeted: false, origin: "retry" });
     }
 
     const kept = this.kept.sort((a, b) => a.since - b.since);
     this.kept = [];
     for (const piece of kept) {
-      if (piece.due > run.flush) this.kept.push(piece);
-      else await this.write(piece, run, { attempts: 1, budgeted: true, origin: "kept" });
+      if (piece.due > run.flush) {
+        this.kept.push(piece);
+        continue;
+      }
+      run.taken += piece.rows.length;
+      await this.write(piece, run, { attempts: 1, budgeted: true, origin: "kept" });
     }
 
     if (!run.halted && this.buffer.length > 0) {
       const rows = this.buffer.splice(0, this.flushSize);
+      run.taken += rows.length;
       await this.write(
         { rows, failures: 0, refusals: 0, grouped: false, due: 0, since: run.flush },
         run,
@@ -506,12 +614,12 @@ export class BatchWriter {
   /** Insert a piece; on a failure, keep it, split it or settle its row. */
   private async write(piece: Piece, run: FlushRun, how: How): Promise<void> {
     if (run.halted) {
-      this.putBack(piece, how.origin);
+      this.putBack(piece, how.origin, run);
       return;
     }
     if (how.budgeted) {
       if (run.budget <= 0) {
-        this.kept.push(piece);
+        this.keep(piece, run);
         return;
       }
       run.budget--;
@@ -524,9 +632,17 @@ export class BatchWriter {
     }
 
     const kind = failed.mapping ? "batch" : await this.classify(failed.error, piece, run);
-    if (kind === "server") {
+    if (kind === "server" || kind === "slow") {
       run.halted = true;
-      this.putBack({ ...piece, failures: piece.failures + 1 }, how.origin);
+      this.putBack(
+        {
+          ...piece,
+          failures: piece.failures + 1,
+          slow: kind === "slow" ? (piece.slow ?? 0) + 1 : 0,
+        },
+        how.origin,
+        run,
+      );
       return;
     }
     if (piece.rows.length === 1) {
@@ -538,16 +654,17 @@ export class BatchWriter {
 
   /**
    * "row": ClickHouse refused the rows (ROW_ERROR_CODES). "server": the
-   * server, the connection or the table failed, ClickHouse does not answer,
-   * or — for RESOURCE_ERROR_FLUSHES flushes — a resource error or an error
-   * without a ClickHouse code. "batch": an unlisted ClickHouse code while
-   * ClickHouse answers, or a resource or code-less error after that.
+   * server, the connection or the table failed, or ClickHouse does not
+   * answer. "slow": a resource error or an error without a ClickHouse code
+   * while ClickHouse answers, for RESOURCE_ERROR_FLUSHES flushes in a row
+   * (`slow`); kept like "server". "batch": an unlisted ClickHouse code while
+   * ClickHouse answers, or a slow failure after those flushes.
    */
   private async classify(
     err: unknown,
     piece: Piece,
     run: FlushRun,
-  ): Promise<"row" | "server" | "batch"> {
+  ): Promise<"row" | "server" | "slow" | "batch"> {
     if (rowErrorName(err) !== null) return "row";
     const code = clickhouseCode(err);
     if (code !== null && SERVER_ERROR_CODES.has(code)) return "server";
@@ -556,7 +673,7 @@ export class BatchWriter {
     // Error) or a resource error: the server may be slow, and the insert may
     // even have been stored. Retried as it is, with its token, first.
     if (code === null || RESOURCE_ERROR_CODES.has(code)) {
-      return piece.failures + 1 < RESOURCE_ERROR_FLUSHES ? "server" : "batch";
+      return (piece.slow ?? 0) + 1 < RESOURCE_ERROR_FLUSHES ? "slow" : "batch";
     }
     return "batch";
   }
@@ -574,12 +691,12 @@ export class BatchWriter {
   }
 
   /**
-   * Split a failed batch: by project (when it holds more than one), then at
-   * the row ClickHouse names, else in halves. The project groups (within
-   * PROJECT_GROUP_INSERTS_PER_FLUSH) and the rows before a named row are
-   * inserted outside the budget — the rows before it, because they parsed;
-   * when they fail anyway, they are split within the budget. The named row
-   * and the rest are budgeted.
+   * Split a failed batch: by project when it holds more than one
+   * (`splitProjects`), then at the row ClickHouse names, else in halves.
+   * The project splits (within PROJECT_SPLIT_INSERTS_PER_FLUSH) and the rows
+   * before a named row are inserted outside the budget — the rows before
+   * it, because they parsed; when they fail anyway, they are split within
+   * the budget. The named row and the rest are budgeted.
    */
   private async split(
     piece: Piece,
@@ -598,36 +715,55 @@ export class BatchWriter {
     });
     const origin = how.origin;
     const budgeted: How = { attempts: 1, budgeted: true, origin };
+    const projectSplit = (): How => {
+      const free = run.splitInserts > 0;
+      if (free) run.splitInserts--;
+      return free ? { attempts: 1, budgeted: false, origin } : budgeted;
+    };
 
-    if (!piece.grouped && !oneProject(piece.rows)) {
-      for (const group of byProject(piece.rows)) {
-        const free = run.groupInserts > 0;
-        if (free) run.groupInserts--;
-        await this.write(
-          part(group),
-          run,
-          free ? { attempts: 1, budgeted: false, origin } : budgeted,
-        );
-      }
-      return;
-    }
-
-    const at = namedRow(err, piece.rows.length);
-    if (at !== null) {
-      const before = piece.rows.slice(0, at - 1);
-      const after = piece.rows.slice(at);
+    // At the named row: the rows before it parsed, so they are inserted
+    // outside the budget — once: a part that was itself expected to succeed
+    // and failed is sorted out within the budget. The named row, refused once
+    // in the batch, is inserted alone (and dropped when refused again); then
+    // the rest.
+    const splitAt = async (rows: EnrichedEvent[], at: number, rowHow = budgeted) => {
+      const before = rows.slice(0, at - 1);
+      const after = rows.slice(at);
       if (before.length > 0) {
-        // Outside the budget, once: a part that was itself expected to
-        // succeed and failed is sorted out within the budget.
         await this.write(
           part(before),
           run,
           how.expected ? budgeted : { attempts: 1, budgeted: false, origin, expected: true },
         );
       }
-      // Refused once in the batch: refused alone, it is dropped.
-      await this.write(part([piece.rows[at - 1]], kind === "row" ? 1 : 0), run, budgeted);
+      await this.write(part([rows[at - 1]], kind === "row" ? 1 : 0), run, rowHow);
       if (after.length > 0) await this.write(part(after), run, budgeted);
+    };
+
+    const at = namedRow(err, piece.rows.length);
+    if (!piece.grouped && !oneProject(piece.rows)) {
+      if (at === null) {
+        for (const group of splitProjects(piece.rows, null)) {
+          await this.write(part(group), run, projectSplit());
+        }
+        return;
+      }
+      // The named row's project apart from all the others (`splitProjects`),
+      // the others first: when the budget runs out, the rows set apart are
+      // then those of projects with refused rows. Within its project the
+      // batch is split at the named row at once: the project's rows before
+      // it came before it in the batch, and parsed. The named row alone is
+      // the second insert of the project split: a row named wrongly, which
+      // ClickHouse then stores, costs no budgeted insert.
+      const named = piece.rows[at - 1];
+      const [mine, others] = splitProjects(piece.rows, at);
+      await this.write(part(others), run, projectSplit());
+      await splitAt(mine, mine.indexOf(named) + 1, projectSplit());
+      return;
+    }
+
+    if (at !== null) {
+      await splitAt(piece.rows, at);
       return;
     }
 
@@ -642,23 +778,30 @@ export class BatchWriter {
     if (kind === "row") {
       const refusals = piece.refusals + 1;
       if (refusals >= 2) run.dropped.push({ row, error });
-      else this.kept.push({ ...piece, refusals, due: run.flush + 1 });
+      else this.keep({ ...piece, refusals, due: run.flush + 1 }, run);
       return;
     }
     const failures = piece.failures + 1;
     const wait = Math.min(2 ** (failures - 1), MAX_UNRECOGNISED_BACKOFF_FLUSHES);
-    this.kept.push({ ...piece, failures, due: run.flush + wait });
+    this.keep({ ...piece, failures, due: run.flush + wait }, run);
     run.unrecognised.push({ row, error });
   }
 
   /** After a server error: back to `retry` (counted), or to `kept` for rows kept apart or refused. */
-  private putBack(piece: Piece, origin: How["origin"]): void {
+  private putBack(piece: Piece, origin: How["origin"], run: FlushRun): void {
     if (origin === "retry" && piece.refusals === 0) {
       this.retry.push(piece);
       this.retryRows += piece.rows.length;
+      run.returned += piece.rows.length;
     } else {
-      this.kept.push(piece);
+      this.keep(piece, run);
     }
+  }
+
+  /** Set a piece apart, in `kept`. */
+  private keep(piece: Piece, run: FlushRun): void {
+    this.kept.push(piece);
+    run.returned += piece.rows.length;
   }
 
   /**
@@ -698,7 +841,7 @@ export class BatchWriter {
       );
     }
 
-    const evicted = this.evict();
+    const evicted = this.evict(run);
     if (evicted.length > 0) {
       this.warnDrop(
         run,
@@ -709,46 +852,14 @@ export class BatchWriter {
     }
   }
 
-  /**
-   * Over `maxKeptRows`: drop rows of the project with the most kept rows,
-   * its oldest first, until within the cap — so one project's stream of
-   * refused rows does not push out another project's few.
-   */
-  private evict(): EnrichedEvent[] {
-    let over = this.keptCount - this.maxKeptRows;
+  /** Over `maxKeptRows`: drop rows in the order of `rowsToDrop` until within the cap. */
+  private evict(run: FlushRun): EnrichedEvent[] {
+    const over = this.keptCount - this.maxKeptRows;
     if (over <= 0) return [];
-    this.kept.sort((a, b) => a.since - b.since);
-    const byProjectRows = new Map<string, EnrichedEvent[]>();
-    for (const piece of this.kept) {
-      for (const row of piece.rows) {
-        const list = byProjectRows.get(row.project_id);
-        if (list) list.push(row);
-        else byProjectRows.set(row.project_id, [row]);
-      }
-    }
-    const evicted = new Set<EnrichedEvent>();
-    const taken = new Map<string, number>();
-    while (over > 0) {
-      let top: string | null = null;
-      let topLeft = 0;
-      let second = 0;
-      for (const [project, list] of byProjectRows) {
-        const left = list.length - (taken.get(project) ?? 0);
-        if (left > topLeft) {
-          second = topLeft;
-          topLeft = left;
-          top = project;
-        } else if (left > second) {
-          second = left;
-        }
-      }
-      if (top === null) break;
-      const n = Math.min(over, topLeft - second + 1);
-      const from = taken.get(top) ?? 0;
-      for (const row of (byProjectRows.get(top) ?? []).slice(from, from + n)) evicted.add(row);
-      taken.set(top, from + n);
-      over -= n;
-    }
+    const refusing = new Set(
+      [...run.dropped, ...run.unrecognised].map(({ row }) => row.project_id),
+    );
+    const evicted = rowsToDrop(this.kept, over, refusing);
     this.kept = this.kept
       .map((piece) => {
         const rows = piece.rows.filter((r) => !evicted.has(r));
@@ -843,6 +954,16 @@ export class BatchWriter {
   /** Events not written yet that count towards backpressure: buffered, or kept after a server error. */
   get bufferedCount(): number {
     return this.buffer.length + this.retryRows;
+  }
+
+  /**
+   * Rows of the flush in progress that are not stored, dropped or back in
+   * the buffer or `kept` yet: in an insert that has not finished, or waiting
+   * for their turn in the flush. 0 between flushes.
+   */
+  get inFlightCount(): number {
+    const run = this.current;
+    return run ? run.taken - run.stored - run.dropped.length - run.returned : 0;
   }
 
   /** Rows kept apart while being sorted out; not counted towards backpressure. */

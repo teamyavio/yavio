@@ -1,19 +1,24 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { createServer } from "node:net";
+import { connect, createServer } from "node:net";
 import { join } from "node:path";
 import { type ClickHouseClient, createClient } from "@clickhouse/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { EVENTS_COLUMNS } from "../../lib/event-enricher.js";
 import { jwtSign } from "../../lib/jwt.js";
 import { WRITTEN_COLUMNS, columnProblems } from "../../lib/schema-guard.js";
-import { disconnect, getClient, runMigrations } from "./helpers/clickhouse-setup.js";
+import {
+  disconnect,
+  getClient,
+  runMigrations,
+  testClickHouseUrl,
+} from "./helpers/clickhouse-setup.js";
 
 // The ingest server as it runs in its container (src/server.ts, through
 // tsx): its startup schema check and its shutdown on SIGTERM, against a
 // real ClickHouse (the CI service, 26.8).
 
-const CLICKHOUSE_URL = process.env.CLICKHOUSE_URL ?? "http://localhost:8123";
+const CLICKHOUSE_URL = testClickHouseUrl();
 const CLICKHOUSE_PASSWORD = process.env.CLICKHOUSE_PASSWORD ?? "test";
 const INGEST_PASSWORD = process.env.CLICKHOUSE_INGEST_PASSWORD ?? "yavio_dev";
 const DATABASE_URL =
@@ -150,8 +155,14 @@ describe("ingest startup and shutdown", () => {
 
   afterAll(async () => {
     for (const server of started) server.child.kill("SIGKILL");
-    await getClient().command({ query: `DROP DATABASE IF EXISTS ${PROBE_DATABASE}` });
-    await disconnect();
+    try {
+      await getClient().command({
+        query: `REVOKE SELECT, INSERT ON ${PROBE_DATABASE}.* FROM yavio_ingest`,
+      });
+    } finally {
+      await getClient().command({ query: `DROP DATABASE IF EXISTS ${PROBE_DATABASE}` });
+      await disconnect();
+    }
   });
 
   it("finds every column ingest writes, with its type, after all migrations — as the ingest user", async () => {
@@ -274,12 +285,97 @@ describe("ingest startup and shutdown", () => {
     const exit = await exitWithin(server, 25_000);
     expect(exit).toEqual({ code: 0, signal: null });
     expect(server.output()).toContain("Shutting down");
-    const result = await getClient().query({
-      query: "SELECT count() AS n FROM events WHERE project_id = {p:String}",
-      query_params: { p: project },
-      format: "JSONEachRow",
-    });
-    const [{ n }] = await result.json<{ n: string | number }>();
-    expect(Number(n)).toBe(20);
+    expect(await storedCount(project)).toBe(20);
+  }, 60_000);
+
+  it("exits 0 with the writers drained when a keep-alive request was in flight at SIGTERM", async () => {
+    const server = startServer(await freePort(), {});
+    expect(await ready(server)).toBe(true);
+    const project = `p-keepalive-${randomUUID()}`;
+    // Sent in part before the signal, in full after it; the client keeps the
+    // connection open afterwards, as a keep-alive agent does.
+    const request = partialRequest(server.port, project, 5, true);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    server.child.kill("SIGTERM");
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    request.finish();
+
+    const exit = await exitWithin(server, 25_000);
+    request.socket.destroy();
+    expect(exit).toEqual({ code: 0, signal: null });
+    expect(request.response()).toMatch(/^HTTP\/1\.1 200/);
+    expect(server.output()).toContain('"msg":"Shut down"');
+    expect(await storedCount(project)).toBe(5);
+  }, 60_000);
+
+  it("exits 0 with the writers drained when a request body is still arriving at SIGTERM", async () => {
+    const server = startServer(await freePort(), {});
+    expect(await ready(server)).toBe(true);
+    const project = `p-arriving-${randomUUID()}`;
+    const buffered = partialRequest(server.port, project, 20, false);
+    buffered.finish();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(buffered.response()).toMatch(/^HTTP\/1\.1 200/);
+    // A body that never completes.
+    const arriving = partialRequest(server.port, `${project}-body`, 5, false);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    server.child.kill("SIGTERM");
+
+    const exit = await exitWithin(server, 25_000);
+    arriving.socket.destroy();
+    expect(exit).toEqual({ code: 0, signal: null });
+    expect(server.output()).toContain('"msg":"Shut down"');
+    expect(await storedCount(project)).toBe(20);
   }, 60_000);
 });
+
+async function storedCount(project: string): Promise<number> {
+  const result = await getClient().query({
+    query: "SELECT count() AS n FROM events WHERE project_id = {p:String}",
+    query_params: { p: project },
+    format: "JSONEachRow",
+  });
+  const [{ n }] = await result.json<{ n: string | number }>();
+  return Number(n);
+}
+
+/**
+ * A POST of `n` widget events over a raw socket, its body sent in part:
+ * `finish()` sends the rest.
+ */
+function partialRequest(port: number, project: string, n: number, keepAlive: boolean) {
+  const traceId = `trace-${randomUUID().slice(0, 8)}`;
+  const now = Math.floor(Date.now() / 1000);
+  const token = jwtSign(
+    {
+      pid: project,
+      wid: "ws-shutdown",
+      tid: traceId,
+      sid: "ses-shutdown",
+      iat: now,
+      exp: now + 900,
+    },
+    JWT_SECRET,
+  );
+  const body = JSON.stringify({
+    events: Array.from({ length: n }, () => ({
+      event_id: randomUUID(),
+      event_type: "widget_click",
+      trace_id: traceId,
+      session_id: "ses-shutdown",
+      timestamp: new Date().toISOString(),
+      source: "widget",
+      click_count: 1,
+    })),
+  });
+  const socket = connect(port, "127.0.0.1");
+  let response = "";
+  socket.on("data", (chunk) => {
+    response += chunk;
+  });
+  socket.on("error", () => {});
+  socket.write(
+    `POST /v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${token}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: ${keepAlive ? "keep-alive" : "close"}\r\n\r\n${body.slice(0, 50)}`,
+  );
+  return { socket, finish: () => socket.write(body.slice(50)), response: () => response };
+}
