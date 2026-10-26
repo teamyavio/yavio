@@ -49,7 +49,8 @@ const DEFAULT_CAPTURE: CaptureConfig = {
  * Be clear about what that does and does not imply. It says the model-level
  * deterrent was ineffective; it does NOT say the downstream layer covers the
  * gap. stripPii() matches five shapes (email, mod-97-valid IBAN, Luhn-valid card,
- * US SSN, US-format phone) and the clamp only bounds length, so the very examples above pass
+ * dashed US SSN, and phone numbers in US formats plus international ones grouped
+ * like them; @yavio/shared/pii) and the clamp only bounds length, so the very examples above pass
  * through both untouched. Removing this clause traded a weak control for none,
  * and that is a real trade rather than a free one.
  *

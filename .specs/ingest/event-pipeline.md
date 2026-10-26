@@ -195,16 +195,21 @@ Individual event fields are validated against maximum size limits to prevent sto
 
 The PII stripping engine runs in the **ingestion API** on every event before it reaches ClickHouse. It is ON by default and cannot be disabled in Community/Cloud Free tiers. Enterprise tier allows configuration.
 
+The string-level rules live in `@yavio/shared/pii` (`stripPiiString(value, "ingest")`, #182), shared with the SDK's best-effort pass (flavor `"sdk"`: dashed SSNs only, no ITIN or address pattern); `lib/pii-stripper.ts` keeps the walk and the identifier-field exemption.
+
 | Pattern | Detection Method | Replacement |
 |---------|-----------------|-------------|
-| Email addresses | RFC 5322 regex | `[EMAIL_REDACTED]` |
-| IBANs | Compact or grouped, ISO 13616 mod-97 check (#90) | `[IBAN_REDACTED]` |
-| Credit card numbers | Luhn algorithm + format check (13–19 digits) | `[CC_REDACTED]` |
-| SSN / Tax IDs | NNN-NN-NNNN pattern and variants | `[SSN_REDACTED]` |
-| Phone numbers | International format detection (E.164 + common formats) | `[PHONE_REDACTED]` |
-| Physical addresses | Heuristic: number + street name patterns | `[ADDRESS_REDACTED]` |
+| Email addresses | `local@domain.tld` in ASCII, quantifiers bounded to the RFC 5321 lengths (linear scan) | `[EMAIL_REDACTED]` |
+| IBANs | Compact or grouped in fours, ISO 13616 mod-97 check (#90); 0.03–0.09 % of 16–32-digit hex ids pass it (#191) | `[IBAN_REDACTED]` |
+| Credit card numbers | 13–19 digits with optional space/dash separators, Luhn check; some 19-digit groupings are missed and Luhn-valid non-card numbers (ISBN, epoch ms) are hit (#190) | `[CC_REDACTED]` |
+| US SSNs | `NNN-NN-NNNN`, `NNN NN NNNN` (either separator may be missing) and the bare nine digits; area 000, 666 and 900–999 excluded. The bare form keeps `\b` boundaries (#182, decision A1), so `order_123456789` is not cut and `ssn_123456789` is not redacted | `[SSN_REDACTED]` |
+| US ITINs | `9NN-NN-NNNN`, spaced or bare (bare: `\b` boundaries, as the SSN's) | `[SSN_REDACTED]` |
+| Phone numbers | An optional `+CC` or `00CC` (1–3 digits) and `(0)`, a first group of 3–4 digits (optionally in parentheses), then 3 and 4 digits, each optionally separated by `-`, `.` or whitespace: the US formats and international numbers grouped like them (`+49 171 1234567`, `0171-1234567`, `(0171) 1234567`, `+49 (0)171 1234567`, `0049 171 1234567`); or a bare run of 12–15 digits not starting with 1 (decision A2). No E.164 parser: other groupings (`030 12345678`, `+33 6 12 34 56 78`, `0171 123 45 67`) and extensions are missed (#189); a standalone 10-digit number (epoch second, `ORD-2026-1234567890`) is hit (#192), and so is an EAN-13 | `[PHONE_REDACTED]` |
+| Physical addresses | US: house number + capitalised street name + street suffix (+ optional unit) | `[ADDRESS_REDACTED]` |
 
-The engine scans all string fields in the event, including nested JSON in the `metadata` field, except the identifier fields `event_id`, `trace_id`, `session_id`, `subject_id` and `timestamp` (#90): they hold no user content, and the phone pattern used to rewrite random ids that contained a digit run. It targets identity data; business values (prices, cities, dates, quantities) are preserved.
+Order: a string that is exactly a valid W3C traceparent is returned unchanged; email over the whole string; then UUID-shaped and traceparent-shaped tokens (any letter case, standing alone) are masked, and IBAN, card, SSN, ITIN and phone run on the text between them; address last, over the whole string. Card, SSN (separated forms), ITIN (separated forms) and phone share one boundary rule (#182): the digit run may not touch a letter or digit on either side, except that it may follow a word of 1–24 letters only, itself standing alone, with a letter outside a–f (`Tel5551234567` is redacted, `deadbeef5551234567` is not). Before #182 the phone pattern had no leading boundary and cut the last ten decimal digits of hex runs (1.8 % of UUIDs, 0.9 % of hex ids, 1.9 % of traceparents inside text), and the card pattern took all-digit UUID segments.
+
+The engine scans all string fields in the event, including nested JSON in the `metadata` field, except the identifier fields `event_id`, `trace_id`, `session_id`, `subject_id` and `timestamp` (#90): they hold no user content, and the phone pattern used to rewrite random ids that contained a digit run (the mask covers UUIDs since #182, the exemption every other id shape). It targets identity data; business values (prices, cities, dates, quantities) are preserved. Ingest cannot restore digits an SDK up to 0.5.5 replaced before sending (traits, metadata, error message, input values, output content, intent), and stored rows keep their tokens until the TTL; nothing is backfilled.
 
 > **Why server-side PII stripping?** Centralizing PII stripping in the ingestion API (instead of in each SDK) has three advantages: (1) single place to update detection patterns, (2) PII rules apply consistently regardless of SDK version, (3) easier to audit and prove GDPR compliance.
 

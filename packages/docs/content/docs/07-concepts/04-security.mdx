@@ -14,7 +14,7 @@ The PII stripping engine runs on every event before it reaches ClickHouse. It is
 PII stripping uses a two-layer strategy:
 
 1. **SDK layer** — a lightweight, non-configurable best-effort pass strips common PII patterns before events leave the developer's process
-2. **Ingestion API layer** — a full configurable scrub runs as the authoritative safety net before writing to ClickHouse
+2. **Ingestion API layer** — the authoritative pass, with the same patterns plus spaced and bare SSNs, ITINs and US street addresses, runs before writing to ClickHouse
 
 This ensures PII is caught regardless of SDK version and provides redundancy if either layer has a bug.
 
@@ -22,12 +22,17 @@ This ensures PII is caught regardless of SDK version and provides redundancy if 
 
 | Pattern | Detection Method | Replacement | Layer |
 |---------|-----------------|-------------|-------|
-| Email addresses | RFC 5322 regex | `[EMAIL_REDACTED]` | SDK + Ingest |
-| IBANs | Compact or grouped, ISO 13616 mod-97 check | `[IBAN_REDACTED]` | SDK + Ingest |
-| Credit card numbers | Luhn algorithm + format check | `[CC_REDACTED]` | SDK + Ingest |
-| SSN / Tax IDs | NNN-NN-NNNN patterns | `[SSN_REDACTED]` | SDK + Ingest |
-| Phone numbers | International format detection (E.164 + common formats) | `[PHONE_REDACTED]` | SDK + Ingest |
-| Physical addresses | Heuristic: number + street name patterns | `[ADDRESS_REDACTED]` | Ingest only |
+| Email addresses | `local@domain.tld` in ASCII, lengths bounded as in RFC 5321 | `[EMAIL_REDACTED]` | SDK + Ingest |
+| IBANs | Compact or grouped in fours, ISO 13616 mod-97 check (a hex id that happens to pass it is redacted too, [#191](https://github.com/teamyavio/yavio/issues/191)) | `[IBAN_REDACTED]` | SDK + Ingest |
+| Credit card numbers | 13–19 digits, optionally separated by spaces or dashes, Luhn check (some 19-digit groupings are missed, [#190](https://github.com/teamyavio/yavio/issues/190)) | `[CC_REDACTED]` | SDK + Ingest |
+| US Social Security numbers | SDK: `NNN-NN-NNNN` with any area number (so a dashed ITIN too). Ingest: also `NNN NN NNNN` and the bare nine digits, without the never-issued area numbers 000, 666 and 900–999 ([#193](https://github.com/teamyavio/yavio/issues/193) aligns the two) | `[SSN_REDACTED]` | SDK + Ingest |
+| US ITINs | `9NN-NN-NNNN`, spaced or bare | `[SSN_REDACTED]` | Ingest (the SDK only dashed, as an SSN) |
+| Phone numbers | Groups of 3–4, 3 and 4 digits, separated by `-`, `.` or a space or not at all, the first optionally in parentheses, with an optional `+CC` or `00CC` and `(0)` in front: the US formats and international numbers of that shape (`+49 171 1234567`, `0171-1234567`, `+49 (0)171 1234567`); and a bare run of 12–15 digits that does not start with 1. There is no E.164 parser: other groupings (`030 12345678`, `+33 6 12 34 56 78`, `0171 123 45 67`) and extensions are not matched ([#189](https://github.com/teamyavio/yavio/issues/189)) | `[PHONE_REDACTED]` | SDK + Ingest |
+| Physical addresses | US street addresses: house number, capitalised street name, street suffix (`Street`, `Ave`, `Blvd`, …), optional unit | `[ADDRESS_REDACTED]` | Ingest only |
+
+A card, SSN, ITIN or phone number must stand on its own: a digit run that touches a letter or digit on either side is part of an id, not a number (`deadbeef5551234567`, `order5551234567x`). The one exception is a run right after a word of up to 24 letters only that has a letter outside a–f, so `Tel5551234567` is still redacted (`cafe5551234567` is not). In ingest, the bare nine-digit SSN and ITIN keep word boundaries instead, so `order_123456789` stays intact and `ssn_123456789` is not redacted either. UUID-shaped and traceparent-shaped values, in any letter case, are masked before these patterns run, and a string that is exactly a valid W3C traceparent is left alone. Since SDK 0.5.6 and the ingest deployed with it ([#182](https://github.com/teamyavio/yavio/issues/182)); before, the phone and card patterns cut the digits of about 1.8 % of random UUIDs and 0.9 % of hex ids, and ingest cannot restore what an older SDK already replaced.
+
+Known false positives: a standalone 10-digit number, such as an epoch second or `ORD-2026-1234567890`, is redacted as a phone number ([#192](https://github.com/teamyavio/yavio/issues/192)), and so is a 12–15-digit number that does not start with 1, such as an EAN-13; a Luhn-valid 13–19-digit number is redacted as a card number ([#190](https://github.com/teamyavio/yavio/issues/190)).
 
 Both layers scan all string fields in the event, including nested JSON in `metadata`. Ingest leaves the identifier fields (`event_id`, `trace_id`, `session_id`, `subject_id`) and the timestamp alone: they hold no user content, and a digit run in a random id must not be mistaken for a phone number. They target identity data — business values like prices, cities, dates, and quantities are preserved.
 

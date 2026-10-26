@@ -603,7 +603,8 @@ function wrapToolCallback(
           // text of an isError result, see the success path). Input capture
           // does: messages routinely interpolate the arguments
           // (`IBAN ${iban} rejected`, a ZodError echoing received values),
-          // and stripPii does not catch IBANs or customer numbers.
+          // and stripPii does not catch names or customer numbers (an IBAN only
+          // with valid check digits).
           errorMessage: capture.inputValues
             ? error instanceof Error
               ? error.message

@@ -76,7 +76,7 @@ yavio-platform/
 │   │   │   │   ├── rate-limit.ts # Per-key rate limiting
 │   │   │   │   └── validate.ts # Schema validation
 │   │   │   ├── pipeline/
-│   │   │   │   ├── pii.ts      # PII stripping engine
+│   │   │   │   ├── pii.ts      # PII stripping walk (lib/pii-stripper.ts; rules in @yavio/shared/pii)
 │   │   │   │   ├── enrich.ts   # Event enrichment (workspace_id, project_id)
 │   │   │   │   └── writer.ts   # ClickHouse batch writer
 │   │   │   └── health.ts       # GET /health — liveness probe
@@ -89,6 +89,7 @@ yavio-platform/
 │   │   └── package.json         # "bin": { "yavio": "./dist/cli.mjs" }
 │   ├── shared/                 # Shared types between dashboard and ingest
 │   │   ├── events.ts           # Event schema & types
+│   │   ├── pii.ts              # PII string rules for the SDK and ingest (@yavio/shared/pii, #182)
 │   │   └── validation.ts       # Shared validation schemas
 │   └── db/                     # Shared database layer (@yavio/db)
 │       ├── src/

@@ -11,7 +11,7 @@ Some tools take data that must never reach analytics — a booking tool with an 
 | `capture.inputValues: false` (global) | Loses input capture for *every* tool, including the ones the dashboard is for. |
 | Register the tool on the unwrapped server | No `tool_call` event (latency, status, intent lost) **and** `yavio.conversion()` / `track()` / `step()` / `identify()` become silent no-ops: `createYavioContext()` is built without a fallback store and only emits inside a wrapped callback's `AsyncLocalStorage` context. Verified 2026-08-26 with a capture endpoint: two bookings, zero conversion events, no warning. |
 
-`stripPii()` is not a substitute: it matches emails, Luhn-valid card numbers, US SSNs and US phone formats — not IBANs, names, addresses or birth dates.
+`stripPii()` is not a substitute: it matches emails, IBANs with valid check digits, Luhn-valid card numbers, dashed US SSNs, and phone numbers in the US formats plus the international numbers grouped like them (`@yavio/shared/pii`, #182) — not names, addresses, customer numbers or birth dates.
 
 > **Since 0.5.0 (#133):** the second option only exists under `withYavio()`. `createYavio().wrap()` instruments every tool on the server, including those registered before the wrap, so under `wrap()` the `tools` override is the only way to keep a tool's input out — see [per-request-servers.md](./per-request-servers.md).
 

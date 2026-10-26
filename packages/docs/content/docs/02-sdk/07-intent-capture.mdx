@@ -77,12 +77,13 @@ Two token-related costs are worth knowing: the parameter description (~11 words)
 
 Intent is free text written by a model from your end user's conversation, so treat it as user-generated content rather than a controlled field.
 
-Two things happen to it unconditionally, before the event leaves your process: it is passed through the SDK's PII stripper, and it is clamped to 500 characters. **Neither makes it safe to store arbitrary conversation text.** The stripper matches four specific shapes — email addresses, Luhn-valid card numbers, US Social Security numbers and US-format phone numbers — and the ingestion API adds ITIN and US street addresses. That is a backstop for the most obvious identifiers, not a general-purpose redactor.
+Two things happen to it unconditionally, before the event leaves your process: it is passed through the SDK's PII stripper, and it is clamped to 500 characters. **Neither makes it safe to store arbitrary conversation text.** The stripper matches five specific shapes — email addresses, IBANs with valid check digits, Luhn-valid card numbers, dashed US Social Security numbers, and phone numbers in the US formats plus the international numbers grouped like them (`+49 171 1234567`, `0171-1234567`) — and the ingestion API adds spaced and bare SSNs, ITINs and US street addresses ([Security](/docs/07-concepts/04-security#what-gets-redacted) has the exact shapes). That is a backstop for the most obvious identifiers, not a general-purpose redactor.
 
 Everything outside those shapes is stored verbatim. In practice that includes:
 
 - financial details a user states in conversation — income, balances, investment amounts
-- names, employers, job titles, and non-US addresses and phone formats
+- names, employers, job titles, and non-US addresses
+- phone numbers grouped differently (`030 12345678`, `+33 6 12 34 56 78`, `0171 123 45 67`) and extensions ([#189](https://github.com/teamyavio/yavio/issues/189))
 - health, legal or other sensitive context that made it into the user's question
 - credentials or keys a user pastes, unless they happen to match one of the patterns above
 

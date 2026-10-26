@@ -140,7 +140,7 @@ Use this for a tool whose input must never reach analytics — an IBAN, a messag
 Tool names are not validated — tools register after `withYavio()` runs — so an override for a name that never registers is simply unused. There is no environment-variable form.
 
 <Callout type="info">
-  The SDK's PII stripper only matches emails, Luhn-valid card numbers, US Social Security numbers and US-format phone numbers. It is not a substitute for an override on a tool that takes names, addresses, IBANs or dates of birth.
+  The SDK's PII stripper only matches emails, IBANs with valid check digits, Luhn-valid card numbers, dashed US Social Security numbers, and phone numbers in the US formats plus the international numbers grouped like them (`+49 171 1234567`, `0171-1234567`; see [Security](/docs/07-concepts/04-security#what-gets-redacted) for the exact shapes). It is not a substitute for an override on a tool that takes names, addresses, customer numbers or dates of birth.
 </Callout>
 
 ## Session key
