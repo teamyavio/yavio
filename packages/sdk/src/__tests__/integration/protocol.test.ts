@@ -804,10 +804,19 @@ describe("task-based tools on MCP SDK v1 (#172): not tracked, the documented cav
     _resetGlobalState();
   });
 
-  const registerTask = (server: McpServer) =>
+  /** `export_report` requires task augmentation; `export_draft` takes a plain call too. */
+  const registerTasks = (server: McpServer) => {
+    registerTask(server, "export_report", "required");
+    registerTask(server, "export_draft", "optional");
+  };
+  const registerTask = (server: McpServer, name: string, taskSupport: "required" | "optional") =>
     server.experimental.tasks.registerToolTask(
-      "export_report",
-      { description: "Export a monthly report", inputSchema: { month: z.string() } },
+      name,
+      {
+        description: "Export a monthly report",
+        inputSchema: { month: z.string() },
+        execution: { taskSupport },
+      },
       {
         async createTask({ month }, { taskStore, taskRequestedTtl }) {
           const task = await taskStore.createTask({ ttl: taskRequestedTtl, pollInterval: 20 });
@@ -830,7 +839,7 @@ describe("task-based tools on MCP SDK v1 (#172): not tracked, the documented cav
     );
 
   it.each(["withYavio", "createYavio().wrap()"] as const)(
-    "%s: the task runs for the client, a plain tool on the same server is one tool_call, the task tool has none",
+    "%s: the task runs for the client, a plain tool on the same server is one tool_call, the task tools have none",
     async (entry) => {
       const options = { apiKey: "yav_tasks", endpoint: ingest.endpoint, serverOnly: true };
       // withYavio() has no shutdown(): one client for the same key and endpoint does it.
@@ -846,11 +855,11 @@ describe("task-based tools on MCP SDK v1 (#172): not tracked, the documented cav
       if (entry === "withYavio") {
         // Both through the proxy, which tracks the tools registered on it.
         server = withYavio(raw, options);
-        registerTask(server);
+        registerTasks(server);
         registerPlain(server);
       } else {
         // A per-request host registers first; wrap() instruments what it finds.
-        registerTask(raw);
+        registerTasks(raw);
         registerPlain(raw);
         server = analytics.wrap(raw);
       }
@@ -886,13 +895,22 @@ describe("task-based tools on MCP SDK v1 (#172): not tracked, the documented cav
         { type: "text", text: "report for 2026-10" },
       ]);
 
+      // A plain call to an optional task tool: v1 creates the task and polls
+      // it itself, and the client gets the final result.
+      const draft = await client.callTool({
+        name: "export_draft",
+        arguments: { month: "2026-11" },
+      });
+      expect(draft.content).toEqual([{ type: "text", text: "report for 2026-11" }]);
+
       const plain = await client.callTool({ name: "lookup", arguments: { id: "A1" } });
       expect(plain.isError).toBeFalsy();
       await client.close();
       await analytics.shutdown();
 
-      // Delivery works (the plain tool's event arrived); the task tool, its
-      // refused call included, left no tool_call and no tool_discovery.
+      // Delivery works (the plain tool's event arrived); the task tools, the
+      // refused and the plain call included, left no tool_call and no
+      // tool_discovery.
       expect(ingest.ofType("tool_call").map((e) => [e.event_name, e.status])).toEqual([
         ["lookup", "success"],
       ]);
