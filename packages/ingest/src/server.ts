@@ -5,6 +5,7 @@ import { createApp } from "./index.js";
 import { BatchWriter } from "./lib/batch-writer.js";
 import { type EnrichedEvent, toClickHouseDateTime } from "./lib/event-enricher.js";
 import { RateLimiter } from "./lib/rate-limiter.js";
+import { deferredWriterLogger } from "./lib/writer-logger.js";
 import { StatsJob } from "./stats/job.js";
 import { PgStatsJobStore } from "./stats/store.js";
 
@@ -33,13 +34,15 @@ async function main() {
   const config = loadConfig();
 
   const clickhouse = createClickHouseClient(config.clickhouseUrl);
-  const batchWriter = new BatchWriter({ clickhouse });
+  const writerLog = deferredWriterLogger();
+  const batchWriter = new BatchWriter({ clickhouse, logger: writerLog.logger });
   batchWriter.start();
 
   const toolRegistryWriter = new BatchWriter({
     clickhouse,
     table: "tool_registry",
     mapRow: mapToolRegistryRow,
+    logger: writerLog.logger,
     flushIntervalMs: 5_000,
     flushSize: 100,
     maxBufferSize: 1_000,
@@ -72,6 +75,7 @@ async function main() {
     trustProxy: config.trustProxy,
     requestTimeoutMs: config.requestTimeoutMs,
   });
+  writerLog.attach(app.log);
 
   // Anonymous statistics (#85): daily, under a Postgres advisory lock.
   let statsJob: StatsJob | null = null;

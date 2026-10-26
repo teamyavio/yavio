@@ -571,21 +571,24 @@ describe("zod 3 acceptance", () => {
   // the schemas, so a new field, or one switched back to a plain zod 4 form,
   // fails here until the tables say which rule it follows.
   describe("every number and bounded string field", () => {
-    type NumberRule = "number" | "int" | "own bound";
-    /** zod 3's `z.number()` (jsonNumber), zod 3's `.int()` (jsonInt), or a bound of its own. */
+    type NumberRule = "Float64" | "Float32" | "UInt16" | "UInt32" | "own bound";
+    /**
+     * The column's bounds on zod 3's rules (jsonNumber, jsonInt), or a bound
+     * of its own (numeric-bounds.test.ts checks each field against its column).
+     */
     const NUMBER_RULES: Record<string, NumberRule> = {
-      latency_ms: "number",
-      connection_duration_ms: "number",
-      conversion_value: "number",
-      device_pixel_ratio: "number",
-      visible_duration_ms: "number",
-      load_time_ms: "number",
-      tokens_in: "int",
-      tokens_out: "int",
-      step_sequence: "int",
-      viewport_width: "int",
-      viewport_height: "int",
-      click_count: "int",
+      latency_ms: "Float64",
+      connection_duration_ms: "Float64",
+      conversion_value: "Float64",
+      device_pixel_ratio: "Float32",
+      visible_duration_ms: "Float64",
+      load_time_ms: "Float64",
+      tokens_in: "UInt32",
+      tokens_out: "UInt32",
+      step_sequence: "UInt32",
+      viewport_width: "UInt16",
+      viewport_height: "UInt16",
+      click_count: "UInt32",
       is_retry: "own bound",
       device_touch: "own bound",
       scroll_depth_pct: "own bound",
@@ -647,26 +650,34 @@ describe("zod 3 acceptance", () => {
       );
       const withRule = (rule: NumberRule) =>
         numberFields.filter((f) => NUMBER_RULES[f.field] === rule).length;
-      expect(withRule("number")).toBe(8);
-      expect(withRule("int")).toBe(8);
+      expect(withRule("Float64") + withRule("Float32")).toBe(8);
+      expect(withRule("UInt32") + withRule("UInt16")).toBe(8);
       // session_source, platform and sdk_version are on every event type.
       expect(stringFields).toHaveLength(3 * IngestEvent.options.length + 14);
     });
 
     it.each(numberFields.map((f) => [f.name, f] as const))(
-      "%s keeps zod 3's number rule",
+      "%s follows its column's number rule",
       (_, f) => {
         const rule = NUMBER_RULES[f.field];
-        if (rule === "number") {
+        if (rule === "Float64" || rule === "Float32") {
+          // Finite: ±Infinity, what JSON.parse makes of 1e999, would be
+          // serialised as null. A fraction or a negative is stored as sent.
           expect(INFINITY).toBe(Number.POSITIVE_INFINITY);
-          expect(accepts(f, INFINITY)).toBe(true);
-          expect(accepts(f, MINUS_INFINITY)).toBe(true);
+          expect(accepts(f, INFINITY)).toBe(false);
+          expect(accepts(f, MINUS_INFINITY)).toBe(false);
           expect(accepts(f, 1.5)).toBe(true);
+          expect(accepts(f, -2)).toBe(true);
           expect(accepts(f, Number.NaN)).toBe(false);
           expect(accepts(f, "5")).toBe(false);
-        } else if (rule === "int") {
-          expect(accepts(f, 2 ** 53)).toBe(true);
-          expect(accepts(f, 2 ** 53 + 2)).toBe(true);
+          expect(accepts(f, 1e300)).toBe(rule === "Float64");
+        } else if (rule === "UInt32" || rule === "UInt16") {
+          const max = rule === "UInt32" ? 4_294_967_295 : 65_535;
+          expect(accepts(f, 0)).toBe(true);
+          expect(accepts(f, max)).toBe(true);
+          expect(accepts(f, max + 1)).toBe(false);
+          expect(accepts(f, -1)).toBe(false);
+          expect(accepts(f, 2 ** 53)).toBe(false);
           expect(accepts(f, 1.5)).toBe(false);
           expect(accepts(f, INFINITY)).toBe(false);
         } else {

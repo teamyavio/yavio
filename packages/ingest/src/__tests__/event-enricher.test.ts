@@ -78,4 +78,30 @@ describe("enrichEvents", () => {
     const enriched = enrichEvents(events, authContext);
     expect(enriched[0].metadata).toBeUndefined();
   });
+
+  it("puts U+FFFD in place of a lone surrogate, which ClickHouse refuses in a String column", () => {
+    const [event] = enrichEvents(
+      [
+        makeEvent({
+          event_name: "a\ud800b",
+          error_message: "\udc00 at the start, a pair 😀 kept",
+          user_id: "\ud83d",
+          metadata: { note: "x\ud800" },
+        }),
+      ],
+      authContext,
+    );
+    expect(event.event_name).toBe("a�b");
+    expect(event.error_message).toBe("� at the start, a pair 😀 kept");
+    expect(event.user_id).toBe("�");
+    // Inside a JSON field JSON.stringify escapes it as text, which ClickHouse stores.
+    expect(event.metadata).toBe('{"note":"x\\ud800"}');
+  });
+
+  it("leaves well-formed strings as they are", () => {
+    const original = makeEvent({ event_name: "ünïcödé 😀 ✓" });
+    const [event] = enrichEvents([original], authContext);
+    expect(event.event_name).toBe("ünïcödé 😀 ✓");
+    expect(event.trace_id).toBe(original.trace_id);
+  });
 });

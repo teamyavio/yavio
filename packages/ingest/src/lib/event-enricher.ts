@@ -42,11 +42,25 @@ export function toClickHouseDateTime(iso: string): string {
   return iso.replace("T", " ").replace("Z", "");
 }
 
-function stringifyJsonFields(event: Record<string, unknown>): Record<string, unknown> {
+/** ES2024 string methods (Node 20+), not in the ES2022 lib this package builds against. */
+type WellFormedString = string & { isWellFormed(): boolean; toWellFormed(): string };
+
+/**
+ * - Object-valued JSON fields are serialised (`JSON_FIELDS`).
+ * - A string with a lone UTF-16 surrogate gets U+FFFD in its place, as
+ *   TextEncoder does. JSON allows one ("\ud800"); UTF-8 cannot encode it,
+ *   and ClickHouse refuses the row (CANNOT_PARSE_ESCAPE_SEQUENCE), which
+ *   the batch writer would then drop. Inside a JSON field it is harmless:
+ *   JSON.stringify escapes it as text, stored as is.
+ */
+function toColumnValues(event: Record<string, unknown>): Record<string, unknown> {
   const result = { ...event };
-  for (const field of JSON_FIELDS) {
-    const value = result[field];
-    if (value !== undefined && value !== null && typeof value === "object") {
+  for (const [field, value] of Object.entries(result)) {
+    if (typeof value === "string") {
+      if (!(value as WellFormedString).isWellFormed()) {
+        result[field] = (value as WellFormedString).toWellFormed();
+      }
+    } else if (JSON_FIELDS.has(field) && value !== null && typeof value === "object") {
       result[field] = JSON.stringify(value);
     }
   }
@@ -55,14 +69,15 @@ function stringifyJsonFields(event: Record<string, unknown>): Record<string, unk
 
 /**
  * Enrich validated events with the auth context. Also serializes
- * object-valued fields to JSON strings for ClickHouse and converts DateTime
- * fields to ClickHouse-compatible format. `ingested_at` is left to the
- * column DEFAULT (see `EnrichedEvent`).
+ * object-valued fields to JSON strings for ClickHouse, makes strings
+ * well-formed UTF-16 (`toColumnValues`) and converts DateTime fields to
+ * ClickHouse-compatible format. `ingested_at` is left to the column DEFAULT
+ * (see `EnrichedEvent`).
  */
 export function enrichEvents(events: BaseEvent[], authContext: AuthContext): EnrichedEvent[] {
   return events.map(
     (event) =>
-      stringifyJsonFields({
+      toColumnValues({
         ...event,
         timestamp: toClickHouseDateTime(event.timestamp),
         workspace_id: authContext.workspaceId,

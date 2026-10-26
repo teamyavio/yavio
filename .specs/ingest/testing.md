@@ -196,6 +196,12 @@ The string rules are `@yavio/shared/pii`: its tests hold the exact-output table 
 | Maximum field lengths | Accepted up to limit, truncated or rejected beyond |
 | Concurrent requests from multiple API keys | Events correctly attributed to respective projects |
 | Rapid sequential batches | No event loss, correct ordering within batches |
+| An event a column cannot store, handed to the writer below the schema (−1 and `1e21` into UInt32, a fraction into UInt16), among valid events | The valid events are stored, the refused ones dropped with one warning (ids and error names, no values), the next flush goes through (`integration/insert-isolation.test.ts`) |
+| Row error codes | `ROW_ERROR_CODES` names match `errorCodeToName` on the server |
+| Numeric bounds | Each numeric field's column type matches its bound; the largest accepted values are stored as sent (Float32's largest, not `inf`); an out-of-range number is rejected per event (207) |
+| A lone surrogate in a string field | Stored with U+FFFD in its place |
+| Batch writer, mocked ClickHouse (`batch-writer.test.ts`) | Success: one insert of the batch as buffered. Refused rows: 1 and k among n isolated, each split part with a token of its own, at most 64 isolation inserts per flush, nothing dropped when every row is refused. Other errors: rows kept as one batch with one token; after 5 failed flushes retried behind newer events and split, so neither newer events nor the rows batched with them are held back; kept rows count towards backpressure |
+| Numeric bounds per field kind (`@yavio/shared` `numeric-bounds.test.ts`, ingest `numeric-bounds.test.ts`) | UInt16/UInt32: −1, 2^n, 1e21 and fractions rejected; Float64: ±Infinity rejected, fractions, negatives and 1e21 accepted; Float32: beyond ±3.4028234663852886e38 rejected; every numeric schema field is in the table |
 
 ## Load Tests (P1)
 

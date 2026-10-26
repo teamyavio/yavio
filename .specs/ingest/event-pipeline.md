@@ -197,7 +197,34 @@ Events are not written to ClickHouse one-by-one. The ingestion API accumulates e
 | Flush interval | 1 second | Low latency for live feed. ClickHouse handles 1/s inserts well. |
 | Max batch size | 10,000 events | Triggers early flush if buffer fills |
 | Insert method | `INSERT INTO events FORMAT JSONEachRow` | Native ClickHouse batch insert. Most efficient method. |
-| Error handling | Retry failed batches up to 3 times with exponential backoff. Return 503 on persistent failure. | SDK-level retries provide recovery for transient ClickHouse outages. |
+| Error handling | An insert that fails for a reason other than its rows (network, timeout, overload, too many parts) is tried 3 times with exponential backoff (1 s, 2 s); its rows are then kept and retried as the same batch. An insert ClickHouse refuses because of a row is split until the refused rows are found (below). Return 503 once the buffer and the kept rows together reach 100,000 events. | SDK-level retries provide recovery for transient ClickHouse outages. |
+
+**Rows ClickHouse refuses** (`lib/batch-writer.ts`). An event with a value outside its column's range (−1 or `1e+21` in a UInt32 column, a string with a lone surrogate escape) does not fail the insert of the events buffered with it:
+
+- **Row errors** are the ClickHouse error codes about the rows' content (`ROW_ERROR_CODES`: `CANNOT_PARSE_*`, `TYPE_MISMATCH`, `INCORRECT_DATA`, `VALUE_IS_OUT_OF_RANGE_OF_DATA_TYPE`, `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN` and the like, matched by code, names checked against ClickHouse 26.8). Such an insert is not retried after a backoff: it is split in halves, each inserted on its own, down to the single rows ClickHouse refuses (about 28 inserts for one such row among 10,000). The other rows are stored; the refused ones are dropped, with one warning per flush naming the count, up to 5 event ids, the project ids and the error names, never a field value. A flush spends at most 64 inserts on this; what it has not isolated by then is kept for the next one. Refused rows are dropped only when the same flush stored other rows: when ClickHouse refuses every row, the table rather than the rows is at fault, and they are kept (`Kept N events ...`) until a flush stores rows again.
+- **Every other error** keeps the rows, as one batch with its deduplication token (migration 0014), never merged with newer events. For 5 flushes in a row such a batch is retried first, with 3 attempts, and its failure ends the flush (the newer events wait, as before). From then on it is retried after the newer events, with one attempt per flush, and split in halves each time it fails again, so that a row failing for a reason not recognised as a row error holds back neither the buffer nor the rows batched with it. Nothing is dropped for such an error; a warning (`N events failed to insert in 5 flushes in a row ...`, with the error's name or code) marks the change.
+- **On success** a flush is one insert of the next batch, as before.
+- The writers' warnings go to the ingest log with their details as fields (`lib/writer-logger.ts`); until this change they had no logger in production.
+
+**Numeric fields are bounded by their columns** (`@yavio/shared/events`), so that such a value is rejected per event at validation (207, or 400 when no event is left) rather than reaching the writer. Integers beyond a UInt column's range are not refused by ClickHouse but wrap around (2^32 into a UInt32 is stored as 0), Float32 beyond its range becomes `inf`, and ±Infinity — what `JSON.parse` makes of `1e999` — was serialised as `null`; these are rejected too. Values the column stores as sent, such as a fraction or a negative in a Float64 column, stay accepted.
+
+| Field | Event types | Column | Accepted |
+|-------|-------------|--------|----------|
+| `latency_ms` | `tool_call`, `sampling_call`, `elicitation` | `Nullable(Float64)` | finite |
+| `connection_duration_ms` | `connection` | `Nullable(Float64)` | finite |
+| `conversion_value` | `conversion` | `Nullable(Float64)` | finite |
+| `visible_duration_ms` | `widget_visibility` | `Nullable(Float64)` | finite |
+| `load_time_ms` | `widget_performance` | `Nullable(Float64)` | finite |
+| `scroll_depth_pct` | `widget_scroll` | `Nullable(Float64)` | 0–100 (unchanged) |
+| `device_pixel_ratio` | `widget_render` | `Nullable(Float32)` | ±3.4028234663852886e38 |
+| `tokens_in`, `tokens_out` | `tool_call`, `sampling_call` | `Nullable(UInt32)` | integer, 0–4,294,967,295 |
+| `step_sequence` | `step` | `Nullable(UInt32)` | integer, 0–4,294,967,295 |
+| `click_count` | `widget_click` | `Nullable(UInt32)` | integer, 0–4,294,967,295 |
+| `viewport_width`, `viewport_height` | `widget_render` | `Nullable(UInt16)` | integer, 0–65,535 |
+| `is_retry` | `tool_call` | `UInt8` | integer, 0–1 (unchanged) |
+| `device_touch` | `widget_render` | `Nullable(UInt8)` | integer, 0–1 (unchanged) |
+
+String fields reach ClickHouse well-formed: the enricher puts U+FFFD in place of a lone UTF-16 surrogate (`event-enricher.ts`), which JSON allows and ClickHouse refuses in a String column.
 
 ## 6.2.8 Event Field Size Limits
 
@@ -295,7 +322,7 @@ When a widget JWT is presented:
 
 > **Status:** Post-V1 enhancement. Not implemented in the initial release.
 
-When the ClickHouse batch writer exhausts all retries, failed batches are currently dropped (SDKs will retry from their side). A future enhancement adds a **disk-based dead-letter queue** for persistent failure recovery:
+The batch writer keeps the rows of a failed insert in memory and retries them (§6.2.7); it drops only rows ClickHouse refuses on their own, and what is still unwritten at shutdown (after 10 s) or when the process ends. A future enhancement adds a **disk-based dead-letter queue** for persistent failure recovery:
 
 - **Format:** NDJSON files written to a configurable directory (e.g., `/var/lib/yavio/dead-letter/`)
 - **Replay:** Automatic replay on service restart, or manual replay via CLI command
