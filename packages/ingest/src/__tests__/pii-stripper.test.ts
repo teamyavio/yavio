@@ -222,7 +222,12 @@ describe("identifier fields are not stripped (#90)", () => {
 
   it("strips ids too when no exemption is passed (the old behaviour)", () => {
     const { result } = stripPii([event]);
-    expect(result[0].event_id).toContain("[PHONE_REDACTED]");
+    expect(result[0].trace_id).toBe("tr_[PHONE_REDACTED]");
+    expect(result[0].subject_id).toBe("v1/[PHONE_REDACTED]");
+    // Since #182 a UUID is masked before the digit patterns run, so this one
+    // survives even without the exemption; the exemption still guards the
+    // other id shapes above.
+    expect(result[0].event_id).toBe(event.event_id);
   });
 });
 
@@ -239,17 +244,29 @@ describe("a W3C traceparent (#173)", () => {
     expect(piiDetected).toBe(false);
   });
 
+  it("strips the text around one and leaves the traceparent intact (#182)", () => {
+    // The exact-format exemption is for the whole string. Inside text the
+    // value is masked instead: the phone number after it is still redacted,
+    // its hex ids are no longer cut (`…-b7ad6b[PHONE_REDACTED]-01` before).
+    expect(stripPiiFromString(`${W3C} call 555-123-4567`)).toEqual({
+      result: `${W3C} call [PHONE_REDACTED]`,
+      redacted: true,
+    });
+  });
+
   it.each([
-    ["text around one", `${W3C} call 555-123-4567`],
     ["upper-case hex", W3C.toUpperCase()],
     ["version ff", `ff${W3C.slice(2)}`],
     ["an all-zero trace id", `00-${"0".repeat(32)}-b7ad6b7169203331-01`],
     ["an all-zero parent id", `00-0af7651916cd43dd8448eb2155501340-${"0".repeat(16)}-01`],
     ["a higher version's extra field", `01${W3C.slice(2)}-00`],
     ["a trailing newline", `${W3C}\n`],
-  ])("strips %s as before: the exemption is for the exact format only", (_case, value) => {
-    const { result, redacted } = stripPiiFromString(value);
-    expect(result).toContain("[PHONE_REDACTED]");
-    expect(redacted).toBe(true);
-  });
+  ])(
+    "does not cut %s: an invalid traceparent still has a traceparent's shape (#182)",
+    (_case, value) => {
+      // Not exempt as a valid traceparent, but masked like any value of that
+      // shape: random hex, so nothing for the digit patterns to find.
+      expect(stripPiiFromString(value)).toEqual({ result: value, redacted: false });
+    },
+  );
 });

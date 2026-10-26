@@ -226,10 +226,9 @@ describe("POST /v1/events — processing scenarios", () => {
     const metadata = JSON.parse(event.metadata as string);
     expect(metadata.traceparent).toBe(traceparent);
     expect(metadata.input_rounds).toBe(1);
-    // Only the exact format is left alone: text around one is stripped as before.
-    expect(metadata.note).toBe(
-      "00-0af7651916cd43dd8448eb211c80319c-b7ad6b[PHONE_REDACTED]-01 call [PHONE_REDACTED]",
-    );
+    // Text around one is still stripped; the traceparent in it is masked,
+    // not cut (#182).
+    expect(metadata.note).toBe(`${traceparent} call [PHONE_REDACTED]`);
   });
 
   it("enriches events with workspace and project IDs", async () => {

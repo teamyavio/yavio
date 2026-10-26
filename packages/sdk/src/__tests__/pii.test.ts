@@ -122,19 +122,41 @@ describe("a W3C traceparent (#173)", () => {
     expect(stripPii({ traceparent })).toEqual({ traceparent });
   });
 
-  it("strips a string that merely contains a traceparent, or an invalid one, as before", () => {
-    // The exemption is for the exact format, not for text around one.
+  it("strips the text around a traceparent-shaped value, never the value itself (#182)", () => {
+    // Only the exact, valid format is exempt as a whole string. A
+    // traceparent-shaped value inside text, or an invalid one, is masked
+    // instead: the patterns run around it, so the phone number is redacted
+    // and the hex ids are not cut (before #182: `…-b7ad6b[PHONE_REDACTED]-01`).
     const text = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01 call 555-123-4567";
     expect(stripPii(text)).toBe(
-      "00-0af7651916cd43dd8448eb211c80319c-b7ad6b[PHONE_REDACTED]-01 call [PHONE_REDACTED]",
+      "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01 call [PHONE_REDACTED]",
     );
-    // Upper-case hex is not a valid traceparent (W3C §3.2.2).
-    expect(stripPii("00-0AF7651916CD43DD8448EB211C80319C-B7AD6B7169203331-01")).toContain(
-      "[PHONE_REDACTED]",
+    // Upper-case hex is not a valid traceparent (W3C §3.2.2), but it is one's shape.
+    expect(stripPii("00-0AF7651916CD43DD8448EB211C80319C-B7AD6B7169203331-01")).toBe(
+      "00-0AF7651916CD43DD8448EB211C80319C-B7AD6B7169203331-01",
     );
-    // Version ff is invalid (§3.2.2.1).
-    expect(stripPii("ff-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")).toContain(
-      "[PHONE_REDACTED]",
+    // Version ff is invalid (§3.2.2.1), but it is one's shape too.
+    expect(stripPii("ff-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")).toBe(
+      "ff-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
     );
+  });
+});
+
+describe("ids and the digit patterns (#182)", () => {
+  // The phone pattern had no leading boundary: it took the last ten decimal
+  // digits of a hex run, 1.8 % of random UUIDs. The card pattern took the
+  // all-digit segments of a UUID. The full corpus is in
+  // packages/shared/src/__tests__/pii-ids.test.ts.
+  it("leaves UUIDs and hex ids in nested input alone, and still strips PII next to them", () => {
+    const input = {
+      order: "47e16ee3-3d22-430b-acb1-959114949231",
+      upper: "21165216-7349-4227-981E-DF7D3BF851DC",
+      hex: "b7ad6b7169203331",
+      note: "47e16ee3-3d22-430b-acb1-959114949231 call 0171-1234567",
+    };
+    expect(stripPii(input)).toEqual({
+      ...input,
+      note: "47e16ee3-3d22-430b-acb1-959114949231 call [PHONE_REDACTED]",
+    });
   });
 });
