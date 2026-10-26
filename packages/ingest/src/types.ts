@@ -33,5 +33,7 @@ declare module "fastify" {
     eventsCharged: boolean;
     /** Charged to the auth-failure bucket on arrival: a header-less events request (plugins/rate-limit.ts). */
     authFailureCharged: boolean;
+    /** Bytes of body the events route's parser read (0 when it read none). */
+    bodyBytes: number;
   }
 }

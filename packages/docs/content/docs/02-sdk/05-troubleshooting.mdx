@@ -26,7 +26,8 @@ If you see `YAVIO-1000` in your logs, the SDK couldn't find an API key. Check:
 
 The ingestion API enforces rate limits:
 - **Per API key:** 1,000 events/second (5,000-event burst)
-- **Per widget token:** 50 events/second (1,000-event burst)
+- **Per widget token:** 50 events/second (1,000-event burst); a request with a large body counts one per KiB
+- **Per project, all widgets:** 1,000 events/second (10,000 burst)
 - **Per IP:** 10 requests/second
 
 If you're hitting limits, the SDK retries automatically with exponential backoff (up to 5 attempts). Sustained rate limiting may indicate an event loop or misconfiguration.

@@ -146,8 +146,9 @@ export const BaseEvent = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
   // SDK-enrichment fields (added to all events before sending)
   user_id: z.string().optional(),
-  platform: z.string().optional(),
-  sdk_version: z.string().optional(),
+  // Bounded strings: the SDKs send a platform name and a semver.
+  platform: maxUnits(64).optional(),
+  sdk_version: maxUnits(64).optional(),
   // How the server SDK derived session_id (#144): one of SESSION_SOURCES.
   // A bounded string, not an enum, so an older ingest keeps accepting a
   // newer SDK's events; ingest NULLs a value it does not know.
@@ -208,9 +209,10 @@ export type ToolCallEvent = z.infer<typeof ToolCallEvent>;
 /** connection — fires on transport connect and disconnect. */
 export const ConnectionEvent = BaseEvent.extend({
   event_type: z.literal("connection"),
-  protocol_version: z.string().optional(),
-  client_name: z.string().optional(),
-  client_version: z.string().optional(),
+  // A dated MCP version, and the client's own name and version (clientInfo).
+  protocol_version: maxUnits(64).optional(),
+  client_name: maxUnits(256).optional(),
+  client_version: maxUnits(128).optional(),
   connection_duration_ms: jsonNumber().optional(),
 });
 export type ConnectionEvent = z.infer<typeof ConnectionEvent>;
@@ -301,7 +303,7 @@ export const WidgetRenderEvent = BaseEvent.extend({
   viewport_height: jsonInt().optional(),
   device_pixel_ratio: jsonNumber().optional(),
   device_touch: z.number().int().min(0).max(1).optional(),
-  connection_type: z.string().optional(),
+  connection_type: maxUnits(32).optional(), // navigator.connection.effectiveType
 });
 export type WidgetRenderEvent = z.infer<typeof WidgetRenderEvent>;
 
@@ -335,7 +337,7 @@ export type WidgetScrollEvent = z.infer<typeof WidgetScrollEvent>;
 /** widget_form_field — fires on focus and blur of form inputs. */
 export const WidgetFormFieldEvent = BaseEvent.extend({
   event_type: z.literal("widget_form_field"),
-  field_name: z.string().optional(),
+  field_name: maxUnits(256).optional(), // the input's name or id
 });
 export type WidgetFormFieldEvent = z.infer<typeof WidgetFormFieldEvent>;
 
@@ -355,8 +357,8 @@ export type WidgetLinkClickEvent = z.infer<typeof WidgetLinkClickEvent>;
 /** widget_navigation — fires on view/route change within multi-step widget. */
 export const WidgetNavigationEvent = BaseEvent.extend({
   event_type: z.literal("widget_navigation"),
-  nav_from: z.string().optional(),
-  nav_to: z.string().optional(),
+  nav_from: maxUnits(2048).optional(),
+  nav_to: maxUnits(2048).optional(),
 });
 export type WidgetNavigationEvent = z.infer<typeof WidgetNavigationEvent>;
 

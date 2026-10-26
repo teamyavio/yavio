@@ -600,6 +600,15 @@ describe("zod 3 acceptance", () => {
       description: { max: 2048 },
       country_code: { length: 2 },
       conversion_currency: { length: 3 },
+      platform: { max: 64 },
+      sdk_version: { max: 64 },
+      protocol_version: { max: 64 },
+      client_name: { max: 256 },
+      client_version: { max: 128 },
+      connection_type: { max: 32 },
+      field_name: { max: 256 },
+      nav_from: { max: 2048 },
+      nav_to: { max: 2048 },
     };
 
     type Def = { type: string; innerType?: { _zod: { def: Def } }; checks?: unknown[] };
@@ -640,8 +649,8 @@ describe("zod 3 acceptance", () => {
         numberFields.filter((f) => NUMBER_RULES[f.field] === rule).length;
       expect(withRule("number")).toBe(8);
       expect(withRule("int")).toBe(8);
-      // session_source is on every event type.
-      expect(stringFields).toHaveLength(IngestEvent.options.length + 7);
+      // session_source, platform and sdk_version are on every event type.
+      expect(stringFields).toHaveLength(3 * IngestEvent.options.length + 14);
     });
 
     it.each(numberFields.map((f) => [f.name, f] as const))(

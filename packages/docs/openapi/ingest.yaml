@@ -31,8 +31,11 @@ paths:
 
         A batch holds at most 1,000 events and 500 KB. Requests are rate
         limited by event count: per project for API keys (5,000-event burst,
-        1,000 events/second), per widget token (project and trace) for widget
-        JWTs (1,000-event burst, 50 events/second).
+        1,000 events/second). Widget JWTs are charged in units, one per
+        event or one per KiB of body when that is more, per widget token
+        (1,000-unit burst, 50 units/second), per client address when the
+        deployment sets TRUST_PROXY (IPv6 by /64; 2,000 burst, 200/s) and
+        per project for all its widgets (10,000 burst, 1,000/s).
 
         Widget beacons (navigator.sendBeacon cannot set headers) send the
         same body as text/plain, at most 64 KiB, with the widget JWT in a
@@ -71,6 +74,8 @@ paths:
             events sent, and nothing in the batch is validated or stored.
             Such a batch is charged as 1,000 events to the rate limit, so
             it gets 429 instead while the credential's bucket holds fewer.
+            A body nested deeper than 64 levels of objects and arrays is
+            rejected the same way ("Body nests deeper than 64 levels").
           content:
             application/json:
               schema:
@@ -275,6 +280,7 @@ components:
           maxLength: 128
         platform:
           type: string
+          maxLength: 64
           enum: [chatgpt, claude, cursor, vscode, windsurf, unknown]
         source:
           type: string
@@ -345,7 +351,8 @@ components:
         Per-event errors, at most 100: the first ones found. `rejected`
         counts every rejected event, so fewer entries than `rejected` means
         the list was cut. `index` is the event's position in the batch, or
-        -1 for an error about the batch as a whole.
+        -1 for an error about the batch as a whole. Each entry lists at
+        most 10 issues.
       items:
         type: object
         properties:

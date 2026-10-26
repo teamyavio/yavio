@@ -49,6 +49,8 @@ The string rules are `@yavio/shared/pii`: its tests hold the exact-output table 
 | Oversized batch (> 500 KB) | Reject with 413 |
 | More than 1,000 events (valid or not) | Reject with 400 and one cap error at `index: -1`; no event parsed (neither the batch schema nor the per-event fallback runs), none stored |
 | Exactly 1,000 valid events | Accept |
+| Body nested deeper than 64 levels (e.g. a tool's `input_schema`) | 400 `Body nests deeper than 64 levels`, never 500 |
+| Validation decisions | Identical to the batch schema plus per-event fallback over a generated corpus; each event parsed once |
 | More than 100 rejected events within the cap | 207/400 lists the first 100 errors; `rejected` counts all |
 | Header-less `text/plain` body over 64 KiB | 413 `YAVIO-2111`, body not parsed |
 | Header-less request that is not `text/plain` | 401 `YAVIO-2000`, body not parsed |
@@ -157,6 +159,10 @@ The string rules are `@yavio/shared/pii`: its tests hold the exact-output table 
 | Widget-token events beyond the token's bucket (1,000 burst, 50/s) | 429 `YAVIO-2053` with `Retry-After`; normal widget batches (20 events) and a 200-event beacon pass |
 | Widget tokens of different traces | Independent buckets; the bucket key has a fixed length |
 | Batch over the cap | Charged 1,000 events: the cap's 400 while the bucket holds 1,000, else 429 |
+| Widget request with few events and a large body | Charged one unit per KiB |
+| With `TRUST_PROXY`: widget tokens from one client address (IPv6: one /64) | One shared bucket; other addresses unaffected; none without `TRUST_PROXY` |
+| A project's widgets together beyond the ceiling | 429 `... for this project`, one warn log a minute; API key and other projects unaffected |
+| Widget buckets | Charged all or none |
 | With `TRUST_PROXY`: concurrent header-less requests beyond the auth-failure burst | 429 before parsing; beacons that authenticate are refunded |
 | Without `TRUST_PROXY`: concurrent beacons from one address | Not charged on arrival; all accepted |
 | Widget-token traffic | Never charged to the project's API-key bucket; API-key requests never charged to a widget bucket |

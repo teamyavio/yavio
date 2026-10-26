@@ -38,6 +38,18 @@ export const EVENT_IDENTIFIER_FIELDS: ReadonlySet<string> = new Set([
   "timestamp",
 ]);
 
+/**
+ * Levels of objects and arrays the PII walk descends: a container deeper
+ * than this is replaced with PII_DEPTH_MARKER instead of being walked, so a
+ * deeply nested value can neither make the walk fail nor pass unscanned. The
+ * events route refuses bodies nested beyond MAX_BODY_NESTING (lib/nesting.ts),
+ * which is below this, so there it never applies.
+ */
+export const MAX_PII_WALK_DEPTH = 64;
+
+/** What a container past MAX_PII_WALK_DEPTH is replaced with. */
+export const PII_DEPTH_MARKER = "[DEPTH_LIMIT]";
+
 export interface StripPiiOptions {
   /** Keys left untouched on each object directly inside the top-level array. */
   exemptEventKeys?: ReadonlySet<string>;
@@ -59,6 +71,10 @@ export function stripPii<T>(
       const { result, redacted } = stripPiiFromString(value);
       if (redacted) piiDetected = true;
       return result;
+    }
+
+    if (value !== null && typeof value === "object" && depth >= MAX_PII_WALK_DEPTH) {
+      return PII_DEPTH_MARKER;
     }
 
     if (Array.isArray(value)) {
