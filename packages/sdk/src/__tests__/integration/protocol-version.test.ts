@@ -431,8 +431,8 @@ describe.each(["v1", "v2"] as const)("a real stdio server on MCP SDK %s (#170, #
         { timeout: 5_000 },
       );
 
-      // v1 never negotiates 2026-07-28: a v1 release that does fails here,
-      // and the README's "MCP 2026-07-28" table needs a new row.
+      // v1 has no 2026-07-28: its latest revision is 2025-11-25 (2025-06-18
+      // on the 1.24.0 floor).
       if (stack === "v1") expect(version).toMatch(/^2025-/);
       else expect(version).toBe(mode ? "2026-07-28" : "2025-11-25");
       const [connection] = ingest.ofType("connection");
