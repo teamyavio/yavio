@@ -18,7 +18,13 @@ import { LruMap } from "../core/lru.js";
 import { detectPlatform } from "../core/platform.js";
 import { stable } from "../core/stable.js";
 import { datadogTraceparent, traceContextKey, traceparentOf } from "../core/trace-context.js";
-import type { CaptureConfig, McpServerLike, SessionState, YavioConfig } from "../core/types.js";
+import type {
+  CaptureConfig,
+  McpServerLike,
+  ResolvedCaptureConfig,
+  SessionState,
+  YavioConfig,
+} from "../core/types.js";
 import type { Transport } from "../transport/types.js";
 import { type RequestStore, getStore, runInContext } from "./context.js";
 import { clientFromUserAgent, headerValue, readCallExtra } from "./extra.js";
@@ -136,7 +142,7 @@ function isUrlElicitationRequired(error: unknown): boolean {
  * the tool's own `tools` override on top. `intent` is not part of it — the
  * intent controller resolves that flag itself.
  */
-function resolveToolCapture(config: YavioConfig, toolName: string): CaptureConfig {
+function resolveToolCapture(config: YavioConfig, toolName: string): ResolvedCaptureConfig {
   // Own entries only: a tool named `constructor` has no override just because
   // Object has one.
   const override = Object.hasOwn(config.tools, toolName) ? config.tools[toolName] : undefined;
@@ -426,7 +432,7 @@ function wrapToolCallback(
   callSessions: CallSessions,
   server: McpServerLike,
   config: YavioConfig,
-  capture: CaptureConfig,
+  capture: ResolvedCaptureConfig,
   transport: Transport,
   sdkVersion: string,
 ): (...cbArgs: unknown[]) => Promise<unknown> {
@@ -1744,7 +1750,7 @@ function extractInputValues(
   args: unknown,
   extra: unknown,
   geo: CaptureConfig["geo"],
-  conversationId: CaptureConfig["conversationId"],
+  conversationId: ResolvedCaptureConfig["conversationId"],
 ): Record<string, unknown> | undefined {
   if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
   try {
@@ -1800,10 +1806,13 @@ const KNOWN_META_KEYS = new Set([
 /**
  * The `_meta` keys that hold a platform's raw conversation id, removed under
  * every `geo` with `capture.conversationId: false` (#204) and named in
- * `_metaDroppedKeys`. Exact names, as findSessionKey reads them. Raw ids
- * of the conversation `session_id` already names (deriveSessionId, a
- * SHA-256 of the session key), so they add no metric of their own — the
- * rule #76 applied to `_sessionId`. A new
+ * `_metaDroppedKeys`. Exact names, as findSessionKey reads them. Without an
+ * `Mcp-Session-Id`, which findSessionKey prefers, `session_id` is
+ * deriveSessionId() of one of them, so they add no metric of their own —
+ * the rule #76 applied to `_sessionId`. On a stateful transport
+ * `session_id` hashes the transport's session instead, and these are the
+ * only per-conversation ids in the event: the flag removes them there too
+ * (review round 1). A new
  * conversation key goes here, in one place. Under a `geo` other than `true`
  * the allowlist drops all of them but `openai/session` already.
  */
@@ -1867,7 +1876,7 @@ function recordable(key: string): boolean {
 function reduceMeta(
   meta: Record<string, unknown>,
   geo: CaptureConfig["geo"],
-  conversationId: CaptureConfig["conversationId"],
+  conversationId: ResolvedCaptureConfig["conversationId"],
 ): { meta: Record<string, unknown>; droppedKeys: string[]; droppedUnnamed: number } {
   const kept: Record<string, unknown> = {};
   const named: string[] = [];

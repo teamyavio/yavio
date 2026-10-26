@@ -8,6 +8,7 @@ import {
   resolveConfig,
   shutdownTimeoutFromEnv,
 } from "../core/config.js";
+import type { CaptureConfig } from "../core/types.js";
 import { without } from "./env.js";
 
 describe("resolveConfig", () => {
@@ -486,14 +487,69 @@ describe("capture.conversationId (#204)", () => {
     }
   });
 
-  it("has no per-tool override: a tools entry naming only it is no override", () => {
-    const config = resolveConfig({
-      apiKey: "test",
-      tools: { pick: { conversationId: false } as never, book: { inputValues: false } },
-    });
-    expect(Object.hasOwn(config?.tools ?? {}, "pick")).toBe(false);
-    expect(config?.tools.book).toEqual({ inputValues: false });
-    expect(config?.capture.conversationId).toBe(true);
+  it("accepts a CaptureConfig typed without it, as before 0.5.6 (review round 1)", () => {
+    // A type check as much as a test: the typecheck job fails here if the
+    // public field is required again (TS2741 in a patch release).
+    const capture: CaptureConfig = {
+      inputValues: true,
+      outputValues: true,
+      geo: "country",
+      tokens: true,
+      retries: true,
+      rejectedInputValues: false,
+    };
+    expect(resolveConfig({ apiKey: "test", capture })?.capture.conversationId).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each(["conversationId", "geo"] as const)(
+    "has no per-tool %s: a tools entry setting it is ignored with one YAVIO-1006 line per tool (review round 1)",
+    (flag) => {
+      const tools = {
+        pick: { [flag]: false } as never,
+        book: { inputValues: false, [flag]: false } as never,
+      };
+      const config = resolveConfig({ apiKey: "test", tools });
+      // Ignored: no entry for a tool that set nothing else, the rest kept,
+      // the global value in force.
+      expect(Object.hasOwn(config?.tools ?? {}, "pick")).toBe(false);
+      expect(config?.tools.book).toEqual({ inputValues: false });
+      expect(config?.capture[flag]).toBe(true);
+      const lines = warn.mock.calls.map((args: unknown[]) => String(args[0]));
+      expect(lines).toHaveLength(2);
+      for (const [i, tool] of ["pick", "book"].entries()) {
+        expect(lines[i]).toContain("YAVIO-1006");
+        expect(lines[i]).toContain(`tools.${tool}.${flag} is ignored`);
+        expect(lines[i]).toContain(`capture.${flag} applies`);
+      }
+      // Once per tool, flag and process: stateless servers resolve per request.
+      resolveConfig({ apiKey: "test", tools });
+      expect(warn).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("warns for a per-tool conversationId in .yaviorc.json too, and the file's global value applies", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "yavio-conversation-tools-test-"));
+    const originalCwd = process.cwd;
+    try {
+      writeFileSync(
+        join(tempDir, ".yaviorc.json"),
+        JSON.stringify({
+          apiKey: "file_key",
+          capture: { conversationId: false },
+          tools: { pick: { conversationId: true } },
+        }),
+      );
+      process.cwd = () => tempDir;
+      const config = resolveConfig();
+      expect(config?.capture.conversationId).toBe(false);
+      expect(Object.hasOwn(config?.tools ?? {}, "pick")).toBe(false);
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0][0]).toContain("tools.pick.conversationId is ignored");
+    } finally {
+      process.cwd = originalCwd;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });
 

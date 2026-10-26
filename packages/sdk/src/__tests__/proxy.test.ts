@@ -2160,7 +2160,7 @@ describe("capture.conversationId (#204)", () => {
   async function callWith(
     config: YavioConfig,
     _meta: unknown,
-    options: { client?: string; outcome?: "throw" } = {},
+    options: { client?: string; outcome?: "throw" | "isError" } = {},
   ) {
     // Every call as in a fresh process: a session's connection event is
     // sent once per process.
@@ -2179,6 +2179,9 @@ describe("capture.conversationId (#204)", () => {
     proxy.tool("conversation_tool", { q: z.string() }, (_args, extra) => {
       seenMeta = extra._meta;
       if (options.outcome === "throw") throw new Error("backend down");
+      if (options.outcome === "isError") {
+        return { content: [{ type: "text", text: "no result" }], isError: true };
+      }
       return { content: [{ type: "text", text: "ok" }] };
     });
     const pending = registeredTool(server, "conversation_tool")?.handler(
@@ -2252,14 +2255,58 @@ describe("capture.conversationId (#204)", () => {
     },
   );
 
-  it("keeps the VS Code and Codex keys under geo: true with the flag on", async () => {
-    const meta = {
-      "vscode.conversationId": "vscode-conversation-test-0001",
-      threadId: "thread-test-0001",
-    };
-    const { inputValues } = await callWith(testConfig, meta, { client: "codex-mcp-client" });
-    expect(JSON.stringify(inputValues)).toBe(JSON.stringify({ q: "hello", _meta: meta }));
-  });
+  // VS Code- and Codex-shaped, with SEP-414 trace context (#173) and a
+  // per-key baggage carrier; every value is synthetic (review round 1).
+  const IDE_SHAPED_META = {
+    "vscode.conversationId": "vscode-conversation-test-0001",
+    threadId: "thread-test-0001",
+    progressToken: 7,
+    traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+    tracestate: "vendor=state-test-0001",
+    baggage: "user.id=user-test-0001",
+    "uberctx-test": "member-test-0001",
+  };
+  const IDE_BEFORE_204 = {
+    true: {
+      q: "hello",
+      _meta: {
+        "vscode.conversationId": "vscode-conversation-test-0001",
+        threadId: "thread-test-0001",
+        progressToken: 7,
+      },
+      _metaDroppedKeys: ["baggage", "tracestate"],
+      _metaDroppedUnnamed: 1,
+    },
+    other: {
+      q: "hello",
+      _meta: {},
+      _metaDroppedKeys: [
+        "baggage",
+        "progressToken",
+        "threadId",
+        "tracestate",
+        "vscode.conversationId",
+      ],
+      _metaDroppedUnnamed: 1,
+    },
+  };
+
+  it.each(GEOS)(
+    "leaves input_values byte-identical to before #204 for a VS Code / Codex-shaped _meta with trace context under geo %s with the flag on",
+    async (geo) => {
+      for (const config of [
+        withCapture({ geo, conversationId: true }),
+        resolveConfig({ apiKey: "yav_test", capture: { geo } }) as YavioConfig,
+      ]) {
+        const { inputValues } = await callWith(config, IDE_SHAPED_META, {
+          client: "codex-mcp-client",
+        });
+        expect(JSON.stringify(inputValues)).toBe(
+          JSON.stringify(geo === true ? IDE_BEFORE_204.true : IDE_BEFORE_204.other),
+        );
+      }
+    },
+  );
 
   const REMAINING_UNDER_TRUE = {
     "openai/locale": "en-US",
@@ -2453,6 +2500,34 @@ describe("capture.conversationId (#204)", () => {
       JSON.stringify({ q: "hello", ...WITHOUT_CONVERSATION.true }),
     );
     expect(event.session_id).toBe(deriveSessionId(CONVERSATION));
+  });
+
+  it("removes them from the event of an isError result too", async () => {
+    const { event, inputValues } = await callWith(
+      withCapture({ conversationId: false }),
+      ALL_CONVERSATION_KEYS_META,
+      { outcome: "isError" },
+    );
+    expect(event.status).toBe("error");
+    expect(event.error_category).toBe("tool_error");
+    expect(JSON.stringify(inputValues)).toBe(
+      JSON.stringify({ q: "hello", ...WITHOUT_CONVERSATION.true }),
+    );
+    expect(event.session_id).toBe(deriveSessionId(CONVERSATION));
+  });
+
+  it("holds for a tool whose override turns input capture on under a global inputValues: false", async () => {
+    const config: YavioConfig = {
+      ...withCapture({ inputValues: false, conversationId: false }),
+      tools: { conversation_tool: { inputValues: true } },
+    };
+    const { event, inputValues } = await callWith(config, ALL_CONVERSATION_KEYS_META);
+    expect(JSON.stringify(inputValues)).toBe(
+      JSON.stringify({ q: "hello", ...WITHOUT_CONVERSATION.true }),
+    );
+    expect(event.subject_id).toBe("v1/subject-test-0001");
+    const serialized = leakScan(event, deriveSessionId(CONVERSATION));
+    for (const value of CONVERSATION_VALUES) expect(serialized, value).not.toContain(value);
   });
 
   it("fails closed on a value that never went through resolveConfig", async () => {

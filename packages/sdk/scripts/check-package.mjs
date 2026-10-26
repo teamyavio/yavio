@@ -55,7 +55,13 @@ const CASES = [
 
 const SOURCES = {
   "server.ts": `import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { type Platform, createYavio, platformValues, withYavio } from "@yavio/sdk";
+import {
+  type CaptureConfig,
+  type Platform,
+  createYavio,
+  platformValues,
+  withYavio,
+} from "@yavio/sdk";
 
 // Fails when require() gets the ESM declarations: the app's McpServer is then
 // the CommonJS class and withYavio() expects the ESM one.
@@ -66,6 +72,21 @@ export const wrapped: McpServer = createYavio().wrap(new McpServer({ name: "c", 
 export const first: Platform = platformValues[0];
 // @ts-expect-error unused, and so an error, if Platform has become any
 export const bogus: Platform = "not-a-platform";
+
+// A CaptureConfig an app typed in full before 0.5.6 still compiles: a flag
+// added in a patch release is optional in the public type (#204 review
+// round 1), and the object is accepted as withYavio()'s capture.
+export const capture: CaptureConfig = {
+  inputValues: true,
+  outputValues: true,
+  geo: "country",
+  tokens: true,
+  retries: true,
+  rejectedInputValues: false,
+};
+export const captured = withYavio(new McpServer({ name: "c", version: "1" }), { capture });
+// @ts-expect-error unused, and so an error, if conversationId has lost its boolean type
+export const badCapture: CaptureConfig = { ...capture, conversationId: "no" };
 `,
   "widget.ts": `import { type YavioWidget, useYavio } from "@yavio/sdk/react";
 
