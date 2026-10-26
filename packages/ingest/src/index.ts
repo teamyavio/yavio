@@ -46,7 +46,17 @@ export interface CreateAppOptions {
    * Empty or absent: request.ip is the socket peer.
    */
   trustProxy?: string[];
+  /**
+   * How long a client has to send a whole request, headers and body, before
+   * the server answers 408 and closes the connection (Node's
+   * `requestTimeout`). Defaults to DEFAULT_REQUEST_TIMEOUT_MS. A request cut
+   * off this way is settled like an aborted one (plugins/charge.ts).
+   */
+  requestTimeoutMs?: number;
 }
+
+/** A client's time to send a whole request (REQUEST_TIMEOUT_MS). */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
  * What a request log line may contain (#92): method and route, nothing that
@@ -66,6 +76,7 @@ export const requestLogSerializers = {
 };
 
 export async function createApp(options: CreateAppOptions): Promise<FastifyInstance> {
+  const requestTimeout = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const app = Fastify({
     logger:
       options.logger === false
@@ -76,6 +87,14 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
           },
     genReqId: () => randomUUID(),
     trustProxy: options.trustProxy && options.trustProxy.length > 0 ? options.trustProxy : false,
+    // Fastify's default (0) turns Node's own request timeout off. Node checks
+    // it at the connections-checking interval, so that is a fraction of it;
+    // the headers timeout may not exceed it.
+    requestTimeout,
+    http: {
+      headersTimeout: Math.min(60_000, requestTimeout),
+      connectionsCheckingInterval: Math.min(5_000, Math.max(50, Math.floor(requestTimeout / 4))),
+    },
   });
 
   const db = options.db ?? createDb(options.databaseUrl as string);
@@ -110,15 +129,14 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
 
   await app.register(errorHandlerPlugin);
   await app.register(corsPlugin);
-  // Header-less beacons are charged per address on arrival only when the
-  // address is the client's (TRUST_PROXY), see RateLimitPluginOptions.
-  await app.register(rateLimitPlugin, {
-    chargeHeaderlessOnArrival: (options.trustProxy?.length ?? 0) > 0,
-  });
+  // request.ip is the client's address only behind a proxy named in
+  // TRUST_PROXY; the limits keyed by a client's address need it to be.
+  const clientAddressTrusted = (options.trustProxy?.length ?? 0) > 0;
+  await app.register(rateLimitPlugin, { clientAddressTrusted });
   await app.register(authPlugin);
   await app.register(healthPlugin);
   await app.register(widgetTokensPlugin, { jwtSecret });
-  await app.register(eventsPlugin);
+  await app.register(eventsPlugin, { clientAddressTrusted });
 
   return app;
 }

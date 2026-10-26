@@ -110,9 +110,9 @@ describe("widget-token rate limit", () => {
     await build(limiter({ burstCapacity: 30, ratePerSecond: 0.001 }));
 
     expect((await widgetBatch("trace-a", 20)).statusCode).toBe(200);
-    // 20 of 30 used: a second batch of 20 does not fit, one of 10 does.
-    expect((await widgetBatch("trace-a", 20)).statusCode).toBe(429);
+    // 20 of 30 used: a batch of 10 fits, then nothing does.
     expect((await widgetBatch("trace-a", 10)).statusCode).toBe(200);
+    expect((await widgetBatch("trace-a", 1)).statusCode).toBe(429);
   });
 
   it("with the default limits, passes a widget's batches and its teardown beacon, and refuses beyond the burst", async () => {

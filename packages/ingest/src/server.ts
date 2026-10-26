@@ -46,7 +46,15 @@ async function main() {
   });
   toolRegistryWriter.start();
 
-  const rateLimiter = new RateLimiter();
+  const { widgetToken, widgetAddress, widgetProject, beacon } = config.rateLimits;
+  const rateLimiter = new RateLimiter(
+    undefined,
+    undefined,
+    widgetToken,
+    widgetAddress,
+    widgetProject,
+    beacon,
+  );
   rateLimiter.start();
 
   const db = createDb(config.databaseUrl);
@@ -62,6 +70,7 @@ async function main() {
     toolRegistryWriter,
     rateLimiter,
     trustProxy: config.trustProxy,
+    requestTimeoutMs: config.requestTimeoutMs,
   });
 
   // Anonymous statistics (#85): daily, under a Postgres advisory lock.

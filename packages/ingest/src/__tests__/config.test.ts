@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadConfig, parseTrustProxy } from "../config.js";
+import { loadConfig, parseRateLimits, parseRequestTimeout, parseTrustProxy } from "../config.js";
 
 const REQUIRED = {
   DATABASE_URL: "postgres://yavio_service:pw@localhost:5432/yavio",
@@ -122,6 +122,84 @@ describe("TRUST_PROXY (#94)", () => {
       expect(loadConfig().trustProxy).toEqual(["172.30.240.1"]);
     } finally {
       Reflect.deleteProperty(process.env, "TRUST_PROXY");
+    }
+  });
+});
+
+describe("rate limits from the environment", () => {
+  it("are empty when nothing is set", () => {
+    expect(parseRateLimits({})).toEqual({});
+    expect(parseRateLimits({ RATE_LIMIT_WIDGET_TOKEN_BURST: "" })).toEqual({});
+  });
+
+  it("read the burst and the per-second rate of each widget bucket and the beacon bucket", () => {
+    expect(
+      parseRateLimits({
+        RATE_LIMIT_WIDGET_TOKEN_BURST: "2000",
+        RATE_LIMIT_WIDGET_TOKEN_PER_SECOND: "100",
+        RATE_LIMIT_WIDGET_ADDRESS_BURST: "5000",
+        RATE_LIMIT_WIDGET_ADDRESS_PER_SECOND: "500",
+        RATE_LIMIT_WIDGET_PROJECT_PER_SECOND: "2500",
+        RATE_LIMIT_BEACON_BURST: "200",
+        RATE_LIMIT_BEACON_PER_SECOND: "0.5",
+      }),
+    ).toEqual({
+      widgetToken: { burstCapacity: 2000, ratePerSecond: 100 },
+      widgetAddress: { burstCapacity: 5000, ratePerSecond: 500 },
+      widgetProject: { ratePerSecond: 2500 },
+      beacon: { burstCapacity: 200, ratePerSecond: 0.5 },
+    });
+  });
+
+  it("stop the start on a rate that is not a positive number", () => {
+    for (const raw of ["0", "-5", "abc", " ", "Infinity", "1e400"]) {
+      expect(() => parseRateLimits({ RATE_LIMIT_BEACON_PER_SECOND: raw })).toThrow(
+        "RATE_LIMIT_BEACON_PER_SECOND must be a positive number",
+      );
+    }
+  });
+
+  it("stop the start on a beacon burst that is not a whole number of at least 1", () => {
+    for (const raw of ["0", "0.5", "-5", "abc", " ", "1.5", "Infinity"]) {
+      expect(() => parseRateLimits({ RATE_LIMIT_BEACON_BURST: raw })).toThrow(
+        "RATE_LIMIT_BEACON_BURST must be a whole number of at least 1 (one beacon)",
+      );
+    }
+    expect(parseRateLimits({ RATE_LIMIT_BEACON_BURST: "1" })).toEqual({
+      beacon: { burstCapacity: 1 },
+    });
+  });
+
+  it("stop the start on a widget burst that cannot hold one full request", () => {
+    for (const prefix of [
+      "RATE_LIMIT_WIDGET_TOKEN",
+      "RATE_LIMIT_WIDGET_ADDRESS",
+      "RATE_LIMIT_WIDGET_PROJECT",
+    ]) {
+      for (const raw of ["100", "586", "999", "1000.5"]) {
+        expect(() => parseRateLimits({ [`${prefix}_BURST`]: raw })).toThrow(
+          `${prefix}_BURST must be a whole number of at least 1000 (a batch of 1,000 events, and a JSON body without a Content-Length)`,
+        );
+      }
+      expect(parseRateLimits({ [`${prefix}_BURST`]: "1000" })).not.toEqual({});
+    }
+  });
+
+  it("read REQUEST_TIMEOUT_MS as a whole number of milliseconds, at least 1000", () => {
+    expect(parseRequestTimeout(undefined)).toBeUndefined();
+    expect(parseRequestTimeout("")).toBeUndefined();
+    expect(parseRequestTimeout("45000")).toBe(45_000);
+    for (const raw of ["999", "0", "1.5", "soon"]) {
+      expect(() => parseRequestTimeout(raw)).toThrow("REQUEST_TIMEOUT_MS must be a whole number");
+    }
+  });
+
+  it("are read by loadConfig", () => {
+    process.env.RATE_LIMIT_WIDGET_PROJECT_BURST = "20000";
+    try {
+      expect(loadConfig().rateLimits).toEqual({ widgetProject: { burstCapacity: 20000 } });
+    } finally {
+      Reflect.deleteProperty(process.env, "RATE_LIMIT_WIDGET_PROJECT_BURST");
     }
   });
 });

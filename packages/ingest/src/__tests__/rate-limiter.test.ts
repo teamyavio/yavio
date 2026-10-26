@@ -141,23 +141,6 @@ describe("RateLimiter", () => {
       expect(limiter.peekAuthFailure("10.0.0.2").allowed).toBe(true);
     });
 
-    it("refunds one token, never above the burst", () => {
-      const limiter = new RateLimiter(undefined, { burstCapacity: 2, ratePerSecond: 0.001 });
-      limiter.refundAuthFailure("10.0.0.4"); // no bucket yet: nothing to do
-      expect(limiter.consumeAuthFailure("10.0.0.4").allowed).toBe(true);
-      expect(limiter.consumeAuthFailure("10.0.0.4").allowed).toBe(true);
-      expect(limiter.peekAuthFailure("10.0.0.4").allowed).toBe(false);
-      limiter.refundAuthFailure("10.0.0.4");
-      expect(limiter.consumeAuthFailure("10.0.0.4").allowed).toBe(true);
-      expect(limiter.consumeAuthFailure("10.0.0.4").allowed).toBe(false);
-      limiter.refundAuthFailure("10.0.0.4");
-      limiter.refundAuthFailure("10.0.0.4");
-      limiter.refundAuthFailure("10.0.0.4");
-      expect(limiter.consumeAuthFailure("10.0.0.4").allowed).toBe(true);
-      expect(limiter.consumeAuthFailure("10.0.0.4").allowed).toBe(true);
-      expect(limiter.consumeAuthFailure("10.0.0.4").allowed).toBe(false);
-    });
-
     it("cleans up stale auth-failure buckets", () => {
       const limiter = new RateLimiter({ cleanupIntervalMs: 1_000, staleAfterMs: 500 });
       limiter.consumeAuthFailure("10.0.0.3");
@@ -169,22 +152,23 @@ describe("RateLimiter", () => {
     });
   });
 
-  describe("widget-token bucket", () => {
-    it("defaults to a 1,000-event burst refilled at 50 events per second", () => {
+  describe("widget-token bucket (through consumeWidget)", () => {
+    const keys = (token: string) => ({ token, project: `project-of-${token}` });
+
+    it("defaults to a 1,000-unit burst refilled at 50 units per second", () => {
       const limiter = new RateLimiter();
-      expect(limiter.consumeWidgetToken("p:trace-1", 1_000).allowed).toBe(true);
-      const denied = limiter.consumeWidgetToken("p:trace-1", 50);
-      expect(denied.allowed).toBe(false);
-      if (!denied.allowed) expect(denied.retryAfterMs).toBe(1_000);
+      expect(limiter.consumeWidget(keys("t1"), 1_000).allowed).toBe(true);
+      const denied = limiter.consumeWidget(keys("t1"), 50);
+      expect(denied).toMatchObject({ allowed: false, limit: "token", retryAfterMs: 1_000 });
       vi.advanceTimersByTime(1_000);
-      expect(limiter.consumeWidgetToken("p:trace-1", 50).allowed).toBe(true);
-      expect(limiter.consumeWidgetToken("p:trace-1", 1).allowed).toBe(false);
+      expect(limiter.consumeWidget(keys("t1"), 50).allowed).toBe(true);
+      expect(limiter.consumeWidget(keys("t1"), 1).allowed).toBe(false);
     });
 
     it("takes its limits from the third constructor argument", () => {
       const limiter = new RateLimiter(undefined, undefined, { burstCapacity: 5, ratePerSecond: 1 });
-      expect(limiter.consumeWidgetToken("p:trace-1", 5).allowed).toBe(true);
-      expect(limiter.consumeWidgetToken("p:trace-1", 1).allowed).toBe(false);
+      expect(limiter.consumeWidget(keys("t1"), 5).allowed).toBe(true);
+      expect(limiter.consumeWidget(keys("t1"), 1)).toMatchObject({ limit: "token" });
     });
 
     it("is separate from the API-key buckets", () => {
@@ -194,17 +178,102 @@ describe("RateLimiter", () => {
       });
       expect(limiter.consumeApiKey("p:w", 1).allowed).toBe(true);
       expect(limiter.consumeApiKey("p:w", 1).allowed).toBe(false);
-      expect(limiter.consumeWidgetToken("p:w", 1).allowed).toBe(true);
-      expect(limiter.consumeWidgetToken("p:w", 1).allowed).toBe(false);
+      expect(limiter.consumeWidget({ token: "p:w", project: "p" }, 1).allowed).toBe(true);
+      expect(limiter.consumeWidget({ token: "p:w", project: "p" }, 1).allowed).toBe(false);
     });
 
-    it("cleans up stale widget-token buckets", () => {
+    it("gives back a refund, never above the burst, and only to buckets that exist", () => {
+      const limiter = new RateLimiter(undefined, undefined, {
+        burstCapacity: 10,
+        ratePerSecond: 0.001,
+      });
+      limiter.refundWidget(keys("t2"), 5); // no buckets yet: nothing to do
+      expect(limiter.widgetTokenBucketCount).toBe(0);
+      expect(limiter.consumeWidget(keys("t2"), 10).allowed).toBe(true);
+      limiter.refundWidget(keys("t2"), 4);
+      expect(limiter.consumeWidget(keys("t2"), 4).allowed).toBe(true);
+      expect(limiter.consumeWidget(keys("t2"), 1).allowed).toBe(false);
+      limiter.refundWidget(keys("t2"), 50);
+      expect(limiter.consumeWidget(keys("t2"), 10).allowed).toBe(true);
+      expect(limiter.consumeWidget(keys("t2"), 1).allowed).toBe(false);
+    });
+
+    it("gives a refund back to the address bucket too", () => {
+      const limiter = new RateLimiter(undefined, undefined, undefined, {
+        burstCapacity: 10,
+        ratePerSecond: 0.001,
+      });
+      const withAddress = { token: "t4", address: "203.0.113.1", project: "p4" };
+      expect(limiter.consumeWidget(withAddress, 10).allowed).toBe(true);
+      expect(limiter.consumeWidget({ ...withAddress, token: "t5" }, 1)).toMatchObject({
+        limit: "address",
+      });
+      limiter.refundWidget(withAddress, 6);
+      // The address holds 6 again: another token from it gets 6, then nothing.
+      expect(limiter.consumeWidget({ ...withAddress, token: "t5" }, 6).allowed).toBe(true);
+      expect(limiter.consumeWidget({ ...withAddress, token: "t6" }, 1)).toMatchObject({
+        limit: "address",
+      });
+    });
+
+    it("cleans up stale widget buckets", () => {
       const limiter = new RateLimiter({ cleanupIntervalMs: 1_000, staleAfterMs: 500 });
-      limiter.consumeWidgetToken("p:trace-1", 1);
+      limiter.consumeWidget({ token: "t3", address: "a", project: "p" }, 1);
       expect(limiter.widgetTokenBucketCount).toBe(1);
+      expect(limiter.widgetAddressBucketCount).toBe(1);
+      expect(limiter.widgetProjectBucketCount).toBe(1);
       limiter.start();
       vi.advanceTimersByTime(1_000);
       expect(limiter.widgetTokenBucketCount).toBe(0);
+      expect(limiter.widgetAddressBucketCount).toBe(0);
+      expect(limiter.widgetProjectBucketCount).toBe(0);
+      limiter.stop();
+    });
+  });
+
+  describe("beacon bucket", () => {
+    it("defaults to a burst of 100 refilled at 50 per second", () => {
+      const limiter = new RateLimiter();
+      for (let i = 0; i < 100; i++) expect(limiter.consumeBeacon("a").allowed).toBe(true);
+      expect(limiter.consumeBeacon("a")).toMatchObject({ allowed: false, retryAfterMs: 20 });
+      vi.advanceTimersByTime(1_000);
+      for (let i = 0; i < 50; i++) expect(limiter.consumeBeacon("a").allowed).toBe(true);
+      expect(limiter.consumeBeacon("a").allowed).toBe(false);
+    });
+
+    it("refunds one, never above the burst, and is separate from the auth-failure bucket", () => {
+      const limiter = new RateLimiter(
+        undefined,
+        { burstCapacity: 1, ratePerSecond: 0.001 },
+        undefined,
+        undefined,
+        undefined,
+        { burstCapacity: 2, ratePerSecond: 0.001 },
+      );
+      limiter.refundBeacon("a"); // no bucket yet: nothing to do
+      expect(limiter.consumeBeacon("a").allowed).toBe(true);
+      expect(limiter.consumeBeacon("a").allowed).toBe(true);
+      expect(limiter.consumeBeacon("a").allowed).toBe(false);
+      limiter.refundBeacon("a");
+      expect(limiter.consumeBeacon("a").allowed).toBe(true);
+      limiter.refundBeacon("a");
+      limiter.refundBeacon("a");
+      limiter.refundBeacon("a");
+      expect(limiter.consumeBeacon("a").allowed).toBe(true);
+      expect(limiter.consumeBeacon("a").allowed).toBe(true);
+      expect(limiter.consumeBeacon("a").allowed).toBe(false);
+      // The auth-failure bucket is untouched.
+      expect(limiter.peekAuthFailure("a").allowed).toBe(true);
+      expect(limiter.consumeAuthFailure("a").allowed).toBe(true);
+    });
+
+    it("cleans up stale beacon buckets", () => {
+      const limiter = new RateLimiter({ cleanupIntervalMs: 1_000, staleAfterMs: 500 });
+      limiter.consumeBeacon("a");
+      expect(limiter.beaconBucketCount).toBe(1);
+      limiter.start();
+      vi.advanceTimersByTime(1_000);
+      expect(limiter.beaconBucketCount).toBe(0);
       limiter.stop();
     });
   });

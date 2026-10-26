@@ -49,6 +49,8 @@ The string rules are `@yavio/shared/pii`: its tests hold the exact-output table 
 | Oversized batch (> 500 KB) | Reject with 413 |
 | More than 1,000 events (valid or not) | Reject with 400 and one cap error at `index: -1`; no event parsed (neither the batch schema nor the per-event fallback runs), none stored |
 | Exactly 1,000 valid events | Accept |
+| Body nested deeper than 64 levels (e.g. a tool's `input_schema`) | 400 `Body nests deeper than 64 levels`, refused on the raw text before `JSON.parse` |
+| Validation decisions | Identical to the batch schema plus per-event fallback over a generated corpus; each event parsed once |
 | More than 100 rejected events within the cap | 207/400 lists the first 100 errors; `rejected` counts all |
 | Header-less `text/plain` body over 64 KiB | 413 `YAVIO-2111`, body not parsed |
 | Header-less request that is not `text/plain` | 401 `YAVIO-2000`, body not parsed |
@@ -157,6 +159,18 @@ The string rules are `@yavio/shared/pii`: its tests hold the exact-output table 
 | Widget-token events beyond the token's bucket (1,000 burst, 50/s) | 429 `YAVIO-2053` with `Retry-After`; normal widget batches (20 events) and a 200-event beacon pass |
 | Widget tokens of different traces | Independent buckets; the bucket key has a fixed length |
 | Batch over the cap | Charged 1,000 events: the cap's 400 while the bucket holds 1,000, else 429 |
+| Widget request with few events and a large body | Charged one unit per KiB |
+| With `TRUST_PROXY`: widget tokens from one client address (IPv6: one /64) | One shared bucket; other addresses unaffected; none without `TRUST_PROXY` |
+| A project's widgets together beyond the ceiling | 429 `... for this project`, one warn log a minute; API key and other projects unaffected |
+| Widget buckets | Charged all or none |
+| Header-authenticated request whose bucket is short (with or without Content-Length) | 429 before the body is read |
+| Arrival charge above the real one | Refunded on success; a request is charged once |
+| With `TRUST_PROXY`: 50 simultaneous valid beacons from one address | All accepted; header-less requests beyond the beacon burst refused unread |
+| Address buckets | IPv6 by /64, IPv4 per address |
+| `RATE_LIMIT_*` variables | Read by loadConfig; a burst must be a whole number holding one full request (widget: at least 1,000; beacon: at least 1), a rate a positive number; anything else stops the start |
+| With `TRUST_PROXY`: beacons of a token whose widget bucket is empty | The beacon burst (100) is read and refused 429; the rest are refused on arrival, unread |
+| Widget request whose handler never runs | Settled to the KiB its parser read; 415 to one unit; a client gone mid-body, or a request past `REQUEST_TIMEOUT_MS` (408), to the KiB received |
+| IPv4-mapped IPv6 addresses, any notation | Counted as their IPv4 address |
 | With `TRUST_PROXY`: concurrent header-less requests beyond the auth-failure burst | 429 before parsing; beacons that authenticate are refunded |
 | Without `TRUST_PROXY`: concurrent beacons from one address | Not charged on arrival; all accepted |
 | Widget-token traffic | Never charged to the project's API-key bucket; API-key requests never charged to a widget bucket |

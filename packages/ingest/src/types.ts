@@ -29,9 +29,22 @@ declare module "fastify" {
     authContext?: AuthContext;
     /** Set when the IP bucket was charged on arrival (plugins/rate-limit.ts). */
     ipRateCharged: boolean;
-    /** The events handler charged this request's events to its key's or widget token's bucket. */
+    /** The events route charged this request to its key's or widget token's buckets. */
     eventsCharged: boolean;
-    /** Charged to the auth-failure bucket on arrival: a header-less events request (plugins/rate-limit.ts). */
-    authFailureCharged: boolean;
+    /** Charged to the beacon bucket on arrival: a header-less events request (plugins/rate-limit.ts). */
+    beaconCharged: boolean;
+    /** Refused by an address bucket on arrival (plugins/rate-limit.ts). */
+    arrivalRefused: boolean;
+    /** Bytes of body the events route's parser read (0 when it read none). */
+    bodyBytes: number;
+    /**
+     * Units charged on arrival, before the body was read: 1 event for an API
+     * key, the declared body size for a widget token (plugins/events.ts).
+     */
+    reservedUnits: number;
+    /** The arrival charge was settled to the request's real charge (plugins/charge.ts). */
+    chargeSettled: boolean;
+    /** The socket's bytesRead at the arrival charge; -1 without a socket count. */
+    bytesAtArrival: number;
   }
 }

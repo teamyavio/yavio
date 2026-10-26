@@ -82,13 +82,16 @@ Every event in a widget JWT batch must have a `traceId` matching the JWT's `tid`
 |-------|-------|---------|
 | Per API key | 1,000 events/second | Prevents abuse from leaked keys |
 | Per API key burst | 5,000 events | Allows short spikes (e.g., batch imports) |
-| Per widget token | 50 events/second | Bounds what one widget JWT can send. A widget sends at most 20 events per batch |
-| Per widget token burst | 1,000 events | Covers a widget's teardown beacon (up to 200 events) many times over |
+| Per widget token | 50 units/second | Bounds what one widget JWT can send. A widget sends at most 20 events per batch |
+| Per widget token burst | 1,000 units | Covers a widget's teardown beacon (up to 200 events) many times over |
+| Per client address, widget tokens | 200 units/second, burst 2,000 | All widget tokens from one address (IPv6: one /64); only with `TRUST_PROXY` set |
+| Per project, widget tokens | 1,000 units/second, burst 10,000 | All of a project's widgets together; logged when reached |
 | Per IP (unauthenticated) | 10 requests/second | Protects against brute-force key scanning |
+| Per address, widget beacons on arrival | 50 requests/second, burst 100 | Bounds what one address can make ingest read before it authenticates; only with `TRUST_PROXY` set |
 
-API keys and widget tokens are charged by event count: an API key's budget is shared by the project, a widget token's budget belongs to that token (its project and trace). Widget traffic never draws on the project's API-key budget.
+API keys are charged by event count; widget tokens in units, one per event or one per KiB of body when that is more (a widget's own batches are charged by their events). An API key's budget is shared by the project, a widget token's belongs to that token (its project and trace), and every widget request also counts towards its address's and its project's widget budgets. Widget traffic never draws on the project's API-key budget.
 
-Rate limit state is stored in memory. Exceeded limits return `429 Too Many Requests` with a `Retry-After` header (`YAVIO-2050` for an API key, `YAVIO-2053` for a widget token).
+A request with a credential in its header is charged before its body is read, so one refused on arrival costs no reading. Per-address limits count an IPv6 address by its /64. Rate limit state is stored in memory. Exceeded limits return `429 Too Many Requests` with a `Retry-After` header (`YAVIO-2050` for an API key, `YAVIO-2053` for a widget token).
 
 ### Reverse Proxy Requirement
 
@@ -124,6 +127,7 @@ Individual event fields are validated against maximum size limits to prevent sto
 | Total event size | 50 KB | Event rejected |
 | Batch size | 500 KB | Batch rejected (413) |
 | Events per batch | 1,000 | Batch rejected whole (400) before any event is validated |
+| Nesting | 64 levels of objects and arrays | Batch rejected whole (400) |
 | Request body (JSON) | 600,000 bytes | Rejected (413) before it is read in full |
 | Request body (widget beacon, `text/plain`) | 64 KiB | Rejected (413) before it is read in full |
 
