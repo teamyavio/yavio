@@ -21,9 +21,8 @@ const BATCH_CAP_ISSUE = `events: Array must contain at most ${MAX_BATCH_EVENTS} 
  * Validate the raw request body against IngestBatch, then partition
  * individual events into valid/error buckets.
  *
- * A batch over MAX_BATCH_EVENTS is rejected whole before any parsing:
- * IngestBatch's `.max()` does not keep zod 3 from parsing every element
- * first, and the per-event fallback below would parse each of them again.
+ * A batch over MAX_BATCH_EVENTS is rejected whole, before IngestBatch or the
+ * per-event fallback looks at any of its events.
  */
 export function validateBatch(body: unknown): ValidationResult {
   const bodyObj = body as Record<string, unknown> | null;

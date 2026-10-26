@@ -141,6 +141,23 @@ describe("RateLimiter", () => {
       expect(limiter.peekAuthFailure("10.0.0.2").allowed).toBe(true);
     });
 
+    it("refunds one token, never above the burst", () => {
+      const limiter = new RateLimiter(undefined, { burstCapacity: 2, ratePerSecond: 0.001 });
+      limiter.refundAuthFailure("10.0.0.4"); // no bucket yet: nothing to do
+      expect(limiter.consumeAuthFailure("10.0.0.4").allowed).toBe(true);
+      expect(limiter.consumeAuthFailure("10.0.0.4").allowed).toBe(true);
+      expect(limiter.peekAuthFailure("10.0.0.4").allowed).toBe(false);
+      limiter.refundAuthFailure("10.0.0.4");
+      expect(limiter.consumeAuthFailure("10.0.0.4").allowed).toBe(true);
+      expect(limiter.consumeAuthFailure("10.0.0.4").allowed).toBe(false);
+      limiter.refundAuthFailure("10.0.0.4");
+      limiter.refundAuthFailure("10.0.0.4");
+      limiter.refundAuthFailure("10.0.0.4");
+      expect(limiter.consumeAuthFailure("10.0.0.4").allowed).toBe(true);
+      expect(limiter.consumeAuthFailure("10.0.0.4").allowed).toBe(true);
+      expect(limiter.consumeAuthFailure("10.0.0.4").allowed).toBe(false);
+    });
+
     it("cleans up stale auth-failure buckets", () => {
       const limiter = new RateLimiter({ cleanupIntervalMs: 1_000, staleAfterMs: 500 });
       limiter.consumeAuthFailure("10.0.0.3");

@@ -31,5 +31,7 @@ declare module "fastify" {
     ipRateCharged: boolean;
     /** The events handler charged this request's events to its key's or widget token's bucket. */
     eventsCharged: boolean;
+    /** Charged to the auth-failure bucket on arrival: a header-less events request (plugins/rate-limit.ts). */
+    authFailureCharged: boolean;
   }
 }

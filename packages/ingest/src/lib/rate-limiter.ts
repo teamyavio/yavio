@@ -127,6 +127,22 @@ export class RateLimiter {
   }
 
   /**
+   * Give back one auth-failure token charged on arrival to a request that
+   * then authenticated (a widget beacon, plugins/rate-limit.ts).
+   */
+  refundAuthFailure(ip: string): void {
+    const bucket = this.authFailureBuckets.get(ip);
+    if (!bucket) return;
+    const now = Date.now();
+    const elapsed = (now - bucket.lastRefill) / 1000;
+    bucket.tokens = Math.min(
+      this.ipConfig.burstCapacity,
+      bucket.tokens + elapsed * this.ipConfig.ratePerSecond + 1,
+    );
+    bucket.lastRefill = now;
+  }
+
+  /**
    * Whether the address still has auth-failure budget, without consuming it.
    * Credentialed requests are refused only once this is exhausted.
    */

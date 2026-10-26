@@ -50,6 +50,10 @@ The string rules are `@yavio/shared/pii`: its tests hold the exact-output table 
 | More than 1,000 events (valid or not) | Reject with 400 and one cap error at `index: -1`; no event parsed (neither the batch schema nor the per-event fallback runs), none stored |
 | Exactly 1,000 valid events | Accept |
 | More than 100 rejected events within the cap | 207/400 lists the first 100 errors; `rejected` counts all |
+| Header-less `text/plain` body over 64 KiB | 413 `YAVIO-2111`, body not parsed |
+| Header-less request that is not `text/plain` | 401 `YAVIO-2000`, body not parsed |
+| JSON body over 600,000 bytes | 413 `YAVIO-2111`, body not parsed; 500 KB–600,000 bytes keeps `Batch exceeds 500KB limit` |
+| 60,000-byte beacon with a valid body token | 200 |
 | Extra unknown fields | Accept (ignore extra fields) |
 | Invalid `timestamp` format | Reject |
 
@@ -125,6 +129,8 @@ The string rules are `@yavio/shared/pii`: its tests hold the exact-output table 
 |-----------|-----------------|
 | Valid API key + valid `traceId` | 200 with JWT in response |
 | Missing `traceId` in body | 400 |
+| `traceId` or `sessionId` over 128 characters, or not a string | 400 |
+| Presented token with `tid` or `sid` over 128 characters | 401 |
 | Invalid `traceId` format | 400 |
 | Invalid API key | 401 |
 | Revoked API key | 401 |
@@ -148,7 +154,10 @@ The string rules are `@yavio/shared/pii`: its tests hold the exact-output table 
 | Requests exceeding API key limit | 429 with `Retry-After` |
 | Different API keys have independent limits | Key A at limit does not affect Key B |
 | Widget-token events beyond the token's bucket (1,000 burst, 50/s) | 429 `YAVIO-2053` with `Retry-After`; normal widget batches (20 events) and a 200-event beacon pass |
-| Widget tokens of different traces | Independent buckets |
+| Widget tokens of different traces | Independent buckets; the bucket key has a fixed length |
+| Batch over the cap | Charged 1,000 events: the cap's 400 while the bucket holds 1,000, else 429 |
+| With `TRUST_PROXY`: concurrent header-less requests beyond the auth-failure burst | 429 before parsing; beacons that authenticate are refunded |
+| Without `TRUST_PROXY`: concurrent beacons from one address | Not charged on arrival; all accepted |
 | Widget-token traffic | Never charged to the project's API-key bucket; API-key requests never charged to a widget bucket |
 | Unauthenticated requests exceeding 10 req/s per IP | 429 |
 

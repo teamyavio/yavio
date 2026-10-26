@@ -68,7 +68,9 @@ Widgets never receive the project API key. Instead, the server-side proxy mints 
 | `tid` | Trace ID (events must match this trace) |
 | `sid` | Session ID (shared with the server) |
 
-Even if a widget JWT is extracted from the browser iframe, it is useless after 15 minutes and cannot be used to send events for other traces.
+Even if a widget JWT is extracted from the browser iframe, it is useless after 15 minutes and cannot be used to send events for other traces. Its trace and session IDs are at most 128 characters each, like the event fields they must match.
+
+A widget beacon (`navigator.sendBeacon` cannot set headers) carries its JWT in a `token` field of a `text/plain` body of at most 64 KiB. That is the only request ingest reads before it authenticates: anything else without an `Authorization` header is refused unread.
 
 ### Trace Validation
 
@@ -122,6 +124,8 @@ Individual event fields are validated against maximum size limits to prevent sto
 | Total event size | 50 KB | Event rejected |
 | Batch size | 500 KB | Batch rejected (413) |
 | Events per batch | 1,000 | Batch rejected whole (400) before any event is validated |
+| Request body (JSON) | 600,000 bytes | Rejected (413) before it is read in full |
+| Request body (widget beacon, `text/plain`) | 64 KiB | Rejected (413) before it is read in full |
 
 A response lists at most 100 per-event errors; its `rejected` count includes every rejected event.
 

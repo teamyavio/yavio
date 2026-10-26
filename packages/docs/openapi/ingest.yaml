@@ -33,6 +33,11 @@ paths:
         limited by event count: per project for API keys (5,000-event burst,
         1,000 events/second), per widget token (project and trace) for widget
         JWTs (1,000-event burst, 50 events/second).
+
+        Widget beacons (navigator.sendBeacon cannot set headers) send the
+        same body as text/plain, at most 64 KiB, with the widget JWT in a
+        `token` field. Without an Authorization header, any other request is
+        refused with 401 before its body is read.
       tags:
         - Events
       security:
@@ -64,9 +69,8 @@ paths:
             whole: `error.message` is "Batch exceeds 1000 events", `errors`
             holds one entry with `index: -1`, `rejected` is the number of
             events sent, and nothing in the batch is validated or stored.
-            The rate limit is charged first, so a batch with more events
-            than the credential's burst gets 429 instead: any batch over
-            1,000 events for a widget token, over 5,000 for an API key.
+            Such a batch is charged as 1,000 events to the rate limit, so
+            it gets 429 instead while the credential's bucket holds fewer.
           content:
             application/json:
               schema:
@@ -78,7 +82,10 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "413":
-          description: Batch exceeds maximum allowed size (500 KB)
+          description: |
+            Batch exceeds maximum allowed size (500 KB), or the request body
+            is over 600,000 bytes (JSON) or 64 KiB (text/plain beacon); those
+            are refused before they are read in full.
           content:
             application/json:
               schema:
@@ -135,7 +142,10 @@ paths:
               schema:
                 $ref: "#/components/schemas/WidgetTokenResponse"
         "400":
-          description: Missing or invalid traceId
+          description: |
+            Missing or invalid traceId or sessionId: each must be a string of
+            at most 128 characters, the limit of the event field it must
+            match.
           content:
             application/json:
               schema:
@@ -368,8 +378,12 @@ components:
       properties:
         traceId:
           type: string
+          minLength: 1
+          maxLength: 128
         sessionId:
           type: string
+          minLength: 1
+          maxLength: 128
 
     WidgetTokenResponse:
       type: object

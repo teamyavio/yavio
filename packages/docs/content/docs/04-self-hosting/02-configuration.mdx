@@ -104,7 +104,7 @@ and start with the proxy override, which pins the Docker networks' subnets:
 docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d
 ```
 
-**Why `TRUST_PROXY`.** Ingest limits requests that don't authenticate per client address, and logs no addresses at all. Behind a proxy, every request arrives from the proxy, so without `TRUST_PROXY` all clients share one address. With it, ingest takes the client address from `X-Forwarded-For`, but only for requests whose direct peer is listed.
+**Why `TRUST_PROXY`.** Ingest limits requests that don't authenticate per client address, and logs no addresses at all. Behind a proxy, every request arrives from the proxy, so without `TRUST_PROXY` all clients share one address. With it, ingest takes the client address from `X-Forwarded-For`, but only for requests whose direct peer is listed. Widget beacons, which carry their token in the body, are also charged to their client's address when they arrive (and refunded once they authenticate) only with `TRUST_PROXY` set; without it, ingest cannot tell the clients behind the proxy apart and charges a beacon only when it fails to authenticate.
 
 **Which address to list.** Not `127.0.0.1`: the proxy connects to a published port, and Docker's port forwarding hands the connection to the container from the **gateway of one of the container's networks**. Ingest is on two networks and Docker picks one, so list both gateways. `docker-compose.proxy.yml` pins them to `172.30.240.1` and `172.30.241.1` (override with `FRONTEND_SUBNET`/`FRONTEND_GATEWAY` and `BACKEND_SUBNET`/`BACKEND_GATEWAY`). Without pinning, the gateway could change whenever the networks are recreated.
 

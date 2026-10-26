@@ -147,15 +147,42 @@ describe("widget-token rate limit", () => {
     expect((await widgetBatch("trace-default", 20, token)).statusCode).toBe(200);
   });
 
-  it("answers a widget batch over the cap 429 from the token's bucket, before the cap check", async () => {
+  it("charges a widget batch over the cap as a full batch: the cap's 400, then 429 until the bucket refills", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    await build(new RateLimiter());
+    const token = widgetToken("trace-over");
+
+    const r = await widgetBatch("trace-over", 1_001, token);
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error.message).toBe("Batch exceeds 1000 events");
+    expect(enqueue).not.toHaveBeenCalled();
+
+    // It used the token's whole 1,000-event burst.
+    const again = await widgetBatch("trace-over", 1_001, token);
+    expect(again.statusCode).toBe(429);
+    expect(again.json().error.code).toBe("YAVIO-2053");
+    expect((await widgetBatch("trace-over", 20, token)).statusCode).toBe(429);
+    vi.setSystemTime(Date.now() + 1_000);
+    expect((await widgetBatch("trace-over", 20, token)).statusCode).toBe(200);
+  });
+
+  it("charges an API-key batch over the cap as a full batch, so it gets the cap's 400 even above the key's burst", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     await build(new RateLimiter());
 
-    const r = await widgetBatch("trace-over", 1_001);
-    expect(r.statusCode).toBe(429);
-    expect(r.json().error.code).toBe("YAVIO-2053");
-    expect(enqueue).not.toHaveBeenCalled();
-    // Refused without a charge: the token's next normal batch passes.
-    expect((await widgetBatch("trace-over", 20)).statusCode).toBe(200);
+    // 6,000 events: more than the key's 5,000-event burst.
+    const r = await app.inject({
+      method: "POST",
+      url: "/v1/events",
+      headers: { authorization: `Bearer ${API_KEY}` },
+      payload: { events: Array.from({ length: 6_000 }, () => ({})) },
+    });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error.message).toBe("Batch exceeds 1000 events");
+    expect(r.json().rejected).toBe(6_000);
+    // 1,000 of the 5,000 used: four more full batches fit, the fifth does not.
+    for (let i = 0; i < 4; i++) expect((await keyedBatch(1_000)).statusCode).toBe(200);
+    expect((await keyedBatch(1)).statusCode).toBe(429);
   });
 
   it("gives each widget token (trace) its own bucket", async () => {
