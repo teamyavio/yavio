@@ -1800,9 +1800,10 @@ const KNOWN_META_KEYS = new Set([
 /**
  * The `_meta` keys that hold a platform's raw conversation id, removed under
  * every `geo` with `capture.conversationId: false` (#204) and named in
- * `_metaDroppedKeys`. Exact names, as findSessionKey reads them. Raw
- * duplicates of `session_id`, which is the SHA-256 of the same key, so they
- * add no metric of their own — the rule #76 applied to `_sessionId`. A new
+ * `_metaDroppedKeys`. Exact names, as findSessionKey reads them. Raw ids
+ * of the conversation `session_id` already names (deriveSessionId, a
+ * SHA-256 of the session key), so they add no metric of their own — the
+ * rule #76 applied to `_sessionId`. A new
  * conversation key goes here, in one place. Under a `geo` other than `true`
  * the allowlist drops all of them but `openai/session` already.
  */
