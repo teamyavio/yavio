@@ -40,8 +40,13 @@ describe("deferredWriterLogger", () => {
     attach(app.log);
     const clickhouse = {
       insert: async ({ values }: { values: Array<{ event_id: string }> }) => {
-        if (values.some((v) => v.event_id === "evt-bad")) {
-          throw new ClickHouseError({ message: "x", code: "72", type: "CANNOT_PARSE_NUMBER" });
+        const at = values.findIndex((v) => v.event_id === "evt-bad");
+        if (at >= 0) {
+          throw new ClickHouseError({
+            message: `Unsigned type must not contain '-' symbol: (at row ${at + 1})`,
+            code: "72",
+            type: "CANNOT_PARSE_NUMBER",
+          });
         }
       },
     } as unknown as ClickHouseClient;

@@ -3,32 +3,11 @@ import { createDb } from "@yavio/db/client";
 import { loadConfig } from "./config.js";
 import { createApp } from "./index.js";
 import { BatchWriter } from "./lib/batch-writer.js";
-import { type EnrichedEvent, toClickHouseDateTime } from "./lib/event-enricher.js";
 import { RateLimiter } from "./lib/rate-limiter.js";
+import { mapToolRegistryRow } from "./lib/tool-registry.js";
 import { deferredWriterLogger } from "./lib/writer-logger.js";
 import { StatsJob } from "./stats/job.js";
 import { PgStatsJobStore } from "./stats/store.js";
-
-function mapToolRegistryRow(event: EnrichedEvent): Record<string, unknown> {
-  const inputSchema = event.input_schema;
-  let inputSchemaStr = "{}";
-  if (inputSchema !== undefined && inputSchema !== null) {
-    inputSchemaStr =
-      typeof inputSchema === "object" ? JSON.stringify(inputSchema) : String(inputSchema);
-  }
-
-  return {
-    project_id: event.project_id,
-    tool_name: String(event.tool_name ?? ""),
-    description: event.description ?? null,
-    input_schema: inputSchemaStr,
-    registered_at: String(event.timestamp),
-    // The registry's version column (ReplacingMergeTree keeps the latest):
-    // stamped here, not on the event — `ingested_at` is ClickHouse's to set
-    // since #148 review round 5, and tool_registry.updated_at has no DEFAULT.
-    updated_at: toClickHouseDateTime(new Date().toISOString()),
-  };
-}
 
 async function main() {
   const config = loadConfig();

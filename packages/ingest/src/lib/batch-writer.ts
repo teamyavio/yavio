@@ -5,47 +5,43 @@ import type { EnrichedEvent } from "./event-enricher.js";
 const DEFAULT_FLUSH_INTERVAL_MS = 1_000;
 const DEFAULT_FLUSH_SIZE = 10_000;
 const DEFAULT_MAX_BUFFER_SIZE = 100_000;
+const DEFAULT_MAX_KEPT_ROWS = 1_000;
 const MAX_RETRIES = 3;
 
 /**
- * Flushes in a row that rows may fail to insert, for a reason other than
- * their content, and still be retried ahead of the events buffered after
- * them (as every failed batch was before). From the next flush on they are
- * retried after the newer events, with one attempt per flush, and split in
- * halves each time they fail again, so that rows failing for a reason of
- * their own that is not recognised as such (`ROW_ERROR_CODES`) can hold back
- * neither the rest of the buffer nor the rows they were batched with for
- * good. Nothing is dropped for such a failure.
- */
-export const MAX_FAILED_FLUSHES_AHEAD = 5;
-
-/**
- * Inserts a flush may spend finding the rows ClickHouse refuses (`write`).
- * One such row among 10,000 takes about 28, two about 50. What is not
- * isolated within the budget is kept and the search goes on in the next
- * flush, so a batch in which every row is refused (a schema the rows do not
- * fit) costs 64 failing inserts per flush, not twice its size.
+ * Inserts a flush may spend sorting out rows whose insert failed because of
+ * their content (`write`): about two per row ClickHouse refuses, when it
+ * names the row, as it does on 26.8 ("at row N"). The inserts of rows known
+ * to be good — the rows before the one ClickHouse named, a project's rows
+ * split from the others — are not counted. What a flush cannot sort out
+ * within the budget is kept apart for the next one.
  */
 export const ISOLATION_INSERTS_PER_FLUSH = 64;
 
-/** How many event ids, and project ids, a warning about refused rows names. */
+/**
+ * Flushes in a row a batch may fail with a resource error (memory, a time
+ * limit) while ClickHouse answers before it is treated as too large or
+ * otherwise specific to its rows, and split.
+ */
+export const RESOURCE_ERROR_FLUSHES = 5;
+
+/** A failing batch with rows of more projects is split into at most this many project groups. */
+const MAX_PROJECT_GROUPS = 16;
+
+/** Longest wait, in flushes, before a row kept after an unrecognised error is tried again. */
+const MAX_UNRECOGNISED_BACKOFF_FLUSHES = 64;
+
+/** How many event ids, and project ids, a warning names. */
 const LOGGED_IDS = 5;
 const LOGGED_PROJECTS = 10;
 
 /**
  * ClickHouse errors about the inserted rows themselves: a value a column
- * cannot parse or hold, such as -1 or "1e+21" for a UInt32 or a string with
- * a lone surrogate escape. Inserting the same rows again fails the same way,
- * so a batch that fails with one of these is split until the refused rows
- * are found (`write`). Matched by code, which ClickHouse never renumbers;
- * the names are those of 26.8 (`errorCodeToName`, checked against the server
- * in insert-isolation.test.ts).
- *
- * Any other error is not about the rows — network, timeout, memory, too
- * many parts or simultaneous queries, but also a missing table or a refused
- * login — and keeps them for a later flush. A truncated request body
- * (ATTEMPT_TO_READ_AFTER_EOF, CANNOT_READ_ALL_DATA) is left out on purpose:
- * it says nothing about the rows.
+ * cannot parse or hold, such as -1 or "1e+21" for a UInt32, a string with a
+ * lone surrogate escape or a timestamp with 20 fractional digits. Inserting
+ * the same rows again fails the same way. Matched by code, which ClickHouse
+ * never renumbers; the names are those of 26.8 (`errorCodeToName`, checked
+ * against the server in insert-isolation.test.ts).
  */
 export const ROW_ERROR_CODES: ReadonlyMap<number, string> = new Map([
   [6, "CANNOT_PARSE_TEXT"],
@@ -72,16 +68,89 @@ export const ROW_ERROR_CODES: ReadonlyMap<number, string> = new Map([
   [676, "CANNOT_PARSE_IPV6"],
 ]);
 
+/**
+ * ClickHouse errors about the server, the connection or the table — never
+ * about the rows: the batch is kept, counted towards backpressure, and
+ * retried as it is, after a backoff. A truncated request body
+ * (UNEXPECTED_END_OF_FILE, ATTEMPT_TO_READ_AFTER_EOF, CANNOT_READ_ALL_DATA)
+ * is a transport failure. Names of 26.8, checked like ROW_ERROR_CODES.
+ */
+export const SERVER_ERROR_CODES: ReadonlyMap<number, string> = new Map([
+  [3, "UNEXPECTED_END_OF_FILE"],
+  [16, "NO_SUCH_COLUMN_IN_TABLE"],
+  [32, "ATTEMPT_TO_READ_AFTER_EOF"],
+  [33, "CANNOT_READ_ALL_DATA"],
+  [60, "UNKNOWN_TABLE"],
+  [81, "UNKNOWN_DATABASE"],
+  [95, "CANNOT_READ_FROM_SOCKET"],
+  [96, "CANNOT_WRITE_TO_SOCKET"],
+  [164, "READONLY"],
+  [192, "UNKNOWN_USER"],
+  [194, "REQUIRED_PASSWORD"],
+  [201, "QUOTA_EXCEEDED"],
+  [202, "TOO_MANY_SIMULTANEOUS_QUERIES"],
+  [209, "SOCKET_TIMEOUT"],
+  [210, "NETWORK_ERROR"],
+  [218, "TABLE_IS_DROPPED"],
+  [236, "ABORTED"],
+  [242, "TABLE_IS_READ_ONLY"],
+  [243, "NOT_ENOUGH_SPACE"],
+  [252, "TOO_MANY_PARTS"],
+  [279, "ALL_CONNECTION_TRIES_FAILED"],
+  [394, "QUERY_WAS_CANCELLED"],
+  [425, "SYSTEM_ERROR"],
+  [497, "ACCESS_DENIED"],
+  [516, "AUTHENTICATION_FAILED"],
+  [700, "USER_SESSION_LIMIT_EXCEEDED"],
+  [749, "TCP_CONNECTION_LIMIT_REACHED"],
+  [762, "HTTP_CONNECTION_LIMIT_REACHED"],
+  [999, "KEEPER_EXCEPTION"],
+  [1000, "POCO_EXCEPTION"],
+]);
+
+/**
+ * Resource errors: the server's state, or a batch too large for it. Kept
+ * and retried like SERVER_ERROR_CODES, and split after
+ * RESOURCE_ERROR_FLUSHES flushes in a row while ClickHouse answers.
+ */
+export const RESOURCE_ERROR_CODES: ReadonlyMap<number, string> = new Map([
+  [159, "TIMEOUT_EXCEEDED"],
+  [173, "CANNOT_ALLOCATE_MEMORY"],
+  [241, "MEMORY_LIMIT_EXCEEDED"],
+  [776, "RESOURCE_LIMIT_EXCEEDED"],
+  [777, "MEMORY_RESERVATION_KILLED"],
+  [778, "MEMORY_RESERVATION_FAILED"],
+]);
+
+function clickhouseCode(err: unknown): number | null {
+  if (!(err instanceof ClickHouseError)) return null;
+  const code = Number(err.code);
+  return Number.isInteger(code) ? code : null;
+}
+
 /** The error's name when it is about the inserted rows (`ROW_ERROR_CODES`), else null. */
 export function rowErrorName(err: unknown): string | null {
-  if (!(err instanceof ClickHouseError)) return null;
-  return ROW_ERROR_CODES.get(Number(err.code)) ?? null;
+  const code = clickhouseCode(err);
+  return code === null ? null : (ROW_ERROR_CODES.get(code) ?? null);
 }
 
 /**
- * A short label for an error that is not about the rows: the ClickHouse
- * error name, or a Node error code. Never the message, which may quote the
- * request.
+ * The 1-based position of the row ClickHouse names in its message ("(at row
+ * 25001)"; the first refused row, also with parallel parsing on 26.8), or
+ * null when there is none or it is outside the batch. Only the number is
+ * read: the rest of the message can quote the row.
+ */
+function namedRow(err: unknown, rows: number): number | null {
+  if (!(err instanceof ClickHouseError)) return null;
+  const match = /\(at row (\d+)\)/.exec(err.message);
+  if (!match) return null;
+  const at = Number(match[1]);
+  return at >= 1 && at <= rows ? at : null;
+}
+
+/**
+ * A short label for an error: the ClickHouse error name or code, or a Node
+ * error code. Never the message, which can quote the rows.
  */
 function errorLabel(err: unknown): string {
   if (err instanceof ClickHouseError) return err.type ?? `code ${err.code}`;
@@ -116,12 +185,14 @@ function errorLabel(err: unknown): string {
  * CSV/TSV-style formats only — and serialises object-mode rows itself. The
  * identity hash is the cheaper choice anyway: it serialises nothing.
  *
- * A part of a batch split to find refused rows (`write`) is a batch of its
+ * A part of a batch split to sort out its rows (`split`) is a batch of its
  * own: its token is hashed from its own rows, and rows kept for a later
  * flush are kept together, so their retry carries the same token. A refused
  * insert has stored nothing: ClickHouse squashes an insert into blocks of up
  * to 1,048,449 rows or 256 MiB, a batch below that is one block, and a block
- * is refused whole.
+ * is refused whole. A batch above 256 MiB can have its first blocks stored
+ * before a later row is refused; its parts then carry new tokens, so those
+ * rows are stored twice until a merge (or FINAL) collapses them.
  */
 function batchToken(batch: ReadonlyArray<EnrichedEvent>): string {
   const hash = createHash("sha256");
@@ -144,30 +215,77 @@ export interface BatchWriterOptions {
   flushIntervalMs?: number;
   flushSize?: number;
   maxBufferSize?: number;
+  /** Rows kept apart while being sorted out (`kept`), at most. Defaults to 1,000. */
+  maxKeptRows?: number;
   logger?: BatchWriterLogger;
 }
 
-/** Rows waiting for another insert, kept together (one token, see batchToken). */
-interface Pending {
+/** Rows inserted together, with what their earlier inserts showed. */
+interface Piece {
   rows: EnrichedEvent[];
-  /** Flushes in a row whose insert of these rows failed for a reason other than their content. */
+  /**
+   * Flushes in a row whose insert of these rows failed without ClickHouse
+   * naming the rows: with a server or resource error (`retry`), or with an
+   * unrecognised error while ClickHouse answers (`kept`, for the backoff).
+   */
   failures: number;
-  /** A row ClickHouse refused in a flush that stored nothing (`settleRefused`). */
-  refused?: true;
+  /** A single row: times ClickHouse refused it with a row error. */
+  refusals: number;
+  /** Split by project already, or of one project. */
+  grouped: boolean;
+  /** The flush from which a kept piece is tried again. */
+  due: number;
+  /** The flush in which its rows were first written, for the age of kept rows. */
+  since: number;
+}
+
+/** How a piece is written. */
+interface How {
+  attempts: number;
+  /** Counted against the flush's isolation budget. */
+  budgeted: boolean;
+  /** Where its rows go back to after a server error: `retry` (counted) or `kept`. */
+  origin: "retry" | "kept";
 }
 
 /** What one flush did. */
 interface FlushRun {
-  /** Inserts left for isolating refused rows. */
+  flush: number;
+  /** Inserts left for sorting out rows. */
   budget: number;
   /** Rows stored. */
   stored: number;
-  /** Rows ClickHouse refused on their own, with the error's name. */
-  refused: Array<{ row: EnrichedEvent; error: string }>;
-  /** An insert failed for a reason other than its rows: nothing more is tried. */
+  /** An insert failed with a server error: nothing more is tried. */
   halted: boolean;
-  /** Rows retried behind newer events that failed again: kept after all others. */
-  last: Pending[];
+  /** Whether ClickHouse answered a ping, once asked in this flush. */
+  answers?: boolean;
+  /** Single rows ClickHouse refused a second time, dropped. */
+  dropped: Array<{ row: EnrichedEvent; error: string }>;
+  /** Single rows that failed with an unrecognised error while ClickHouse answers, kept apart. */
+  unrecognised: Array<{ row: EnrichedEvent; error: string }>;
+}
+
+function summary(rows: EnrichedEvent[]) {
+  return {
+    event_ids: rows.slice(0, LOGGED_IDS).map((r) => String(r.event_id)),
+    project_ids: [...new Set(rows.map((r) => r.project_id))].slice(0, LOGGED_PROJECTS),
+  };
+}
+
+/** Rows by project, in order of first appearance; beyond MAX_PROJECT_GROUPS the smallest go together. */
+function byProject(rows: EnrichedEvent[]): EnrichedEvent[][] {
+  const groups = new Map<string, EnrichedEvent[]>();
+  for (const row of rows) {
+    const group = groups.get(row.project_id);
+    if (group) group.push(row);
+    else groups.set(row.project_id, [row]);
+  }
+  const all = [...groups.values()];
+  if (all.length <= MAX_PROJECT_GROUPS) return all;
+  const largest = new Set(
+    [...all].sort((a, b) => b.length - a.length).slice(0, MAX_PROJECT_GROUPS - 1),
+  );
+  return [...all.filter((g) => largest.has(g)), all.filter((g) => !largest.has(g)).flat()];
 }
 
 /**
@@ -175,40 +293,47 @@ interface FlushRun {
  *
  * A flush writes, in order:
  *
- * 1. rows that failed in fewer than MAX_FAILED_FLUSHES_AHEAD flushes in a
- *    row for a reason other than their content (a network error, a timeout,
- *    an overloaded server), each as the batch it was, with three attempts;
- * 2. the next `flushSize` buffered events;
- * 3. what earlier flushes kept: rows that failed in more flushes than that
- *    (one attempt each; when they fail again, split in halves and to the
- *    back of the queue), rows whose isolation ran out of budget, and
- *    refused rows kept by the rule below — within the flush's isolation
- *    budget.
+ * 1. batches kept after ClickHouse was unavailable or reported a server
+ *    error (`retry`; counted towards backpressure), each as it was, with
+ *    three attempts;
+ * 2. rows kept apart while being sorted out (`kept`; not counted), oldest
+ *    first, within the flush's isolation budget;
+ * 3. the next `flushSize` buffered events.
  *
- * The first failure that is not about the rows ends the flush: everything
- * not tried yet stays where it is, and the buffer keeps filling until
- * `maxBufferSize`, where ingest answers 503 (backpressure). Rows kept this
- * way never share an insert with newer events, so a retry carries the same
- * deduplication token, and after MAX_FAILED_FLUSHES_AHEAD flushes rows that
- * keep failing hold back neither the buffer, nor the rows batched with them,
- * nor each other.
+ * When an insert fails, the error decides:
  *
- * An insert ClickHouse refuses because of a row (`ROW_ERROR_CODES`) is split
- * in halves, each inserted on its own, down to the single rows it refuses.
- * Those are dropped, with one warning per flush that names their event and
- * project ids and the error, never a value. They are dropped only when the
- * same flush stored other rows: when ClickHouse refuses every row, the
- * schema rather than the rows is at fault, and they are kept, to be tried
- * again in the next flush that stores rows.
+ * - A row error (`ROW_ERROR_CODES`): the batch is split — by project, then
+ *   at the row ClickHouse names, else in halves — and each part inserted on
+ *   its own. The other rows are stored. A single row ClickHouse refuses is
+ *   kept apart and dropped when it is refused a second time, with one
+ *   warning per flush (count, event ids, project ids, error names; never a
+ *   value).
+ * - A server error (`SERVER_ERROR_CODES`, a resource error for up to
+ *   RESOURCE_ERROR_FLUSHES flushes), or any failure while ClickHouse does
+ *   not answer a ping: the batch is kept in `retry` and the flush ends;
+ *   everything not tried yet stays where it is, and the buffer fills until
+ *   `maxBufferSize`, where ingest answers 503 (backpressure). Nothing is
+ *   split or dropped.
+ * - Any other failure while ClickHouse answers a ping: it is treated as
+ *   specific to the batch and split like a row error; a single row that
+ *   keeps failing is kept apart (not dropped), retried with a backoff of up
+ *   to MAX_UNRECOGNISED_BACKOFF_FLUSHES flushes, and logged with its error.
+ *
+ * Rows kept apart never count towards backpressure, so they cannot make
+ * ingest refuse other events. They are capped at `maxKeptRows`; beyond it
+ * the oldest are dropped, with a warning.
  *
  * When every insert succeeds, a flush is one insert of the next batch, as
  * before: nothing is serialised or hashed twice.
  */
 export class BatchWriter {
   private buffer: EnrichedEvent[] = [];
-  /** Rows an earlier flush could not write, oldest first. */
-  private pending: Pending[] = [];
-  private pendingRows = 0;
+  /** Batches kept after a server error, oldest first; counted. */
+  private retry: Piece[] = [];
+  private retryRows = 0;
+  /** Rows kept apart while being sorted out; not counted towards backpressure. */
+  private kept: Piece[] = [];
+  private flushes = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly clickhouse: ClickHouseClient;
   private readonly table: string;
@@ -216,6 +341,7 @@ export class BatchWriter {
   private readonly flushIntervalMs: number;
   private readonly flushSize: number;
   private readonly maxBufferSize: number;
+  private readonly maxKeptRows: number;
   private readonly logger?: BatchWriterLogger;
   private inFlight: Promise<void> | null = null;
 
@@ -226,6 +352,7 @@ export class BatchWriter {
     this.flushIntervalMs = options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
     this.flushSize = options.flushSize ?? DEFAULT_FLUSH_SIZE;
     this.maxBufferSize = options.maxBufferSize ?? DEFAULT_MAX_BUFFER_SIZE;
+    this.maxKeptRows = options.maxKeptRows ?? DEFAULT_MAX_KEPT_ROWS;
     this.logger = options.logger;
   }
 
@@ -263,10 +390,10 @@ export class BatchWriter {
   /**
    * Flush buffered events to ClickHouse.
    *
-   * Resolves only once currently-buffered events have actually been
-   * written (or kept after a failed insert) — callers like the shutdown
-   * path rely on this as a completion guarantee, so a flush that is
-   * already in flight is awaited instead of skipped.
+   * Resolves only once the next batch has actually been written (or kept
+   * after a failed insert) — callers like the shutdown path rely on this as
+   * a completion guarantee, so a flush that is already in flight is awaited
+   * instead of skipped.
    */
   async flush(): Promise<void> {
     await this.runFlush();
@@ -277,14 +404,18 @@ export class BatchWriter {
     while (this.inFlight) {
       await this.inFlight;
     }
-    if (this.buffer.length === 0 && this.pending.length === 0) return null;
+    if (this.buffer.length === 0 && this.retry.length === 0 && this.kept.length === 0) {
+      return null;
+    }
 
+    this.flushes++;
     const run: FlushRun = {
+      flush: this.flushes,
       budget: ISOLATION_INSERTS_PER_FLUSH,
       stored: 0,
-      refused: [],
       halted: false,
-      last: [],
+      dropped: [],
+      unrecognised: [],
     };
     this.inFlight = this.flushOnce(run);
     try {
@@ -296,122 +427,214 @@ export class BatchWriter {
   }
 
   private async flushOnce(run: FlushRun): Promise<void> {
-    // The kept rows stay counted (`pendingRows`, backpressure) until each
-    // unit is taken for its insert, as the batch in flight is not counted.
-    const pending = this.pending;
-    this.pending = [];
-    const isAhead = (p: Pending) => p.failures > 0 && p.failures < MAX_FAILED_FLUSHES_AHEAD;
-
-    for (const p of pending.filter(isAhead)) {
-      this.pendingRows -= p.rows.length;
-      await this.write(p.rows, p.failures, run, false);
+    // The rows of a retried batch stay counted (backpressure) until it is
+    // taken for its insert, as the batch in flight is not counted.
+    const retry = this.retry;
+    this.retry = [];
+    for (const piece of retry) {
+      this.retryRows -= piece.rows.length;
+      await this.write(piece, run, { attempts: MAX_RETRIES, budgeted: false, origin: "retry" });
     }
+
+    const kept = this.kept.sort((a, b) => a.since - b.since);
+    this.kept = [];
+    for (const piece of kept) {
+      if (piece.due > run.flush) this.kept.push(piece);
+      else await this.write(piece, run, { attempts: 1, budgeted: true, origin: "kept" });
+    }
+
     if (!run.halted && this.buffer.length > 0) {
-      await this.write(this.buffer.splice(0, this.flushSize), 0, run, false);
-    }
-    for (const p of pending.filter((q) => !isAhead(q))) {
-      this.pendingRows -= p.rows.length;
-      // A refused row kept by settleRefused is tried again only in a flush
-      // that has stored rows: until then it would be refused again, and
-      // dropping it is decided in such a flush.
-      if (p.refused && run.stored === 0) this.keep(p);
-      else await this.write(p.rows, p.failures, run, true);
-    }
-    for (const p of run.last) this.keep(p);
-
-    this.settleRefused(run);
-  }
-
-  /**
-   * Insert `rows`. When ClickHouse refuses them because of a row, insert
-   * each half on its own, down to single rows (`run.refused`). Rows that
-   * cannot be tried now — after a failure that ends the flush, or with the
-   * isolation budget spent (`isolating`: a half, or rows kept by an earlier
-   * flush) — are kept for the next one.
-   */
-  private async write(
-    rows: EnrichedEvent[],
-    failures: number,
-    run: FlushRun,
-    isolating: boolean,
-  ): Promise<void> {
-    if (run.halted || (isolating && run.budget <= 0)) {
-      this.keep({ rows, failures });
-      return;
-    }
-    if (isolating) run.budget--;
-
-    const failed = await this.insert(rows, failures >= MAX_FAILED_FLUSHES_AHEAD ? 1 : MAX_RETRIES);
-    if (!failed) {
-      run.stored += rows.length;
-      return;
-    }
-
-    const rowError = rowErrorName(failed.error);
-    if (rowError === null) {
-      run.halted = true;
-      const kept = { rows, failures: failures + 1 };
-      if (kept.failures === MAX_FAILED_FLUSHES_AHEAD) {
-        this.logger?.warn(
-          `${rows.length} events failed to insert in ${MAX_FAILED_FLUSHES_AHEAD} flushes in a row; they are retried after newer events from now on`,
-          { events: rows.length, error: errorLabel(failed.error) },
-        );
-      }
-      if (failures < MAX_FAILED_FLUSHES_AHEAD) {
-        this.keep(kept);
-      } else if (rows.length === 1) {
-        run.last.push(kept);
-      } else {
-        // Retried behind newer events and failed again: split, so that the
-        // rows batched with one that keeps failing get through.
-        const half = Math.ceil(rows.length / 2);
-        run.last.push(
-          { rows: rows.slice(0, half), failures: kept.failures },
-          { rows: rows.slice(half), failures: kept.failures },
-        );
-      }
-      return;
-    }
-
-    if (rows.length === 1) {
-      run.refused.push({ row: rows[0], error: rowError });
-      return;
-    }
-    const half = Math.ceil(rows.length / 2);
-    await this.write(rows.slice(0, half), 0, run, true);
-    await this.write(rows.slice(half), 0, run, true);
-  }
-
-  /**
-   * Drop the rows ClickHouse refused on their own, with one warning — or,
-   * when the flush stored nothing else, keep them: ClickHouse refusing every
-   * row points at the table, not at the rows.
-   */
-  private settleRefused(run: FlushRun): void {
-    if (run.refused.length === 0) return;
-    const rows = run.refused.map((r) => r.row);
-    const summary = {
-      event_ids: rows.slice(0, LOGGED_IDS).map((r) => String(r.event_id)),
-      project_ids: [...new Set(rows.map((r) => r.project_id))].slice(0, LOGGED_PROJECTS),
-      errors: [...new Set(run.refused.map((r) => r.error))],
-    };
-    if (run.stored > 0) {
-      this.logger?.warn(
-        `Dropped ${rows.length} events ClickHouse refused to store; the events buffered with them were stored`,
-        { dropped: rows.length, ...summary },
+      const rows = this.buffer.splice(0, this.flushSize);
+      await this.write(
+        { rows, failures: 0, refusals: 0, grouped: false, due: 0, since: run.flush },
+        run,
+        { attempts: MAX_RETRIES, budgeted: false, origin: "retry" },
       );
-      return;
     }
-    for (const row of rows) this.keep({ rows: [row], failures: 0, refused: true });
-    this.logger?.warn(
-      `Kept ${rows.length} events ClickHouse refused to store: no other event was stored in this flush; they are tried again in the next flush that stores events`,
-      { kept: rows.length, ...summary },
-    );
+
+    this.settle(run);
   }
 
-  private keep(p: Pending): void {
-    this.pending.push(p);
-    this.pendingRows += p.rows.length;
+  /** Insert a piece; on a failure, keep it, split it or settle its row. */
+  private async write(piece: Piece, run: FlushRun, how: How): Promise<void> {
+    if (run.halted) {
+      this.putBack(piece, how.origin);
+      return;
+    }
+    if (how.budgeted) {
+      if (run.budget <= 0) {
+        this.kept.push(piece);
+        return;
+      }
+      run.budget--;
+    }
+
+    const failed = await this.insert(piece.rows, how.attempts);
+    if (!failed) {
+      run.stored += piece.rows.length;
+      return;
+    }
+
+    const kind = await this.classify(failed.error, piece, run);
+    if (kind === "server") {
+      run.halted = true;
+      this.putBack({ ...piece, failures: piece.failures + 1 }, how.origin);
+      return;
+    }
+    if (piece.rows.length === 1) {
+      this.settleRow(piece, kind, errorLabel(failed.error), run);
+      return;
+    }
+    await this.split(piece, failed.error, kind, run, how.origin);
+  }
+
+  /**
+   * "row": ClickHouse refused the rows (ROW_ERROR_CODES). "server": the
+   * server, the connection or the table failed — or ClickHouse does not
+   * answer. "batch": any other failure while ClickHouse answers.
+   */
+  private async classify(
+    err: unknown,
+    piece: Piece,
+    run: FlushRun,
+  ): Promise<"row" | "server" | "batch"> {
+    if (rowErrorName(err) !== null) return "row";
+    const code = clickhouseCode(err);
+    if (code !== null && SERVER_ERROR_CODES.has(code)) return "server";
+    if (!(await this.answers(run))) return "server";
+    if (code !== null && RESOURCE_ERROR_CODES.has(code)) {
+      return piece.failures + 1 < RESOURCE_ERROR_FLUSHES ? "server" : "batch";
+    }
+    return "batch";
+  }
+
+  /** Whether ClickHouse answers a ping; asked once per flush. */
+  private async answers(run: FlushRun): Promise<boolean> {
+    if (run.answers === undefined) {
+      try {
+        run.answers = (await this.clickhouse.ping()).success === true;
+      } catch {
+        run.answers = false;
+      }
+    }
+    return run.answers;
+  }
+
+  /**
+   * Split a failed batch: by project (once), then at the row ClickHouse
+   * names, else in halves. The rows before a named row parsed and are
+   * inserted at once, outside the budget; the named row and the rest are
+   * budgeted.
+   */
+  private async split(
+    piece: Piece,
+    err: unknown,
+    kind: "row" | "batch",
+    run: FlushRun,
+    origin: How["origin"],
+  ): Promise<void> {
+    const part = (rows: EnrichedEvent[], refusals = 0): Piece => ({
+      rows,
+      failures: 0,
+      refusals,
+      grouped: true,
+      due: 0,
+      since: piece.since,
+    });
+    const free: How = { attempts: 1, budgeted: false, origin };
+    const budgeted: How = { attempts: 1, budgeted: true, origin };
+
+    if (!piece.grouped) {
+      const groups = byProject(piece.rows);
+      if (groups.length > 1) {
+        for (const group of groups) await this.write(part(group), run, free);
+        return;
+      }
+    }
+
+    const at = namedRow(err, piece.rows.length);
+    if (at !== null) {
+      const before = piece.rows.slice(0, at - 1);
+      const after = piece.rows.slice(at);
+      if (before.length > 0) await this.write(part(before), run, free);
+      // Refused once in the batch: refused alone, it is dropped.
+      await this.write(part([piece.rows[at - 1]], kind === "row" ? 1 : 0), run, budgeted);
+      if (after.length > 0) await this.write(part(after), run, budgeted);
+      return;
+    }
+
+    const half = Math.ceil(piece.rows.length / 2);
+    await this.write(part(piece.rows.slice(0, half)), run, budgeted);
+    await this.write(part(piece.rows.slice(half)), run, budgeted);
+  }
+
+  /** A single row that failed: dropped when refused a second time, else kept apart. */
+  private settleRow(piece: Piece, kind: "row" | "batch", error: string, run: FlushRun): void {
+    const [row] = piece.rows;
+    if (kind === "row") {
+      const refusals = piece.refusals + 1;
+      if (refusals >= 2) run.dropped.push({ row, error });
+      else this.kept.push({ ...piece, refusals, due: run.flush + 1 });
+      return;
+    }
+    const failures = piece.failures + 1;
+    const wait = Math.min(2 ** (failures - 1), MAX_UNRECOGNISED_BACKOFF_FLUSHES);
+    this.kept.push({ ...piece, failures, due: run.flush + wait });
+    run.unrecognised.push({ row, error });
+  }
+
+  /** After a server error: back to `retry` (counted), or to `kept` for rows kept apart or refused. */
+  private putBack(piece: Piece, origin: How["origin"]): void {
+    if (origin === "retry" && piece.refusals === 0) {
+      this.retry.push(piece);
+      this.retryRows += piece.rows.length;
+    } else {
+      this.kept.push(piece);
+    }
+  }
+
+  /** One warning per kind per flush; the cap on rows kept apart. */
+  private settle(run: FlushRun): void {
+    if (run.dropped.length > 0) {
+      const rows = run.dropped.map((d) => d.row);
+      this.logger?.warn(`Dropped ${rows.length} events ClickHouse refused twice`, {
+        dropped: rows.length,
+        ...summary(rows),
+        errors: [...new Set(run.dropped.map((d) => d.error))],
+      });
+    }
+    if (run.unrecognised.length > 0) {
+      const rows = run.unrecognised.map((u) => u.row);
+      this.logger?.warn(
+        `${rows.length} events failed to insert on their own while ClickHouse answers, with an error it does not attribute to their content; kept apart and retried`,
+        {
+          kept: rows.length,
+          ...summary(rows),
+          errors: [...new Set(run.unrecognised.map((u) => u.error))],
+        },
+      );
+    }
+
+    let over = this.keptCount - this.maxKeptRows;
+    if (over <= 0) return;
+    this.kept.sort((a, b) => a.since - b.since);
+    const evicted: EnrichedEvent[] = [];
+    while (over > 0) {
+      const oldest = this.kept[0];
+      if (oldest.rows.length <= over) {
+        this.kept.shift();
+        evicted.push(...oldest.rows);
+        over -= oldest.rows.length;
+      } else {
+        evicted.push(...oldest.rows.slice(0, over));
+        this.kept[0] = { ...oldest, rows: oldest.rows.slice(over) };
+        over = 0;
+      }
+    }
+    this.logger?.warn(
+      `Dropped ${evicted.length} events kept apart after failed inserts: over the ${this.maxKeptRows}-event limit`,
+      { dropped: evicted.length, ...summary(evicted) },
+    );
   }
 
   /** Insert `rows` with up to `attempts` tries; the last error, or undefined once stored. */
@@ -423,7 +646,7 @@ export class BatchWriter {
     try {
       values = this.mapRow ? rows.map(this.mapRow) : rows;
     } catch (error) {
-      return { error }; // not a ClickHouse error: the rows are kept
+      return { error }; // not a ClickHouse error: classified like a network failure
     }
     const dedupToken = batchToken(rows);
     let lastError: unknown;
@@ -442,8 +665,12 @@ export class BatchWriter {
         return undefined;
       } catch (err) {
         lastError = err;
-        // The same rows are refused the same way: no point in waiting.
-        if (rowErrorName(err) !== null) break;
+        // ClickHouse answered with an error that is not about its state:
+        // the same rows fail the same way, so there is no point in waiting.
+        const code = clickhouseCode(err);
+        if (code !== null && !SERVER_ERROR_CODES.has(code) && !RESOURCE_ERROR_CODES.has(code)) {
+          break;
+        }
         if (attempt < attempts - 1) {
           const delay = 1000 * 2 ** attempt; // 1s, 2s, 4s
           await new Promise((resolve) => setTimeout(resolve, delay));
@@ -464,20 +691,43 @@ export class BatchWriter {
       this.timer = null;
     }
     const deadline = Date.now() + timeoutMs;
+    // The buffered and retried events, until the deadline: each flush stores
+    // its batch, sets aside what ClickHouse refuses, or waits out a failure.
     while (this.bufferedCount > 0 && Date.now() < deadline) {
       const before = this.bufferedCount;
-      const run = await this.runFlush();
-      // Nothing written and no failure that may pass: what is left are rows
-      // ClickHouse refuses, and flushing them again changes nothing.
-      if (run && !run.halted && this.bufferedCount >= before) break;
+      await this.runFlush();
+      if (this.bufferedCount >= before && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, deadline - Date.now())));
+      }
+    }
+    // Then the rows kept apart, as long as a flush settles some of them.
+    while (this.keptCount > 0 && Date.now() < deadline) {
+      const before = this.keptCount;
+      await this.runFlush();
+      if (this.keptCount >= before) break;
     }
     if (this.bufferedCount > 0) {
-      this.logger?.warn(`Shutdown timeout: ${this.bufferedCount} events dropped`);
+      this.logger?.warn(
+        `Shutdown timeout: ${this.bufferedCount} events not written by the deadline, dropped`,
+      );
+    }
+    if (this.keptCount > 0) {
+      this.logger?.warn(
+        `Shutdown: ${this.keptCount} events kept apart after failed inserts, dropped`,
+        summary(this.kept.flatMap((p) => p.rows)),
+      );
     }
   }
 
-  /** Events not written yet: buffered, or kept after a failed insert. */
+  /** Events not written yet that count towards backpressure: buffered, or kept after a server error. */
   get bufferedCount(): number {
-    return this.buffer.length + this.pendingRows;
+    return this.buffer.length + this.retryRows;
+  }
+
+  /** Rows kept apart while being sorted out; not counted towards backpressure. */
+  get keptCount(): number {
+    let rows = 0;
+    for (const piece of this.kept) rows += piece.rows.length;
+    return rows;
   }
 }

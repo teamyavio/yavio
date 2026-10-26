@@ -29,7 +29,10 @@ export interface NormalizeResult {
 /**
  * - `timestamp` is clamped to [now - 72 h, now + 5 min]. A future-dated event
  *   would otherwise escape retention and pollute day/hour buckets; the #85
- *   TTL additionally uses least(timestamp, ingested_at).
+ *   TTL additionally uses least(timestamp, ingested_at). It is always written
+ *   as an ISO string with milliseconds (`toISOString`), the precision of the
+ *   column (DateTime64(3)) — and of tool_registry.registered_at, which is
+ *   taken from it.
  * - `country_code`: ISO 3166-1 alpha-2 or XK, upper-cased; else NULL.
  * - `conversion_currency`: ISO 4217, upper-cased; else NULL.
  * - `locale`: a BCP-47 tag in canonical form (Intl.getCanonicalLocales); else NULL.
@@ -51,10 +54,11 @@ export function normalizeEvents(events: BaseEvent[], now = Date.now()): Normaliz
 
     const time = Date.parse(event.timestamp);
     const clamped = Math.min(Math.max(time, now - MAX_PAST_MS), now + MAX_FUTURE_MS);
-    if (clamped !== time) {
-      out.timestamp = new Date(clamped).toISOString();
-      clampedTimestamps++;
-    }
+    if (clamped !== time) clampedTimestamps++;
+    // Always written anew, in milliseconds: the schema takes any number of
+    // fractional digits, ClickHouse's DateTime64(3) refuses 20 and more, and
+    // Date.parse has already cut the value to milliseconds.
+    out.timestamp = new Date(clamped).toISOString();
 
     const checks: Array<[string, (value: string) => string | null]> = [
       ["country_code", (v) => (COUNTRY_CODES.has(v.toUpperCase()) ? v.toUpperCase() : null)],

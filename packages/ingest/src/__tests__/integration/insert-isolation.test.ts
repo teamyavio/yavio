@@ -1,11 +1,18 @@
 import { randomUUID } from "node:crypto";
+import { ClickHouseError } from "@clickhouse/client";
 import type { Database } from "@yavio/db/client";
 import type { FastifyInstance } from "fastify";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createApp } from "../../index.js";
 import type { ApiKeyResolver } from "../../lib/api-key-resolver.js";
-import { BatchWriter, ROW_ERROR_CODES } from "../../lib/batch-writer.js";
+import {
+  BatchWriter,
+  RESOURCE_ERROR_CODES,
+  ROW_ERROR_CODES,
+  SERVER_ERROR_CODES,
+} from "../../lib/batch-writer.js";
 import type { EnrichedEvent } from "../../lib/event-enricher.js";
+import { mapToolRegistryRow } from "../../lib/tool-registry.js";
 import { disconnect, getClient, runMigrations } from "./helpers/clickhouse-setup.js";
 
 // Rows the events table refuses, against a real ClickHouse (the CI service,
@@ -72,6 +79,9 @@ describe("an event a column cannot store, buffered with valid events", () => {
 
     expect(await storedIds(workspace)).toEqual(ids(good));
     expect(writer.bufferedCount).toBe(0);
+    // ClickHouse names each refused row: refused in the batch and alone, it
+    // is dropped in the same flush.
+    expect(writer.keptCount).toBe(0);
     expect(warn).toHaveBeenCalledTimes(1);
     const [message, details] = warn.mock.calls[0] as [string, Record<string, unknown>];
     expect(message).toMatch(/3 events/);
@@ -93,16 +103,33 @@ describe("an event a column cannot store, buffered with valid events", () => {
     expect(writer.bufferedCount).toBe(0);
   }, 30_000);
 
-  it("treats as row errors codes that ClickHouse names as in ROW_ERROR_CODES", async () => {
-    const codes = [...ROW_ERROR_CODES.keys()];
+  it.each([
+    ["ROW_ERROR_CODES", ROW_ERROR_CODES],
+    ["SERVER_ERROR_CODES", SERVER_ERROR_CODES],
+    ["RESOURCE_ERROR_CODES", RESOURCE_ERROR_CODES],
+  ])("names the codes of %s as ClickHouse does", async (_, map) => {
     const result = await getClient().query({
       query: "SELECT arrayMap(c -> errorCodeToName(c), {codes:Array(UInt32)}) AS names",
-      query_params: { codes },
+      query_params: { codes: [...map.keys()] },
       format: "JSONEachRow",
     });
     const [{ names }] = await result.json<{ names: string[] }>();
-    expect(names).toEqual([...ROW_ERROR_CODES.values()]);
+    expect(names).toEqual([...map.values()]);
   });
+
+  it("names the first refused row in its message, also with parallel parsing over 10 MiB", async () => {
+    const workspace = `ws-isolation-named-${randomUUID()}`;
+    const pad = "x".repeat(400);
+    const rows = Array.from({ length: 30_000 }, (_, i) =>
+      row(workspace, i === 25_000 ? { tokens_in: -1, error_message: pad } : { error_message: pad }),
+    );
+    const error = await getClient()
+      .insert({ table: "events", values: rows, format: "JSONEachRow" })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ClickHouseError);
+    expect((error as ClickHouseError).message).toMatch(/\(at row 25001\)/);
+  }, 60_000);
 
   it("bounds each numeric field by the type its column has", async () => {
     // The column side of the table in @yavio/shared numeric-bounds.test.ts.
@@ -136,25 +163,37 @@ describe("an event a column cannot store, buffered with valid events", () => {
   describe("through the API", () => {
     let app: FastifyInstance;
     let writer: BatchWriter;
+    let registryWriter: BatchWriter;
     const workspace = `ws-isolation-api-${randomUUID()}`;
+    const project = `p-isolation-api-${randomUUID()}`;
 
     beforeAll(async () => {
       writer = new BatchWriter({ clickhouse: getClient(), flushSize: 100 });
+      // As server.ts builds it.
+      registryWriter = new BatchWriter({
+        clickhouse: getClient(),
+        table: "tool_registry",
+        mapRow: mapToolRegistryRow,
+        flushSize: 100,
+        maxBufferSize: 1_000,
+      });
       app = await createApp({
         db: { execute: async () => [{ "?column?": 1 }] } as unknown as Database,
         clickhouse: getClient(),
         apiKeyResolver: {
-          resolve: async () => ({ projectId: "p-isolation-api", workspaceId: workspace }),
+          resolve: async () => ({ projectId: project, workspaceId: workspace }),
           clearCache: () => {},
         } as unknown as ApiKeyResolver,
         jwtSecret: "s",
         batchWriter: writer,
+        toolRegistryWriter: registryWriter,
         logger: false,
       });
     });
 
     afterEach(async () => {
       await writer.flush();
+      await registryWriter.flush();
     });
 
     afterAll(async () => {
@@ -241,6 +280,35 @@ describe("an event a column cannot store, buffered with valid events", () => {
       expect(rows.get(conversion.event_id)).toMatchObject({
         conversion_value: "1.7976931348623157e308",
       });
+    });
+
+    it("stores a timestamp sent with 20 fractional digits in milliseconds, in events and in tool_registry", async () => {
+      const second = new Date(Date.now() - 60_000).toISOString().slice(0, 19);
+      const timestamp = `${second}.12345678901234567890Z`;
+      const call = event({ timestamp });
+      const toolName = `tool-${randomUUID()}`;
+      const discovery = event({ event_type: "tool_discovery", tool_name: toolName, timestamp });
+      const response = await post([call, discovery]);
+      expect(response.statusCode).toBe(200);
+      await writer.flush();
+      await registryWriter.flush();
+
+      const expected = `${second.replace("T", " ")}.123`;
+      const stored = await getClient().query({
+        query: "SELECT toString(timestamp) AS t FROM events WHERE event_id = {id:String}",
+        query_params: { id: call.event_id },
+        format: "JSONEachRow",
+      });
+      expect(await stored.json()).toEqual([{ t: expected }]);
+      const registered = await getClient().query({
+        query:
+          "SELECT toString(registered_at) AS t FROM tool_registry WHERE project_id = {p:String} AND tool_name = {name:String}",
+        query_params: { p: project, name: toolName },
+        format: "JSONEachRow",
+      });
+      expect(await registered.json()).toEqual([{ t: expected }]);
+      expect(writer.bufferedCount + writer.keptCount).toBe(0);
+      expect(registryWriter.bufferedCount + registryWriter.keptCount).toBe(0);
     });
 
     it("stores an event whose string carries a lone surrogate, with U+FFFD in its place", async () => {
