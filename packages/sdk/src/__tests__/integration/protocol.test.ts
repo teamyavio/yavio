@@ -12,6 +12,7 @@ import type { BaseEvent, ToolCallEvent } from "@yavio/shared/events";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { z as z3 } from "zod/v3";
+import { deriveSessionId } from "../../core/ids.js";
 import type { IntentConfig, YavioConfig } from "../../core/types.js";
 import { createYavioContext } from "../../server/context.js";
 import { createYavio, withYavio } from "../../server/index.js";
@@ -53,6 +54,7 @@ function makeConfig(overrides: Partial<YavioConfig> = {}): YavioConfig {
       inputValues: true,
       outputValues: true,
       geo: true,
+      conversationId: true,
       tokens: true,
       retries: true,
       rejectedInputValues: true,
@@ -160,6 +162,7 @@ describe("protocol layer — failures before the handler", () => {
             inputValues: true,
             outputValues: true,
             geo,
+            conversationId: true,
             tokens: true,
             retries: true,
             rejectedInputValues,
@@ -179,6 +182,37 @@ describe("protocol layer — failures before the handler", () => {
       expect(meta?.["openai/locale"]).toBe("de-DE");
       expect(JSON.stringify(event)).not.toContain("Duisburg");
       expect(JSON.stringify(event)).not.toContain("Europe/Berlin");
+    },
+  );
+
+  it.each([true, false] as const)(
+    "removes the conversation ids from a validation event with capture.conversationId: false (rejectedInputValues: %s, #204)",
+    async (rejectedInputValues) => {
+      const h = await setup(
+        (proxy) => {
+          proxy.registerTool("search", { inputSchema: { query: z.string() } }, async () => ok("x"));
+        },
+        { capture: { ...makeConfig().capture, conversationId: false, rejectedInputValues } },
+      );
+      const _meta = {
+        ...CLIENT_META,
+        "openai/session": "conv-validation-204",
+        sessionId: "conv-validation-204-top",
+      };
+
+      await h.client.callTool({ name: "search", arguments: { query: 42 }, _meta });
+
+      const [event] = toolCalls(h.events);
+      expect(event?.error_category).toBe("validation");
+      expect(event?.session_id).toBe(deriveSessionId("conv-validation-204"));
+      expect(event?.session_source).toBe("openai_session");
+      // geo true (makeConfig): the rest of _meta stays verbatim.
+      expect(event?.input_values).toEqual({
+        ...(rejectedInputValues ? { query: 42 } : {}),
+        _meta: CLIENT_META,
+        _metaDroppedKeys: ["openai/session", "sessionId"],
+      });
+      expect(JSON.stringify(event)).not.toContain("conv-validation-204");
     },
   );
 
@@ -598,6 +632,7 @@ describe("rejected calls without rejectedInputValues (the default, #123)", () =>
     inputValues: true,
     outputValues: true,
     geo: true,
+    conversationId: true,
     tokens: true,
     retries: true,
     rejectedInputValues: false,

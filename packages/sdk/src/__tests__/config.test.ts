@@ -62,6 +62,7 @@ describe("resolveConfig", () => {
       inputValues: true,
       outputValues: true,
       geo: true,
+      conversationId: true,
       tokens: true,
       retries: true,
       rejectedInputValues: false,
@@ -77,6 +78,7 @@ describe("resolveConfig", () => {
       inputValues: false,
       outputValues: true,
       geo: true,
+      conversationId: true,
       tokens: true,
       retries: true,
       rejectedInputValues: false,
@@ -378,17 +380,21 @@ describe("boolean capture flags fail closed", () => {
     expect(config?.tools.pick).toEqual({ rejectedInputValues: true });
   });
 
-  it.each(["inputValues", "outputValues", "tokens", "retries", "rejectedInputValues"] as const)(
-    'turns %s off on the string "false", with one YAVIO-1006 warning',
-    (flag) => {
-      // Hand-written JSON: "false" is truthy and used to keep capture ON.
-      const config = resolveConfig({ apiKey: "test", capture: { [flag]: "false" as never } });
-      expect(config?.capture[flag]).toBe(false);
-      expect(warn).toHaveBeenCalledOnce();
-      expect(warn.mock.calls[0][0]).toContain("YAVIO-1006");
-      expect(warn.mock.calls[0][0]).toContain(`capture.${flag}`);
-    },
-  );
+  it.each([
+    "inputValues",
+    "outputValues",
+    "conversationId",
+    "tokens",
+    "retries",
+    "rejectedInputValues",
+  ] as const)('turns %s off on the string "false", with one YAVIO-1006 warning', (flag) => {
+    // Hand-written JSON: "false" is truthy and used to keep capture ON.
+    const config = resolveConfig({ apiKey: "test", capture: { [flag]: "false" as never } });
+    expect(config?.capture[flag]).toBe(false);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0][0]).toContain("YAVIO-1006");
+    expect(warn.mock.calls[0][0]).toContain(`capture.${flag}`);
+  });
 
   it("passes booleans through and warns once per flag, not once overall", () => {
     const config = resolveConfig({
@@ -415,6 +421,79 @@ describe("boolean capture flags fail closed", () => {
       process.cwd = originalCwd;
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("capture.conversationId (#204)", () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    _resetConfigWarnings();
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  it("is on by default, also when set to undefined, and passes false through, without a warning", () => {
+    expect(resolveConfig({ apiKey: "test" })?.capture.conversationId).toBe(true);
+    // A computed option: `conversationId: strict ? false : undefined`.
+    expect(
+      resolveConfig({ apiKey: "test", capture: { conversationId: undefined } })?.capture
+        .conversationId,
+    ).toBe(true);
+    expect(
+      resolveConfig({ apiKey: "test", capture: { conversationId: false } })?.capture.conversationId,
+    ).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each(["no", "false", "true", 0, 1, null])(
+    "fails closed on %j: false, with one YAVIO-1006 warning",
+    (value) => {
+      const config = resolveConfig({ apiKey: "test", capture: { conversationId: value as never } });
+      expect(config?.capture.conversationId).toBe(false);
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0][0]).toContain("YAVIO-1006");
+      expect(warn.mock.calls[0][0]).toContain("capture.conversationId must be true or false");
+    },
+  );
+
+  it("is read from .yaviorc.json like the other flags: code options win, an invalid value fails closed", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "yavio-conversation-test-"));
+    const originalCwd = process.cwd;
+    const write = (capture: object) =>
+      writeFileSync(
+        join(tempDir, ".yaviorc.json"),
+        JSON.stringify({ apiKey: "file_key", capture }),
+      );
+    try {
+      process.cwd = () => tempDir;
+      write({ conversationId: false });
+      expect(resolveConfig()?.capture.conversationId).toBe(false);
+      expect(resolveConfig({ capture: { conversationId: true } })?.capture.conversationId).toBe(
+        true,
+      );
+      expect(warn).not.toHaveBeenCalled();
+      write({ conversationId: "no" });
+      expect(resolveConfig()?.capture.conversationId).toBe(false);
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0][0]).toContain("capture.conversationId");
+    } finally {
+      process.cwd = originalCwd;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("has no per-tool override: a tools entry naming only it is no override", () => {
+    const config = resolveConfig({
+      apiKey: "test",
+      tools: { pick: { conversationId: false } as never, book: { inputValues: false } },
+    });
+    expect(Object.hasOwn(config?.tools ?? {}, "pick")).toBe(false);
+    expect(config?.tools.book).toEqual({ inputValues: false });
+    expect(config?.capture.conversationId).toBe(true);
   });
 });
 

@@ -529,7 +529,9 @@ function wrapToolCallback(
           errorMessage: resultError && capture.outputValues ? resultError.message : undefined,
           inputKeys: captureInput ? extractInputKeys(cbArgs[0]) : undefined,
           inputTypes: captureInput ? extractInputTypes(cbArgs[0]) : undefined,
-          inputValues: captureInput ? extractInputValues(cbArgs[0], extra, capture.geo) : undefined,
+          inputValues: captureInput
+            ? extractInputValues(cbArgs[0], extra, capture.geo, capture.conversationId)
+            : undefined,
           outputContent: capture.outputValues ? extractOutputContent(result) : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
           intentContext: intentContextFor(config),
@@ -611,7 +613,7 @@ function wrapToolCallback(
               : String(error)
             : undefined,
           inputValues: captureInputOnError
-            ? extractInputValues(cbArgs[0], extra, capture.geo)
+            ? extractInputValues(cbArgs[0], extra, capture.geo, capture.conversationId)
             : undefined,
           intentSignals: getCapturedIntent() ?? undefined,
           intentContext: intentContextFor(config),
@@ -951,7 +953,14 @@ export function createProxy<T extends McpServerLike>(
         inputKeys: capture.inputValues ? nonEmpty(extractInputKeys(shownArgs)) : undefined,
         inputTypes: capture.inputValues ? nonEmpty(extractInputTypes(shownArgs)) : undefined,
         inputValues: capture.inputValues
-          ? nonEmpty(extractInputValues(keepValues ? (args ?? {}) : {}, extra, capture.geo))
+          ? nonEmpty(
+              extractInputValues(
+                keepValues ? (args ?? {}) : {},
+                extra,
+                capture.geo,
+                capture.conversationId,
+              ),
+            )
           : undefined,
         outputContent:
           capture.outputValues && keepValues ? extractOutputContent(result) : undefined,
@@ -1707,14 +1716,19 @@ function extractInputTypes(args: unknown): Record<string, unknown> | undefined {
  *   ids, flags), `tracestate` vendor state and Datadog's
  *   `_dd_trace_context` both and more, none of use here; a valid
  *   `traceparent` goes to `metadata.traceparent` instead (extractClientMeta).
- *   The clone is what makes this safe: the handler's own `_meta` is never
- *   touched.
+ *   `capture.conversationId: false` (#204) removes the platform's raw
+ *   conversation ids (CONVERSATION_META_KEYS) under every `geo`; `true`, the
+ *   default, leaves `_meta` as `geo` alone makes it. The session key is read
+ *   from the handler's `_meta` (findSessionKey), never from this clone, so
+ *   `session_id` and `session_source` do not depend on the flag. The clone
+ *   is what makes this safe: the handler's own `_meta` is never touched.
  * - `_metaDroppedKeys` / `_metaDroppedUnnamed`: the names (never the values)
  *   of the `_meta` keys reduceMeta dropped, so a new key shows up, and the
  *   count of those it does not name. Under `geo: true` only the trace-context
  *   keys can be named there (`tracestate`, `baggage`, `correlation-context`,
  *   `_dd_trace_context` in any letter case, an invalid or not lower-case
- *   `traceparent`), and only the per-key baggage carriers counted.
+ *   `traceparent`) and, with `conversationId: false`, the conversation keys
+ *   that were sent; only the per-key baggage carriers are counted.
  * - `_taskId`: MCP task id, for correlating task-based flows.
  * - `_requestInfo`: allow-listed headers and the URL sans query, see
  *   sanitizeRequestInfo.
@@ -1730,6 +1744,7 @@ function extractInputValues(
   args: unknown,
   extra: unknown,
   geo: CaptureConfig["geo"],
+  conversationId: CaptureConfig["conversationId"],
 ): Record<string, unknown> | undefined {
   if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
   try {
@@ -1738,7 +1753,7 @@ function extractInputValues(
     if (ex.meta) {
       const meta = JSON.parse(JSON.stringify(ex.meta)) as unknown;
       if (meta && typeof meta === "object" && !Array.isArray(meta)) {
-        const reduced = reduceMeta(meta as Record<string, unknown>, geo);
+        const reduced = reduceMeta(meta as Record<string, unknown>, geo, conversationId);
         clone._meta = reduced.meta;
         if (reduced.droppedKeys.length > 0) clone._metaDroppedKeys = reduced.droppedKeys;
         if (reduced.droppedUnnamed > 0) clone._metaDroppedUnnamed = reduced.droppedUnnamed;
@@ -1770,7 +1785,9 @@ function extractInputValues(
  * top-level keys between 2026-09 and 2026-10, one of them location data, and
  * nothing makes the next one carry a recognisable name. The four kept here
  * are the ones a "country"/"region"/false integration documents to its users:
- * language, device, and the platform's pseudonymous user and conversation ids.
+ * language, device, and the platform's pseudonymous user and conversation ids
+ * — three with `capture.conversationId: false`, which removes
+ * `openai/session` (CONVERSATION_META_KEYS, #204).
  * The names of dropped keys are recorded (see reduceMeta), never their values.
  */
 const KNOWN_META_KEYS = new Set([
@@ -1778,6 +1795,30 @@ const KNOWN_META_KEYS = new Set([
   "openai/userAgent",
   "openai/subject",
   "openai/session",
+]);
+
+/**
+ * The `_meta` keys that hold a platform's raw conversation id, removed under
+ * every `geo` with `capture.conversationId: false` (#204) and named in
+ * `_metaDroppedKeys`. Exact names, as findSessionKey reads them. Raw
+ * duplicates of `session_id`, which is the SHA-256 of the same key, so they
+ * add no metric of their own — the rule #76 applied to `_sessionId`. A new
+ * conversation key goes here, in one place. Under a `geo` other than `true`
+ * the allowlist drops all of them but `openai/session` already.
+ */
+const CONVERSATION_META_KEYS = new Set([
+  // ChatGPT's session key (`openai_session`), and a KNOWN_META_KEYS member.
+  "openai/session",
+  // ChatGPT, top level and undocumented: in its traffic each maps one to one
+  // to `openai/session`.
+  "sessionId",
+  "windowId",
+  // VS Code / Copilot Chat, a session key from any client (`vscode_conversation`).
+  "vscode.conversationId",
+  // The Codex CLI's session key (`codex_thread`), and only its; another
+  // client's `threadId` is no session key but is removed too: for a flag
+  // that removes ids, removing more is the safe direction.
+  "threadId",
 ]);
 
 /**
@@ -1808,6 +1849,10 @@ function recordable(key: string): boolean {
  *   the integrator's upstream chooses and which can name a customer. That is
  *   why a per-key carrier (`uberctx-user.id`, `ot-baggage-tenant`), whose
  *   name is the member's, is only counted.
+ * - `conversationId` other than `true` (#204): the CONVERSATION_META_KEYS
+ *   are dropped and named, under every `geo`. Exact values, like `geo`: a
+ *   flag that skipped resolveConfig (a string "true") drops them. With
+ *   `true` the output is what it was before the flag.
  * - `geo: true`: everything else verbatim.
  * - Any other `geo`: `openai/userLocation` is rebuilt from an allow-list, so
  *   a field the platform adds later cannot leak through: `{ country }` for
@@ -1821,10 +1866,12 @@ function recordable(key: string): boolean {
 function reduceMeta(
   meta: Record<string, unknown>,
   geo: CaptureConfig["geo"],
+  conversationId: CaptureConfig["conversationId"],
 ): { meta: Record<string, unknown>; droppedKeys: string[]; droppedUnnamed: number } {
   const kept: Record<string, unknown> = {};
   const named: string[] = [];
   let unnamed = 0;
+  const dropConversation = conversationId !== true;
   for (const [key, value] of Object.entries(meta)) {
     const traceKey = traceContextKey(key);
     if (traceKey === "counted") unnamed++;
@@ -1832,7 +1879,8 @@ function reduceMeta(
       // A fixed name in some letter case, never data: named as sent, also
       // `_dd_trace_context`, which recordable() would refuse.
       if (!(key === "traceparent" && traceparentOf(value))) named.push(key);
-    } else if (geo === true || KNOWN_META_KEYS.has(key)) kept[key] = value;
+    } else if (dropConversation && CONVERSATION_META_KEYS.has(key)) named.push(key);
+    else if (geo === true || KNOWN_META_KEYS.has(key)) kept[key] = value;
     else if (key === "openai/userLocation") continue;
     else if (recordable(key)) named.push(key);
     else unnamed++;

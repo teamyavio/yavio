@@ -20,6 +20,8 @@ const DEFAULT_CAPTURE: CaptureConfig = {
   inputValues: true,
   outputValues: true,
   geo: true,
+  // On: _meta keeps the platform's conversation ids, as before #204.
+  conversationId: true,
   tokens: true,
   retries: true,
   // Off: a rejected call must not store what the schema refused (#123).
@@ -223,6 +225,7 @@ function resolveGeo(value: unknown): CaptureConfig["geo"] {
 const BOOLEAN_CAPTURE_FLAGS = [
   "inputValues",
   "outputValues",
+  "conversationId",
   "tokens",
   "retries",
   "rejectedInputValues",

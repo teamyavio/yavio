@@ -41,6 +41,7 @@ function makeConfig(intent: IntentConfig, tools: YavioConfig["tools"] = {}): Yav
       inputValues: true,
       outputValues: true,
       geo: true,
+      conversationId: true,
       tokens: true,
       retries: true,
       rejectedInputValues: false,

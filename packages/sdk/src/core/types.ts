@@ -188,6 +188,21 @@ export interface CaptureConfig {
    *   from `_meta`.
    */
   geo: boolean | "country" | "region";
+  /**
+   * The platform's raw conversation ids in `input_values._meta` (#204).
+   * - `true` (default): `_meta` keeps what `geo` keeps — all of them under
+   *   `geo: true`, only `openai/session` under any other `geo`.
+   * - `false`: removed under every `geo`: `openai/session`, ChatGPT's
+   *   top-level `sessionId` and `windowId`, `vscode.conversationId`, and
+   *   `threadId` from any client. Their names go to `_metaDroppedKeys`.
+   *   `session_id` (an unkeyed SHA-256 of the same key, so pseudonymous)
+   *   and `session_source` stay the same, and the handler still receives the
+   *   full `_meta`.
+   * Global only, no per-tool override: one conversation would be split into
+   * rows with the id and rows without it. Forward only: stored events keep
+   * their ids.
+   */
+  conversationId: boolean;
   tokens: boolean;
   retries: boolean;
   /**
