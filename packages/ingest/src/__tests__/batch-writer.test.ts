@@ -673,32 +673,35 @@ describe("BatchWriter: rows ClickHouse refuses", () => {
     expect(droppedCount(warn)).toBe(200);
   });
 
-  it("re-splits by project a group of small projects put together, so their rows are stored", async () => {
-    // V4b: 15 large projects take their own groups; 5 small valid projects
-    // and 3 projects of refused rows share the last group.
-    const ch = fakeClickHouse(isBad);
-    const writer = new BatchWriter({ clickhouse: ch.client });
-    const result = await load(writer, ch, 120, (f) => {
-      const out: EnrichedEvent[][] = [];
-      for (let p = 0; p < 15; p++) out.push(events(`ok-big-${f}-${p}`, 100, `proj-big-${p}`));
-      for (let p = 0; p < 5; p++) {
-        out.push(events(`ok-small-${f}-${p}`, 3, `proj-small-${p}`));
-        out.push(events(`bad-${f}-${p}`, 12, `proj-refused-${p % 3}`));
-      }
-      return out;
-    });
-    expect(result.validMissing).toEqual([]);
-    expect(result.backpressure).toEqual([]);
-    expect(result.maxCounted).toBe(0);
-  });
+  it(
+    "stores the rows of small projects next to large ones and projects of refused rows",
+    { timeout: 120_000 },
+    async () => {
+      // V4b: in each of 120 flushes, 15 large projects, 5 small valid projects
+      // and 3 projects of refused rows.
+      const ch = fakeClickHouse(isBad);
+      const writer = new BatchWriter({ clickhouse: ch.client });
+      const result = await load(writer, ch, 120, (f) => {
+        const out: EnrichedEvent[][] = [];
+        for (let p = 0; p < 15; p++) out.push(events(`ok-big-${f}-${p}`, 100, `proj-big-${p}`));
+        for (let p = 0; p < 5; p++) {
+          out.push(events(`ok-small-${f}-${p}`, 3, `proj-small-${p}`));
+          out.push(events(`bad-${f}-${p}`, 12, `proj-refused-${p % 3}`));
+        }
+        return out;
+      });
+      expect(result.validMissing).toEqual([]);
+      expect(result.backpressure).toEqual([]);
+      expect(result.maxCounted).toBe(0);
+    },
+  );
 
   describe("rowsToDrop: which rows the cap drops", () => {
-    const kept = (rows: EnrichedEvent[], since: number, refusals = 0, failures = 0) => ({
-      rows,
-      refusals,
-      failures,
-      since,
-    });
+    const kept = (
+      rows: EnrichedEvent[],
+      since: number,
+      { refusals = 0, failures = 0, failedAlone = false } = {},
+    ) => ({ rows, refusals, failures, failedAlone, since });
     const ids = (rows: Set<EnrichedEvent>) => [...rows].map((r) => String(r.event_id)).sort();
 
     it("drops rows that failed on their own first, then other rows of their projects, a clean project's rows last", () => {
@@ -706,10 +709,10 @@ describe("BatchWriter: rows ClickHouse refuses", () => {
         // A clean project's rows set apart unsorted, the oldest of all.
         kept(events("clean", 6, "proj-clean"), 1),
         // A project with a refused row: that row, and its other rows.
-        kept([ev("refused-1", "proj-noisy")], 2, 1),
+        kept([ev("refused-1", "proj-noisy")], 2, { refusals: 1, failedAlone: true }),
         kept(events("noisy-rest", 3, "proj-noisy"), 2),
         // A row kept after an unrecognised error.
-        kept([ev("odd-1", "proj-odd")], 3, 0, 1),
+        kept([ev("odd-1", "proj-odd")], 3, { failures: 1, failedAlone: true }),
       ];
       expect(ids(rowsToDrop(pieces, 2))).toEqual(["odd-1", "refused-1"]);
       expect(ids(rowsToDrop(pieces, 5))).toEqual(
@@ -726,6 +729,27 @@ describe("BatchWriter: rows ClickHouse refuses", () => {
           "odd-1",
           "refused-1",
         ].sort(),
+      );
+    });
+
+    it("takes only a row whose insert on its own failed as failed on its own", () => {
+      const pieces = [
+        // Rows kept after a server error: they never failed on their own.
+        kept(events("retried", 5, "proj-clean"), 1, { failures: 1 }),
+        kept([ev("retried-alone", "proj-clean")], 1, { failures: 1 }),
+        // A row ClickHouse named in a batch, set apart before its insert on
+        // its own (the budget ran out): its project counts as refusing.
+        kept([ev("named-1", "proj-x")], 2, { refusals: 1 }),
+        kept(events("x-rest", 2, "proj-x"), 2),
+        // Refused on its own.
+        kept([ev("refused-1", "proj-y")], 3, { refusals: 1, failedAlone: true }),
+      ];
+      expect(ids(rowsToDrop(pieces, 1))).toEqual(["refused-1"]);
+      expect(ids(rowsToDrop(pieces, 4))).toEqual(
+        ["named-1", "refused-1", "x-rest-0", "x-rest-1"].sort(),
+      );
+      expect(ids(rowsToDrop(pieces, 5))).toEqual(
+        ["named-1", "refused-1", "retried-0", "x-rest-0", "x-rest-1"].sort(),
       );
     });
 

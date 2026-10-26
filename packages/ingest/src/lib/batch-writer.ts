@@ -274,6 +274,11 @@ interface Piece {
   slow?: number;
   /** A single row: times ClickHouse refused it with a row error. */
   refusals: number;
+  /**
+   * A single row whose insert on its own failed, with a row error or an
+   * unrecognised error (`settleRow`).
+   */
+  failedAlone?: boolean;
   /** Of one project, or split by project already. */
   grouped: boolean;
   /** The flush from which a kept piece is tried again. */
@@ -357,23 +362,26 @@ function splitProjects(rows: EnrichedEvent[], named: number | null): EnrichedEve
 /** A piece set apart, as eviction sees it. */
 export interface KeptRows {
   rows: EnrichedEvent[];
-  /** A single row ClickHouse refused once (row error). */
+  /** A single row ClickHouse refused: named in a batch, or on its own. */
   refusals: number;
-  /** A single row that failed with an unrecognised error. */
+  /** Flushes whose insert of these rows failed without naming them. */
   failures: number;
+  /** A single row whose insert on its own failed (row or unrecognised error). */
+  failedAlone?: boolean;
   /** The flush in which its rows were first written. */
   since: number;
 }
 
 /**
  * The rows to drop to bring the rows set apart down by `over`, in this
- * order: rows that failed on their own (refused once, or an unrecognised
- * error); then other rows of projects with such rows (or with rows dropped
- * as refused twice, `refusingProjects`); the rows of projects with none
- * last — a clean project's rows set apart only because the flush could not
- * sort a batch out. Within each, the project with the most of them first,
- * its oldest first, so that one project's stream does not push out
- * another's few.
+ * order: single rows whose insert on their own failed (`failedAlone`:
+ * refused once alone, or an unrecognised error); then the other rows of
+ * projects with such rows, with a row ClickHouse named in a batch, or with
+ * rows dropped in the flush (`refusingProjects`); the rows of projects with
+ * none last — a clean project's rows set apart only because the flush could
+ * not sort a batch out, or kept after a server error. Within each, the
+ * project with the most of them first, its oldest first, so that one
+ * project's stream does not push out another's few.
  */
 export function rowsToDrop(
   pieces: readonly KeptRows[],
@@ -381,16 +389,18 @@ export function rowsToDrop(
   refusingProjects: ReadonlySet<string> = new Set(),
 ): Set<EnrichedEvent> {
   const ordered = [...pieces].sort((a, b) => a.since - b.since);
-  const failedOnTheirOwn = (p: KeptRows) => p.refusals > 0 || p.failures > 0;
+  const failedAlone = (p: KeptRows) => p.failedAlone === true;
   const refusing = new Set(refusingProjects);
   for (const piece of ordered) {
-    if (failedOnTheirOwn(piece)) for (const row of piece.rows) refusing.add(row.project_id);
+    if (failedAlone(piece) || piece.refusals > 0) {
+      for (const row of piece.rows) refusing.add(row.project_id);
+    }
   }
   // Tier → project → rows, oldest first.
   const tiers: Array<Map<string, EnrichedEvent[]>> = [new Map(), new Map(), new Map()];
   for (const piece of ordered) {
     for (const row of piece.rows) {
-      const tier = failedOnTheirOwn(piece) ? 0 : refusing.has(row.project_id) ? 1 : 2;
+      const tier = failedAlone(piece) ? 0 : refusing.has(row.project_id) ? 1 : 2;
       const list = tiers[tier].get(row.project_id);
       if (list) list.push(row);
       else tiers[tier].set(row.project_id, [row]);
@@ -778,12 +788,12 @@ export class BatchWriter {
     if (kind === "row") {
       const refusals = piece.refusals + 1;
       if (refusals >= 2) run.dropped.push({ row, error });
-      else this.keep({ ...piece, refusals, due: run.flush + 1 }, run);
+      else this.keep({ ...piece, refusals, failedAlone: true, due: run.flush + 1 }, run);
       return;
     }
     const failures = piece.failures + 1;
     const wait = Math.min(2 ** (failures - 1), MAX_UNRECOGNISED_BACKOFF_FLUSHES);
-    this.keep({ ...piece, failures, due: run.flush + wait }, run);
+    this.keep({ ...piece, failures, failedAlone: true, due: run.flush + wait }, run);
     run.unrecognised.push({ row, error });
   }
 

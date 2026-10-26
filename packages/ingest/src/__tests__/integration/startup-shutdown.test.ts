@@ -12,6 +12,7 @@ import {
   getClient,
   runMigrations,
   testClickHouseUrl,
+  testDatabaseUrl,
 } from "./helpers/clickhouse-setup.js";
 
 // The ingest server as it runs in its container (src/server.ts, through
@@ -21,8 +22,7 @@ import {
 const CLICKHOUSE_URL = testClickHouseUrl();
 const CLICKHOUSE_PASSWORD = process.env.CLICKHOUSE_PASSWORD ?? "test";
 const INGEST_PASSWORD = process.env.CLICKHOUSE_INGEST_PASSWORD ?? "yavio_dev";
-const DATABASE_URL =
-  process.env.DATABASE_URL ?? "postgres://yavio_service:test@localhost:5432/yavio_test";
+const DATABASE_URL = testDatabaseUrl();
 const JWT_SECRET = "startup-shutdown-jwt-secret";
 const PROBE_DATABASE = "ingest_schema_probe";
 
