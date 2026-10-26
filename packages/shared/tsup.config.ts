@@ -9,6 +9,7 @@ export default defineConfig({
     "src/validation.ts",
     "src/platform.ts",
     "src/geo.ts",
+    "src/pii.ts",
   ],
   format: ["esm", "cjs"],
   dts: true,
