@@ -24,6 +24,7 @@ const instrumented = withYavio(server, {
     inputValues: true,  // full input values + client metadata (PII-stripped)
     outputValues: true, // full tool results
     geo: true,         // true | "region" | "country" | false: country code, region, location in _meta
+    conversationId: true, // false: no raw platform conversation id in _meta, under any geo (#204)
     tokens: true,      // reserved — no effect today
     retries: true,     // reserved — no effect today (is_retry is never set)
   },

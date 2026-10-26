@@ -1,6 +1,6 @@
 # `input_values` Extra Fields (`_`-prefixed)
 
-**Status:** Implemented 2026-09-03 (#76; proposed 2026-08-26, reviewed 2026-08-26 with corrections folded in, geo gating decided 2026-09-03; `geo: "country"` added 2026-10-13, #82; SEP-414 trace context 2026-10-25, #173) · **Packages:** sdk, docs · **Version:** patch
+**Status:** Implemented 2026-09-03 (#76; proposed 2026-08-26, reviewed 2026-08-26 with corrections folded in, geo gating decided 2026-09-03; `geo: "country"` added 2026-10-13, #82; SEP-414 trace context 2026-10-25, #173; `capture.conversationId` 2026-10-26, #204) · **Packages:** sdk, docs · **Version:** patch
 
 ## Current Behaviour
 
@@ -99,6 +99,30 @@ All names are matched in any letter case (`Baggage`, `TraceState`); only the exa
 - **PII stripper:** both strippers (SDK `core/pii.ts`, ingest `lib/pii-stripper.ts`) return a string that is exactly a valid traceparent unchanged. Their phone pattern (ten decimal digits and a word boundary) cut ~1.9 % of valid ones: a 32- or 16-digit hex id ends in ten decimal digits with probability (10/16)^10 each, and the W3C example `…-b7ad6b7169203331-01` is among them. A path exemption for `metadata.traceparent` alone was rejected: it would let any text under that key past the stripper. The same false positive on UUIDs and other hex ids in `input_values` and `output_content` was #182: since SDK 0.5.6 and the matching ingest the string rules live once in `@yavio/shared/pii`, UUID-shaped and traceparent-shaped values standing alone (any letter case, inside text too, not glued to a letter or digit) are masked before the digit patterns run, and those patterns need a boundary on both sides, so such a traceparent is not cut, exact or not. The ingest half ships with the next ingest deploy, no migration.
 - Rows stored before keep `input_values._meta.baggage` / `tracestate` until the 13-month TTL; nothing is backfilled.
 
+## Decided: `capture.conversationId` (#204)
+
+**Decided 2026-10-26 (the issue's proposal); ships with 0.5.6, no change to the default.** `input_values._meta` stored the platform's conversation id in plain text, and no setting removed it: `openai/session` is one of the four `KNOWN_META_KEYS`, and `geo: true`, the default, also keeps ChatGPT's top-level `sessionId` and `windowId` (in ChatGPT traffic each maps one to one to `openai/session`), VS Code's `vscode.conversationId` and the Codex CLI's `threadId`. They add no metric: `session_id` is `deriveSessionId()` of the same key (`findSessionKey()`, `server/session-key.ts`), and dashboard, ingest and db read sessions only from `session_id`. An integrator who has to justify each stored field can explain the hashed `session_id`, not the raw duplicates. The rule #76 applied to `_sessionId`. A new capture flag, `conversationId: boolean`, default `true`:
+
+| `_meta` key | `conversationId: true` (default) | `conversationId: false` |
+|---|---|---|
+| `openai/session` | kept under every `geo` (a `KNOWN_META_KEYS` member) | dropped, named in `_metaDroppedKeys` |
+| `sessionId`, `windowId` (ChatGPT, top level) | kept under `geo: true`; dropped by the allowlist otherwise | dropped, named, under every `geo` |
+| `vscode.conversationId` | kept under `geo: true`; dropped by the allowlist otherwise | dropped, named, under every `geo` |
+| `threadId`, from any client | kept under `geo: true`; dropped by the allowlist otherwise | dropped, named, under every `geo` |
+| every other key | as `geo` decides (unchanged) | as `geo` decides (unchanged) |
+
+- **One set**, `CONVERSATION_META_KEYS`, next to `KNOWN_META_KEYS` in `proxy.ts`, with a comment per key; a new conversation key goes there. Exact names, as `findSessionKey()` reads them: unlike the trace-context keys, which arrive in any letter case through HTTP-header conventions, these are written by the platform under one spelling.
+- **`threadId` from any client:** only the Codex CLI's is a session key (`codex_thread`), but for a flag that removes ids removing more is the safe direction.
+- **Under `"region"`, `"country"` and `false`** the allowlist drops all of them but `openai/session` already; there the flag removes `openai/session`, and the captured `_meta` keeps three known keys instead of four.
+- **Named like every dropped key:** a conversation key that was sent goes to `_metaDroppedKeys`, with the same sorting and the 20-name cap (past it, counted in `_metaDroppedUnnamed`). Under `geo: true` the field then appears for these keys too, not only for the trace context.
+- **`true` is byte-identical to before:** reduceMeta's branch for these keys runs only when the flag is not `true`, so the captured `input_values` of every `geo` is the same as before the flag (test: the same literals pass on the commit before #204).
+- **Sessions unchanged:** the session key is read from the handler's `_meta` (`ex.meta`), never from the reduced clone, so `session_id` and `session_source` are the same with the flag on and off, and the handler receives the full `_meta` (the clone is a deep copy). The integrator's `sessionKey` still receives the full `_meta` as well.
+- **Fails closed:** in `BOOLEAN_CAPTURE_FLAGS`, so a value other than `true` or `false` (a `"no"` from `.yaviorc.json`, `0`) becomes `false` with one `YAVIO-1006` warning; `undefined` keeps the default. reduceMeta compares exact values (`conversationId !== true` drops), like the `geo` use sites, so a config that skipped `resolveConfig()` drops the keys too.
+- **Global only, not in `ToolCaptureOverride`:** a per-tool value would split one conversation's events into rows with the id and rows without it. A per-tool `inputValues: false` already removes all of `_meta` for that tool. A `conversationId` key in a `tools` entry is ignored like any unknown key.
+- **Pseudonymous, not anonymous:** `deriveSessionId()` is an unkeyed SHA-256, so whoever holds the raw id (the platform, the integrator's own logs) can compute `session_id` again. The docs keep calling it pseudonymous. A keyed hash would change every `session_id` across versions; out of scope.
+- **Forward only:** events stored before the flag is set keep their raw ids until the 13-month TTL. Removing them from stored events is an operator task, not part of this change.
+- **Not covered:** the user id, `openai/subject`, stored raw in `_meta` and as the first-class `subject_id` that user stitching (#89) relies on: removing it from `_meta` alone would not remove it, so it is left for its own issue. The per-call ids `callId`, `itemId`, `openai/request_id` name one call, not a conversation; every `geo` but `true` drops them.
+
 ## Changes
 
 | Package | Change |
@@ -111,6 +135,8 @@ All names are matched in any letter case (`Baggage`, `TraceState`); only the exa
 `proxy.test.ts` `extractInputValues`: `_requestId`/`_taskRequestedTtl`/`_sessionId` absent; `_meta`, `_taskId`, `_requestInfo` present; header allow-list unchanged (five headers; four since #173); `geo:false` → no `openai/userLocation` at all.
 
 #173: `proxy.test.ts` "SEP-414 trace context (#173)" (every `geo`, the lift and its sources, eleven invalid values, a schema-less tool, thrown / `isError` / retried calls, `inputValues: false` global and per tool), `events.test.ts` (the `metadata` merge), `pii.test.ts`, `mcp-v2.test.ts` (2026-07-28 per-request and `serveStdio`, with v2's own key constants), `stateless-e2e.test.ts` (v1 stateless HTTP); ingest `pii-stripper.test.ts` and `api/events-processing.test.ts`.
+
+#204: `proxy.test.ts` "capture.conversationId (#204)" (every `geo`: the flag on byte-identical to before, off with the remaining keys and `_metaDroppedKeys`, three known keys instead of four, the 20-name cap; `session_id` and `session_source` identical on and off for ChatGPT, VS Code and the Codex CLI; the handler's `_meta` untouched; the thrown path; a value that skipped `resolveConfig()`), `config.test.ts` (default, `undefined`, invalid values with `YAVIO-1006`, `.yaviorc.json`, no per-tool override), `integration/protocol.test.ts` (a `validation` event, with and without `rejectedInputValues`), `integration/mcp-v2.test.ts` (v2 legacy era, `_meta` from `ctx.mcpReq`; 2026-07-28 per-request host from `createYavio()` options, one session across instances).
 
 ## Compatibility
 
