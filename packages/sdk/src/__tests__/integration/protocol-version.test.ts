@@ -360,7 +360,16 @@ describe("protocol_version off HTTP, MCP SDK v2 (#170)", () => {
   });
 });
 
-describe.each(["v1", "v2"] as const)("a real stdio server on MCP SDK %s (#170)", (stack) => {
+/**
+ * A real stdio child driven by a real `StdioClientTransport` (#170, #172).
+ * The era is the server entry point's and the client's choice, not the
+ * transport's: v2's `serveStdio` serves 2026-07-28 to a client that asks for
+ * it (`auto` or a pin) and 2025-11-25 to the default client; v1 has no
+ * 2026-07-28. On 2026-07-28 there is no `initialize`, so the client's name
+ * comes from the request envelope. Either way each call is one `tool_call`
+ * and, with no conversation key, the session is the connection's own.
+ */
+describe.each(["v1", "v2"] as const)("a real stdio server on MCP SDK %s (#170, #172)", (stack) => {
   let ingest: MockIngest;
 
   beforeEach(async () => {
@@ -373,7 +382,7 @@ describe.each(["v1", "v2"] as const)("a real stdio server on MCP SDK %s (#170)",
     stack === "v2" ? ([undefined, "auto", { pin: "2026-07-28" }] as const) : ([undefined] as const);
 
   it.each(modes.map((mode) => [JSON.stringify(mode ?? "default"), mode] as const))(
-    "records the negotiated version with the client's %s negotiation",
+    "records the negotiated era, one tool_call per call and the client identity's source with the client's %s negotiation",
     async (_label, mode) => {
       const params = {
         command: process.execPath,
@@ -409,20 +418,40 @@ describe.each(["v1", "v2"] as const)("a real stdio server on MCP SDK %s (#170)",
       }
       await client.connect(transport as never);
       const version = negotiated();
-      await client.callTool({ name: "echo", arguments: { q: "a" } });
+      for (const q of ["a", "b", "c"]) {
+        const result = await client.callTool({ name: "echo", arguments: { q } });
+        expect((result.content as Array<{ text?: string }>)[0]?.text).toBe(q);
+      }
       await client.close();
-      await vi.waitFor(() => expect(ingest.ofType("connection")).toHaveLength(1), {
-        timeout: 5_000,
-      });
+      await vi.waitFor(
+        () => {
+          expect(ingest.ofType("connection")).toHaveLength(1);
+          expect(ingest.ofType("tool_call")).toHaveLength(3);
+        },
+        { timeout: 5_000 },
+      );
 
-      if (stack === "v2") expect(version).toBe(mode ? "2026-07-28" : "2025-11-25");
+      // v1 never negotiates 2026-07-28: a v1 release that does fails here,
+      // and the README's "MCP 2026-07-28" table needs a new row.
+      if (stack === "v1") expect(version).toMatch(/^2025-/);
+      else expect(version).toBe(mode ? "2026-07-28" : "2025-11-25");
       const [connection] = ingest.ofType("connection");
       expect(connection?.protocol_version).toBe(version);
       expect(connection?.client_name).toBe("stdio-pv");
-      expect((connection?.metadata as Record<string, unknown>).client_capabilities).toEqual([
-        "elicitation",
-        "roots",
-      ]);
+      const metadata = connection?.metadata as Record<string, unknown>;
+      expect(metadata.client_capabilities).toEqual(["elicitation", "roots"]);
+      expect(metadata.client_info_source).toBe(
+        version === "2026-07-28" ? "envelope" : "initialize",
+      );
+
+      // One event per call, in order, on the connection's own session.
+      const calls = ingest.ofType("tool_call");
+      expect(calls.map((e) => (e.input_values as { q?: string }).q)).toEqual(["a", "b", "c"]);
+      expect(calls.every((e) => e.event_name === "echo" && e.status === "success")).toBe(true);
+      expect(new Set(calls.map((e) => e.session_id))).toEqual(new Set([connection?.session_id]));
+      expect(new Set([connection, ...calls].map((e) => e?.session_source))).toEqual(
+        new Set(["connection"]),
+      );
     },
     30_000,
   );

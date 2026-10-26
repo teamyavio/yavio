@@ -1,16 +1,23 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTaskStore } from "@modelcontextprotocol/sdk/experimental/tasks/stores/in-memory.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpServer as McpServerCtor } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { McpError } from "@modelcontextprotocol/sdk/types.js";
+import {
+  type CallToolResult,
+  CallToolResultSchema,
+  McpError,
+} from "@modelcontextprotocol/sdk/types.js";
 import type { BaseEvent, ToolCallEvent } from "@yavio/shared/events";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { z as z3 } from "zod/v3";
 import type { IntentConfig, YavioConfig } from "../../core/types.js";
 import { createYavioContext } from "../../server/context.js";
+import { createYavio, withYavio } from "../../server/index.js";
 import { _resetGlobalState, createProxy } from "../../server/proxy.js";
 import type { Transport } from "../../transport/types.js";
+import { type MockIngest, startMockIngest } from "./helpers.js";
 
 /**
  * Status detection at the protocol layer (protocol-layer-status.md, #77):
@@ -772,4 +779,124 @@ describe("rejected calls without rejectedInputValues (the default, #123)", () =>
     expect(event?.status).toBe("success");
     expect(event?.input_values).toMatchObject({ plan: "premium" });
   });
+});
+
+/**
+ * Task-based tools (the MCP 2025-11-25 tasks of MCP SDK v1's experimental
+ * `server.experimental.tasks.registerToolTask`) are not tracked (#172):
+ * `registerToolTask` registers through `_createRegisteredTool` on the
+ * unwrapped server, past the `registerTool()` interceptor; `wrap()` skips a
+ * tool whose handler is an object; and the protocol layer passes a
+ * registered but uninstrumented tool straight through. This pins the caveat
+ * the README documents ("MCP 2026-07-28"): once task tools are instrumented
+ * this fails, and the caveat goes with it.
+ */
+describe("task-based tools on MCP SDK v1 (#172): not tracked, the documented caveat", () => {
+  let ingest: MockIngest;
+
+  beforeEach(async () => {
+    _resetGlobalState();
+    ingest = await startMockIngest();
+  });
+
+  afterEach(async () => {
+    await ingest.close();
+    _resetGlobalState();
+  });
+
+  const registerTask = (server: McpServer) =>
+    server.experimental.tasks.registerToolTask(
+      "export_report",
+      { description: "Export a monthly report", inputSchema: { month: z.string() } },
+      {
+        async createTask({ month }, { taskStore, taskRequestedTtl }) {
+          const task = await taskStore.createTask({ ttl: taskRequestedTtl, pollInterval: 20 });
+          setTimeout(() => {
+            void taskStore.storeTaskResult(task.taskId, "completed", ok(`report for ${month}`));
+          }, 30);
+          return { task };
+        },
+        async getTask(_args, { taskId, taskStore }) {
+          return await taskStore.getTask(taskId);
+        },
+        async getTaskResult(_args, { taskId, taskStore }) {
+          return (await taskStore.getTaskResult(taskId)) as CallToolResult;
+        },
+      },
+    );
+  const registerPlain = (server: McpServer) =>
+    server.registerTool("lookup", { inputSchema: { id: z.string() } }, async ({ id }) =>
+      ok(`found ${id}`),
+    );
+
+  it.each(["withYavio", "createYavio().wrap()"] as const)(
+    "%s: the task runs for the client, a plain tool on the same server is one tool_call, the task tool has none",
+    async (entry) => {
+      const options = { apiKey: "yav_tasks", endpoint: ingest.endpoint, serverOnly: true };
+      // withYavio() has no shutdown(): one client for the same key and endpoint does it.
+      const analytics = createYavio(options);
+      const raw = new McpServerCtor(
+        { name: "tasks", version: "1.0" },
+        {
+          capabilities: { tasks: { requests: { tools: { call: {} } } } },
+          taskStore: new InMemoryTaskStore(),
+        },
+      );
+      let server: McpServer;
+      if (entry === "withYavio") {
+        // Both through the proxy, which tracks the tools registered on it.
+        server = withYavio(raw, options);
+        registerTask(server);
+        registerPlain(server);
+      } else {
+        // A per-request host registers first; wrap() instruments what it finds.
+        registerTask(raw);
+        registerPlain(raw);
+        server = analytics.wrap(raw);
+      }
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverTransport);
+      const client = new Client({ name: "task-client", version: "1.0" });
+      await client.connect(clientTransport);
+
+      // Without task augmentation the MCP SDK refuses the call before any handler.
+      const refused = await client.callTool({
+        name: "export_report",
+        arguments: { month: "2026-09" },
+      });
+      expect(refused.isError).toBe(true);
+      expect(JSON.stringify(refused.content)).toContain("requires task augmentation");
+
+      // tools/list tells the client which tools are tasks; the stream then
+      // creates the task, polls it and fetches its result.
+      const listed = await client.listTools();
+      expect(listed.tools.find((t) => t.name === "export_report")?.execution).toEqual({
+        taskSupport: "required",
+      });
+      const stream: Array<{ type: string; result?: unknown }> = [];
+      for await (const message of client.experimental.tasks.callToolStream(
+        { name: "export_report", arguments: { month: "2026-10" } },
+        CallToolResultSchema,
+      )) {
+        stream.push(message as { type: string; result?: unknown });
+      }
+      expect(stream[0]?.type).toBe("taskCreated");
+      expect(stream.at(-1)?.type).toBe("result");
+      expect((stream.at(-1)?.result as { content?: unknown }).content).toEqual([
+        { type: "text", text: "report for 2026-10" },
+      ]);
+
+      const plain = await client.callTool({ name: "lookup", arguments: { id: "A1" } });
+      expect(plain.isError).toBeFalsy();
+      await client.close();
+      await analytics.shutdown();
+
+      // Delivery works (the plain tool's event arrived); the task tool, its
+      // refused call included, left no tool_call and no tool_discovery.
+      expect(ingest.ofType("tool_call").map((e) => [e.event_name, e.status])).toEqual([
+        ["lookup", "success"],
+      ]);
+      expect(ingest.ofType("tool_discovery").map((e) => e.tool_name)).toEqual(["lookup"]);
+    },
+  );
 });
