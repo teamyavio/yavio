@@ -20,13 +20,21 @@
 | Credit card (Visa) | `"Card: 4111111111111111"` | `"Card: [CC_REDACTED]"` |
 | Credit card (Amex) | `"Card: 378282246310005"` | `"Card: [CC_REDACTED]"` |
 | SSN format | `"SSN: 123-45-6789"` | `"SSN: [SSN_REDACTED]"` |
-| Phone (E.164) | `"Call +14155552671"` | `"Call [PHONE_REDACTED]"` |
+| Phone (`+CC`, compact) | `"Call +14155552671"` | `"Call [PHONE_REDACTED]"` |
 | Phone (formatted) | `"Call (415) 555-2671"` | `"Call [PHONE_REDACTED]"` |
+| Phone (trunk 0, #182) | `"call 0171-1234567"` | `"call [PHONE_REDACTED]"` (not `0[PHONE_REDACTED]`) |
+| Phone glued to a word | `"Tel5551234567"` | `"Tel[PHONE_REDACTED]"` |
+| UUID (#182) | `"47e16ee3-3d22-430b-acb1-959114949231"` | unchanged (was `…-95[PHONE_REDACTED]`) |
+| Hex id (#182) | `"deadbeef5551234567"`, `"b7ad6b7169203331"` | unchanged |
+| Traceparent inside text (#182) | `"traceparent: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01, call 555-123-4567"` | the traceparent unchanged, `call [PHONE_REDACTED]` |
+| Bare nine digits glued to a word (#182, A1) | `"order_123456789"` | unchanged |
 | Address | `"Ship to 123 Main Street"` | `"Ship to [ADDRESS_REDACTED]"` |
 | Nested metadata | `{ metadata: { user: "alice@test.com" } }` | `{ metadata: { user: "[EMAIL_REDACTED]" } }` |
 | No PII (preserve) | `"Total: $42.99, qty: 3"` | `"Total: $42.99, qty: 3"` (unchanged) |
 | Empty string | `""` | `""` |
 | Non-string fields | `{ count: 42, active: true }` | `{ count: 42, active: true }` (unchanged) |
+
+The string rules are `@yavio/shared/pii`: its tests hold the exact-output table per flavor (SDK and ingest), the seeded id corpus (200 000 UUIDs and traceparents per kind, none cut by the phone, card or SSN patterns), the SDK/ingest mirror check and the 100 KB ReDoS guard (#182). `PII_ID_CORPUS_SIZE=200000` runs every id kind at that size.
 
 ### Schema Validation
 

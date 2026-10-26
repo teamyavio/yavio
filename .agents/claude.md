@@ -141,7 +141,7 @@ These patterns are critical — follow them in all new code:
 ### PII Stripping
 - The ingestion pipeline strips PII before ClickHouse storage
 - Business data is preserved; identity data is removed
-- PII engine is in `packages/ingest/src/pipeline/pii.ts`
+- The PII string rules are `packages/shared/src/pii.ts` (`@yavio/shared/pii`, shared by the SDK and ingest, #182); ingest's walk and identifier-field exemption are `packages/ingest/src/lib/pii-stripper.ts`, the SDK's walk `packages/sdk/src/core/pii.ts`
 
 ### Widget Security
 - Short-lived JWT (15-min expiry, write-only, trace-scoped)

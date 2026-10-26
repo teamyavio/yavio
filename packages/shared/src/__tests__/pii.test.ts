@@ -1,0 +1,408 @@
+import { describe, expect, it } from "vitest";
+import { isTraceparent, stripPiiString } from "../pii.js";
+import { ID_KINDS, prng } from "./pii-id-corpus.js";
+
+const P = "[PHONE_REDACTED]";
+const CC = "[CC_REDACTED]";
+const SSN = "[SSN_REDACTED]";
+const W3C = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+
+/**
+ * [input, SDK output, ingest output (when it differs from the SDK's)]. Every
+ * row is the exact output, so a pattern that starts to cut more, or less,
+ * shows up here.
+ */
+type Row = [input: string, sdk: string, ingest?: string];
+
+const PHONES: Row[] = [
+  // A trunk 0, `00` and `(0)` belong to the number (#182): before, the
+  // leading digits were left in front of the token (`call 0[PHONE_REDACTED]`).
+  ["call 0171-1234567", `call ${P}`],
+  ["Tel. 0171 1234567", `Tel. ${P}`],
+  ["(0171) 1234567", P],
+  ["01711234567", P],
+  ["+49 171 1234567", P],
+  ["+49 (0)171 1234567", P],
+  ["0049 171 1234567", P],
+  ["tel:+491711234567", `tel:${P}`],
+  // A bare 12-15-digit run that does not start with 1: E.164 without the `+`.
+  ["491711234567", P],
+  ["+1 (555) 123-4567", P],
+  ["(555) 123-4567", P],
+  ["555.123.4567", P],
+  ["call 5551234567.", `call ${P}.`],
+  ["15551234567", P],
+  // Glued to a word of letters with a non-hex letter, or to `_`: still a number.
+  ["Tel5551234567", `Tel${P}`],
+  ["phone_5551234567", `phone_${P}`],
+  ['{"note":"Jane\\n5551234567"}', `{"note":"Jane\\n${P}"}`],
+  // Glued to a word of letters a-f only, with a phone's shape: a `+`, a `(`
+  // or a separator after the first group (#182 review round 1).
+  ["cafe555-123-4567", `cafe${P}`],
+  ["Ad+49 171 1234567", `Ad${P}`],
+  ["ab(555) 123-4567", `ab${P}`],
+  // A five-digit area code with its trunk 0 (review round 3): before, the
+  // whole number was shown.
+  ["07141 1234567", P],
+  ["07141 123-4567", P],
+  ["Tel. 07141 123 4567", `Tel. ${P}`],
+  ["(07141) 1234567", P],
+  ["+49 7141 1234567", P],
+  // After a word of letters a-f, a 5-digit group starting with a trunk 0 and
+  // a separator is a phone's shape too (review round 4).
+  ["Bad07141 123-4567", `Bad${P}`],
+  ["cafe07141 1234567", `cafe${P}`],
+];
+
+const CARDS: Row[] = [
+  ["Card: 4111 1111 1111 1111", `Card: ${CC}`],
+  ["4111-1111-1111-1111", CC],
+  ["card_4111111111111111", `card_${CC}`],
+  ["card4111111111111111", `card${CC}`],
+  ["4111 1111 1111 1111 12/27", `${CC} 12/27`],
+  ["ab4111 1111 1111 1111", `ab${CC}`],
+  // Luhn-invalid, 13 digits starting with 1: neither a card nor a phone.
+  ["ID: 1234567890123", "ID: 1234567890123"],
+  // Sixteen digits in a row, standing alone, Luhn or not: a mistyped card
+  // (one wrong digit always fails Luhn), a gift card (review round 3).
+  ["4111111111111112", CC],
+  ["Gift card 6274019958234411", `Gift card ${CC}`],
+  // A Luhn-valid card after any letters-only word, a-f included (review round 3).
+  ["a4666960593450200", `a${CC}`],
+  ["Bad4444127800745918", `Bad${CC}`],
+  ["cafe4367063062371650", `cafe${CC}`],
+];
+
+const SSNS: Row[] = [
+  ["SSN: 123-45-6789", `SSN: ${SSN}`],
+  ["ssn_123-45-6789", `ssn_${SSN}`],
+  // The SDK matches dashed SSNs only (#193); ingest spaced and bare ones too.
+  ["SSN: 123 45 6789", "SSN: 123 45 6789", `SSN: ${SSN}`],
+  ["SSN: 123456789", "SSN: 123456789", `SSN: ${SSN}`],
+  // The bare nine digits keep their `\b` boundaries in ingest (#182, A1):
+  // ids glued to a word are not cut, and `ssn_123456789` stays unredacted, as before.
+  ["order_123456789", "order_123456789"],
+  ["KD123456789", "KD123456789"],
+  ["ssn_123456789", "ssn_123456789"],
+  ["order_912345678", "order_912345678"],
+  // ITINs: the SDK's dashed SSN pattern has no area exclusion, ingest has ITIN.
+  ["ITIN: 912-34-5678", `ITIN: ${SSN}`],
+  ["ITIN: 912345678", "ITIN: 912345678", `ITIN: ${SSN}`],
+  ["000-12-3456", SSN, "000-12-3456"],
+  // Only the fully separated form uses the #182 boundary; one separator keeps
+  // `\b` like the bare form (review round 2): ids are not cut.
+  ["SSN:123-45-6789", `SSN:${SSN}`],
+  ["SSN: 123-456789", "SSN: 123-456789", `SSN: ${SSN}`],
+  ["ABC123-456789", "ABC123-456789"],
+  ["order_123-456789", "order_123-456789"],
+  ["GKS66905-4537", "GKS66905-4537"],
+];
+
+const IDS: Row[] = [
+  // The phone pattern took the last ten decimal digits of a hex run.
+  ["47e16ee3-3d22-430b-acb1-959114949231", "47e16ee3-3d22-430b-acb1-959114949231"],
+  // The card pattern took the all-digit segments of a UUID.
+  ["21165216-7349-4227-981e-df7d3bf851dc", "21165216-7349-4227-981e-df7d3bf851dc"],
+  ["b7ad6b7169203331", "b7ad6b7169203331"],
+  ["deadbeef5551234567", "deadbeef5551234567"],
+  [W3C, W3C],
+  [W3C.toUpperCase(), W3C.toUpperCase()],
+  [`ff${W3C.slice(2)}`, `ff${W3C.slice(2)}`],
+  [`traceparent: ${W3C}, call 555-123-4567`, `traceparent: ${W3C}, call ${P}`],
+  [
+    "47e16ee3-3d22-430b-acb1-959114949231 555-123-4567",
+    `47e16ee3-3d22-430b-acb1-959114949231 ${P}`,
+  ],
+  // An epoch in ms starts with 1 and is Luhn-invalid here: kept.
+  ['{"createdAt":1761484800127}', '{"createdAt":1761484800127}'],
+];
+
+/**
+ * After a URL percent-escape or a JSON `\uXXXX` escape, which ends in a hex
+ * digit glued to the number (#182 review round 1).
+ */
+const ESCAPES: Row[] = [
+  ["?phone=%2B4917612345678", `?phone=%2B${P}`],
+  ["?msg=Call%20me%20at%20555-123-4567", `?msg=Call%20me%20at%20${P}`],
+  ["?msg=Call%20me%20at%200171-1234567", `?msg=Call%20me%20at%20${P}`],
+  ["href=tel%3A235-515-6734", `href=tel%3A${P}`],
+  ["Jane%0A5551234567", `Jane%0A${P}`],
+  ['{"t":"Tel.\\u00a00171 1234567"}', `{"t":"Tel.\\u00a0${P}"}`],
+  ['{"t":"Tel.\\u00a0+49 171 1234567"}', `{"t":"Tel.\\u00a0${P}"}`],
+  ["ssn%3A123-45-6789", `ssn%3A${SSN}`],
+  // An id right after an escape is masked like one standing alone.
+  ["%2F47e16ee3-3d22-430b-acb1-959114949231", "%2F47e16ee3-3d22-430b-acb1-959114949231"],
+  ["\\u002221165216-7349-4227-981e-df7d3bf851dc", "\\u002221165216-7349-4227-981e-df7d3bf851dc"],
+  // A card after an escape whose own characters are digits: the candidate
+  // that starts inside the escape fails Luhn and is retried one character on
+  // (review round 2); before, the card leaked whole.
+  ["Pay%20with%204111111111111111", `Pay%20with%20${CC}`],
+  ["card%224111111111111111%22", `card%22${CC}%22`],
+  ["%284111111111111111%29", `%28${CC}%29`],
+  ['{"t":"\\u00224298 4937 9894 0771\\u0022"}', `{"t":"\\u0022${CC}\\u0022"}`],
+  ['{"t":"Card\\u20094935 3421 7113 8728"}', `{"t":"Card\\u2009${CC}"}`],
+  // A word glued to the number right after an escape (review round 2).
+  ["Call%20me%20at%20Tel5551234567", `Call%20me%20at%20Tel${P}`],
+  ["%2FTel5551234567", `%2FTel${P}`],
+  ["Jane%0Amobile5551234567", `Jane%0Amobile${P}`],
+  ['{"t":"Hi\\u00a0Tel5551234567"}', `{"t":"Hi\\u00a0Tel${P}"}`],
+  ["Call%20me%20at%20cafe555-123-4567", `Call%20me%20at%20cafe${P}`],
+  // JSON letter escapes; \f and \b are a-f letters (review round 2).
+  ['{"t":"Jane\\f5551234567"}', `{"t":"Jane\\f${P}"}`],
+  ['{"t":"Jane\\b5551234567"}', `{"t":"Jane\\b${P}"}`],
+  // A double-encoded escape, `%25` + `2B` (review round 3); an id after one
+  // is masked like after a single escape.
+  ["%252B4917612345678", `%252B${P}`],
+  ["%252F47e16ee3-3d22-430b-acb1-959114949231", "%252F47e16ee3-3d22-430b-acb1-959114949231"],
+  // A card right after a double-encoded escape whose hex is digits: the
+  // candidate that starts inside the escape fails Luhn and is tried again one
+  // character later, as after a single one (review round 4).
+  ["Card%253A%25204111-1111-1111-1111", `Card%253A%2520${CC}`],
+  ["%25203782-822463-10005", `%2520${CC}`],
+];
+
+const OTHER: Row[] = [
+  ["contact user@example.com", "contact [EMAIL_REDACTED]"],
+  // Email runs first, over the whole string: a UUID-shaped local part is an email.
+  ["47e16ee3-3d22-430b-acb1-959114949231@example.com", "[EMAIL_REDACTED]"],
+  ["IBAN DE89 3704 0044 0532 0130 00.", "IBAN [IBAN_REDACTED]."],
+  ["send to DE89370400440532013000 by friday", "send to [IBAN_REDACTED] by friday"],
+  ["Ship to 100 Pine Ave Apt 4B", "Ship to 100 Pine Ave Apt 4B", "Ship to [ADDRESS_REDACTED]"],
+  ["Comparing revenue for 2022 2023 2024 2025", "Comparing revenue for 2022 2023 2024 2025"],
+];
+
+/** Documented ambiguities and misses: pinned so a change is a decision. */
+const DOCUMENTED: Row[] = [
+  // A standalone ten-digit number is a phone number, an id or an epoch
+  // second alike (#192).
+  ["ORD-2026-1234567890", `ORD-2026-${P}`],
+  ['{"created":1761484800}', `{"created":${P}}`],
+  // The NANP `1-` before a dashed ten-digit number stays.
+  ["1-800-555-1234", `1-${P}`],
+  // A 12-15-digit number that does not start with 1 is a phone number (EAN-13).
+  ["EAN 4006381333931", `EAN ${P}`],
+  // Letters on the right end no number, nor does a word of letters a-f only
+  // on the left: the price of not cutting hex ids.
+  ["5551234567x12", "5551234567x12"],
+  ["abc5551234567", "abc5551234567"],
+  ["cafe5551234567", "cafe5551234567"],
+  ["cafe4111111111111112", "cafe4111111111111112"],
+  // ... while a Luhn-valid card after one is a card, also one ending a hex id.
+  ["deadbeef4111111111111111", `deadbeef${CC}`],
+  // Sixteen digits in a row are a card whatever they mean: an epoch in
+  // microseconds, an order number, a 16-digit run starting with `00`.
+  ["1700000000000000", CC],
+  ["order 1234567890123456 shipped", `order ${CC} shipped`],
+  ["0012345678901234", CC],
+  // A Luhn-invalid 16-digit number in groups is not (`2022 2023 2024 2025`
+  // above is a list of years).
+  ["card 4111 1111 1111 1112", "card 4111 1111 1111 1112"],
+  // Numbers with digits after a double-encoded escape are cut as after a
+  // single one: an encoded path id.
+  ["%252Forders%252F1234567890", `%252Forders%252F${P}`],
+  // A UUID glued to a letter is not masked.
+  ["x21165216-7349-4227-981e-df7d3bf851dc", `x${CC}-981e-df7d3bf851dc`],
+  // A fully separated SSN glued to a word is still an SSN.
+  ["XBG109-09-1527", `XBG${SSN}`],
+  // A phone can start inside an escape's own digits: over-redaction, the
+  // escape is cut but nothing is left. Forbidding it loses more than it saves:
+  // `(890)%20567-5540` and `50%555-123-4567` are only caught that way.
+  ["Call%20me%20at%205551234567", `Call%20me%20at%${P}`],
+  ["(890)%20567-5540", "(890)%20567-5540", `(890)%${SSN}`],
+  ["50%555-123-4567", `50%${P}`],
+  // A word right after an escape is standing alone: a path segment like
+  // `/user1234567890`, url-encoded, is cut as it is decoded.
+  ["%2Fuser1234567890", `%2Fuser${P}`],
+  // A Luhn-valid card candidate inside an escape wins over the card after
+  // it: the last group stays (better than before #182, which left two).
+  ['{"t":"\\u00224111 1111 1111 1111\\u0022"}', `{"t":"\\u${CC} 1111\\u0022"}`],
+  ['{"t":"Card\\u00204799 56605796 5730"}', `{"t":"Card\\u${CC} 5730"}`],
+  // The same inside a URL escape, as before #182 (review round 4).
+  ["Card%3A%205555-5555-5555-4444", `Card%3A%${CC}-4444`],
+  // A bare nine-digit SSN or ITIN, or one with a single separator, keeps its
+  // `\b` boundaries (A1): after `\u00a0` it is not redacted. Before #182 the
+  // phone pattern caught it by taking the escape's last `0`.
+  ['{"t":"SSN\\u00a0912345678"}', '{"t":"SSN\\u00a0912345678"}'],
+  ['{"t":"SSN\\u00a012345-6789"}', '{"t":"SSN\\u00a012345-6789"}'],
+  // Separators other than `-`, `.` and whitespace are not taken (#189).
+  ["Tel. 07141/1234567", "Tel. 07141/1234567"],
+  // Groupings other than 3/4 + 3 + 4 are not matched (#189).
+  ["Tel: 030 12345678", "Tel: 030 12345678"],
+  ["0171 123 45 67", "0171 123 45 67"],
+  ["+44 20 7946 0958", "+44 20 7946 0958"],
+];
+
+const TABLE: Array<[string, Row[]]> = [
+  ["phone", PHONES],
+  ["card", CARDS],
+  ["SSN and ITIN", SSNS],
+  ["id", IDS],
+  ["escape", ESCAPES],
+  ["email, IBAN, address, prose", OTHER],
+  ["documented ambiguity", DOCUMENTED],
+];
+
+describe.each(["sdk", "ingest"] as const)("stripPiiString(value, %j) (#182)", (flavor) => {
+  for (const [group, rows] of TABLE) {
+    it.each(rows)(`${group}: %j`, (input, sdk, ingest = sdk) => {
+      const expected = flavor === "sdk" ? sdk : ingest;
+      expect(stripPiiString(input, flavor)).toEqual({
+        result: expected,
+        redacted: expected !== input,
+      });
+    });
+  }
+});
+
+describe("the SDK and ingest flavors mirror each other (#182)", () => {
+  it("give the same output wherever only shared patterns apply", { timeout: 60_000 }, () => {
+    // Ids of every kind, and every table row whose expectation is the same
+    // for both flavors.
+    const r = prng(99);
+    const values: string[] = [];
+    for (const generate of Object.values(ID_KINDS)) {
+      for (let i = 0; i < 3_000; i++) values.push(generate(r));
+    }
+    for (const [, rows] of TABLE) {
+      for (const [input, , ingest] of rows) if (ingest === undefined) values.push(input);
+    }
+    const differ = values.filter(
+      (value) => stripPiiString(value, "sdk").result !== stripPiiString(value, "ingest").result,
+    );
+    expect(values.length).toBeGreaterThan(42_000);
+    expect(differ).toEqual([]);
+  });
+});
+
+describe("email addresses (#182 review round 1)", () => {
+  // Matched from each "@" instead of by the regex, which scanned up to 64
+  // characters at every position: the same matches, in linear time. Strings
+  // without a digit, so that only the email rule applies.
+  const OLD = /[a-zA-Z0-9._%+-]{1,64}@[a-zA-Z0-9.-]{1,255}\.[a-zA-Z]{2,24}/g;
+  const old = (value: string) => value.replace(OLD, "[EMAIL_REDACTED]");
+
+  it.each([
+    "user@example.com",
+    "a@b@c.com",
+    "a@b.cc.d@e.com",
+    "x.y+tag%_z-@sub.example.co.uk, and again: q@w.io",
+    `${"l".repeat(64)}@example.com`,
+    `${"l".repeat(65)}@example.com`,
+    `a@${"d".repeat(251)}.com`,
+    `a@${"d".repeat(252)}.com`,
+    `a@b.${"t".repeat(30)}`,
+    "a@b.c",
+    "a@.co",
+    "@example.com",
+    "a@b..co",
+    "name@domain-with-dash.example",
+  ])("%s", (value) => {
+    const expected = old(value);
+    for (const flavor of ["sdk", "ingest"] as const) {
+      expect(stripPiiString(value, flavor)).toEqual({
+        result: expected,
+        redacted: expected !== value,
+      });
+    }
+  });
+
+  it("matches like the regex on 20 000 seeded strings", { timeout: 60_000 }, () => {
+    const r = prng(5150);
+    const ATOMS = ["@", "@", ".", "%", "+", "-", "_", " ", "a", "Z", ".co", "..", "x@y", "a@b.io"];
+    const RUNS = ["a", ".", "%", "-", "b.c"];
+    const differ: string[] = [];
+    for (let i = 0; i < 20_000; i++) {
+      let value = "";
+      const k = 1 + Math.floor(r() * 10);
+      for (let j = 0; j < k; j++) {
+        value +=
+          r() < 0.15
+            ? (RUNS[Math.floor(r() * RUNS.length)] as string).repeat(55 + Math.floor(r() * 210))
+            : ATOMS[Math.floor(r() * ATOMS.length)];
+      }
+      const expected = old(value);
+      const got = stripPiiString(value, "sdk");
+      if (got.result !== expected || got.redacted !== (expected !== value)) differ.push(value);
+    }
+    expect(differ).toEqual([]);
+  });
+});
+
+describe("isTraceparent", () => {
+  it("accepts exactly a valid W3C traceparent", () => {
+    expect(isTraceparent(W3C)).toBe(true);
+    expect(isTraceparent(W3C.replace(/-01$/, "-00"))).toBe(true);
+  });
+
+  it.each([
+    ["upper-case hex", W3C.toUpperCase()],
+    ["version ff", `ff${W3C.slice(2)}`],
+    ["an all-zero trace id", `00-${"0".repeat(32)}-b7ad6b7169203331-01`],
+    ["an all-zero parent id", `00-0af7651916cd43dd8448eb211c80319c-${"0".repeat(16)}-01`],
+    ["a higher version's extra field", `01${W3C.slice(2)}-00`],
+    ["a trailing newline", `${W3C}\n`],
+    ["text around one", `traceparent: ${W3C}`],
+  ])("rejects %s", (_case, value) => {
+    expect(isTraceparent(value)).toBe(false);
+  });
+
+  it("is why stripPiiString returns a valid one unchanged and not redacted", () => {
+    for (const flavor of ["sdk", "ingest"] as const) {
+      expect(stripPiiString(W3C, flavor)).toEqual({ result: W3C, redacted: false });
+    }
+  });
+});
+
+describe("pathological input (#182)", () => {
+  // Every pattern is linear on these; before #182 a 100 KB string took
+  // 150-300 ms on a loaded machine, mostly in the email scan. The bound only
+  // catches catastrophic backtracking, not a slow runner.
+  const N = 100_000;
+  const repeat = (s: string) => s.repeat(Math.ceil(N / s.length)).slice(0, N);
+  const r = prng(5);
+  let hex = "";
+  for (let i = 0; i < N; i++) hex += "0123456789abcdef"[Math.floor(r() * 16)];
+
+  it.each([
+    ["digits", "1".repeat(N)],
+    ["random hex", hex],
+    ["a digit and 1000 spaces, repeated", repeat(`1${" ".repeat(1000)}`)],
+    ["Tel and nine digits, repeated", repeat("Tel123456789")],
+    ["letters a-z, repeated", repeat("abcdefghijklmnopqrstuvwxyz")],
+    ["UUID-shaped values glued by dashes", repeat("00000000-0000-4000-8000-000000000000-")],
+    // The email regex took ~450 ms on the next one (4.4 s at 1 MB): it
+    // scanned up to 64 characters at every position.
+    ["letters and one @ at the end", `${"a".repeat(N - 1)}@`],
+    [
+      "64 letters, @, 255 letters, a digit, repeated",
+      repeat(`${"a".repeat(64)}@${"a".repeat(255)}1`),
+    ],
+    ["%2B and 13 digits, repeated", repeat("%2B4917612345678")],
+    // Every card candidate starts inside the escape, fails Luhn and is retried.
+    ["%20 and 18 digits, repeated", repeat(`%20${"7".repeat(18)} `)],
+    // Review round 3: the five-digit trunk-0 group, the bare 16-digit run,
+    // any letters before a card, double-encoded escapes.
+    ["(01234) 123, repeated", repeat("(01234) 123 ")],
+    ["17 digits and a space, repeated", repeat("12345678901234567 ")],
+    ["letters and 16 digits, repeated", repeat("cafe1234567890123456 ")],
+    ["%25 and hex pairs, repeated", repeat("%252B%2520")],
+    // Review round 4: the retry after `%25`, the a-f word before a 5-digit group.
+    ["%2520 and 18 digits, repeated", repeat(`%2520${"7".repeat(18)} `)],
+    ["a-f word and 0 + 4 digits, repeated", repeat("cafe01234 ")],
+  ])("%s (100 KB) in under 1 s per flavor", (_case, value) => {
+    for (const flavor of ["sdk", "ingest"] as const) {
+      const start = performance.now();
+      stripPiiString(value, flavor);
+      expect(performance.now() - start).toBeLessThan(1_000);
+    }
+  });
+
+  it("letters and one @ at the end, 1 MB, in under 1 s per flavor", () => {
+    const value = `${"a".repeat(1_000_000 - 1)}@`;
+    for (const flavor of ["sdk", "ingest"] as const) {
+      const start = performance.now();
+      stripPiiString(value, flavor);
+      expect(performance.now() - start).toBeLessThan(1_000);
+    }
+  });
+});

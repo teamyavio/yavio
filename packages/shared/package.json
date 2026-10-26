@@ -38,6 +38,11 @@
       "types": "./dist/geo.d.ts",
       "import": "./dist/geo.js",
       "require": "./dist/geo.cjs"
+    },
+    "./pii": {
+      "types": "./dist/pii.d.ts",
+      "import": "./dist/pii.js",
+      "require": "./dist/pii.cjs"
     }
   },
   "scripts": {

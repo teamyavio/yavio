@@ -77,8 +77,8 @@ Each condition carries its own declarations (0.4.2). With one `types` for both, 
 
 > **Note:** PII redaction uses a defense-in-depth strategy across two layers:
 >
-> 1. **SDK (best-effort, client-side)** — A lightweight, non-configurable pass strips common PII patterns (emails, IPs, credit card numbers, phone numbers) from event payloads before they leave the process. This minimises PII in transit and reduces exposure if the server-side layer has a bug. The implementation lives in `core/pii.ts` and uses fast regex matching with zero additional dependencies.
-> 2. **Ingestion API (authoritative, server-side)** — The ingestion pipeline runs a full configurable scrub (`pipeline/pii.ts`) before writing to ClickHouse. This layer supports project-specific redaction rules (configured via the dashboard) and acts as the safety net — even if a developer uses an outdated SDK, PII is still caught here.
+> 1. **SDK (best-effort, client-side)** — A lightweight, non-configurable pass strips common PII patterns (emails, IBANs, credit card numbers, dashed US SSNs, phone numbers; no IP addresses) from event payloads before they leave the process. This minimises PII in transit and reduces exposure if the server-side layer has a bug. `core/pii.ts` walks the payload; the string rules are `@yavio/shared/pii` (#182), shared with ingest and bundled into the package, so they add no runtime dependency. Its walk turns a shared, non-circular reference into `"[Circular]"` (#194).
+> 2. **Ingestion API (authoritative, server-side)** — The ingestion pipeline strips every event again before writing to ClickHouse (`lib/pii-stripper.ts`: the SDK's rules plus spaced and bare SSNs, ITINs and US street addresses; not configurable, no per-project rules). It is the safety net for fields the SDK does not strip and for clients without the SDK, but it cannot restore what an outdated SDK already replaced.
 
 ## Build Configuration
 

@@ -31,7 +31,8 @@ const execFile = promisify(execFileCallback);
 
 const sdkDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(sdkDir, "../..");
-const tsc = createRequire(join(sdkDir, "package.json")).resolve("typescript/bin/tsc");
+const requireFromSdk = createRequire(join(sdkDir, "package.json"));
+const tsc = requireFromSdk.resolve("typescript/bin/tsc");
 const installedVersion = (name) =>
   JSON.parse(readFileSync(join(sdkDir, "node_modules", name, "package.json"), "utf8")).version;
 const mcpVersion = installedVersion("@modelcontextprotocol/sdk");
@@ -274,6 +275,36 @@ try {
       return offenders.length === 0
         ? null
         : `imports @modelcontextprotocol: ${offenders.join(", ")}`;
+    },
+  });
+  // The React bundle runs in browsers, and Safari and iOS before 16.4 cannot
+  // parse a regex literal with a lookbehind: the whole file would fail to
+  // load. @yavio/shared/pii compiles its lookbehinds with new RegExp on first
+  // use and falls back without them (#182 review round 1); a literal anywhere
+  // in dist/ would undo that. Parsed, so a string or comment is no hit.
+  checks.push({
+    name: "dist has no regex literal with a lookbehind",
+    run: async () => {
+      const ts = requireFromSdk("typescript");
+      const dist = join(work, "node_modules", "@yavio", "sdk", "dist");
+      const hits = [];
+      for (const file of readdirSync(dist).filter((f) => /\.(js|cjs|mjs)$/.test(f))) {
+        const source = ts.createSourceFile(
+          file,
+          readFileSync(join(dist, file), "utf8"),
+          ts.ScriptTarget.Latest,
+          false,
+          ts.ScriptKind.JS,
+        );
+        const visit = (node) => {
+          if (node.kind === ts.SyntaxKind.RegularExpressionLiteral && /\(\?<[=!]/.test(node.text)) {
+            hits.push(`${file}: ${node.text.slice(0, 80)}`);
+          }
+          ts.forEachChild(node, visit);
+        };
+        visit(source);
+      }
+      return hits.length === 0 ? null : `lookbehind literals:\n${hits.join("\n")}`;
     },
   });
 
