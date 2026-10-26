@@ -14,7 +14,7 @@ import { validateBatch } from "../lib/schema-validator.js";
 // response lists at most 100 per-event errors (`rejected` counts them all).
 
 const TEST_KEY = "yav_abc123def456abc123def456abc123de";
-const CAP_ISSUE = `events: Array must contain at most ${MAX_BATCH_EVENTS} element(s)`;
+const CAP_ISSUE = `events: Too big: expected array to have <=${MAX_BATCH_EVENTS} items`;
 
 function makeEvent(overrides: Record<string, unknown> = {}) {
   return {
@@ -203,7 +203,7 @@ describe("POST /v1/events — the batch cap", () => {
     expect(body.error.code).toBe("YAVIO-2100");
     expect(body.error.message).toBe("All events failed validation");
     expect(body.errors).toEqual([
-      { index: -1, issues: ["events: Array must contain at least 1 element(s)"] },
+      { index: -1, issues: ["events: Too small: expected array to have >=1 items"] },
     ]);
     expect(body.accepted).toBe(0);
     expect(body.rejected).toBe(1);

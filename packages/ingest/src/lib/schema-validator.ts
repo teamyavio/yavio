@@ -15,7 +15,7 @@ export interface ValidationResult {
 }
 
 /** The issue reported for a batch over the cap, worded as zod words its `too_big`. */
-const BATCH_CAP_ISSUE = `events: Array must contain at most ${MAX_BATCH_EVENTS} element(s)`;
+const BATCH_CAP_ISSUE = `events: Too big: expected array to have <=${MAX_BATCH_EVENTS} items`;
 
 /**
  * Validate the raw request body against IngestBatch, then partition
