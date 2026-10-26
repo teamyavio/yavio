@@ -40,7 +40,9 @@ export async function authenticate(request: FastifyRequest): Promise<void> {
  * authenticateBodyToken; any other type is refused here, unread.
  */
 export async function authenticateHeader(request: FastifyRequest): Promise<void> {
-  if (request.headers.authorization) {
+  // Present at all, even empty: authenticated (or refused) here, unread, like
+  // any request with a header; the rate limiter treats it the same way.
+  if (request.headers.authorization !== undefined) {
     await authenticate(request);
     return;
   }

@@ -52,6 +52,7 @@ The string rules are `@yavio/shared/pii`: its tests hold the exact-output table 
 | More than 100 rejected events within the cap | 207/400 lists the first 100 errors; `rejected` counts all |
 | Header-less `text/plain` body over 64 KiB | 413 `YAVIO-2111`, body not parsed |
 | Header-less request that is not `text/plain` | 401 `YAVIO-2000`, body not parsed |
+| `text/plain` request with an empty or blank `Authorization` header | 401, body not parsed |
 | JSON body over 600,000 bytes | 413 `YAVIO-2111`, body not parsed; 500 KB–600,000 bytes keeps `Batch exceeds 500KB limit` |
 | 60,000-byte beacon with a valid body token | 200 |
 | Extra unknown fields | Accept (ignore extra fields) |

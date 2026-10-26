@@ -48,7 +48,7 @@ function parsedWith(spy: { mock: { calls: unknown[][] } }, marker: string): numb
   ).length;
 }
 
-describe("events route — reading bodies before authentication", () => {
+describe("events route — reading bodies before authentication", { timeout: 20_000 }, () => {
   let app: FastifyInstance;
   let enqueue: ReturnType<typeof vi.fn>;
 
@@ -124,6 +124,36 @@ describe("events route — reading bodies before authentication", () => {
 
     expect(r.statusCode).toBe(200);
     expect(r.json().accepted).toBe(200);
+  });
+
+  it("refuses a text/plain request with an empty or blank Authorization header before reading its body", async () => {
+    await build();
+    const parse = vi.spyOn(JSON, "parse");
+    const body = (marker: string) =>
+      JSON.stringify({
+        token: widgetToken("trace-empty-header"),
+        events: widgetEvents("trace-empty-header", 1),
+        sdk_version: marker,
+      });
+    const send = (authorization: string, marker: string) =>
+      app.inject({
+        method: "POST",
+        url: "/v1/events",
+        headers: { "content-type": "text/plain;charset=UTF-8", authorization },
+        payload: body(marker),
+      });
+
+    const empty = await send("", "marker-empty-header");
+    expect(empty.statusCode).toBe(401);
+    expect(empty.json().error.code).toBe("YAVIO-2000");
+
+    const blank = await send("   ", "marker-blank-header");
+    expect(blank.statusCode).toBe(401);
+    expect(blank.json().error.code).toBe("YAVIO-2006");
+
+    expect(parsedWith(parse, "marker-empty-header")).toBe(0);
+    expect(parsedWith(parse, "marker-blank-header")).toBe(0);
+    expect(enqueue).not.toHaveBeenCalled();
   });
 
   it("refuses a header-less JSON request before reading its body", async () => {

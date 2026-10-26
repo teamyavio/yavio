@@ -170,7 +170,7 @@ Errors from the `yavio-ingest` service. These appear in HTTP responses, Pino log
 
 | Code | HTTP | Message | Description | Recovery |
 |------|------|---------|-------------|----------|
-| `YAVIO-2000` | 401 | Missing authorization header | Request has no `Authorization` header. On `POST /v1/events` only a widget beacon (`text/plain`, widget token in the body's `token` field) can authenticate without one; any other request without a header is refused before its body is read. | Include `Authorization: Bearer <key\|jwt>` header. |
+| `YAVIO-2000` | 401 | Missing authorization header | Request has no `Authorization` header. On `POST /v1/events` only a widget beacon (`text/plain`, widget token in the body's `token` field) can authenticate without one; any other request without a header is refused before its body is read. An `Authorization` header that is present but empty is refused the same way, unread. | Include `Authorization: Bearer <key\|jwt>` header. |
 | `YAVIO-2001` | 401 | Invalid API key | API key does not exist in PostgreSQL or hash mismatch. | Use a valid key from the dashboard. |
 | `YAVIO-2002` | 401 | API key expired | API key has an `expires_at` in the past. | Generate a new key from the dashboard. |
 | `YAVIO-2003` | 401 | API key revoked | API key has a `revoked_at` timestamp set. | Generate a new key or use an active key. |
