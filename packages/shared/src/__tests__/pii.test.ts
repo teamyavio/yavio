@@ -70,6 +70,13 @@ const SSNS: Row[] = [
   ["ITIN: 912-34-5678", `ITIN: ${SSN}`],
   ["ITIN: 912345678", "ITIN: 912345678", `ITIN: ${SSN}`],
   ["000-12-3456", SSN, "000-12-3456"],
+  // Only the fully separated form uses the #182 boundary; one separator keeps
+  // `\b` like the bare form (review round 2): ids are not cut.
+  ["SSN:123-45-6789", `SSN:${SSN}`],
+  ["SSN: 123-456789", "SSN: 123-456789", `SSN: ${SSN}`],
+  ["ABC123-456789", "ABC123-456789"],
+  ["order_123-456789", "order_123-456789"],
+  ["GKS66905-4537", "GKS66905-4537"],
 ];
 
 const IDS: Row[] = [
@@ -107,6 +114,23 @@ const ESCAPES: Row[] = [
   // An id right after an escape is masked like one standing alone.
   ["%2F47e16ee3-3d22-430b-acb1-959114949231", "%2F47e16ee3-3d22-430b-acb1-959114949231"],
   ["\\u002221165216-7349-4227-981e-df7d3bf851dc", "\\u002221165216-7349-4227-981e-df7d3bf851dc"],
+  // A card after an escape whose own characters are digits: the candidate
+  // that starts inside the escape fails Luhn and is retried one character on
+  // (review round 2); before, the card leaked whole.
+  ["Pay%20with%204111111111111111", `Pay%20with%20${CC}`],
+  ["card%224111111111111111%22", `card%22${CC}%22`],
+  ["%284111111111111111%29", `%28${CC}%29`],
+  ['{"t":"\\u00224298 4937 9894 0771\\u0022"}', `{"t":"\\u0022${CC}\\u0022"}`],
+  ['{"t":"Card\\u20094935 3421 7113 8728"}', `{"t":"Card\\u2009${CC}"}`],
+  // A word glued to the number right after an escape (review round 2).
+  ["Call%20me%20at%20Tel5551234567", `Call%20me%20at%20Tel${P}`],
+  ["%2FTel5551234567", `%2FTel${P}`],
+  ["Jane%0Amobile5551234567", `Jane%0Amobile${P}`],
+  ['{"t":"Hi\\u00a0Tel5551234567"}', `{"t":"Hi\\u00a0Tel${P}"}`],
+  ["Call%20me%20at%20cafe555-123-4567", `Call%20me%20at%20cafe${P}`],
+  // JSON letter escapes; \f and \b are a-f letters (review round 2).
+  ['{"t":"Jane\\f5551234567"}', `{"t":"Jane\\f${P}"}`],
+  ['{"t":"Jane\\b5551234567"}', `{"t":"Jane\\b${P}"}`],
 ];
 
 const OTHER: Row[] = [
@@ -138,6 +162,20 @@ const DOCUMENTED: Row[] = [
   ["%252B4917612345678", "%252B4917612345678"],
   // A UUID glued to a letter is not masked.
   ["x21165216-7349-4227-981e-df7d3bf851dc", `x${CC}-981e-df7d3bf851dc`],
+  // A fully separated SSN glued to a word is still an SSN.
+  ["XBG109-09-1527", `XBG${SSN}`],
+  // A phone can start inside an escape's own digits: over-redaction, the
+  // escape is cut but nothing is left. Forbidding it loses more than it saves:
+  // `(890)%20567-5540` and `50%555-123-4567` are only caught that way.
+  ["Call%20me%20at%205551234567", `Call%20me%20at%${P}`],
+  ["(890)%20567-5540", "(890)%20567-5540", `(890)%${SSN}`],
+  ["50%555-123-4567", `50%${P}`],
+  // A word right after an escape is standing alone: a path segment like
+  // `/user1234567890`, url-encoded, is cut as it is decoded.
+  ["%2Fuser1234567890", `%2Fuser${P}`],
+  // A Luhn-valid card candidate inside an escape wins over the card after
+  // it: the last group stays (better than before #182, which left two).
+  ['{"t":"\\u00224111 1111 1111 1111\\u0022"}', `{"t":"\\u${CC} 1111\\u0022"}`],
   // A Luhn-invalid 16-digit number is no longer partly cut as a phone number.
   ["4111111111111112", "4111111111111112"],
   // Groupings other than 3/4 + 3 + 4 are not matched (#189).
@@ -292,6 +330,8 @@ describe("pathological input (#182)", () => {
       repeat(`${"a".repeat(64)}@${"a".repeat(255)}1`),
     ],
     ["%2B and 13 digits, repeated", repeat("%2B4917612345678")],
+    // Every card candidate starts inside the escape, fails Luhn and is retried.
+    ["%20 and 18 digits, repeated", repeat(`%20${"7".repeat(18)} `)],
   ])("%s (100 KB) in under 1 s per flavor", (_case, value) => {
     for (const flavor of ["sdk", "ingest"] as const) {
       const start = performance.now();

@@ -22,9 +22,13 @@
  * phone's shape (`cafe5551234567`), to a token of letters and digits
  * (`ref15551234567`), to a word of more than 24 letters, or after a
  * double-encoded escape (`%252B…`): the price of not cutting hex ids (see
- * START). Wrongly matched: a standalone 10-digit number such as an epoch
- * second (#192), a 12-15-digit number that does not start with 1 (an
- * EAN-13), a Luhn-valid 13-19-digit number (#190), and IBAN-shaped hex (#191).
+ * START); a card grouped other than in fours with Unicode spaces. Wrongly
+ * matched: a standalone 10-digit number such as an epoch second (#192), a
+ * 12-15-digit number that does not start with 1 (an EAN-13), a Luhn-valid
+ * 13-19-digit number (#190), IBAN-shaped hex (#191), a fully separated SSN
+ * glued to a word (`XBG109-09-1527`), and an escape's own digits taken into a
+ * phone number (`%20` + `5551234567` becomes `%[PHONE_REDACTED]`; see
+ * applyRetrying for why that start is not forbidden).
  *
  * No regular expression with a lookbehind is written as a literal: a browser
  * without lookbehind support (Safari and iOS before 16.4) would fail to parse
@@ -126,30 +130,39 @@ const ADDRESS_TOKEN = "[ADDRESS_REDACTED]";
 /** Not directly after a letter or digit. */
 const NOT_GLUED = String.raw`(?<![A-Za-z0-9])`;
 /**
- * Right after a URL percent-escape (`%2B4917612345678`, `Call%20me%20at%20…`)
- * or a JSON `\uXXXX` escape (`"Tel. 0171 1234567"` from an
- * ensure_ascii encoder): the escape ends in a hex digit glued to the number.
+ * Right after a URL percent-escape (`%2B4917612345678`, `Call%20me%20at%20...`),
+ * a JSON `\uXXXX` escape (`"Tel.\u00a00171 1234567"` from an ensure_ascii
+ * encoder) or a JSON letter escape (`"Jane\f5551234567"`): the escape ends in a
+ * letter or hex digit glued to what follows.
  */
-const AFTER_ESCAPE = [String.raw`(?<=%[0-9A-Fa-f]{2})`, String.raw`(?<=\\u[0-9A-Fa-f]{4})`];
+const AFTER_ESCAPE = [
+  String.raw`(?<=%[0-9A-Fa-f]{2})`,
+  String.raw`(?<=\\u[0-9A-Fa-f]{4})`,
+  String.raw`(?<=\\[bfnrt])`,
+];
+/** Not glued to a letter or digit, or right after an escape. */
+const STANDALONE = `(?:${[NOT_GLUED, ...AFTER_ESCAPE].join("|")})`;
 
 /**
  * Where a card, SSN, ITIN or phone number may start (#182). The digit run may
  * not follow a letter or digit, so the digits inside a hex id (`…b7ad6b7169203331`)
  * are not a number. It may still follow:
- * - a word of 1-24 letters only (itself not glued to a letter or digit) that
- *   has a letter outside a-f: `Tel5551234567`, `card4111111111111111`;
- * - a URL or JSON escape (AFTER_ESCAPE);
- * - a word of letters a-f only, when the number has a phone's shape: a `+`, a
- *   `(`, or a separator after its first 2-4 digits (`cafe555-123-4567`), which
- *   a hex id never has (`deadbeef5551234567` stays).
+ * - a word of 1-24 letters only that has a letter outside a-f, the word
+ *   itself standing alone or right after an escape: `Tel5551234567`,
+ *   `card4111111111111111`, `Call%20me%20at%20Tel5551234567`;
+ * - an escape (AFTER_ESCAPE);
+ * - a word of letters a-f only, standing alone or right after an escape, when
+ *   the number has a phone's shape: a `+`, a `(`, or a separator after its
+ *   first 2-4 digits (`cafe555-123-4567`), which a hex id never has
+ *   (`deadbeef5551234567` stays).
  * The leading lookahead keeps the lookbehinds off every position that cannot
  * start a number.
  */
 const START = `(?=[\\d+(])(?:${[
   NOT_GLUED,
-  String.raw`(?<=(?<![A-Za-z0-9])(?=[A-Za-z]{0,23}[G-Zg-z])[A-Za-z]{1,24})`,
+  String.raw`(?<=${STANDALONE}(?=[A-Za-z]{0,23}[G-Zg-z])[A-Za-z]{1,24})`,
   ...AFTER_ESCAPE,
-  String.raw`(?<=(?<![A-Za-z0-9])[A-Fa-f]{1,24})(?=[+(]|\d{2,4}\)?[-.\s])`,
+  String.raw`(?<=${STANDALONE}[A-Fa-f]{1,24})(?=[+(]|\d{2,4}\)?[-.\s])`,
 ].join("|")})`;
 /** Where it must end: not followed by a letter or digit. */
 const END = "(?![A-Za-z0-9])";
@@ -160,12 +173,17 @@ const END = "(?![A-Za-z0-9])";
  * (`%2F<uuid>`). The digit patterns never run inside one: an all-digit UUID
  * segment (`21165216-7349-4227-…`) is neither a card nor a phone number.
  */
-const ID_MASK = `(?:${[NOT_GLUED, ...AFTER_ESCAPE].join("|")})(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2})(?![A-Za-z0-9])`;
+const ID_MASK = `${STANDALONE}(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2})(?![A-Za-z0-9])`;
 
 interface Rule {
   pattern: RegExp;
   replacement: string;
   validate?: (match: string) => boolean;
+  /**
+   * A candidate that fails validate() and began inside an escape is tried
+   * again one character later (see applyRules).
+   */
+  retryInsideEscape?: boolean;
 }
 
 // IBANs, compact or in groups of four (#90). Before the card and phone
@@ -204,11 +222,13 @@ interface Engine {
 /** The #182 patterns. Throws where the engine has no lookbehind. */
 function currentEngine(): Engine {
   const rx = (source: string) => new RegExp(source, "g");
+  const iban: Rule = { ...IBAN, retryInsideEscape: true };
   // 13-19 digits with optional space or dash separators, Luhn checked.
   const card: Rule = {
     pattern: rx(`${START}(?:\\d[ -]*?){13,19}${END}`),
     replacement: CARD_TOKEN,
     validate: passesCardCheck,
+    retryInsideEscape: true,
   };
   // SDK: dashed SSNs only, any area number (aligning with ingest: #193).
   const ssnSdk: Rule = {
@@ -216,22 +236,23 @@ function currentEngine(): Engine {
     replacement: SSN_TOKEN,
   };
   // Ingest: dashed, spaced and bare SSNs, without the never-issued area
-  // numbers 000, 666 and 900-999. The bare nine digits keep the `\b`
-  // boundaries they had before #182 (decision A1): on START/END, ids like
-  // `order_123456789` or `KD123456789` would be cut, so `ssn_123456789` stays
-  // unredacted as before.
+  // numbers 000, 666 and 900-999. Only the fully separated form
+  // (`123-45-6789`, `123 45 6789`) uses START/END, so `ssn_123-45-6789` and
+  // `SSN:123-45-6789` are redacted. Every other form, bare nine digits or one
+  // separator (`123456789`, `123-456789`, `12345-6789`), keeps the `\b`
+  // boundaries it had before #182 (decision A1, review round 2): on START/END,
+  // ids like `order_123456789`, `KD123456789` or `ABC123-456789` would be cut,
+  // so `ssn_123456789` stays unredacted as before.
   const ssnIngest: Rule = {
     pattern: rx(
-      `${START}(?!000|666|9\\d{2})(?=\\d{3}[- ]|\\d{5}[- ])\\d{3}[- ]?\\d{2}[- ]?\\d{4}${END}|\\b(?!000|666|9\\d{2})\\d{9}\\b`,
+      `${START}(?!000|666|9\\d{2})\\d{3}[- ]\\d{2}[- ]\\d{4}${END}|\\b(?!000|666|9\\d{2})\\d{3}[- ]?\\d{2}[- ]?\\d{4}\\b`,
     ),
     replacement: SSN_TOKEN,
   };
-  // Ingest: US ITINs, 9XX-XX-XXXX, same token as an SSN. The bare form keeps
-  // its `\b` boundaries for the same reason as the SSN's.
+  // Ingest: US ITINs, 9XX-XX-XXXX, same token as an SSN, with the SSN's
+  // boundaries per form.
   const itin: Rule = {
-    pattern: rx(
-      `${START}9(?=\\d{2}[- ]|\\d{4}[- ])\\d{2}[- ]?\\d{2}[- ]?\\d{4}${END}|\\b9\\d{8}\\b`,
-    ),
+    pattern: rx(`${START}9\\d{2}[- ]\\d{2}[- ]\\d{4}${END}|\\b9\\d{2}[- ]?\\d{2}[- ]?\\d{4}\\b`),
     replacement: SSN_TOKEN,
   };
   // Phone numbers: an optional `+CC` or `00CC` and `(0)`, a first group of
@@ -247,7 +268,7 @@ function currentEngine(): Engine {
   };
   return {
     mask: new RegExp(ID_MASK, "gi"),
-    rules: { sdk: [IBAN, card, ssnSdk, phone], ingest: [IBAN, card, ssnIngest, itin, phone] },
+    rules: { sdk: [iban, card, ssnSdk, phone], ingest: [iban, card, ssnIngest, itin, phone] },
   };
 }
 
@@ -303,10 +324,47 @@ function getEngine(): Engine {
  */
 const DIGIT = /\d/;
 
+/** A "%" or a "\u" with up to three hex digits right before a candidate. */
+const INSIDE_ESCAPE = /(?:%|\\u[0-9A-Fa-f]{0,3})$/;
+
+/**
+ * A validated rule whose candidate began inside an escape and failed its
+ * check: the scan resumes one character after that start instead of after
+ * the candidate (#182 review round 2). `Pay%20with%204111111111111111`: the
+ * card candidate `204111…` (the escape's own `20` in front) fails Luhn, and the
+ * card right after the escape would otherwise never be tried.
+ *
+ * Forbidding a start inside an escape instead was measured and lost more than
+ * it saved: the escape's digits are what lets `(890)%20567-5540` (an encoded
+ * space between the groups) be caught as `%[SSN_REDACTED]`, and a "%" glued to
+ * a number is as often a percent sign as an escape (`50%555-123-4567`).
+ */
+function applyRetrying(text: string, rule: Rule, hit: { redacted: boolean }): string {
+  const { pattern, replacement, validate } = rule;
+  let out = "";
+  let last = 0;
+  pattern.lastIndex = 0;
+  for (let m = pattern.exec(text); m !== null; m = pattern.exec(text)) {
+    if (validate?.(m[0]) !== false) {
+      out += text.slice(last, m.index) + replacement;
+      last = pattern.lastIndex;
+      hit.redacted = true;
+    } else if (INSIDE_ESCAPE.test(text.slice(Math.max(0, m.index - 5), m.index))) {
+      pattern.lastIndex = m.index + 1;
+    }
+  }
+  return last === 0 ? text : out + text.slice(last);
+}
+
 /** Each rule over the running result; a failed validation keeps the match. */
 function applyRules(text: string, rules: readonly Rule[], hit: { redacted: boolean }): string {
   let result = text;
-  for (const { pattern, replacement, validate } of rules) {
+  for (const rule of rules) {
+    if (rule.retryInsideEscape) {
+      result = applyRetrying(result, rule, hit);
+      continue;
+    }
+    const { pattern, replacement, validate } = rule;
     result = result.replace(pattern, (match) => {
       if (validate && !validate(match)) return match;
       hit.redacted = true;
