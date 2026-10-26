@@ -185,13 +185,13 @@ Errors from the `yavio-ingest` service. These appear in HTTP responses, Pino log
 | `YAVIO-2050` | 429 | API key rate limit exceeded | Sustained event rate exceeds 1,000 events/second for this key. | Reduce event volume. Retry with `Retry-After` header. |
 | `YAVIO-2051` | 429 | API key burst limit exceeded | Burst exceeds 5,000 events. | Spread events over time. Retry with `Retry-After` header. |
 | `YAVIO-2052` | 429 | IP rate limit exceeded | Unauthenticated IP exceeded 10 requests/second. | Authenticate requests or reduce request rate. |
-| `YAVIO-2053` | 429 | Widget token rate limit exceeded | Widget JWT exceeded 50 events per session. | Expected ceiling for widget interactions. |
+| `YAVIO-2053` | 429 | Widget token rate limit exceeded | A widget JWT's events exceeded its bucket: 1,000-event burst, refilled at 50 events/second, one bucket per token (project and trace), charged by event count. Separate from the project's API-key bucket. A request with the token in its header whose body fails to parse is charged one event. Charged before the batch cap, so a widget batch over 1,000 events is answered with this code, not `YAVIO-2100`. | Spread events over time. Retry with `Retry-After` header. A widget (20 events per batch, up to 200 in a teardown beacon) stays well below it. |
 
 ### Schema Validation (2100&ndash;2199)
 
 | Code | HTTP | Message | Description | Recovery |
 |------|------|---------|-------------|----------|
-| `YAVIO-2100` | 400 | Event schema validation failed | Event does not conform to the expected schema. | Check event payload against the event schema in [metrics/events.md](./metrics/events.md). |
+| `YAVIO-2100` | 400 | Event schema validation failed | Event does not conform to the expected schema. Also the answer to an empty batch, a missing or non-array `events`, and a batch of more than 1,000 events (`MAX_BATCH_EVENTS`): that one is rejected whole before any event in it is validated, with the message `Batch exceeds 1000 events`, one `errors` entry at `index: -1` (`events: Array must contain at most 1000 element(s)`) and `rejected` set to the number of events sent; nothing is stored. A 207 or 400 body lists at most 100 per-event errors, the first ones found; `rejected` counts every rejected event. | Check event payload against the event schema in [metrics/events.md](./metrics/events.md). Send at most 1,000 events per batch. |
 | `YAVIO-2101` | 400 | Missing required field | A required field (`event_type`, `event_name`, `timestamp`, `trace_id`, `session_id`) is missing. | Include all required fields. |
 | `YAVIO-2102` | 400 | Invalid event_type | `event_type` is not one of the allowed values. | Use a valid event type: `tool_call`, `step`, `conversion`, `identify`, `custom`, `connection`, `tool_discovery`, `resource_access`, `widget_render`, `widget_interaction`, `widget_error`. |
 | `YAVIO-2103` | 400 | Invalid timestamp format | `timestamp` is not a valid ISO-8601 string. | Use ISO-8601 format (e.g., `2026-03-15T10:30:00.123Z`). |

@@ -107,7 +107,7 @@ Server SDK                          Widget SDK
 Ingestion API
   ├─ 1. Auth: API key lookup OR JWT signature verification
   │      → resolve project_id + workspace_id
-  ├─ 2. Rate limit check (per API key, per IP)
+  ├─ 2. Rate limit check (per API key or widget token by event count, per IP)
   ├─ 3. Schema validation (reject malformed events)
   ├─ 4. Event enrichment (add workspace_id, project_id; ingested_at is the column DEFAULT, stamped by ClickHouse at insert — #148 review round 5)
   ├─ 5. PII stripping (all string fields)
@@ -120,8 +120,8 @@ Ingestion API
 | Status | Condition |
 |--------|-----------|
 | `200 OK` | All events accepted |
-| `207 Multi-Status` | Partial success — some events accepted, others rejected (body includes per-event errors) |
-| `400 Bad Request` | All events failed schema validation, or empty/missing request body |
+| `207 Multi-Status` | Partial success — some events accepted, others rejected (body includes per-event errors, at most 100; `rejected` counts all) |
+| `400 Bad Request` | All events failed schema validation, empty/missing request body, or more than 1,000 events in the batch (rejected whole before any event is validated, see §6.2.8) |
 | `401 Unauthorized` | Missing, invalid, expired, or revoked credential |
 | `413 Payload Too Large` | Batch exceeds maximum allowed size |
 | `429 Too Many Requests` | Rate limit exceeded. Includes `Retry-After` header. |
@@ -155,7 +155,18 @@ JWT verification is purely cryptographic (no database query needed), making it f
 |-------|-------|-----------|
 | Per API key | 1,000 events/second | Generous for legitimate use. Prevents abuse from leaked keys. |
 | Per API key burst | 5,000 events | Allows short spikes (e.g., batch import) |
+| Per widget token | 50 events/second | Bounds what one widget JWT sends over its 15 minutes. A widget sends at most 20 events per batch. |
+| Per widget token burst | 1,000 events | One batch at the cap fits; a widget's teardown beacon (up to 200 events) fits many times over |
 | Per IP (unauthenticated) | 10 requests/second | Protects against brute-force key scanning |
+
+API keys and widget tokens are both charged by event count (`events.length`), before schema validation:
+
+- **API key:** one bucket per project (`project_id:workspace_id`), shared by every key and server of the project.
+- **Widget token:** one bucket per token, keyed by the JWT's `pid` and `tid` (the trace every event of the token must match, §6.5.1). Separate from the project's API-key bucket, so widget traffic never draws on the server-side budget. `YAVIO-2053` on exhaustion.
+- A request authenticated by its `Authorization` header whose body then fails to parse (400) or exceeds the body limit (413) is charged one event to that bucket (#113).
+- The charge comes before the batch cap (§6.2.8): a batch with more events than its bucket's burst is answered `429` unparsed. Over the cap that is every batch for a widget token (burst 1,000) and a batch of more than 5,000 events for an API key; the others get the cap's `400`.
+
+The limits are the `RateLimiter` constructor's three arguments (API key, IP, widget token), each a partial `{ ratePerSecond, burstCapacity }` over the defaults above (`packages/ingest/src/lib/rate-limiter.ts`).
 
 Rate limit state is stored in memory. Exceeded limits return `429 Too Many Requests` with `Retry-After` header.
 
@@ -188,8 +199,11 @@ Individual event fields are validated against maximum size limits to prevent sto
 | `session_id` | 128 chars | Reject event |
 | Total event size | 50 KB | Reject event |
 | Batch size | 500 KB | Reject batch with `413 Payload Too Large` |
+| Events per batch | 1,000 (`MAX_BATCH_EVENTS`, `@yavio/shared/events`) | Reject batch whole with `400` (`YAVIO-2100`, message `Batch exceeds 1000 events`, one error at `index: -1`, `rejected` = events sent). Checked before any event is parsed: neither the batch schema nor the per-event fallback runs, and nothing is stored. |
 
 **Implementation:** Size checks run during schema validation (step 3 in §6.2.3), before PII stripping and ClickHouse writes. Truncation is preferred over rejection for non-critical fields to avoid data loss.
+
+**Per-event errors:** when the batch schema fails within the cap, each event is validated on its own, so valid events are still accepted (207). A 207 or 400 body lists at most 100 per-event errors (`MAX_REPORTED_ERRORS`), the first ones found; `rejected` counts every rejected event. The server SDK sends at most 100 events per batch, so it always gets every error.
 
 ## 6.3 PII Stripping Engine
 

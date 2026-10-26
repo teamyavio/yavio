@@ -1,14 +1,16 @@
 import { ErrorCode, YavioError } from "@yavio/shared/errors";
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
+import type { AuthContext } from "../types.js";
 
 /**
  * Per-IP limits for requests that do not end up authenticated (#94).
  *
- * Authenticated requests are limited per API key (events route) and are not
- * charged here. Behind a reverse proxy every client used to share one IP
- * bucket, so scanner traffic (/.env, /.git/config) or simply the combined rate
- * of all customers got every SDK a 429.
+ * Authenticated requests are limited per API key or per widget token (events
+ * route, by event count) and are not charged here. Behind a reverse proxy
+ * every client used to share one IP bucket, so scanner traffic (/.env,
+ * /.git/config) or simply the combined rate of all customers got every SDK a
+ * 429.
  *
  * Two buckets per address:
  * - A request that cannot carry a credential is charged to the first one up
@@ -30,6 +32,19 @@ function mayCarryCredential(request: FastifyRequest): boolean {
   return request.method === "POST" && request.url.split("?")[0] === "/v1/events";
 }
 
+/** An API key's bucket: per project, shared by every key of the project. */
+export function apiKeyBucket(ctx: AuthContext): string {
+  return `${ctx.projectId}:${ctx.workspaceId}`;
+}
+
+/**
+ * A widget token's bucket: per project and the token's trace (`pid`, `tid`),
+ * the scope every event of the token must match (WIDGET_TRACE_ID_MISMATCH).
+ */
+export function widgetTokenBucket(ctx: AuthContext): string {
+  return `${ctx.projectId}:${ctx.traceId ?? ""}`;
+}
+
 function isHealthCheck(request: FastifyRequest): boolean {
   return request.url === "/health";
 }
@@ -42,7 +57,7 @@ function tooMany(retryAfterMs: number): YavioError {
 
 const rateLimitHook: FastifyPluginAsync = async (app) => {
   app.decorateRequest("ipRateCharged", false);
-  app.decorateRequest("apiKeyCharged", false);
+  app.decorateRequest("eventsCharged", false);
 
   app.addHook("onRequest", async (request) => {
     if (!app.rateLimiter || isHealthCheck(request)) return;
@@ -64,11 +79,16 @@ const rateLimitHook: FastifyPluginAsync = async (app) => {
     const ctx = request.authContext;
     if (ctx) {
       // Authenticated, but the route handler never ran — the body failed to
-      // parse (400) or was over the limit (413). Charged to the key's bucket
-      // like any request of that key, so a flood of them is bounded there
-      // (#113); the handler charges per event when it does run.
-      if (ctx.source === "api_key" && !request.apiKeyCharged) {
-        app.rateLimiter.consumeApiKey(`${ctx.projectId}:${ctx.workspaceId}`, 1);
+      // parse (400) or was over the limit (413). Charged to the key's or the
+      // widget token's bucket like any request of that credential, so a
+      // flood of them is bounded there (#113); the handler charges per event
+      // when it does run.
+      if (!request.eventsCharged) {
+        if (ctx.source === "api_key") {
+          app.rateLimiter.consumeApiKey(apiKeyBucket(ctx), 1);
+        } else {
+          app.rateLimiter.consumeWidgetToken(widgetTokenBucket(ctx), 1);
+        }
       }
       return;
     }

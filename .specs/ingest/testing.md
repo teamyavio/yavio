@@ -46,7 +46,10 @@ The string rules are `@yavio/shared/pii`: its tests hold the exact-output table 
 | Missing `timestamp` | Reject |
 | Unknown `eventType` | Reject |
 | Empty batch (0 events) | Reject with 400 |
-| Oversized batch (> max batch size) | Reject with 413 |
+| Oversized batch (> 500 KB) | Reject with 413 |
+| More than 1,000 events (valid or not) | Reject with 400 and one cap error at `index: -1`; no event parsed (neither the batch schema nor the per-event fallback runs), none stored |
+| Exactly 1,000 valid events | Accept |
+| More than 100 rejected events within the cap | 207/400 lists the first 100 errors; `rejected` counts all |
 | Extra unknown fields | Accept (ignore extra fields) |
 | Invalid `timestamp` format | Reject |
 
@@ -144,6 +147,9 @@ The string rules are `@yavio/shared/pii`: its tests hold the exact-output table 
 | Burst within allowance (≤ 5,000 events) | Accepted |
 | Requests exceeding API key limit | 429 with `Retry-After` |
 | Different API keys have independent limits | Key A at limit does not affect Key B |
+| Widget-token events beyond the token's bucket (1,000 burst, 50/s) | 429 `YAVIO-2053` with `Retry-After`; normal widget batches (20 events) and a 200-event beacon pass |
+| Widget tokens of different traces | Independent buckets |
+| Widget-token traffic | Never charged to the project's API-key bucket; API-key requests never charged to a widget bucket |
 | Unauthenticated requests exceeding 10 req/s per IP | 429 |
 
 ## Integration Tests

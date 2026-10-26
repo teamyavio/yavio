@@ -29,7 +29,7 @@ declare module "fastify" {
     authContext?: AuthContext;
     /** Set when the IP bucket was charged on arrival (plugins/rate-limit.ts). */
     ipRateCharged: boolean;
-    /** The events handler charged this request's events to its key's bucket. */
-    apiKeyCharged: boolean;
+    /** The events handler charged this request's events to its key's or widget token's bucket. */
+    eventsCharged: boolean;
   }
 }

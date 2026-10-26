@@ -28,6 +28,11 @@ paths:
       description: |
         Receives a batch of analytics events from the server SDK or widget SDK.
         Events are validated, PII-stripped, and written to ClickHouse.
+
+        A batch holds at most 1,000 events and 500 KB. Requests are rate
+        limited by event count: per project for API keys (5,000-event burst,
+        1,000 events/second), per widget token (project and trace) for widget
+        JWTs (1,000-event burst, 50 events/second).
       tags:
         - Events
       security:
@@ -53,11 +58,19 @@ paths:
               schema:
                 $ref: "#/components/schemas/PartialEventBatchResponse"
         "400":
-          description: All events failed validation or empty request body
+          description: |
+            All events failed validation, empty request body, or a batch of
+            more than 1,000 events. A batch over 1,000 events is rejected
+            whole: `error.message` is "Batch exceeds 1000 events", `errors`
+            holds one entry with `index: -1`, `rejected` is the number of
+            events sent, and nothing in the batch is validated or stored.
+            The rate limit is charged first, so a batch with more events
+            than the credential's burst gets 429 instead: any batch over
+            1,000 events for a widget token, over 5,000 for an API key.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                $ref: "#/components/schemas/BatchErrorResponse"
         "401":
           description: Missing, invalid, expired, or revoked credential
           content:
@@ -71,7 +84,10 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "429":
-          description: Rate limit exceeded
+          description: |
+            Rate limit exceeded: the API key's (YAVIO-2050) or the widget
+            token's (YAVIO-2053) event budget, or the per-IP limit for
+            requests that do not authenticate (YAVIO-2052).
           headers:
             Retry-After:
               schema:
@@ -191,6 +207,9 @@ components:
       properties:
         events:
           type: array
+          description: |
+            1 to 1,000 events. A longer array is rejected whole with 400
+            before any event in it is validated.
           items:
             $ref: "#/components/schemas/Event"
           minItems: 1
@@ -297,17 +316,9 @@ components:
           type: integer
         rejected:
           type: integer
+          description: Number of events rejected, all of them
         errors:
-          type: array
-          items:
-            type: object
-            properties:
-              index:
-                type: integer
-              issues:
-                type: array
-                items:
-                  type: string
+          $ref: "#/components/schemas/EventErrors"
         requestId:
           type: string
           description: Unique request identifier for tracing
@@ -316,6 +327,38 @@ components:
           items:
             type: string
           description: Field truncation warnings (omitted when empty)
+
+    EventErrors:
+      type: array
+      maxItems: 100
+      description: |
+        Per-event errors, at most 100: the first ones found. `rejected`
+        counts every rejected event, so fewer entries than `rejected` means
+        the list was cut. `index` is the event's position in the batch, or
+        -1 for an error about the batch as a whole.
+      items:
+        type: object
+        properties:
+          index:
+            type: integer
+          issues:
+            type: array
+            items:
+              type: string
+
+    BatchErrorResponse:
+      type: object
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorEnvelope"
+        accepted:
+          type: integer
+          description: Always 0
+        rejected:
+          type: integer
+          description: Number of events rejected
+        errors:
+          $ref: "#/components/schemas/EventErrors"
 
     WidgetTokenRequest:
       type: object
@@ -355,21 +398,24 @@ components:
       type: object
       properties:
         error:
+          $ref: "#/components/schemas/ErrorEnvelope"
+
+    ErrorEnvelope:
+      type: object
+      description: Nested error envelope
+      properties:
+        code:
+          type: string
+          description: Yavio error code (e.g., YAVIO-2001)
+        message:
+          type: string
+        status:
+          type: integer
+          description: HTTP status code
+        requestId:
+          type: string
+          description: Unique request identifier for tracing
+        metadata:
           type: object
-          description: Nested error envelope
-          properties:
-            code:
-              type: string
-              description: Yavio error code (e.g., YAVIO-2001)
-            message:
-              type: string
-            status:
-              type: integer
-              description: HTTP status code
-            requestId:
-              type: string
-              description: Unique request identifier for tracing
-            metadata:
-              type: object
-              additionalProperties: true
-              description: Additional error context (optional)
+          additionalProperties: true
+          description: Additional error context (optional)

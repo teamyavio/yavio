@@ -1,11 +1,18 @@
 /**
  * Token bucket rate limiter.
  *
- * Per-API-key: 1,000 events/sec, 5,000 burst capacity.
+ * Per-API-key (keyed per project): 1,000 events/sec, 5,000 burst capacity.
+ * Per widget token (keyed per project and the token's trace, the JWT's `pid`
+ * and `tid`): 50 events/sec, 1,000 burst capacity. A batch at the cap fits
+ * the burst; a widget (at most 20 events per batch, 200 in a teardown beacon)
+ * stays far below both.
+ * Both are charged by event count (plugins/events.ts).
  * Per-IP, two separate buckets of 10 req/sec, burst 20 (plugins/rate-limit.ts):
  *   - requests that carry no credential at all;
  *   - requests that carry one and fail authentication.
- * Authenticated traffic is bounded by the per-key bucket instead (#94).
+ * Authenticated traffic is bounded by the per-key or per-token bucket instead (#94).
+ *
+ * Each scope's limits are a constructor argument over these defaults.
  */
 
 interface TokenBucket {
@@ -34,18 +41,30 @@ const DEFAULT_IP_CONFIG: RateLimiterConfig = {
   burstCapacity: 20,
 };
 
+const DEFAULT_WIDGET_TOKEN_CONFIG: RateLimiterConfig = {
+  ratePerSecond: 50,
+  burstCapacity: 1_000,
+};
+
 export class RateLimiter {
   private readonly apiKeyBuckets = new Map<string, TokenBucket>();
   private readonly ipBuckets = new Map<string, TokenBucket>();
   private readonly authFailureBuckets = new Map<string, TokenBucket>();
+  private readonly widgetTokenBuckets = new Map<string, TokenBucket>();
   private readonly apiKeyConfig: RateLimiterConfig;
   private readonly ipConfig: RateLimiterConfig;
+  private readonly widgetTokenConfig: RateLimiterConfig;
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private readonly staleAfterMs: number;
 
-  constructor(apiKeyConfig?: Partial<RateLimiterConfig>, ipConfig?: Partial<RateLimiterConfig>) {
+  constructor(
+    apiKeyConfig?: Partial<RateLimiterConfig>,
+    ipConfig?: Partial<RateLimiterConfig>,
+    widgetTokenConfig?: Partial<RateLimiterConfig>,
+  ) {
     this.apiKeyConfig = { ...DEFAULT_API_KEY_CONFIG, ...apiKeyConfig };
     this.ipConfig = { ...DEFAULT_IP_CONFIG, ...ipConfig };
+    this.widgetTokenConfig = { ...DEFAULT_WIDGET_TOKEN_CONFIG, ...widgetTokenConfig };
     this.staleAfterMs = apiKeyConfig?.staleAfterMs ?? 60_000;
   }
 
@@ -77,6 +96,18 @@ export class RateLimiter {
     tokens = 1,
   ): { allowed: true } | { allowed: false; retryAfterMs: number } {
     return this.consume(this.apiKeyBuckets, key, this.apiKeyConfig, tokens);
+  }
+
+  /**
+   * Consume tokens for a widget-token (JWT) request, keyed per token: the
+   * project and the token's trace. Separate from the API-key buckets, so
+   * widget traffic never draws on a project's server-side budget.
+   */
+  consumeWidgetToken(
+    key: string,
+    tokens = 1,
+  ): { allowed: true } | { allowed: false; retryAfterMs: number } {
+    return this.consume(this.widgetTokenBuckets, key, this.widgetTokenConfig, tokens);
   }
 
   /**
@@ -151,7 +182,7 @@ export class RateLimiter {
         this.apiKeyBuckets.delete(key);
       }
     }
-    for (const buckets of [this.ipBuckets, this.authFailureBuckets]) {
+    for (const buckets of [this.ipBuckets, this.authFailureBuckets, this.widgetTokenBuckets]) {
       for (const [key, bucket] of buckets) {
         if (now - bucket.lastRefill > this.staleAfterMs) {
           buckets.delete(key);
@@ -170,5 +201,9 @@ export class RateLimiter {
 
   get authFailureBucketCount(): number {
     return this.authFailureBuckets.size;
+  }
+
+  get widgetTokenBucketCount(): number {
+    return this.widgetTokenBuckets.size;
   }
 }
