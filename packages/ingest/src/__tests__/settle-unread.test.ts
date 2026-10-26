@@ -152,5 +152,106 @@ describe(
       expect(response()).toMatch(/^HTTP\/1\.1 408/);
       await vi.waitFor(() => expect(holds(575)).toBe(true), { timeout: 5_000, interval: 50 });
     });
+
+    /** Sends a chunked body of `bytes` over a real socket; resolves with the response once the server closes. */
+    async function chunkedOverSocket(contentType: string, bytes: number) {
+      await app.listen({ port: 0, host: "127.0.0.1" });
+      const { port } = app.server.address() as AddressInfo;
+      const socket = connect(port, "127.0.0.1");
+      await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+      const received: Buffer[] = [];
+      socket.on("data", (chunk) => received.push(chunk));
+      socket.on("error", () => {});
+      const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+      socket.write(
+        [
+          "POST /v1/events HTTP/1.1",
+          "Host: 127.0.0.1",
+          `Authorization: Bearer ${token}`,
+          `Content-Type: ${contentType}`,
+          "Transfer-Encoding: chunked",
+          "",
+          "",
+        ].join("\r\n"),
+      );
+      const chunk = "x".repeat(8_192);
+      for (let sent = 0; sent < bytes && !socket.destroyed; sent += chunk.length) {
+        socket.write(`${chunk.length.toString(16)}\r\n${chunk}\r\n`);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      if (!socket.destroyed) socket.end("0\r\n\r\n");
+      await closed;
+      return Buffer.concat(received).toString();
+    }
+
+    it("settles a chunked text/plain body over its limit to the 64 KiB read", async () => {
+      await build();
+      const response = await chunkedOverSocket("text/plain;charset=UTF-8", 80_000);
+      expect(response).toMatch(/^HTTP\/1\.1 413/);
+      // 64 units charged, read in full: 536 left.
+      await vi.waitFor(() => expect(holds(537)).toBe(false), { timeout: 5_000, interval: 50 });
+      expect(holds(536)).toBe(true);
+    });
+
+    it("settles a chunked JSON body over its limit to the 586 units read", async () => {
+      await build();
+      const response = await chunkedOverSocket("application/json", 700_000);
+      expect(response).toMatch(/^HTTP\/1\.1 413/);
+      await vi.waitFor(() => expect(holds(15)).toBe(false), { timeout: 5_000, interval: 50 });
+      expect(holds(14)).toBe(true);
+    });
+
+    it("closes the connection after an error reply sent before the body was parsed", async () => {
+      await build();
+      const post = (headers: Record<string, string>, payload: string | Readable) =>
+        app.inject({ method: "POST", url: "/v1/events", headers, payload });
+
+      // 401: no credential, not a beacon.
+      const unauthenticated = await post({ "content-type": "application/json" }, '{"events":[]}');
+      expect(unauthenticated.statusCode).toBe(401);
+      expect(unauthenticated.headers.connection).toBe("close");
+      // 415: an unsupported type.
+      const unsupported = await post(
+        { authorization: `Bearer ${token}`, "content-type": "application/xml" },
+        "<events/>",
+      );
+      expect(unsupported.statusCode).toBe(415);
+      expect(unsupported.headers.connection).toBe("close");
+      // 429 on arrival: the 415 cost one unit; the rest of the bucket goes here.
+      expect(holds(599)).toBe(true);
+      const limited = await post(
+        {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "transfer-encoding": "chunked",
+        },
+        Readable.from([Buffer.from('{"events":[]}')]),
+      );
+      expect(limited.statusCode).toBe(429);
+      expect(limited.headers.connection).toBe("close");
+    });
+
+    it("keeps the connection open after a reply to a body that was read", async () => {
+      await build();
+      const r = await app.inject({
+        method: "POST",
+        url: "/v1/events",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        payload: JSON.stringify({
+          events: [
+            {
+              event_id: "550e8400-e29b-41d4-a716-446655440000",
+              event_type: "widget_click",
+              trace_id: TRACE,
+              session_id: "ses-1",
+              timestamp: new Date().toISOString(),
+              source: "widget",
+            },
+          ],
+        }),
+      });
+      expect(r.statusCode).toBe(200);
+      expect(r.headers.connection).not.toBe("close");
+    });
   },
 );

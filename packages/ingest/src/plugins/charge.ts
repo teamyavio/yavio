@@ -12,7 +12,7 @@ import { apiKeyBucket, widgetBuckets, widgetUnits } from "./rate-limit.js";
  *    and before its body is read): an API key is charged one event, a widget
  *    token its declared body size in units (Content-Length, or the body
  *    limit when there is none) on all of its widget buckets. A refusal is a
- *    429 and the body is never read.
+ *    429, the body is not parsed, and the connection is closed (events.ts).
  * 2. Settling (handler): the charge becomes the request's real one, events
  *    for an API key and widgetUnits(events, bytes read) for a widget token.
  *    More is charged when it is more (a refusal is a 429, the arrival charge
@@ -77,7 +77,7 @@ function keysFor(request: FastifyRequest, ctx: AuthContext, opts: ChargeOptions)
  * The units a widget-token request is charged before its body is read: its
  * Content-Length in KiB, or the route's limit for its type when it declares
  * none (a chunked body, read up to that limit). A Content-Length over the
- * limit is refused 413 unread, so it costs one unit.
+ * limit is refused 413 before it is parsed, so it costs one unit.
  */
 export function reservationUnits(request: FastifyRequest, limits: BodyLimits): number {
   const limit = isTextPlain(request) ? limits.text : limits.json;
@@ -107,18 +107,21 @@ export function chargeOnArrival(app: FastifyInstance, opts: ChargeOptions) {
     const result = limiter.consumeWidget(keysFor(request, ctx, opts), units);
     if (!result.allowed) throw widgetLimit(request, ctx, result);
     request.reservedUnits = units;
-    // What the socket has read so far, to tell later how much body came in
-    // when no parser ran (an aborted or timed-out request, a body refused
-    // before parsing). No count without a real socket.
+    // Where the body starts in the socket's count, to tell later how much of
+    // it came in when no parser ran (an aborted or timed-out request, a body
+    // refused before parsing): what the socket has read, less the body bytes
+    // that arrived with the headers and wait in the request stream. No count
+    // without a real socket.
     const bytesRead = request.raw.socket?.bytesRead;
-    request.bytesAtArrival = typeof bytesRead === "number" ? bytesRead : -1;
+    request.bytesAtArrival =
+      typeof bytesRead === "number" ? bytesRead - (request.raw.readableLength ?? 0) : -1;
   };
 }
 
 /**
- * Bytes the socket read since the arrival charge: the body received (it
- * misses the part read together with the headers). Undefined without a
- * socket count.
+ * Body bytes the socket has received: what it read since the arrival
+ * charge, plus the body bytes that came with the headers. Undefined without
+ * a socket count.
  */
 function bytesSinceArrival(request: FastifyRequest): number | undefined {
   const now = request.raw.socket?.bytesRead;
@@ -190,9 +193,9 @@ export function settleCharge(
  * handler never ran is settled to what it made ingest read:
  * - a body its parser read (it failed to parse, or nested too deep): the KiB
  *   read;
- * - an unsupported type (415): one unit, nothing was read;
- * - otherwise (a body over a limit): the KiB the socket received since
- *   arrival, or, without a socket count, the arrival charge.
+ * - an unsupported type (415): one unit, nothing was parsed;
+ * - otherwise (a body over a limit): the KiB of body the socket received,
+ *   or, without a socket count, the arrival charge.
  * An API key keeps its one event, as before.
  */
 export function settleUnhandled(app: FastifyInstance, opts: ChargeOptions) {

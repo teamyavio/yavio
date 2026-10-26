@@ -1,6 +1,6 @@
 import { ErrorCode, YavioError } from "@yavio/shared/errors";
 import { MAX_BATCH_EVENTS } from "@yavio/shared/events";
-import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
 import { BEACON_BODY_LIMIT, JSON_BODY_LIMIT } from "../lib/body-limits.js";
 import { enrichEvents } from "../lib/event-enricher.js";
@@ -76,6 +76,31 @@ function parseTextAsJson(
 
 export { BEACON_BODY_LIMIT, JSON_BODY_LIMIT };
 
+/** Whether the request declares a body: a Content-Length above 0, or a chunked one. */
+function declaresBody(request: FastifyRequest): boolean {
+  const length = request.headers["content-length"];
+  return (
+    request.headers["transfer-encoding"] !== undefined || (length !== undefined && length !== "0")
+  );
+}
+
+/**
+ * Route onSend hook: an error reply sent before any parser ran (a 401, a 429
+ * on arrival, a 415) asks to close the connection, so the rest of the body
+ * is not read to keep it alive. Fastify does the same for a body its parser
+ * refused (413, invalid JSON).
+ */
+async function closeWhenBodyUnread(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  payload: unknown,
+): Promise<unknown> {
+  if (reply.statusCode >= 400 && request.bodyBytes === 0 && declaresBody(request)) {
+    reply.header("connection", "close");
+  }
+  return payload;
+}
+
 const eventsRoute: FastifyPluginAsync<EventsPluginOptions> = async (root, opts) => {
   // An encapsulated scope, so these parsers apply to this route only; every
   // other route keeps Fastify's defaults (text/plain stays a string, and the
@@ -119,6 +144,7 @@ function registerEventsRoute(app: FastifyInstance, opts: EventsPluginOptions): v
       preHandler: [authenticateBodyToken],
       onResponse: [settleUnhandled(app, charge)],
       onRequestAbort: [settleAborted(app, charge)],
+      onSend: [closeWhenBodyUnread],
       config: { rawBody: true },
     },
     async (request, reply) => {
