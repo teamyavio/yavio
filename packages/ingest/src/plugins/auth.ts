@@ -1,10 +1,16 @@
 import { ErrorCode, YavioError } from "@yavio/shared/errors";
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
+import { MAX_SESSION_ID_LENGTH, MAX_TRACE_ID_LENGTH } from "../lib/field-limits.js";
 import { jwtVerify } from "../lib/jwt.js";
 
 const API_KEY_PREFIX = "yav_";
 const JWT_PREFIX = "eyJ";
+
+/** A non-empty string of at most `max` characters: a widget token's `tid` and `sid`. */
+export function isBoundedId(value: unknown, max: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= max;
+}
 
 /**
  * Auth preHandler that can be added to individual routes.
@@ -29,11 +35,35 @@ export async function authenticate(request: FastifyRequest): Promise<void> {
  * fails to parse (400, 413) is already authenticated, so the rate limiter does
  * not count it as a failed credential — it used to, and a keyed client with a
  * serialisation bug locked its own address out of the events route. A bad key
- * is refused before any parsing work, too. Without a header the request goes
- * on to authenticateBodyToken.
+ * is refused before any parsing work, too. Without a header, a text/plain
+ * request (a widget beacon) is parsed, up to BEACON_BODY_LIMIT, and goes on to
+ * authenticateBodyToken; any other type is refused here, unread.
  */
 export async function authenticateHeader(request: FastifyRequest): Promise<void> {
-  if (request.headers.authorization) await authenticate(request);
+  // Present at all, even empty: authenticated (or refused) here, unread, like
+  // any request with a header; the rate limiter treats it the same way.
+  if (request.headers.authorization !== undefined) {
+    await authenticate(request);
+    return;
+  }
+  // Without a header, only a widget beacon can authenticate, by the token in
+  // its text/plain body. Any other request without one is refused before its
+  // body is read.
+  if (!isTextPlain(request)) throw missingCredential();
+}
+
+/** Whether the request's body is text/plain: the only type a body token is read from. */
+export function isTextPlain(request: FastifyRequest): boolean {
+  const type = request.headers["content-type"];
+  return typeof type === "string" && type.split(";")[0].trim().toLowerCase() === "text/plain";
+}
+
+function missingCredential(): YavioError {
+  return new YavioError(
+    ErrorCode.INGEST.MISSING_AUTH_HEADER,
+    "Authorization header (or, for widget beacons, a token in the body) is required",
+    401,
+  );
 }
 
 /**
@@ -43,8 +73,9 @@ export async function authenticateHeader(request: FastifyRequest): Promise<void>
  * parsing; a request it authenticated passes through here untouched except
  * that a token in its body is still removed.
  *
- * - Only a widget JWT is accepted from the body; API keys belong to servers,
- *   which can set headers.
+ * - Only a widget JWT is accepted from the body, and only from a text/plain
+ *   body (authenticateHeader refuses other types without a header); API keys
+ *   belong to servers, which can set headers.
  * - The token is removed from the body once read, so nothing downstream can
  *   store or log it.
  * - A beacon whose body fails to parse never gets here: it carried no header,
@@ -58,12 +89,8 @@ export async function authenticateBodyToken(request: FastifyRequest): Promise<vo
   }
 
   if (request.authContext) return;
-  if (typeof bodyToken !== "string" || bodyToken === "") {
-    throw new YavioError(
-      ErrorCode.INGEST.MISSING_AUTH_HEADER,
-      "Authorization header (or, for widget beacons, a token in the body) is required",
-      401,
-    );
+  if (typeof bodyToken !== "string" || bodyToken === "" || !isTextPlain(request)) {
+    throw missingCredential();
   }
   if (!bodyToken.startsWith(JWT_PREFIX)) {
     throw new YavioError(
@@ -115,7 +142,13 @@ function resolveJwt(request: FastifyRequest, token: string): void {
   const jwtSecret = request.server.jwtSecret;
   const payload = jwtVerify(token, jwtSecret);
 
-  if (!payload) {
+  // A token minted before the mint bounded its ids stays valid for its 15
+  // minutes: its claims are held to the same bounds here.
+  if (
+    !payload ||
+    !isBoundedId(payload.tid, MAX_TRACE_ID_LENGTH) ||
+    !isBoundedId(payload.sid, MAX_SESSION_ID_LENGTH)
+  ) {
     throw new YavioError(ErrorCode.INGEST.INVALID_WIDGET_JWT, "Invalid or expired widget JWT", 401);
   }
 

@@ -66,6 +66,6 @@ Self-hosted and Cloud run the same codebase. Cloud monetizes through usage-based
 | User auth | Email+password + OAuth | Full team auth with workspaces, roles, invites. NextAuth.js v5 for session management. |
 | Deployment | Docker Compose | Single `docker-compose up` starts all services. Same images used for managed SaaS. |
 | Multi-tenancy | Workspace-scoped, shared infrastructure | All workspaces share ClickHouse/Postgres instances. Data isolated by workspace_id/project_id columns. |
-| Security (widget) | Short-lived JWT + rate limiting + schema validation | Trace-scoped JWT (15-min expiry, write-only). Rate limiting per token (50 events/session). Schema validation rejects malformed events. Project API key never leaves the server. |
+| Security (widget) | Short-lived JWT + rate limiting + schema validation | Trace-scoped JWT (15-min expiry, write-only). Rate limiting per token by event count (1,000-event burst, 50 events/s). Schema validation rejects malformed events. Project API key never leaves the server. |
 | Open-source model | Fully open source (MIT) | Entire platform open source. |
 | Data capture philosophy | Store full values (PII-stripped) | Developer's own data. Full values enable richer queries and debugging. PII engine strips identity data, not business data. |

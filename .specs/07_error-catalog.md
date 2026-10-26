@@ -170,11 +170,11 @@ Errors from the `yavio-ingest` service. These appear in HTTP responses, Pino log
 
 | Code | HTTP | Message | Description | Recovery |
 |------|------|---------|-------------|----------|
-| `YAVIO-2000` | 401 | Missing authorization header | Request has no `Authorization` header. | Include `Authorization: Bearer <key\|jwt>` header. |
+| `YAVIO-2000` | 401 | Missing authorization header | Request has no `Authorization` header. On `POST /v1/events` only a widget beacon (`text/plain`, widget token in the body's `token` field) can authenticate without one; any other request without a header is refused before its body is read. An `Authorization` header that is present but empty is refused the same way, unread. | Include `Authorization: Bearer <key\|jwt>` header. |
 | `YAVIO-2001` | 401 | Invalid API key | API key does not exist in PostgreSQL or hash mismatch. | Use a valid key from the dashboard. |
 | `YAVIO-2002` | 401 | API key expired | API key has an `expires_at` in the past. | Generate a new key from the dashboard. |
 | `YAVIO-2003` | 401 | API key revoked | API key has a `revoked_at` timestamp set. | Generate a new key or use an active key. |
-| `YAVIO-2004` | 401 | Invalid widget JWT | JWT signature verification failed. | Token was tampered with or signed with wrong secret. |
+| `YAVIO-2004` | 401 | Invalid widget JWT | JWT signature verification failed, or its `tid` or `sid` claim is not a string of 1 to 128 characters. | Token was tampered with or signed with wrong secret. |
 | `YAVIO-2005` | 401 | Widget JWT expired | JWT `exp` claim is in the past. | Mint a new token via `POST /v1/widget-tokens`. |
 | `YAVIO-2006` | 401 | Malformed bearer token | Token is neither a valid `yav_` key nor a parseable JWT. | Check the Authorization header format. |
 
@@ -185,13 +185,13 @@ Errors from the `yavio-ingest` service. These appear in HTTP responses, Pino log
 | `YAVIO-2050` | 429 | API key rate limit exceeded | Sustained event rate exceeds 1,000 events/second for this key. | Reduce event volume. Retry with `Retry-After` header. |
 | `YAVIO-2051` | 429 | API key burst limit exceeded | Burst exceeds 5,000 events. | Spread events over time. Retry with `Retry-After` header. |
 | `YAVIO-2052` | 429 | IP rate limit exceeded | Unauthenticated IP exceeded 10 requests/second. | Authenticate requests or reduce request rate. |
-| `YAVIO-2053` | 429 | Widget token rate limit exceeded | Widget JWT exceeded 50 events per session. | Expected ceiling for widget interactions. |
+| `YAVIO-2053` | 429 | Widget token rate limit exceeded | A widget JWT's events exceeded its bucket: 1,000-event burst, refilled at 50 events/second, one bucket per token (project and trace), charged by event count. Separate from the project's API-key bucket. A request with the token in its header whose body fails to parse is charged one event. A batch over 1,000 events is charged as 1,000. | Spread events over time. Retry with `Retry-After` header. A widget (20 events per batch, up to 200 in a teardown beacon) stays well below it. |
 
 ### Schema Validation (2100&ndash;2199)
 
 | Code | HTTP | Message | Description | Recovery |
 |------|------|---------|-------------|----------|
-| `YAVIO-2100` | 400 | Event schema validation failed | Event does not conform to the expected schema. | Check event payload against the event schema in [metrics/events.md](./metrics/events.md). |
+| `YAVIO-2100` | 400 | Event schema validation failed | Event does not conform to the expected schema. Also the answer to an empty batch, a missing or non-array `events`, and a batch of more than 1,000 events (`MAX_BATCH_EVENTS`): that one is rejected whole before any event in it is validated, with the message `Batch exceeds 1000 events`, one `errors` entry at `index: -1` (`events: Too big: expected array to have <=1000 items`) and `rejected` set to the number of events sent; nothing is stored. Such a batch is charged as 1,000 events to its API key's or widget token's bucket, so it gets this answer whenever the bucket holds 1,000, and `429` while it does not. A 207 or 400 body lists at most 100 per-event errors, the first ones found; `rejected` counts every rejected event. | Check event payload against the event schema in [metrics/events.md](./metrics/events.md). Send at most 1,000 events per batch. |
 | `YAVIO-2101` | 400 | Missing required field | A required field (`event_type`, `event_name`, `timestamp`, `trace_id`, `session_id`) is missing. | Include all required fields. |
 | `YAVIO-2102` | 400 | Invalid event_type | `event_type` is not one of the allowed values. | Use a valid event type: `tool_call`, `step`, `conversion`, `identify`, `custom`, `connection`, `tool_discovery`, `resource_access`, `widget_render`, `widget_interaction`, `widget_error`. |
 | `YAVIO-2103` | 400 | Invalid timestamp format | `timestamp` is not a valid ISO-8601 string. | Use ISO-8601 format (e.g., `2026-03-15T10:30:00.123Z`). |
@@ -202,7 +202,7 @@ Errors from the `yavio-ingest` service. These appear in HTTP responses, Pino log
 | `YAVIO-2108` | 400 | Event exceeds max size | Total serialized event exceeds 50 KB. Event rejected. | Reduce metadata and field sizes. |
 | `YAVIO-2109` | 400 | Empty or missing request body | Request body is empty, missing, or not valid JSON. | Send a JSON body with a `batch` array. |
 | `YAVIO-2110` | 400 | Empty batch array | `batch` array is present but empty. | Include at least one event in the batch. |
-| `YAVIO-2111` | 413 | Batch exceeds max size | Total batch payload exceeds 500 KB. Entire batch rejected. | Split into smaller batches. |
+| `YAVIO-2111` | 413 | Batch exceeds max size | Total batch payload exceeds 500 KB. Entire batch rejected. On `POST /v1/events` a JSON body over 600,000 bytes and a `text/plain` (beacon) body over 64 KiB are refused before they are read in full. | Split into smaller batches. |
 | `YAVIO-2112` | 400 | Widget trace ID mismatch | Widget JWT `tid` claim does not match event `trace_id`. Entire batch rejected. | Ensure all events in the batch match the JWT trace scope. |
 
 ### Field Truncation (2200&ndash;2249)
@@ -229,8 +229,8 @@ These are informational &mdash; the event is accepted, but oversized fields are 
 
 | Code | HTTP | Message | Description | Recovery |
 |------|------|---------|-------------|----------|
-| `YAVIO-2300` | 400 | Missing or invalid traceId | `POST /v1/widget-tokens` body is missing `traceId` or it is not a string. | Include a valid `traceId` in the request body. |
-| `YAVIO-2301` | 400 | Missing sessionId | `POST /v1/widget-tokens` body is missing `sessionId`. | Include a valid `sessionId` in the request body. |
+| `YAVIO-2300` | 400 | Missing or invalid traceId | `POST /v1/widget-tokens` body is missing `traceId`, or it is not a string of at most 128 characters (the `trace_id` limit every event of the token must match). | Include a valid `traceId` in the request body. |
+| `YAVIO-2301` | 400 | Missing or invalid sessionId | `POST /v1/widget-tokens` body is missing `sessionId`, or it is not a string of at most 128 characters (the `session_id` limit). | Include a valid `sessionId` in the request body. |
 | `YAVIO-2302` | 401 | Unauthorized for widget token minting | API key validation failed for the token minting request. | Use a valid, non-revoked API key. |
 | `YAVIO-2303` | 429 | Widget token rate limited | Too many token minting requests. | Reduce token minting frequency. |
 

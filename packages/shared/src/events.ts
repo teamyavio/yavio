@@ -419,7 +419,10 @@ export type IngestEvent = z.infer<typeof IngestEvent>;
 // Batch ingestion payload (POST /v1/events)
 // ---------------------------------------------------------------------------
 
+/** The most events one POST /v1/events batch may hold; ingest rejects a longer batch whole. */
+export const MAX_BATCH_EVENTS = 1000;
+
 export const IngestBatch = z.object({
-  events: z.array(IngestEvent).min(1).max(1000),
+  events: z.array(IngestEvent).min(1).max(MAX_BATCH_EVENTS),
 });
 export type IngestBatch = z.infer<typeof IngestBatch>;

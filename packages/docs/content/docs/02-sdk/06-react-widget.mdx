@@ -170,4 +170,4 @@ Session (ses_xxx) ← shared by server + widget
 - The widget never receives the project API key
 - The JWT is trace-scoped, write-only, and expires after 15 minutes
 - `window.__YAVIO__` is deleted after reading to reduce XSS exposure
-- Events from widget JWTs are rate-limited per token
+- Events from widget JWTs are rate-limited per token by event count (1,000-event burst, 50 events/second), separately from the project's API key

@@ -110,7 +110,11 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
 
   await app.register(errorHandlerPlugin);
   await app.register(corsPlugin);
-  await app.register(rateLimitPlugin);
+  // Header-less beacons are charged per address on arrival only when the
+  // address is the client's (TRUST_PROXY), see RateLimitPluginOptions.
+  await app.register(rateLimitPlugin, {
+    chargeHeaderlessOnArrival: (options.trustProxy?.length ?? 0) > 0,
+  });
   await app.register(authPlugin);
   await app.register(healthPlugin);
   await app.register(widgetTokensPlugin, { jwtSecret });

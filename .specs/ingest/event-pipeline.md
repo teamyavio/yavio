@@ -83,6 +83,8 @@ Content-Type: application/json
 | `wid` | Workspace ID (resolved from the API key) |
 | `tid` | Trace ID (from the request body) |
 | `sid` | Session ID (from the request body). Widget events use this as their `session_id`, sharing the server's session. |
+
+`traceId` and `sessionId` must be strings of at most 128 characters, the limits of the `trace_id` and `session_id` event fields they must match (§6.2.8); otherwise `400` (`YAVIO-2300` / `YAVIO-2301`).
 | `iat` | Issued-at timestamp |
 | `exp` | Expiry timestamp (15 minutes after `iat`) |
 
@@ -107,7 +109,7 @@ Server SDK                          Widget SDK
 Ingestion API
   ├─ 1. Auth: API key lookup OR JWT signature verification
   │      → resolve project_id + workspace_id
-  ├─ 2. Rate limit check (per API key, per IP)
+  ├─ 2. Rate limit check (per API key or widget token by event count, per IP)
   ├─ 3. Schema validation (reject malformed events)
   ├─ 4. Event enrichment (add workspace_id, project_id; ingested_at is the column DEFAULT, stamped by ClickHouse at insert — #148 review round 5)
   ├─ 5. PII stripping (all string fields)
@@ -120,8 +122,8 @@ Ingestion API
 | Status | Condition |
 |--------|-----------|
 | `200 OK` | All events accepted |
-| `207 Multi-Status` | Partial success — some events accepted, others rejected (body includes per-event errors) |
-| `400 Bad Request` | All events failed schema validation, or empty/missing request body |
+| `207 Multi-Status` | Partial success — some events accepted, others rejected (body includes per-event errors, at most 100; `rejected` counts all) |
+| `400 Bad Request` | All events failed schema validation, empty/missing request body, or more than 1,000 events in the batch (rejected whole before any event is validated, see §6.2.8) |
 | `401 Unauthorized` | Missing, invalid, expired, or revoked credential |
 | `413 Payload Too Large` | Batch exceeds maximum allowed size |
 | `429 Too Many Requests` | Rate limit exceeded. Includes `Retry-After` header. |
@@ -155,7 +157,20 @@ JWT verification is purely cryptographic (no database query needed), making it f
 |-------|-------|-----------|
 | Per API key | 1,000 events/second | Generous for legitimate use. Prevents abuse from leaked keys. |
 | Per API key burst | 5,000 events | Allows short spikes (e.g., batch import) |
+| Per widget token | 50 events/second | Bounds what one widget JWT sends over its 15 minutes. A widget sends at most 20 events per batch. |
+| Per widget token burst | 1,000 events | One batch at the cap fits; a widget's teardown beacon (up to 200 events) fits many times over |
 | Per IP (unauthenticated) | 10 requests/second | Protects against brute-force key scanning |
+
+API keys and widget tokens are both charged by event count (`events.length`, at most 1,000), before schema validation:
+
+- **API key:** one bucket per project (`project_id:workspace_id`), shared by every key and server of the project.
+- **Widget token:** one bucket per token, keyed by the JWT's `pid` and `tid` (the trace every event of the token must match, §6.5.1). Separate from the project's API-key bucket, so widget traffic never draws on the server-side budget. `YAVIO-2053` on exhaustion.
+- A request authenticated by its `Authorization` header whose body then fails to parse (400) or exceeds the body limit (413) is charged one event to that bucket (#113).
+- The charge is `min(events.length, 1000)` and comes before the batch cap (§6.2.8): a batch over the cap costs a full batch, so it gets the cap's `400` whenever its bucket holds 1,000 events, and `429` while the bucket is short.
+- A widget token's bucket key is a SHA-256 of `pid:tid` (base64url), so its length does not depend on the claims. `tid` and `sid` are bounded anyway: at most 128 characters each at mint (§6.2.2) and when a token is presented (`401 YAVIO-2004` otherwise), like the `trace_id` and `session_id` they must match.
+- **Header-less requests.** Only a widget beacon authenticates without an `Authorization` header: `text/plain`, widget token in the body's `token` field (#96), read up to 64 KiB (§6.2.8). Any other request without a header is refused `401` before its body is read; a header that is present but empty or blank counts as a header and gets `401` unread too. With `TRUST_PROXY` set, a header-less request is charged to its address's auth-failure bucket (10/s, burst 20) on arrival and refunded once it authenticates, so the number of unauthenticated bodies an address can have read at once is bounded. Without `TRUST_PROXY`, `request.ip` is the socket peer, which behind a proxy is the proxy for every client; header-less requests are then charged only when they fail to authenticate, after parsing, so normal beacons from many clients are not refused together.
+
+The limits are the `RateLimiter` constructor's three arguments (API key, IP, widget token), each a partial `{ ratePerSecond, burstCapacity }` over the defaults above (`packages/ingest/src/lib/rate-limiter.ts`).
 
 Rate limit state is stored in memory. Exceeded limits return `429 Too Many Requests` with `Retry-After` header.
 
@@ -188,8 +203,13 @@ Individual event fields are validated against maximum size limits to prevent sto
 | `session_id` | 128 chars | Reject event |
 | Total event size | 50 KB | Reject event |
 | Batch size | 500 KB | Reject batch with `413 Payload Too Large` |
+| Request body, `application/json` | 600,000 bytes (`JSON_BODY_LIMIT`, `plugins/events.ts`) | `413` (`YAVIO-2111`) before the body is read in full. The 500 KB batch limit is checked on the parsed batch; this leaves room for formatting. |
+| Request body, `text/plain` (widget beacon) | 64 KiB (`BEACON_BODY_LIMIT`): sendBeacon's own quota; the React SDK splits beacons at 60,000 bytes | `413` (`YAVIO-2111`) before the body is read in full. A header-less request is read only as `text/plain`, so this bounds what ingest reads before a request authenticates. |
+| Events per batch | 1,000 (`MAX_BATCH_EVENTS`, `@yavio/shared/events`) | Reject batch whole with `400` (`YAVIO-2100`, message `Batch exceeds 1000 events`, one error at `index: -1`, `rejected` = events sent). Checked before any event is parsed: neither the batch schema nor the per-event fallback runs, and nothing is stored. |
 
 **Implementation:** Size checks run during schema validation (step 3 in §6.2.3), before PII stripping and ClickHouse writes. Truncation is preferred over rejection for non-critical fields to avoid data loss.
+
+**Per-event errors:** when the batch schema fails within the cap, each event is validated on its own, so valid events are still accepted (207). A 207 or 400 body lists at most 100 per-event errors (`MAX_REPORTED_ERRORS`), the first ones found; `rejected` counts every rejected event. The server SDK sends at most 100 events per batch, so it always gets every error.
 
 ## 6.3 PII Stripping Engine
 

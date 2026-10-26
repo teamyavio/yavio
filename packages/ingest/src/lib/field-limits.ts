@@ -27,6 +27,14 @@ const LIMITS = {
   batch: 512_000, // 500 KB
 } as const;
 
+/**
+ * The longest `trace_id` / `session_id` an event may carry, in characters.
+ * Widget-token claims (`tid`, `sid`) are held to the same bounds: every
+ * event of a token must carry its `tid` as `trace_id`.
+ */
+export const MAX_TRACE_ID_LENGTH = LIMITS.trace_id;
+export const MAX_SESSION_ID_LENGTH = LIMITS.session_id;
+
 export interface FieldLimitResult {
   accepted: BaseEvent[];
   rejected: Array<{

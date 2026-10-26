@@ -68,7 +68,9 @@ Widgets never receive the project API key. Instead, the server-side proxy mints 
 | `tid` | Trace ID (events must match this trace) |
 | `sid` | Session ID (shared with the server) |
 
-Even if a widget JWT is extracted from the browser iframe, it is useless after 15 minutes and cannot be used to send events for other traces.
+Even if a widget JWT is extracted from the browser iframe, it is useless after 15 minutes and cannot be used to send events for other traces. Its trace and session IDs are at most 128 characters each, like the event fields they must match.
+
+A widget beacon (`navigator.sendBeacon` cannot set headers) carries its JWT in a `token` field of a `text/plain` body of at most 64 KiB. That is the only request ingest reads before it authenticates: anything else without an `Authorization` header is refused unread.
 
 ### Trace Validation
 
@@ -80,9 +82,13 @@ Every event in a widget JWT batch must have a `traceId` matching the JWT's `tid`
 |-------|-------|---------|
 | Per API key | 1,000 events/second | Prevents abuse from leaked keys |
 | Per API key burst | 5,000 events | Allows short spikes (e.g., batch imports) |
+| Per widget token | 50 events/second | Bounds what one widget JWT can send. A widget sends at most 20 events per batch |
+| Per widget token burst | 1,000 events | Covers a widget's teardown beacon (up to 200 events) many times over |
 | Per IP (unauthenticated) | 10 requests/second | Protects against brute-force key scanning |
 
-Rate limit state is stored in memory. Exceeded limits return `429 Too Many Requests` with a `Retry-After` header.
+API keys and widget tokens are charged by event count: an API key's budget is shared by the project, a widget token's budget belongs to that token (its project and trace). Widget traffic never draws on the project's API-key budget.
+
+Rate limit state is stored in memory. Exceeded limits return `429 Too Many Requests` with a `Retry-After` header (`YAVIO-2050` for an API key, `YAVIO-2053` for a widget token).
 
 ### Reverse Proxy Requirement
 
@@ -117,6 +123,11 @@ Individual event fields are validated against maximum size limits to prevent sto
 | `user_id` | 256 chars | Event rejected |
 | Total event size | 50 KB | Event rejected |
 | Batch size | 500 KB | Batch rejected (413) |
+| Events per batch | 1,000 | Batch rejected whole (400) before any event is validated |
+| Request body (JSON) | 600,000 bytes | Rejected (413) before it is read in full |
+| Request body (widget beacon, `text/plain`) | 64 KiB | Rejected (413) before it is read in full |
+
+A response lists at most 100 per-event errors; its `rejected` count includes every rejected event.
 
 Truncation is preferred over rejection for non-critical fields to avoid data loss.
 

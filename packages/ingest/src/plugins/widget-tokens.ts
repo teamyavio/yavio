@@ -1,8 +1,9 @@
 import { ErrorCode, YavioError } from "@yavio/shared/errors";
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
+import { MAX_SESSION_ID_LENGTH, MAX_TRACE_ID_LENGTH } from "../lib/field-limits.js";
 import { jwtSign } from "../lib/jwt.js";
-import { authenticate } from "./auth.js";
+import { authenticate, isBoundedId } from "./auth.js";
 
 const JWT_EXPIRY_SECONDS = 15 * 60; // 15 minutes
 
@@ -29,8 +30,24 @@ const widgetTokensRoute: FastifyPluginAsync<{ jwtSecret: string }> = async (app,
       if (!body?.traceId) {
         throw new YavioError(ErrorCode.INGEST.MISSING_TRACE_ID, "traceId is required", 400);
       }
+      // Bounded like the event fields they must match: an event's trace_id
+      // has to equal the token's tid, and session_id is held to its own limit.
+      if (!isBoundedId(body.traceId, MAX_TRACE_ID_LENGTH)) {
+        throw new YavioError(
+          ErrorCode.INGEST.MISSING_TRACE_ID,
+          `traceId must be a string of at most ${MAX_TRACE_ID_LENGTH} characters`,
+          400,
+        );
+      }
       if (!body.sessionId) {
         throw new YavioError(ErrorCode.INGEST.MISSING_SESSION_ID, "sessionId is required", 400);
+      }
+      if (!isBoundedId(body.sessionId, MAX_SESSION_ID_LENGTH)) {
+        throw new YavioError(
+          ErrorCode.INGEST.MISSING_SESSION_ID,
+          `sessionId must be a string of at most ${MAX_SESSION_ID_LENGTH} characters`,
+          400,
+        );
       }
 
       const now = Math.floor(Date.now() / 1000);
