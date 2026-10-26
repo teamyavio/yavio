@@ -2,8 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ApiKeyFormat,
   ApiKeyPrefix,
-  CurrencyCode,
-  PaginationParams,
+  IsoDatetime,
   ProjectSlug,
   SessionId,
   TimeRange,
@@ -22,6 +21,11 @@ describe("Uuid", () => {
   it("rejects non-UUID strings", () => {
     expect(() => Uuid.parse("not-a-uuid")).toThrow();
     expect(() => Uuid.parse("")).toThrow();
+  });
+
+  it("accepts UUID-shaped ids of any version and variant, as zod 3's .uuid() did", () => {
+    expect(Uuid.safeParse("11111111-1111-1111-1111-111111111111").success).toBe(true);
+    expect(Uuid.safeParse("00000000-0000-0000-0000-000000000001").success).toBe(true);
   });
 });
 
@@ -139,38 +143,6 @@ describe("WorkspaceRole", () => {
   });
 });
 
-describe("PaginationParams", () => {
-  it("uses defaults when no values provided", () => {
-    const result = PaginationParams.parse({});
-    expect(result.limit).toBe(20);
-    expect(result.offset).toBe(0);
-  });
-
-  it("accepts valid values", () => {
-    const result = PaginationParams.parse({ limit: 50, offset: 10 });
-    expect(result.limit).toBe(50);
-    expect(result.offset).toBe(10);
-  });
-
-  it("coerces string values", () => {
-    const result = PaginationParams.parse({ limit: "30", offset: "5" });
-    expect(result.limit).toBe(30);
-    expect(result.offset).toBe(5);
-  });
-
-  it("rejects limit below 1", () => {
-    expect(() => PaginationParams.parse({ limit: 0 })).toThrow();
-  });
-
-  it("rejects limit above 100", () => {
-    expect(() => PaginationParams.parse({ limit: 101 })).toThrow();
-  });
-
-  it("rejects negative offset", () => {
-    expect(() => PaginationParams.parse({ offset: -1 })).toThrow();
-  });
-});
-
 describe("TimeRange", () => {
   it("accepts valid ISO datetime strings", () => {
     const result = TimeRange.parse({
@@ -192,14 +164,27 @@ describe("TimeRange", () => {
   });
 });
 
-describe("CurrencyCode", () => {
-  it("accepts a 3-letter code and uppercases it", () => {
-    expect(CurrencyCode.parse("usd")).toBe("USD");
-    expect(CurrencyCode.parse("EUR")).toBe("EUR");
+describe("IsoDatetime", () => {
+  it("accepts UTC datetimes with or without seconds, and any fraction", () => {
+    for (const v of [
+      "2026-10-26T10:00Z",
+      "2026-10-26T10:00:00Z",
+      "2026-10-26T10:00:00.123Z",
+      "2026-10-26T10:00:00.123456789Z",
+    ]) {
+      expect(IsoDatetime.safeParse(v).success).toBe(true);
+    }
   });
 
-  it("rejects codes not exactly 3 chars", () => {
-    expect(() => CurrencyCode.parse("US")).toThrow();
-    expect(() => CurrencyCode.parse("EURO")).toThrow();
+  it("rejects offsets, a missing zone, and anything short of minutes", () => {
+    for (const v of [
+      "2026-10-26T10:00:00+02:00",
+      "2026-10-26T10:00:00",
+      "2026-10-26",
+      "2026-10-26T10Z",
+      "2026-02-30T10:00:00Z",
+    ]) {
+      expect(IsoDatetime.safeParse(v).success).toBe(false);
+    }
   });
 });

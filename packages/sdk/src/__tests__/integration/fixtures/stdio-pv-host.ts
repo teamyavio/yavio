@@ -1,8 +1,8 @@
 /**
- * The child of `protocol-version.test.ts` (#170): a stdio MCP server on the
- * stack under test, wrapped by one `createYavio()` client, that delivers its
- * events when the client closes stdin (await `shutdown()`, then exit) — the
- * shape of #167's `stdio-host.ts` in MODE=stdin-end. Started with
+ * The child of `protocol-version.test.ts` (#170, #172): a stdio MCP server on
+ * the stack under test, wrapped by one `createYavio()` client, that delivers
+ * its events when the client closes stdin (await `shutdown()`, then exit) —
+ * the shape of #167's `stdio-host.ts` in MODE=stdin-end. Started with
  * `node --import tsx` against the SDK's source.
  *
  * Env: ENDPOINT (the mock ingest); STACK = "v1" (`StdioServerTransport`) |

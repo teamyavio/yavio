@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { IsoDatetime, Uuid } from "./validation.js";
 
 // ---------------------------------------------------------------------------
 // Event source & platform
@@ -90,18 +91,59 @@ export type SessionSource = (typeof SESSION_SOURCES)[number];
 export const MAX_SESSION_SOURCE_LENGTH = 32;
 
 // ---------------------------------------------------------------------------
+// zod 3 acceptance
+// ---------------------------------------------------------------------------
+
+// Ingest accepts exactly the events it accepted before the zod 4 upgrade; a
+// field that fails takes its whole event with it, and changing what passes
+// is a decision of its own, not a side effect of the upgrade. Besides Uuid
+// and IsoDatetime (validation.ts), zod 4 differs from zod 3 here in two ways:
+//
+// - z.number() refuses ±Infinity, which is what JSON.parse makes of an
+//   overflowing literal such as 1e999, and .int() refuses integers beyond
+//   ±(2^53 − 1);
+// - zod 4.6 counts string bounds in Unicode code points, not in UTF-16 code
+//   units (String.length) as zod 3 did: a run of emoji would pass at up to
+//   twice a .max(), and .length(2) would take "😀😀" and refuse "😀".
+//
+// The helpers below keep zod 3's rule. Fields whose own bound already
+// excludes those values (is_retry, device_touch, scroll_depth_pct, .min(1))
+// keep the plain zod 4 form.
+
+/** zod 3's `z.number()`: any number except NaN, ±Infinity included. */
+const jsonNumber = () =>
+  z.custom<number>(
+    (v) => typeof v === "number" && !Number.isNaN(v),
+    "Invalid input: expected number",
+  );
+
+/** zod 3's `z.number().int()`: any integer, beyond ±(2^53 − 1) included. */
+const jsonInt = () =>
+  z.number().refine(Number.isInteger, "Invalid input: expected int, received number");
+
+/** zod 3's `z.string().max(n)`: at most `n` UTF-16 code units. */
+const maxUnits = (n: number) =>
+  z.string().refine((v) => v.length <= n, `Too big: expected string to have <=${n} characters`);
+
+/** zod 3's `z.string().length(n)`: exactly `n` UTF-16 code units. */
+const exactUnits = (n: number) =>
+  z
+    .string()
+    .refine((v) => v.length === n, `Invalid input: expected string to have ${n} characters`);
+
+// ---------------------------------------------------------------------------
 // Base event (fields present on every event)
 // ---------------------------------------------------------------------------
 
 export const BaseEvent = z.object({
-  event_id: z.string().uuid(),
+  event_id: Uuid,
   event_type: EventType,
   trace_id: z.string(),
   session_id: z.string(),
-  timestamp: z.string().datetime(),
+  timestamp: IsoDatetime,
   source: EventSource,
   event_name: z.string().optional(),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
   // SDK-enrichment fields (added to all events before sending)
   user_id: z.string().optional(),
   platform: z.string().optional(),
@@ -109,7 +151,7 @@ export const BaseEvent = z.object({
   // How the server SDK derived session_id (#144): one of SESSION_SOURCES.
   // A bounded string, not an enum, so an older ingest keeps accepting a
   // newer SDK's events; ingest NULLs a value it does not know.
-  session_source: z.string().max(MAX_SESSION_SOURCE_LENGTH).optional(),
+  session_source: maxUnits(MAX_SESSION_SOURCE_LENGTH).optional(),
 });
 export type BaseEvent = z.infer<typeof BaseEvent>;
 
@@ -120,7 +162,7 @@ export type BaseEvent = z.infer<typeof BaseEvent>;
 /** tool_call — fires on every tool invocation. */
 export const ToolCallEvent = BaseEvent.extend({
   event_type: z.literal("tool_call"),
-  latency_ms: z.number().optional(),
+  latency_ms: jsonNumber().optional(),
   status: z.enum(["success", "error"]).optional(),
   // `tool_error`: the handler returned a result with `isError: true` (MCP's
   // in-band tool failure). `unknown`: the handler threw. The client sees the
@@ -131,11 +173,11 @@ export const ToolCallEvent = BaseEvent.extend({
     .optional(),
   error_message: z.string().optional(),
   is_retry: z.number().int().min(0).max(1).optional(),
-  input_keys: z.record(z.unknown()).optional(),
-  input_types: z.record(z.unknown()).optional(),
-  input_values: z.record(z.unknown()).optional(),
-  output_content: z.record(z.unknown()).optional(),
-  intent_signals: z.record(z.unknown()).optional(),
+  input_keys: z.record(z.string(), z.unknown()).optional(),
+  input_types: z.record(z.string(), z.unknown()).optional(),
+  input_values: z.record(z.string(), z.unknown()).optional(),
+  output_content: z.record(z.string(), z.unknown()).optional(),
+  intent_signals: z.record(z.string(), z.unknown()).optional(),
   // How the SDK advertised the intent `context` parameter for this tool (#73):
   // `required`; `optional` (widget-invoked tools, whose own iframe calls
   // cannot send it, or intent `required: false`); `none` (nothing advertised:
@@ -143,9 +185,9 @@ export const ToolCallEvent = BaseEvent.extend({
   // `context` or an unextendable schema, an unknown tool). Absent on events
   // from SDKs before 0.4.0.
   intent_context: z.enum(["required", "optional", "none"]).optional(),
-  tokens_in: z.number().int().optional(),
-  tokens_out: z.number().int().optional(),
-  country_code: z.string().length(2).optional(),
+  tokens_in: jsonInt().optional(),
+  tokens_out: jsonInt().optional(),
+  country_code: exactUnits(2).optional(),
   // State or province as the platform names it (ChatGPT: the English name in
   // openai/userLocation.region, e.g. "North Rhine-Westphalia"; not ISO
   // 3166-2). Sent with capture.geo true or "region" (#127). Any type and no
@@ -157,9 +199,9 @@ export const ToolCallEvent = BaseEvent.extend({
   // Client metadata relayed by the platform in request _meta (ChatGPT sends
   // these on every call; other platforms may not). All optional — absence
   // means the platform did not transmit them or the SDK's capture is off.
-  locale: z.string().max(35).optional(),
-  end_user_agent: z.string().max(512).optional(),
-  subject_id: z.string().max(256).optional(),
+  locale: maxUnits(35).optional(),
+  end_user_agent: maxUnits(512).optional(),
+  subject_id: maxUnits(256).optional(),
 });
 export type ToolCallEvent = z.infer<typeof ToolCallEvent>;
 
@@ -169,7 +211,7 @@ export const ConnectionEvent = BaseEvent.extend({
   protocol_version: z.string().optional(),
   client_name: z.string().optional(),
   client_version: z.string().optional(),
-  connection_duration_ms: z.number().optional(),
+  connection_duration_ms: jsonNumber().optional(),
 });
 export type ConnectionEvent = z.infer<typeof ConnectionEvent>;
 
@@ -188,16 +230,16 @@ export type PromptUsageEvent = z.infer<typeof PromptUsageEvent>;
 /** sampling_call — fires on sampling/createMessage interception. */
 export const SamplingCallEvent = BaseEvent.extend({
   event_type: z.literal("sampling_call"),
-  latency_ms: z.number().optional(),
-  tokens_in: z.number().int().optional(),
-  tokens_out: z.number().int().optional(),
+  latency_ms: jsonNumber().optional(),
+  tokens_in: jsonInt().optional(),
+  tokens_out: jsonInt().optional(),
 });
 export type SamplingCallEvent = z.infer<typeof SamplingCallEvent>;
 
 /** elicitation — fires on elicitation/requestInput interception. */
 export const ElicitationEvent = BaseEvent.extend({
   event_type: z.literal("elicitation"),
-  latency_ms: z.number().optional(),
+  latency_ms: jsonNumber().optional(),
 });
 export type ElicitationEvent = z.infer<typeof ElicitationEvent>;
 
@@ -210,9 +252,9 @@ export type WidgetResponseEvent = z.infer<typeof WidgetResponseEvent>;
 /** tool_discovery — fires when a tool is registered on the server. */
 export const ToolDiscoveryEvent = BaseEvent.extend({
   event_type: z.literal("tool_discovery"),
-  tool_name: z.string().min(1).max(256),
-  description: z.string().max(2048).optional(),
-  input_schema: z.record(z.unknown()).optional(),
+  tool_name: maxUnits(256).min(1),
+  description: maxUnits(2048).optional(),
+  input_schema: z.record(z.string(), z.unknown()).optional(),
 });
 export type ToolDiscoveryEvent = z.infer<typeof ToolDiscoveryEvent>;
 
@@ -223,7 +265,7 @@ export type ToolDiscoveryEvent = z.infer<typeof ToolDiscoveryEvent>;
 /** step — funnel progression point. */
 export const StepEvent = BaseEvent.extend({
   event_type: z.literal("step"),
-  step_sequence: z.number().int().optional(),
+  step_sequence: jsonInt().optional(),
 });
 export type StepEvent = z.infer<typeof StepEvent>;
 
@@ -236,15 +278,15 @@ export type TrackEvent = z.infer<typeof TrackEvent>;
 /** conversion — revenue attribution event. */
 export const ConversionEvent = BaseEvent.extend({
   event_type: z.literal("conversion"),
-  conversion_value: z.number().optional(),
-  conversion_currency: z.string().length(3).optional(),
+  conversion_value: jsonNumber().optional(),
+  conversion_currency: exactUnits(3).optional(),
 });
 export type ConversionEvent = z.infer<typeof ConversionEvent>;
 
 /** identify — user identification event. */
 export const IdentifyEvent = BaseEvent.extend({
   event_type: z.literal("identify"),
-  user_traits: z.record(z.unknown()).optional(),
+  user_traits: z.record(z.string(), z.unknown()).optional(),
 });
 export type IdentifyEvent = z.infer<typeof IdentifyEvent>;
 
@@ -255,9 +297,9 @@ export type IdentifyEvent = z.infer<typeof IdentifyEvent>;
 /** widget_render — fires once on useYavio() first initialization. */
 export const WidgetRenderEvent = BaseEvent.extend({
   event_type: z.literal("widget_render"),
-  viewport_width: z.number().int().optional(),
-  viewport_height: z.number().int().optional(),
-  device_pixel_ratio: z.number().optional(),
+  viewport_width: jsonInt().optional(),
+  viewport_height: jsonInt().optional(),
+  device_pixel_ratio: jsonNumber().optional(),
   device_touch: z.number().int().min(0).max(1).optional(),
   connection_type: z.string().optional(),
 });
@@ -272,14 +314,14 @@ export type WidgetErrorEvent = z.infer<typeof WidgetErrorEvent>;
 /** widget_visibility — fires when widget enters or exits viewport. */
 export const WidgetVisibilityEvent = BaseEvent.extend({
   event_type: z.literal("widget_visibility"),
-  visible_duration_ms: z.number().optional(),
+  visible_duration_ms: jsonNumber().optional(),
 });
 export type WidgetVisibilityEvent = z.infer<typeof WidgetVisibilityEvent>;
 
 /** widget_click — fires on every click/tap event. */
 export const WidgetClickEvent = BaseEvent.extend({
   event_type: z.literal("widget_click"),
-  click_count: z.number().int().optional(),
+  click_count: jsonInt().optional(),
 });
 export type WidgetClickEvent = z.infer<typeof WidgetClickEvent>;
 
@@ -327,7 +369,7 @@ export type WidgetFocusEvent = z.infer<typeof WidgetFocusEvent>;
 /** widget_performance — fires via PerformanceObserver on widget load. */
 export const WidgetPerformanceEvent = BaseEvent.extend({
   event_type: z.literal("widget_performance"),
-  load_time_ms: z.number().optional(),
+  load_time_ms: jsonNumber().optional(),
 });
 export type WidgetPerformanceEvent = z.infer<typeof WidgetPerformanceEvent>;
 

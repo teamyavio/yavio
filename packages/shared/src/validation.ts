@@ -4,8 +4,13 @@ import { z } from "zod";
 // Identifiers
 // ---------------------------------------------------------------------------
 
-/** UUID v4 string. */
-export const Uuid = z.string().uuid();
+/**
+ * A UUID-shaped string: 8-4-4-4-12 hex digits, of any version and variant.
+ * `z.guid()`, which is zod 3's `.uuid()`: zod 4's `z.uuid()` also requires the
+ * RFC 9562 version and variant bits, and would reject ids such as
+ * `11111111-1111-1111-1111-111111111111` that ingest has always accepted.
+ */
+export const Uuid = z.guid();
 
 /** Workspace slug: lowercase alphanumeric + hyphens, 3-48 chars. */
 export const WorkspaceSlug = z
@@ -49,27 +54,28 @@ export const WorkspaceRole = z.enum(["owner", "admin", "member", "viewer"]);
 export type WorkspaceRole = z.infer<typeof WorkspaceRole>;
 
 // ---------------------------------------------------------------------------
-// Pagination
+// ISO datetime
 // ---------------------------------------------------------------------------
 
-export const PaginationParams = z.object({
-  limit: z.coerce.number().int().min(1).max(100).default(20),
-  offset: z.coerce.number().int().min(0).default(0),
+/**
+ * An ISO 8601 datetime in UTC: a `Z` suffix and no offset, with seconds
+ * optional and any fraction of them (`2026-01-01T10:00Z`,
+ * `2026-01-01T10:00:00.123Z`).
+ *
+ * This is zod 3's `.datetime()`. zod 4's requires the seconds (RFC 3339), so
+ * the second branch adds the minute form back: ingest must not start
+ * rejecting event timestamps it accepted before the zod 4 upgrade.
+ */
+export const IsoDatetime = z.union([z.iso.datetime(), z.iso.datetime({ precision: -1 })], {
+  error: "Invalid ISO datetime",
 });
-export type PaginationParams = z.infer<typeof PaginationParams>;
 
 // ---------------------------------------------------------------------------
 // Time range (analytics queries)
 // ---------------------------------------------------------------------------
 
 export const TimeRange = z.object({
-  from: z.string().datetime(),
-  to: z.string().datetime(),
+  from: IsoDatetime,
+  to: IsoDatetime,
 });
 export type TimeRange = z.infer<typeof TimeRange>;
-
-// ---------------------------------------------------------------------------
-// ISO currency code
-// ---------------------------------------------------------------------------
-
-export const CurrencyCode = z.string().length(3).toUpperCase();
