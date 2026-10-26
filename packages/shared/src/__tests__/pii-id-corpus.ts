@@ -96,7 +96,9 @@ function version(r: Random): string {
   if (k === 1) return `v${core}`;
   if (k === 2) return `${core}-rc.${int(r, 0, 20)}`;
   if (k === 3) return `${core}+sha.${pick(r, HEX, 7)}`;
-  return `${int(r, 2000, 2035)}.${int(r, 1, 12)}.${int(r, 1, 31)}`;
+  // CalVer with a build number: the date alone has 13 392 values, too few
+  // for the corpus's distinctness check.
+  return `${int(r, 2000, 2035)}.${int(r, 1, 12)}.${int(r, 1, 31)}.${int(r, 0, 99_999)}`;
 }
 
 /** Id kinds that no phone, card or SSN pattern may cut. */

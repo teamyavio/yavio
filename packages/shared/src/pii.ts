@@ -1,15 +1,15 @@
 /**
  * The string-level PII rules (#182): what one string becomes. Shared by the
  * SDK's best-effort stripper (packages/sdk/src/core/pii.ts, which bundles
- * this module) and ingest's authoritative one
+ * this module, also into the React widget) and ingest's authoritative one
  * (packages/ingest/src/lib/pii-stripper.ts). Each keeps its own walk over
  * objects and its own exemptions; the patterns live here once.
  *
  * What is matched, in this order:
  * 1. A string that is exactly a valid W3C traceparent is returned unchanged.
  * 2. Email addresses, over the whole string.
- * 3. UUID-shaped and traceparent-shaped tokens are masked: the next patterns
- *    run on the text between them, never inside them.
+ * 3. UUID-shaped and traceparent-shaped tokens standing alone are masked: the
+ *    next patterns run on the text between them, never inside them.
  * 4. Between the masked tokens: IBANs (mod-97 checked), card numbers (13-19
  *    digits, Luhn checked), US SSNs, US ITINs (ingest only), and phone
  *    numbers.
@@ -18,11 +18,19 @@
  * What is not matched (follow-ups): phone numbers grouped other than 3/4 + 3
  * + 4 digits, such as `030 12345678`, `+33 6 12 34 56 78` or `0171 123 45 67`,
  * and extensions (#189); 19-digit cards (#190); the SDK's spaced and bare
- * SSNs (#193); a number glued to a word of letters a-f only or to a token of
- * letters and digits (`cafe5551234567`), the price of not cutting hex ids
- * (see START). Wrongly matched: a standalone 10-digit number such as an epoch
- * second (#192), a 12-15-digit number that does not start with 1 (an EAN-13),
- * a Luhn-valid 13-19-digit number (#190), and IBAN-shaped hex (#191).
+ * SSNs (#193); a number glued to a word of letters a-f only unless it has a
+ * phone's shape (`cafe5551234567`), to a token of letters and digits
+ * (`ref15551234567`), to a word of more than 24 letters, or after a
+ * double-encoded escape (`%252B…`): the price of not cutting hex ids (see
+ * START). Wrongly matched: a standalone 10-digit number such as an epoch
+ * second (#192), a 12-15-digit number that does not start with 1 (an
+ * EAN-13), a Luhn-valid 13-19-digit number (#190), and IBAN-shaped hex (#191).
+ *
+ * No regular expression with a lookbehind is written as a literal: a browser
+ * without lookbehind support (Safari and iOS before 16.4) would fail to parse
+ * the whole bundle. They are compiled on first use, and where that throws, the
+ * pre-#182 patterns (no lookbehind, no mask) take over: they cut more ids but
+ * redact nothing less than SDK 0.5.5 did (see legacyEngine).
  */
 
 /** Which stripper's rules apply. They differ only where they did before #182. */
@@ -105,28 +113,54 @@ export function isTraceparent(value: string): boolean {
   );
 }
 
+const EMAIL_TOKEN = "[EMAIL_REDACTED]";
+const IBAN_TOKEN = "[IBAN_REDACTED]";
+const CARD_TOKEN = "[CC_REDACTED]";
+const SSN_TOKEN = "[SSN_REDACTED]";
+const PHONE_TOKEN = "[PHONE_REDACTED]";
+const ADDRESS_TOKEN = "[ADDRESS_REDACTED]";
+
+// Regex sources, compiled in currentEngine(). Never literals: see the module
+// comment.
+
+/** Not directly after a letter or digit. */
+const NOT_GLUED = String.raw`(?<![A-Za-z0-9])`;
+/**
+ * Right after a URL percent-escape (`%2B4917612345678`, `Call%20me%20at%20…`)
+ * or a JSON `\uXXXX` escape (`"Tel. 0171 1234567"` from an
+ * ensure_ascii encoder): the escape ends in a hex digit glued to the number.
+ */
+const AFTER_ESCAPE = [String.raw`(?<=%[0-9A-Fa-f]{2})`, String.raw`(?<=\\u[0-9A-Fa-f]{4})`];
+
 /**
  * Where a card, SSN, ITIN or phone number may start (#182). The digit run may
  * not follow a letter or digit, so the digits inside a hex id (`…b7ad6b7169203331`)
- * are not a number. One exception: it may follow a word of 1-24 letters only
- * (itself not glued to a letter or digit) that has a letter outside a-f,
- * so `Tel5551234567` and `card4111111111111111` are still redacted, while
- * `deadbeef5551234567` is a hex id. The leading lookahead keeps the
- * lookbehinds off every position that cannot start a number.
+ * are not a number. It may still follow:
+ * - a word of 1-24 letters only (itself not glued to a letter or digit) that
+ *   has a letter outside a-f: `Tel5551234567`, `card4111111111111111`;
+ * - a URL or JSON escape (AFTER_ESCAPE);
+ * - a word of letters a-f only, when the number has a phone's shape: a `+`, a
+ *   `(`, or a separator after its first 2-4 digits (`cafe555-123-4567`), which
+ *   a hex id never has (`deadbeef5551234567` stays).
+ * The leading lookahead keeps the lookbehinds off every position that cannot
+ * start a number.
  */
-const START =
-  "(?=[\\d+(])(?:(?<![A-Za-z0-9])|(?<=(?<![A-Za-z0-9])(?=[A-Za-z]{0,23}[G-Zg-z])[A-Za-z]{1,24}))";
+const START = `(?=[\\d+(])(?:${[
+  NOT_GLUED,
+  String.raw`(?<=(?<![A-Za-z0-9])(?=[A-Za-z]{0,23}[G-Zg-z])[A-Za-z]{1,24})`,
+  ...AFTER_ESCAPE,
+  String.raw`(?<=(?<![A-Za-z0-9])[A-Fa-f]{1,24})(?=[+(]|\d{2,4}\)?[-.\s])`,
+].join("|")})`;
 /** Where it must end: not followed by a letter or digit. */
 const END = "(?![A-Za-z0-9])";
 
 /**
  * UUIDs (any version, any letter case) and traceparent-shaped values (any
- * letter case, any version or ids), standing alone. The digit patterns never
- * run inside one: an all-digit UUID segment (`21165216-7349-4227-…`) is
- * neither a card nor a phone number.
+ * letter case, any version or ids), standing alone or right after an escape
+ * (`%2F<uuid>`). The digit patterns never run inside one: an all-digit UUID
+ * segment (`21165216-7349-4227-…`) is neither a card nor a phone number.
  */
-const ID_MASK =
-  /(?<![A-Za-z0-9])(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2})(?![A-Za-z0-9])/gi;
+const ID_MASK = `(?:${[NOT_GLUED, ...AFTER_ESCAPE].join("|")})(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2})(?![A-Za-z0-9])`;
 
 interface Rule {
   pattern: RegExp;
@@ -134,69 +168,13 @@ interface Rule {
   validate?: (match: string) => boolean;
 }
 
-// Bounded to the RFC 5321 limits (local part 64, domain 255): the unbounded
-// `+` made the scan quadratic, and one size-limit-compliant batch could block
-// the event loop for tens of seconds.
-const EMAIL: Rule = {
-  pattern: /[a-zA-Z0-9._%+-]{1,64}@[a-zA-Z0-9.-]{1,255}\.[a-zA-Z]{2,24}/g,
-  replacement: "[EMAIL_REDACTED]",
-};
-
 // IBANs, compact or in groups of four (#90). Before the card and phone
 // patterns, which would otherwise take only the digit tail and leave the
 // country code, check digits and bank code in place.
 const IBAN: Rule = {
   pattern: /\b[A-Za-z]{2}\d{2}(?: ?[A-Za-z0-9]{4}){2,7}(?: ?[A-Za-z0-9]{1,4})?\b/g,
-  replacement: "[IBAN_REDACTED]",
+  replacement: IBAN_TOKEN,
   validate: passesIbanCheck,
-};
-
-// 13-19 digits with optional space or dash separators, Luhn checked.
-const CARD: Rule = {
-  pattern: new RegExp(`${START}(?:\\d[ -]*?){13,19}${END}`, "g"),
-  replacement: "[CC_REDACTED]",
-  validate: passesCardCheck,
-};
-
-// SDK: dashed SSNs only, any area number (aligning with ingest: #193).
-const SSN_SDK: Rule = {
-  pattern: new RegExp(`${START}\\d{3}-\\d{2}-\\d{4}${END}`, "g"),
-  replacement: "[SSN_REDACTED]",
-};
-
-// Ingest: dashed, spaced and bare SSNs, without the never-issued area numbers
-// 000, 666 and 900-999. The bare nine digits keep the `\b` boundaries they
-// had before #182: on START/END, ids like `order_123456789` or `KD123456789`
-// would be cut, so `ssn_123456789` stays unredacted as before.
-const SSN_INGEST: Rule = {
-  pattern: new RegExp(
-    `${START}(?!000|666|9\\d{2})(?=\\d{3}[- ]|\\d{5}[- ])\\d{3}[- ]?\\d{2}[- ]?\\d{4}${END}|\\b(?!000|666|9\\d{2})\\d{9}\\b`,
-    "g",
-  ),
-  replacement: "[SSN_REDACTED]",
-};
-
-// Ingest: US ITINs, 9XX-XX-XXXX, same token as an SSN. The bare form keeps
-// its `\b` boundaries for the same reason as the SSN's.
-const ITIN: Rule = {
-  pattern: new RegExp(
-    `${START}9(?=\\d{2}[- ]|\\d{4}[- ])\\d{2}[- ]?\\d{2}[- ]?\\d{4}${END}|\\b9\\d{8}\\b`,
-    "g",
-  ),
-  replacement: "[SSN_REDACTED]",
-};
-
-// Phone numbers: an optional `+CC` or `00CC` and `(0)`, a first group of 3-4
-// digits (so a trunk 0 or a leading 1 belongs to it: `0171 1234567`,
-// `(0171) 1234567`, `15551234567`), then 3 and 4 digits, each group optionally
-// separated by `-`, `.` or whitespace. Or a bare run of 12-15 digits that does
-// not start with 1 (E.164 without the `+`: `491711234567`).
-const PHONE: Rule = {
-  pattern: new RegExp(
-    `${START}(?:(?:\\+|00)\\d{1,3}[-.\\s]?(?:\\(0\\)[-.\\s]?)?)?\\(?\\d{3,4}\\)?[-.\\s]?\\d{3}[-.\\s]?\\d{4}${END}|${START}(?:0|[2-9])\\d{11,14}${END}`,
-    "g",
-  ),
-  replacement: "[PHONE_REDACTED]",
 };
 
 /**
@@ -212,17 +190,112 @@ const ADDRESS: Rule = {
     `\\b\\d{1,6}\\s+[A-Z][a-zA-Z.]+(?:\\s+[A-Z][a-zA-Z.]+)*\\s+(?:${STREET_SUFFIXES})\\.?(?:\\s*(?:#|Apt\\.?|Suite|Ste\\.?|Unit)\\s*\\S+)?\\b`,
     "g",
   ),
-  replacement: "[ADDRESS_REDACTED]",
+  replacement: ADDRESS_TOKEN,
 };
-
-const EMAIL_RULES: readonly Rule[] = [EMAIL];
 const ADDRESS_RULES: readonly Rule[] = [ADDRESS];
 
-/** The patterns that run between masked ids, in order, per flavor. */
-const MASKED_RULES: Record<PiiFlavor, readonly Rule[]> = {
-  sdk: [IBAN, CARD, SSN_SDK, PHONE],
-  ingest: [IBAN, CARD, SSN_INGEST, ITIN, PHONE],
-};
+interface Engine {
+  /** The id mask, or null: the pre-#182 patterns run over the whole text. */
+  mask: RegExp | null;
+  /** The patterns that run between masked ids, in order, per flavor. */
+  rules: Record<PiiFlavor, readonly Rule[]>;
+}
+
+/** The #182 patterns. Throws where the engine has no lookbehind. */
+function currentEngine(): Engine {
+  const rx = (source: string) => new RegExp(source, "g");
+  // 13-19 digits with optional space or dash separators, Luhn checked.
+  const card: Rule = {
+    pattern: rx(`${START}(?:\\d[ -]*?){13,19}${END}`),
+    replacement: CARD_TOKEN,
+    validate: passesCardCheck,
+  };
+  // SDK: dashed SSNs only, any area number (aligning with ingest: #193).
+  const ssnSdk: Rule = {
+    pattern: rx(`${START}\\d{3}-\\d{2}-\\d{4}${END}`),
+    replacement: SSN_TOKEN,
+  };
+  // Ingest: dashed, spaced and bare SSNs, without the never-issued area
+  // numbers 000, 666 and 900-999. The bare nine digits keep the `\b`
+  // boundaries they had before #182 (decision A1): on START/END, ids like
+  // `order_123456789` or `KD123456789` would be cut, so `ssn_123456789` stays
+  // unredacted as before.
+  const ssnIngest: Rule = {
+    pattern: rx(
+      `${START}(?!000|666|9\\d{2})(?=\\d{3}[- ]|\\d{5}[- ])\\d{3}[- ]?\\d{2}[- ]?\\d{4}${END}|\\b(?!000|666|9\\d{2})\\d{9}\\b`,
+    ),
+    replacement: SSN_TOKEN,
+  };
+  // Ingest: US ITINs, 9XX-XX-XXXX, same token as an SSN. The bare form keeps
+  // its `\b` boundaries for the same reason as the SSN's.
+  const itin: Rule = {
+    pattern: rx(
+      `${START}9(?=\\d{2}[- ]|\\d{4}[- ])\\d{2}[- ]?\\d{2}[- ]?\\d{4}${END}|\\b9\\d{8}\\b`,
+    ),
+    replacement: SSN_TOKEN,
+  };
+  // Phone numbers: an optional `+CC` or `00CC` and `(0)`, a first group of
+  // 3-4 digits (so a trunk 0 or a leading 1 belongs to it: `0171 1234567`,
+  // `(0171) 1234567`, `15551234567`), then 3 and 4 digits, each group
+  // optionally separated by `-`, `.` or whitespace. Or a bare run of 12-15
+  // digits that does not start with 1 (E.164 without the `+`: `491711234567`).
+  const phone: Rule = {
+    pattern: rx(
+      `${START}(?:(?:\\+|00)\\d{1,3}[-.\\s]?(?:\\(0\\)[-.\\s]?)?)?\\(?\\d{3,4}\\)?[-.\\s]?\\d{3}[-.\\s]?\\d{4}${END}|${START}(?:0|[2-9])\\d{11,14}${END}`,
+    ),
+    replacement: PHONE_TOKEN,
+  };
+  return {
+    mask: new RegExp(ID_MASK, "gi"),
+    rules: { sdk: [IBAN, card, ssnSdk, phone], ingest: [IBAN, card, ssnIngest, itin, phone] },
+  };
+}
+
+/**
+ * The patterns of SDK 0.5.5 and the ingest before #182, verbatim, for an
+ * engine without lookbehind (the React widget on Safari and iOS before
+ * 16.4): no id mask, no boundary before a phone number. They cut ids
+ * (`…-95[PHONE_REDACTED]`) and leave a trunk 0 in front of the token, but
+ * never redact less than before, and the module never fails to load.
+ */
+function legacyEngine(): Engine {
+  const card: Rule = {
+    pattern: /\b(?:\d[ -]*?){13,19}\b/g,
+    replacement: CARD_TOKEN,
+    validate: passesCardCheck,
+  };
+  const phone: Rule = {
+    pattern: /(?:\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g,
+    replacement: PHONE_TOKEN,
+  };
+  return {
+    mask: null,
+    rules: {
+      sdk: [IBAN, card, { pattern: /\b\d{3}-\d{2}-\d{4}\b/g, replacement: SSN_TOKEN }, phone],
+      ingest: [
+        IBAN,
+        card,
+        { pattern: /\b(?!000|666|9\d{2})\d{3}[- ]?\d{2}[- ]?\d{4}\b/g, replacement: SSN_TOKEN },
+        { pattern: /\b9\d{2}[- ]?\d{2}[- ]?\d{4}\b/g, replacement: SSN_TOKEN },
+        phone,
+      ],
+    },
+  };
+}
+
+let engine: Engine | undefined;
+
+/** Compiled on first use: a SyntaxError here selects the pre-#182 patterns. */
+function getEngine(): Engine {
+  if (!engine) {
+    try {
+      engine = currentEngine();
+    } catch {
+      engine = legacyEngine();
+    }
+  }
+  return engine;
+}
 
 /**
  * Every pattern but the email one needs a digit, so text without one is
@@ -248,18 +321,86 @@ function applyToGap(text: string, rules: readonly Rule[], hit: { redacted: boole
 }
 
 /** The rules on the text between masked ids; the ids themselves stay verbatim. */
-function applyBetweenIds(text: string, rules: readonly Rule[], hit: { redacted: boolean }): string {
+function applyBetweenIds(
+  text: string,
+  { mask, rules }: { mask: RegExp | null; rules: readonly Rule[] },
+  hit: { redacted: boolean },
+): string {
+  if (!mask) return applyRules(text, rules, hit);
   let out = "";
   let last = 0;
-  // exec() on the module's regex, not matchAll(), which copies it per call.
+  // exec() on the engine's regex, not matchAll(), which copies it per call.
   // Synchronous and never re-entered, so its lastIndex is ours.
-  ID_MASK.lastIndex = 0;
-  for (let id = ID_MASK.exec(text); id !== null; id = ID_MASK.exec(text)) {
+  mask.lastIndex = 0;
+  for (let id = mask.exec(text); id !== null; id = mask.exec(text)) {
     out += applyToGap(text.slice(last, id.index), rules, hit) + id[0];
-    last = ID_MASK.lastIndex;
+    last = mask.lastIndex;
   }
   // A masked id is never empty, so last === 0 means there was none.
   return last === 0 ? applyRules(text, rules, hit) : out + applyToGap(text.slice(last), rules, hit);
+}
+
+// Email addresses, as /[a-zA-Z0-9._%+-]{1,64}@[a-zA-Z0-9.-]{1,255}\.[a-zA-Z]{2,24}/g
+// matched them (bounded to the RFC 5321 lengths), found from each "@"
+// instead of from every position: the regex scanned up to 64 characters at
+// every position of a long letter or digit run (~60 ms per 50 KB), this
+// visits at most ~350 characters per "@". Same matches, same order.
+const isAlpha = (c: number) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+const isAlnum = (c: number) => isAlpha(c) || (c >= 48 && c <= 57);
+/** [a-zA-Z0-9.-] */
+const isDomainChar = (c: number) => isAlnum(c) || c === 46 || c === 45;
+/** [a-zA-Z0-9._%+-] */
+const isLocalChar = (c: number) => isDomainChar(c) || c === 95 || c === 37 || c === 43;
+
+/**
+ * Where the regex's domain and TLD end for a domain starting at `from`, or
+ * -1. `[a-zA-Z0-9.-]{1,255}` is greedy and backtracks to the last `.` within
+ * its 255 characters that is followed by two letters; the TLD then takes up
+ * to 24 letters.
+ */
+function emailEnd(text: string, from: number): number {
+  let dot = -1;
+  for (let i = from; i - from <= 255 && i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (!isDomainChar(c)) break;
+    if (
+      c === 46 &&
+      i > from &&
+      isAlpha(text.charCodeAt(i + 1)) &&
+      isAlpha(text.charCodeAt(i + 2))
+    ) {
+      dot = i;
+    }
+  }
+  if (dot === -1) return -1;
+  let end = dot + 1;
+  while (end - dot <= 24 && isAlpha(text.charCodeAt(end))) end++;
+  return end;
+}
+
+function replaceEmails(text: string, hit: { redacted: boolean }): string {
+  let out = "";
+  // The end of the previous match: the regex resumes there.
+  let last = 0;
+  let at = text.indexOf("@");
+  while (at !== -1) {
+    // "@" is not a local-part character, so a match ending its local part
+    // here starts at the leftmost of the at most 64 local-part characters
+    // right before it, not before the previous match.
+    const floor = Math.max(last, at - 64);
+    let start = at;
+    while (start > floor && isLocalChar(text.charCodeAt(start - 1))) start--;
+    const end = start < at ? emailEnd(text, at + 1) : -1;
+    if (end === -1) {
+      at = text.indexOf("@", at + 1);
+      continue;
+    }
+    out += text.slice(last, start) + EMAIL_TOKEN;
+    hit.redacted = true;
+    last = end;
+    at = text.indexOf("@", end);
+  }
+  return last === 0 ? text : out + text.slice(last);
 }
 
 /**
@@ -271,11 +412,10 @@ function applyBetweenIds(text: string, rules: readonly Rule[], hit: { redacted: 
 export function stripPiiString(value: string, flavor: PiiFlavor): PiiStripResult {
   if (isTraceparent(value)) return { result: value, redacted: false };
   const hit = { redacted: false };
-  // Without an "@" the email pattern cannot match: skipping it changes no
-  // output and saves its scan, the slowest of all on long text.
-  let result = value.includes("@") ? applyRules(value, EMAIL_RULES, hit) : value;
+  let result = replaceEmails(value, hit);
   if (!DIGIT.test(result)) return { result, redacted: hit.redacted };
-  result = applyBetweenIds(result, MASKED_RULES[flavor], hit);
+  const { mask, rules } = getEngine();
+  result = applyBetweenIds(result, { mask, rules: rules[flavor] }, hit);
   if (flavor === "ingest") result = applyRules(result, ADDRESS_RULES, hit);
   return { result, redacted: hit.redacted };
 }
