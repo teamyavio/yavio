@@ -1736,8 +1736,8 @@ function extractInputTypes(args: unknown): Record<string, unknown> | undefined {
  *   `traceparent`) and, with `conversationId: false`, the conversation keys
  *   that were sent; only the per-key baggage carriers are counted.
  * - `_taskId`: MCP task id, for correlating task-based flows.
- * - `_requestInfo`: allow-listed headers and the URL sans query, see
- *   sanitizeRequestInfo.
+ * - `_requestInfo`: allow-listed headers, and the URL sans query when a
+ *   custom transport passes it as a string; see sanitizeRequestInfo.
  *
  * Dropped in 0.4.0 after an inventory (input-values-extra-fields.md):
  * `_requestId` (a per-connection counter, on ~every call, says nothing),
@@ -2030,7 +2030,8 @@ function locationRegion(location: unknown, country: string | undefined): string 
  * Reduce the HTTP request info (v1 `RequestHandlerExtra.requestInfo`, v2
  * `ctx.http.req`, both read by extra.ts) to the parts that are safe to store:
  * allowlisted headers, and the URL without its query string (query params are
- * a common place for tokens).
+ * a common place for tokens). extra.ts passes a URL only when v1's
+ * `requestInfo.url` is a string, which the MCP SDK's own transports do not pass.
  *
  * Returns undefined when nothing survives, so the event carries no empty shell.
  */

@@ -64,7 +64,7 @@ A stateless host builds the server — tools included — and wraps the finished
 |---|---|---|
 | session id | `extra.sessionId` | `ctx.sessionId` |
 | request `_meta` | `extra._meta` | `ctx.mcpReq._meta` |
-| HTTP headers / URL | `extra.requestInfo.headers` (record), `.url` when a string (v1 transports pass a `URL` object, which is dropped) | `ctx.http.req` — a web `Request`: `headers` is a `Headers` object (lower-cased into a record); its `url` is **not read**, so v2 records what v1 records (a path can carry a secret as easily as the query string the sanitiser strips) |
+| HTTP headers / URL | `extra.requestInfo.headers` (record), `.url` when a string (v1 transports pass none before 1.27 and a `URL` object from 1.27, which is dropped) | `ctx.http.req` — a web `Request`: `headers` is a `Headers` object (lower-cased into a record); its `url` is **not read**, so v2 records what v1 records (a path can carry a secret as easily as the query string the sanitiser strips) |
 | task id | `extra.taskId` | — |
 | protocol version (#170, 0.5.5) | the `mcp-protocol-version` header, then the version `initialize` answered (the protocol layer's tap: v1's `Server` keeps it nowhere) | `ctx.mcpReq.envelope["io.modelcontextprotocol/protocolVersion"]` (2026-07-28), the header, `server.server.getNegotiatedProtocolVersion()` (deprecated since 2.0.0, still functional), the tap; each kept only when date-shaped |
 | client capabilities (#170, 0.5.5; names only) | `server.server.getClientCapabilities()` (initialize handshake) | `ctx.mcpReq.envelope["io.modelcontextprotocol/clientCapabilities"]` when the envelope names a version, else `getClientCapabilities()` |

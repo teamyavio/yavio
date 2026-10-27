@@ -13,7 +13,7 @@
 | `_requestId` | `extra.requestId` | JSON-RPC request id — a per-connection counter; ChatGPT reconnects per call, so it is almost always a small integer | None |
 | `_taskId` | `extra.taskId` | MCP task id (task-based flows) | Correlation for task flows |
 | `_taskRequestedTtl` | `extra.taskRequestedTtl` | requested TTL of a task | None |
-| `_requestInfo` | `extra.requestInfo` via `sanitizeRequestInfo()` | allow-listed headers (`user-agent`, `accept-language`, `x-anthropic-client`, `mcp-protocol-version`; `traceparent` too until 0.5.5, now `metadata.traceparent`, #173) + URL without query | Which client/protocol called |
+| `_requestInfo` | `extra.requestInfo` via `sanitizeRequestInfo()` | allow-listed headers (`user-agent`, `accept-language`, `x-anthropic-client`, `mcp-protocol-version`; `traceparent` too until 0.5.5, now `metadata.traceparent`, #173) + the URL without query only when `requestInfo.url` is a string, which the MCP SDK's own transports do not pass (v1: none before 1.27, a `URL` object from 1.27, dropped; v2: not read, see `per-request-servers.md`) | Which client/protocol called |
 
 The README documents only `_requestInfo` (and understates it — it lists two headers, the code keeps five). `.specs/metrics/events.md` does not mention the extra fields at all.
 
