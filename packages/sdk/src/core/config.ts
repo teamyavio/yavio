@@ -4,6 +4,7 @@ import { ErrorCode } from "@yavio/shared/error-codes";
 import type {
   CaptureConfig,
   IntentConfig,
+  ResolvedCaptureConfig,
   SessionKeyFunction,
   ShutdownTimeoutSource,
   ToolCaptureOverride,
@@ -16,10 +17,12 @@ import type {
 // drops every event. It pointed at an unregistered host until 2026-08-04.
 const DEFAULT_ENDPOINT = "https://ingest.yavio.ai/v1/events";
 
-const DEFAULT_CAPTURE: CaptureConfig = {
+const DEFAULT_CAPTURE: ResolvedCaptureConfig = {
   inputValues: true,
   outputValues: true,
   geo: true,
+  // On: _meta keeps the platform's conversation ids, as before #204.
+  conversationId: true,
   tokens: true,
   retries: true,
   // Off: a rejected call must not store what the schema refused (#123).
@@ -124,14 +127,27 @@ const TOOL_OVERRIDE_KEYS = [
 ] as const;
 
 /**
+ * Capture flags that exist only globally (#204 review round 1). In a `tools`
+ * entry, from `.yaviorc.json` or untyped JS, they were ignored without a
+ * word: fail-open for a privacy setting, since the integrator believes the
+ * tool's location or raw conversation ids are off while the global value
+ * applies. Still ignored, with one `YAVIO-1006` line per tool, flag and
+ * process when the value differs from the resolved global one; the same
+ * value changes nothing and logs nothing (review round 2).
+ */
+const GLOBAL_ONLY_CAPTURE_KEYS = ["geo", "conversationId"] as const;
+
+/**
  * Merge per-tool overrides from the config file and the code options, field
  * by field per tool (code wins), the same way `capture` merges. Only the known
- * keys survive (an unknown key is ignored), and like the global flags they
- * fail closed: the file is hand-written JSON, and a `"false"` string must not
- * silently drop the override and leave the tool on the global default — it
- * becomes `false` with one warning.
+ * keys survive (an unknown key is ignored; a global-only flag is ignored, with
+ * a warning when it differs from `capture`, see GLOBAL_ONLY_CAPTURE_KEYS), and
+ * like the global flags they fail closed: the file is hand-written JSON, and a
+ * `"false"` string must not silently drop the override and leave the tool on
+ * the global default — it becomes `false` with one warning.
  */
 function resolveTools(
+  capture: ResolvedCaptureConfig,
   ...sources: Array<Record<string, ToolCaptureOverride> | undefined>
 ): Record<string, ToolCaptureOverride> {
   // No prototype: a tool is looked up by its name, and a tool (or a JSON key)
@@ -147,6 +163,12 @@ function resolveTools(
         const value = (override as Record<string, unknown>)[key];
         if (value === undefined) continue;
         merged[key] = resolveBooleanFlag(`tools.${name}.${key}`, value);
+      }
+      for (const key of GLOBAL_ONLY_CAPTURE_KEYS) {
+        const value = (override as Record<string, unknown>)[key];
+        if (value !== undefined && value !== capture[key]) {
+          warnGlobalOnlyFlag(`tools.${name}.${key}`, key);
+        }
       }
       if (Object.keys(merged).length > 0) tools[name] = merged;
     }
@@ -172,6 +194,15 @@ function warnInvalidFlag(path: string, accepted: string, value: unknown): void {
   warnedInvalidFlags.add(path);
   console.warn(
     `[${ErrorCode.SDK.INVALID_CAPTURE_OPTION}] ${path} must be ${accepted}, got ${JSON.stringify(value)} — treating it as false. Shown once per process.`,
+  );
+}
+
+/** A global-only flag in a `tools` entry: ignored, warned once per path and process. */
+function warnGlobalOnlyFlag(path: string, flag: string): void {
+  if (warnedInvalidFlags.has(path)) return;
+  warnedInvalidFlags.add(path);
+  console.warn(
+    `[${ErrorCode.SDK.INVALID_CAPTURE_OPTION}] ${path} is ignored — ${flag} has no per-tool form, so capture.${flag} applies to this tool too. Shown once per process.`,
   );
 }
 
@@ -223,6 +254,7 @@ function resolveGeo(value: unknown): CaptureConfig["geo"] {
 const BOOLEAN_CAPTURE_FLAGS = [
   "inputValues",
   "outputValues",
+  "conversationId",
   "tokens",
   "retries",
   "rejectedInputValues",
@@ -382,7 +414,7 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
   // A field set to undefined is "not set" — untyped JS and computed options
   // (`geo: flag ? "country" : undefined`) produce one routinely — so it must
   // not override the file's value or the default; a plain spread would.
-  const capture: CaptureConfig = {
+  const capture: ResolvedCaptureConfig = {
     ...DEFAULT_CAPTURE,
     ...defined(fileConfig?.capture),
     ...defined(options?.capture),
@@ -403,7 +435,7 @@ export function resolveConfig(options?: WithYavioOptions): YavioConfig | null {
   );
 
   // No env-var form: the shape is nested. File first, code options win.
-  const tools = resolveTools(fileConfig?.tools, options?.tools);
+  const tools = resolveTools(capture, fileConfig?.tools, options?.tools);
 
   const { ms: shutdownTimeoutMs, source: shutdownTimeoutMsSource } = resolveShutdownTimeout([
     ["option", options?.shutdownTimeoutMs],

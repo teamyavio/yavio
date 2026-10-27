@@ -7,7 +7,7 @@ export type { SessionSource };
 export interface YavioConfig {
   apiKey: string;
   endpoint: string;
-  capture: CaptureConfig;
+  capture: ResolvedCaptureConfig;
   /**
    * When true, the SDK runs in server-only mode: no `_meta.yavio` is injected
    * into tool results and no widget token is minted. Server-side event capture
@@ -188,6 +188,26 @@ export interface CaptureConfig {
    *   from `_meta`.
    */
   geo: boolean | "country" | "region";
+  /**
+   * The platform's raw conversation ids in `input_values._meta` (#204).
+   * Optional, unlike the flags before it, so that a `CaptureConfig` typed
+   * before 0.5.6 still compiles; unset means `true`.
+   * - `true` (default): `_meta` keeps what `geo` keeps — all of them under
+   *   `geo: true`, only `openai/session` under any other `geo`.
+   * - `false`: removed under every `geo`: `openai/session`, ChatGPT's
+   *   top-level `sessionId` and `windowId`, `vscode.conversationId`, and
+   *   `threadId` from any client. Their names go to `_metaDroppedKeys`.
+   *   `session_id` and `session_source` stay the same, and the handler
+   *   still receives the full `_meta`. `session_id` is an unkeyed SHA-256
+   *   of the conversation id only when the call has no `Mcp-Session-Id`;
+   *   on a stateful transport it hashes the transport's session, and the
+   *   raw id this removes is the only per-conversation id in the event.
+   * Global only: a `tools` entry that sets it is ignored, with one
+   * `YAVIO-1006` warning when its value differs from this one (one
+   * conversation would be split into rows with the id and rows without
+   * it). Forward only: stored events keep their ids.
+   */
+  conversationId?: boolean;
   tokens: boolean;
   retries: boolean;
   /**
@@ -209,6 +229,15 @@ export interface CaptureConfig {
    */
   rejectedInputValues: boolean;
 }
+
+/**
+ * The capture flags as resolveConfig() returns them, every one set (#204
+ * review round 1): what `YavioConfig.capture` and a tool's resolved capture
+ * hold. `CaptureConfig` is the public shape, where a flag added in a patch
+ * release stays optional; `IntentOptions` and `IntentConfig` split the same
+ * way.
+ */
+export type ResolvedCaptureConfig = Required<CaptureConfig>;
 
 /** Options passed to `withYavio()`. */
 export interface WithYavioOptions {

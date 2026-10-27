@@ -55,6 +55,7 @@ These identifiers are **pseudonymous personal data** under the GDPR. None of the
 | `user_id` | the id you pass to `.identify()` |
 | `subject_id` | the AI platform's stable id for one user of one app, e.g. ChatGPT's `openai/subject` |
 | `session_id` | a SHA-256 hash of the platform's session key: the same conversation always gets the same id |
+| raw conversation ids in `input_values._meta` | the platform's own id of the conversation, as sent: ChatGPT's `openai/session`; with `capture.geo: true` also ChatGPT's `sessionId` and `windowId`, VS Code's `vscode.conversationId` and the Codex CLI's `threadId`. Not stored with `capture.conversationId: false` (SDK 0.5.6 and later; see [Configuration](/docs/02-sdk/03-configuration#capture-options)) |
 
 They are stored only with the raw events and expire with them. The anonymous statistics contain none of them.
 

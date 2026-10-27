@@ -80,6 +80,7 @@ const makeConfig = (overrides: Partial<YavioConfig> = {}): YavioConfig => ({
     inputValues: true,
     outputValues: true,
     geo: "country",
+    conversationId: true,
     tokens: true,
     retries: true,
     rejectedInputValues: false,
@@ -187,6 +188,41 @@ describe("MCP SDK v2 — legacy era over InMemoryTransport", () => {
 
     const [connection] = connections(h.events);
     expect(connection?.client_name).toBe("v2-test-client");
+    expect(connection?.session_id).toBe(deriveSessionId("conv-v2-1"));
+  });
+
+  it("capture.conversationId: false removes openai/session from _meta from ctx.mcpReq; the session and the handler's _meta stay (#204)", async () => {
+    let seenExtra: unknown;
+    const h = await setup(
+      (proxy) => {
+        proxy.registerTool(
+          "get_price",
+          { description: "d", inputSchema: { sku: z.string() } },
+          async ({ sku }, extra) => {
+            seenExtra = extra;
+            return ok(`price of ${sku}`);
+          },
+        );
+      },
+      { capture: { ...makeConfig().capture, conversationId: false } },
+    );
+
+    await h.client.callTool({ name: "get_price", arguments: { sku: "A1" }, _meta: CLIENT_META });
+    expect((seenExtra as { mcpReq: { _meta: unknown } }).mcpReq._meta).toEqual(CLIENT_META);
+
+    const [event] = toolCalls(h.events);
+    expect(event?.session_id).toBe(deriveSessionId("conv-v2-1"));
+    expect(event?.session_source).toBe("openai_session");
+    const values = event?.input_values as Record<string, unknown>;
+    // geo "country" (makeConfig): three known keys instead of four.
+    expect(values._meta).toEqual({
+      "openai/locale": "de-DE",
+      "openai/subject": "v1/subject-1",
+      "openai/userLocation": { country: "DE" },
+    });
+    expect(values._metaDroppedKeys).toEqual(["openai/session"]);
+    expect(leakScan(event as unknown as Record<string, unknown>)).not.toContain("conv-v2-1");
+    const [connection] = connections(h.events);
     expect(connection?.session_id).toBe(deriveSessionId("conv-v2-1"));
   });
 
@@ -487,6 +523,62 @@ describe("MCP SDK v2 — 2026-07-28 era over Streamable HTTP, a new server per r
     // What v1 records: headers only. The web Request's URL is never read.
     expect(requestInfo).not.toHaveProperty("url");
     expect(JSON.stringify(calls)).not.toContain("127.0.0.1");
+  });
+
+  it("capture.conversationId: false from the options: one session across per-request instances, no conversation id in _meta (#204)", async () => {
+    const yavio = createYavio({
+      apiKey: "yav_v2_conversation",
+      endpoint: ingestUrl,
+      serverOnly: true,
+      capture: { conversationId: false },
+    });
+    const buildServer = () => {
+      const server = new McpServer({ name: "stateless-v2", version: "1.0" });
+      server.registerTool(
+        "get_price",
+        { description: "d", inputSchema: { sku: z.string() } },
+        async ({ sku }) => ok(`price of ${sku}`),
+      );
+      return server;
+    };
+    const nodeHandler = toNodeHandler(createMcpHandler(() => yavio.wrap(buildServer())));
+    const httpServer = createServer((req, res) => {
+      void nodeHandler(req, res);
+    });
+    mcp = httpServer;
+    await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+    const url = new URL(`http://127.0.0.1:${(httpServer.address() as AddressInfo).port}/mcp`);
+    const client = new Client(
+      { name: "modern-client", version: "7.0" },
+      { versionNegotiation: { mode: "auto" } },
+    );
+    await client.connect(new StreamableHTTPClientTransport(url));
+    expect(client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
+    const _meta = {
+      "openai/session": "conv-http-204",
+      "openai/locale": "fr-FR",
+      sessionId: "conv-http-204-top",
+      windowId: "conv-http-204-top:0",
+    };
+    for (let i = 0; i < 3; i++) {
+      await client.callTool({ name: "get_price", arguments: { sku: `A${i}` }, _meta });
+    }
+    await client.close();
+    await yavio.shutdown();
+
+    const calls = ingest.events.filter((e) => e.event_type === "tool_call");
+    expect(calls).toHaveLength(3);
+    expect(new Set(calls.map((e) => e.session_id))).toEqual(
+      new Set([deriveSessionId("conv-http-204")]),
+    );
+    expect(calls.every((e) => e.session_source === "openai_session")).toBe(true);
+    for (const call of calls) {
+      const values = call.input_values as Record<string, unknown>;
+      // geo true (the default): everything else stays verbatim.
+      expect(values._meta).toEqual({ "openai/locale": "fr-FR" });
+      expect(values._metaDroppedKeys).toEqual(["openai/session", "sessionId", "windowId"]);
+      expect(leakScan(call)).not.toContain("conv-http-204");
+    }
   });
 
   it("the 2026-07-28 envelope names the client even when the User-Agent names another (#142)", async () => {

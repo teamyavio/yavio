@@ -50,6 +50,7 @@ const config: YavioConfig = {
     inputValues: true,
     outputValues: true,
     geo: "country",
+    conversationId: true,
     tokens: true,
     retries: true,
     rejectedInputValues: false,

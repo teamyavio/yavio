@@ -8,6 +8,7 @@ import {
   resolveConfig,
   shutdownTimeoutFromEnv,
 } from "../core/config.js";
+import type { CaptureConfig } from "../core/types.js";
 import { without } from "./env.js";
 
 describe("resolveConfig", () => {
@@ -62,6 +63,7 @@ describe("resolveConfig", () => {
       inputValues: true,
       outputValues: true,
       geo: true,
+      conversationId: true,
       tokens: true,
       retries: true,
       rejectedInputValues: false,
@@ -77,6 +79,7 @@ describe("resolveConfig", () => {
       inputValues: false,
       outputValues: true,
       geo: true,
+      conversationId: true,
       tokens: true,
       retries: true,
       rejectedInputValues: false,
@@ -378,17 +381,21 @@ describe("boolean capture flags fail closed", () => {
     expect(config?.tools.pick).toEqual({ rejectedInputValues: true });
   });
 
-  it.each(["inputValues", "outputValues", "tokens", "retries", "rejectedInputValues"] as const)(
-    'turns %s off on the string "false", with one YAVIO-1006 warning',
-    (flag) => {
-      // Hand-written JSON: "false" is truthy and used to keep capture ON.
-      const config = resolveConfig({ apiKey: "test", capture: { [flag]: "false" as never } });
-      expect(config?.capture[flag]).toBe(false);
-      expect(warn).toHaveBeenCalledOnce();
-      expect(warn.mock.calls[0][0]).toContain("YAVIO-1006");
-      expect(warn.mock.calls[0][0]).toContain(`capture.${flag}`);
-    },
-  );
+  it.each([
+    "inputValues",
+    "outputValues",
+    "conversationId",
+    "tokens",
+    "retries",
+    "rejectedInputValues",
+  ] as const)('turns %s off on the string "false", with one YAVIO-1006 warning', (flag) => {
+    // Hand-written JSON: "false" is truthy and used to keep capture ON.
+    const config = resolveConfig({ apiKey: "test", capture: { [flag]: "false" as never } });
+    expect(config?.capture[flag]).toBe(false);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0][0]).toContain("YAVIO-1006");
+    expect(warn.mock.calls[0][0]).toContain(`capture.${flag}`);
+  });
 
   it("passes booleans through and warns once per flag, not once overall", () => {
     const config = resolveConfig({
@@ -411,6 +418,154 @@ describe("boolean capture flags fail closed", () => {
       );
       process.cwd = () => tempDir;
       expect(resolveConfig()?.capture.inputValues).toBe(false);
+    } finally {
+      process.cwd = originalCwd;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("capture.conversationId (#204)", () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    _resetConfigWarnings();
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  it("is on by default, also when set to undefined, and passes false through, without a warning", () => {
+    expect(resolveConfig({ apiKey: "test" })?.capture.conversationId).toBe(true);
+    // A computed option: `conversationId: strict ? false : undefined`.
+    expect(
+      resolveConfig({ apiKey: "test", capture: { conversationId: undefined } })?.capture
+        .conversationId,
+    ).toBe(true);
+    expect(
+      resolveConfig({ apiKey: "test", capture: { conversationId: false } })?.capture.conversationId,
+    ).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each(["no", "false", "true", 0, 1, null])(
+    "fails closed on %j: false, with one YAVIO-1006 warning",
+    (value) => {
+      const config = resolveConfig({ apiKey: "test", capture: { conversationId: value as never } });
+      expect(config?.capture.conversationId).toBe(false);
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0][0]).toContain("YAVIO-1006");
+      expect(warn.mock.calls[0][0]).toContain("capture.conversationId must be true or false");
+    },
+  );
+
+  it("is read from .yaviorc.json like the other flags: code options win, an invalid value fails closed", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "yavio-conversation-test-"));
+    const originalCwd = process.cwd;
+    const write = (capture: object) =>
+      writeFileSync(
+        join(tempDir, ".yaviorc.json"),
+        JSON.stringify({ apiKey: "file_key", capture }),
+      );
+    try {
+      process.cwd = () => tempDir;
+      write({ conversationId: false });
+      expect(resolveConfig()?.capture.conversationId).toBe(false);
+      expect(resolveConfig({ capture: { conversationId: true } })?.capture.conversationId).toBe(
+        true,
+      );
+      expect(warn).not.toHaveBeenCalled();
+      write({ conversationId: "no" });
+      expect(resolveConfig()?.capture.conversationId).toBe(false);
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0][0]).toContain("capture.conversationId");
+    } finally {
+      process.cwd = originalCwd;
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a CaptureConfig typed without it, as before 0.5.6 (review round 1)", () => {
+    // A type check as much as a test: the typecheck job fails here if the
+    // public field is required again (TS2741 in a patch release).
+    const capture: CaptureConfig = {
+      inputValues: true,
+      outputValues: true,
+      geo: "country",
+      tokens: true,
+      retries: true,
+      rejectedInputValues: false,
+    };
+    expect(resolveConfig({ apiKey: "test", capture })?.capture.conversationId).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each(["conversationId", "geo"] as const)(
+    "has no per-tool %s: a tools entry setting it is ignored with one YAVIO-1006 line per tool (review round 1)",
+    (flag) => {
+      const tools = {
+        pick: { [flag]: false } as never,
+        book: { inputValues: false, [flag]: false } as never,
+      };
+      const config = resolveConfig({ apiKey: "test", tools });
+      // Ignored: no entry for a tool that set nothing else, the rest kept,
+      // the global value in force.
+      expect(Object.hasOwn(config?.tools ?? {}, "pick")).toBe(false);
+      expect(config?.tools.book).toEqual({ inputValues: false });
+      expect(config?.capture[flag]).toBe(true);
+      const lines = warn.mock.calls.map((args: unknown[]) => String(args[0]));
+      expect(lines).toHaveLength(2);
+      for (const [i, tool] of ["pick", "book"].entries()) {
+        expect(lines[i]).toContain("YAVIO-1006");
+        expect(lines[i]).toContain(`tools.${tool}.${flag} is ignored`);
+        expect(lines[i]).toContain(`capture.${flag} applies`);
+      }
+      // Once per tool, flag and process: stateless servers resolve per request.
+      resolveConfig({ apiKey: "test", tools });
+      expect(warn).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("does not warn for a per-tool geo or conversationId equal to the global value (review round 2)", () => {
+    const config = resolveConfig({
+      apiKey: "test",
+      capture: { geo: "country", conversationId: false },
+      tools: {
+        same: { geo: "country", conversationId: false } as never,
+        other: { geo: "region", conversationId: true } as never,
+      },
+    });
+    expect(config?.capture.geo).toBe("country");
+    expect(config?.capture.conversationId).toBe(false);
+    expect(Object.hasOwn(config?.tools ?? {}, "same")).toBe(false);
+    expect(Object.hasOwn(config?.tools ?? {}, "other")).toBe(false);
+    // Only the differing tool: the same value changes nothing.
+    const lines = warn.mock.calls.map((args: unknown[]) => String(args[0]));
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("tools.other.geo is ignored");
+    expect(lines[1]).toContain("tools.other.conversationId is ignored");
+  });
+
+  it("warns for a per-tool conversationId in .yaviorc.json too, and the file's global value applies", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "yavio-conversation-tools-test-"));
+    const originalCwd = process.cwd;
+    try {
+      writeFileSync(
+        join(tempDir, ".yaviorc.json"),
+        JSON.stringify({
+          apiKey: "file_key",
+          capture: { conversationId: false },
+          tools: { pick: { conversationId: true } },
+        }),
+      );
+      process.cwd = () => tempDir;
+      const config = resolveConfig();
+      expect(config?.capture.conversationId).toBe(false);
+      expect(Object.hasOwn(config?.tools ?? {}, "pick")).toBe(false);
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0][0]).toContain("tools.pick.conversationId is ignored");
     } finally {
       process.cwd = originalCwd;
       rmSync(tempDir, { recursive: true, force: true });

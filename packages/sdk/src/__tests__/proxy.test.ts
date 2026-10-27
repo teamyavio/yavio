@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BaseEvent } from "@yavio/shared/events";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { resolveConfig } from "../core/config.js";
 import { deriveCustomSessionId, deriveSessionId } from "../core/ids.js";
 import type { CaptureConfig, SessionKeyRequest, YavioConfig } from "../core/types.js";
 import { createYavioContext } from "../server/context.js";
@@ -68,6 +69,7 @@ const testConfig: YavioConfig = {
     inputValues: true,
     outputValues: true,
     geo: true,
+    conversationId: true,
     tokens: true,
     retries: true,
     rejectedInputValues: false,
@@ -2106,6 +2108,438 @@ describe("client metadata capture", () => {
       "openai/userLocation": { country: "Germany" },
     });
     expect(event.country_code).toBeUndefined();
+  });
+});
+
+describe("capture.conversationId (#204)", () => {
+  const GEOS = [true, "region", "country", false] as const;
+  // serverOnly: no widget token, which has nothing to do with _meta.
+  const withCapture = (capture: Partial<CaptureConfig>): YavioConfig => ({
+    ...testConfig,
+    serverOnly: true,
+    capture: { ...testConfig.capture, ...capture },
+  });
+
+  // Shaped like what ChatGPT sends; every value is synthetic.
+  const CONVERSATION = "v1/conversation-test-0001";
+  const CHATGPT_SHAPED_META = {
+    "openai/locale": "en-US",
+    "openai/userAgent": "ChatGPT/0.0.0 (test)",
+    "openai/subject": "v1/subject-test-0001",
+    "openai/session": CONVERSATION,
+    "openai/userLocation": {
+      city: "Testville",
+      region: "Test Region",
+      country: "US",
+      timezone: "America/Chicago",
+      latitude: "0.12345",
+      longitude: "0.54321",
+    },
+    timezone: "America/Chicago",
+    timezone_offset_minutes: -300,
+    sessionId: "conversation-test-0001",
+    windowId: "conversation-test-0001:0",
+    callId: "call-test-0001",
+    itemId: "item-test-0001",
+    "openai/request_id": "request-test-0001",
+    "openai/organization": "v1/org-test-0001",
+    traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+  };
+  /** Every conversation key at once, the VS Code and Codex ones included. */
+  const ALL_CONVERSATION_KEYS_META = {
+    ...CHATGPT_SHAPED_META,
+    "vscode.conversationId": "vscode-conversation-test-0001",
+    threadId: "thread-test-0001",
+  };
+  const CONVERSATION_VALUES = [
+    "conversation-test-0001",
+    "vscode-conversation-test-0001",
+    "thread-test-0001",
+  ];
+
+  async function callWith(
+    config: YavioConfig,
+    _meta: unknown,
+    options: { client?: string; outcome?: "throw" | "isError" } = {},
+  ) {
+    // Every call as in a fresh process: a session's connection event is
+    // sent once per process.
+    _resetGlobalState();
+    const server = new McpServer({ name: "test", version: "1.0" });
+    if (options.client) {
+      // The client named by its initialize handshake (a long-lived server).
+      (server.server as unknown as Record<string, unknown>).getClientVersion = () => ({
+        name: options.client,
+        version: "0.0.1",
+      });
+    }
+    const transport = createMockTransport();
+    const proxy = createProxy(server, config, transport, "0.0.1");
+    let seenMeta: unknown;
+    proxy.tool("conversation_tool", { q: z.string() }, (_args, extra) => {
+      seenMeta = extra._meta;
+      if (options.outcome === "throw") throw new Error("backend down");
+      if (options.outcome === "isError") {
+        return { content: [{ type: "text", text: "no result" }], isError: true };
+      }
+      return { content: [{ type: "text", text: "ok" }] };
+    });
+    const pending = registeredTool(server, "conversation_tool")?.handler(
+      { q: "hello" },
+      {
+        signal: new AbortController().signal,
+        requestId: "req-204",
+        sendNotification: async () => {},
+        sendRequest: async () => ({}),
+        _meta,
+      },
+    );
+    if (options.outcome === "throw") await expect(pending).rejects.toThrow("backend down");
+    else await pending;
+    const events = transport.sent.flat() as Array<Record<string, unknown>>;
+    const event = events.find((e) => e.event_type === "tool_call") as Record<string, unknown>;
+    const connection = events.find((e) => e.event_type === "connection") as Record<string, unknown>;
+    return {
+      event,
+      connection,
+      seenMeta,
+      inputValues: event.input_values as Record<string, unknown>,
+    };
+  }
+
+  // Written out key by key in the order the SDK emits them: JSON.stringify
+  // compares the order too. The same literals pass on the commit before #204.
+  const { traceparent: _traceparent, ...chatgptShapedWithoutTraceparent } = CHATGPT_SHAPED_META;
+  const DROPPED_BY_ALLOWLIST = [
+    "callId",
+    "itemId",
+    "openai/organization",
+    "openai/request_id",
+    "sessionId",
+    "timezone",
+    "timezone_offset_minutes",
+    "windowId",
+  ];
+  const KNOWN_FOUR = {
+    "openai/locale": "en-US",
+    "openai/userAgent": "ChatGPT/0.0.0 (test)",
+    "openai/subject": "v1/subject-test-0001",
+    "openai/session": CONVERSATION,
+  };
+  const BEFORE_204: Record<string, Record<string, unknown>> = {
+    true: { q: "hello", _meta: chatgptShapedWithoutTraceparent },
+    region: {
+      q: "hello",
+      _meta: { ...KNOWN_FOUR, "openai/userLocation": { country: "US", region: "Test Region" } },
+      _metaDroppedKeys: DROPPED_BY_ALLOWLIST,
+    },
+    country: {
+      q: "hello",
+      _meta: { ...KNOWN_FOUR, "openai/userLocation": { country: "US" } },
+      _metaDroppedKeys: DROPPED_BY_ALLOWLIST,
+    },
+    false: { q: "hello", _meta: KNOWN_FOUR, _metaDroppedKeys: DROPPED_BY_ALLOWLIST },
+  };
+
+  it.each(GEOS)(
+    "leaves input_values byte-identical to before #204 under geo %s with the flag on",
+    async (geo) => {
+      for (const config of [
+        withCapture({ geo, conversationId: true }),
+        // What resolveConfig makes of options that do not set the flag.
+        resolveConfig({ apiKey: "yav_test", capture: { geo } }) as YavioConfig,
+      ]) {
+        const { inputValues } = await callWith(config, CHATGPT_SHAPED_META);
+        expect(JSON.stringify(inputValues)).toBe(JSON.stringify(BEFORE_204[String(geo)]));
+      }
+    },
+  );
+
+  // VS Code- and Codex-shaped, with SEP-414 trace context (#173) and a
+  // per-key baggage carrier; every value is synthetic (review round 1).
+  const IDE_SHAPED_META = {
+    "vscode.conversationId": "vscode-conversation-test-0001",
+    threadId: "thread-test-0001",
+    progressToken: 7,
+    traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+    tracestate: "vendor=state-test-0001",
+    baggage: "user.id=user-test-0001",
+    "uberctx-test": "member-test-0001",
+  };
+  const IDE_BEFORE_204 = {
+    true: {
+      q: "hello",
+      _meta: {
+        "vscode.conversationId": "vscode-conversation-test-0001",
+        threadId: "thread-test-0001",
+        progressToken: 7,
+      },
+      _metaDroppedKeys: ["baggage", "tracestate"],
+      _metaDroppedUnnamed: 1,
+    },
+    other: {
+      q: "hello",
+      _meta: {},
+      _metaDroppedKeys: [
+        "baggage",
+        "progressToken",
+        "threadId",
+        "tracestate",
+        "vscode.conversationId",
+      ],
+      _metaDroppedUnnamed: 1,
+    },
+  };
+
+  it.each(GEOS)(
+    "leaves input_values byte-identical to before #204 for a VS Code / Codex-shaped _meta with trace context under geo %s with the flag on",
+    async (geo) => {
+      for (const config of [
+        withCapture({ geo, conversationId: true }),
+        resolveConfig({ apiKey: "yav_test", capture: { geo } }) as YavioConfig,
+      ]) {
+        const { inputValues } = await callWith(config, IDE_SHAPED_META, {
+          client: "codex-mcp-client",
+        });
+        expect(JSON.stringify(inputValues)).toBe(
+          JSON.stringify(geo === true ? IDE_BEFORE_204.true : IDE_BEFORE_204.other),
+        );
+      }
+    },
+  );
+
+  const REMAINING_UNDER_TRUE = {
+    "openai/locale": "en-US",
+    "openai/userAgent": "ChatGPT/0.0.0 (test)",
+    "openai/subject": "v1/subject-test-0001",
+    "openai/userLocation": CHATGPT_SHAPED_META["openai/userLocation"],
+    timezone: "America/Chicago",
+    timezone_offset_minutes: -300,
+    callId: "call-test-0001",
+    itemId: "item-test-0001",
+    "openai/request_id": "request-test-0001",
+    "openai/organization": "v1/org-test-0001",
+  };
+  const KNOWN_THREE = {
+    "openai/locale": "en-US",
+    "openai/userAgent": "ChatGPT/0.0.0 (test)",
+    "openai/subject": "v1/subject-test-0001",
+  };
+  const DROPPED_UNDER_OTHER_GEO = [
+    "callId",
+    "itemId",
+    "openai/organization",
+    "openai/request_id",
+    "openai/session",
+    "sessionId",
+    "threadId",
+    "timezone",
+    "timezone_offset_minutes",
+    "vscode.conversationId",
+    "windowId",
+  ];
+  const WITHOUT_CONVERSATION: Record<string, Record<string, unknown>> = {
+    true: {
+      _meta: REMAINING_UNDER_TRUE,
+      _metaDroppedKeys: [
+        "openai/session",
+        "sessionId",
+        "threadId",
+        "vscode.conversationId",
+        "windowId",
+      ],
+    },
+    region: {
+      _meta: { ...KNOWN_THREE, "openai/userLocation": { country: "US", region: "Test Region" } },
+      _metaDroppedKeys: DROPPED_UNDER_OTHER_GEO,
+    },
+    country: {
+      _meta: { ...KNOWN_THREE, "openai/userLocation": { country: "US" } },
+      _metaDroppedKeys: DROPPED_UNDER_OTHER_GEO,
+    },
+    false: { _meta: KNOWN_THREE, _metaDroppedKeys: DROPPED_UNDER_OTHER_GEO },
+  };
+
+  it.each(GEOS)(
+    "removes every conversation key under geo %s with the flag off and names them",
+    async (geo) => {
+      const { event, inputValues } = await callWith(
+        withCapture({ geo, conversationId: false }),
+        ALL_CONVERSATION_KEYS_META,
+      );
+      expect(JSON.stringify(inputValues)).toBe(
+        JSON.stringify({ q: "hello", ...WITHOUT_CONVERSATION[String(geo)] }),
+      );
+      expect(inputValues).not.toHaveProperty("_metaDroppedUnnamed");
+      // The rest of the event is as with the flag on: the client metadata
+      // and the traceparent (#173) do not depend on it.
+      expect(event.subject_id).toBe("v1/subject-test-0001");
+      expect(event.locale).toBe("en-US");
+      expect(event.metadata).toEqual({ traceparent: CHATGPT_SHAPED_META.traceparent });
+      const serialized = leakScan(event, deriveSessionId(CONVERSATION));
+      for (const value of CONVERSATION_VALUES) expect(serialized, value).not.toContain(value);
+    },
+  );
+
+  it.each(GEOS)(
+    "keeps three of the four known keys under geo %s and names only what was sent",
+    async (geo) => {
+      const { inputValues } = await callWith(withCapture({ geo, conversationId: false }), {
+        ...KNOWN_FOUR,
+        "openai/userLocation": { country: "US" },
+      });
+      expect(inputValues._meta).toEqual(
+        geo === false ? KNOWN_THREE : { ...KNOWN_THREE, "openai/userLocation": { country: "US" } },
+      );
+      expect(inputValues._metaDroppedKeys).toEqual(["openai/session"]);
+    },
+  );
+
+  it("adds no _metaDroppedKeys under geo: true when no conversation key was sent", async () => {
+    const { inputValues } = await callWith(withCapture({ conversationId: false }), KNOWN_THREE);
+    expect(inputValues).toEqual({ q: "hello", _meta: KNOWN_THREE });
+  });
+
+  it("keeps the 20-name cap and the count past it: the conversation keys are ordinary names there", async () => {
+    const many = Object.fromEntries(
+      Array.from({ length: 25 }, (_, i) => [`extra${String(i).padStart(2, "0")}`, i]),
+    );
+    const { inputValues } = await callWith(withCapture({ geo: "country", conversationId: false }), {
+      ...ALL_CONVERSATION_KEYS_META,
+      ...many,
+    });
+    const named = inputValues._metaDroppedKeys as string[];
+    // 11 dropped by the allowlist and the flag, plus 25: sorted, the first 20.
+    const all = [...DROPPED_UNDER_OTHER_GEO, ...Object.keys(many)].sort();
+    expect(named).toEqual(all.slice(0, 20));
+    expect(inputValues._metaDroppedUnnamed).toBe(all.length - 20);
+  });
+
+  const CLIENTS = [
+    [
+      "ChatGPT",
+      { "openai/session": CONVERSATION, sessionId: "conversation-test-0001" },
+      undefined,
+      "openai_session",
+      CONVERSATION,
+    ],
+    [
+      "VS Code",
+      { "vscode.conversationId": "vscode-conversation-test-0001" },
+      undefined,
+      "vscode_conversation",
+      "vscode-conversation-test-0001",
+    ],
+    [
+      "the Codex CLI",
+      { threadId: "thread-test-0001" },
+      "codex-mcp-client",
+      "codex_thread",
+      "thread-test-0001",
+    ],
+  ] as const;
+
+  it.each(CLIENTS)(
+    "derives the same session_id and session_source with the flag on and off (%s)",
+    async (_label, meta, client, source, key) => {
+      for (const geo of GEOS) {
+        const sessions: unknown[][] = [];
+        for (const conversationId of [true, false]) {
+          const { event, connection, inputValues } = await callWith(
+            withCapture({ geo, conversationId }),
+            meta,
+            { client },
+          );
+          sessions.push([
+            event.session_id,
+            event.session_source,
+            connection.session_id,
+            connection.session_source,
+          ]);
+          const stored = inputValues._meta as Record<string, unknown>;
+          if (conversationId) {
+            expect(stored, String(geo)).toEqual(geo === true ? meta : pickKnown(meta));
+          } else {
+            expect(stored, String(geo)).toEqual({});
+            expect(inputValues._metaDroppedKeys).toEqual(Object.keys(meta).sort());
+          }
+        }
+        const expected = [deriveSessionId(key), source, deriveSessionId(key), source];
+        expect(sessions, String(geo)).toEqual([expected, expected]);
+      }
+    },
+  );
+
+  /** What geo other than true keeps of a meta with no location: the known keys. */
+  function pickKnown(meta: Record<string, unknown>): Record<string, unknown> {
+    return "openai/session" in meta ? { "openai/session": meta["openai/session"] } : {};
+  }
+
+  it.each(GEOS)(
+    "never mutates the _meta the handler receives with the flag off (geo %s)",
+    async (geo) => {
+      const _meta = JSON.parse(JSON.stringify(ALL_CONVERSATION_KEYS_META));
+      const { seenMeta, inputValues } = await callWith(
+        withCapture({ geo, conversationId: false }),
+        _meta,
+      );
+      expect(seenMeta).toBe(_meta);
+      expect(seenMeta).toEqual(ALL_CONVERSATION_KEYS_META);
+      expect(inputValues._meta).not.toHaveProperty("openai/session");
+    },
+  );
+
+  it("removes them on the error path too", async () => {
+    const { event, inputValues } = await callWith(
+      withCapture({ conversationId: false }),
+      ALL_CONVERSATION_KEYS_META,
+      { outcome: "throw" },
+    );
+    expect(event.status).toBe("error");
+    expect(JSON.stringify(inputValues)).toBe(
+      JSON.stringify({ q: "hello", ...WITHOUT_CONVERSATION.true }),
+    );
+    expect(event.session_id).toBe(deriveSessionId(CONVERSATION));
+  });
+
+  it("removes them from the event of an isError result too", async () => {
+    const { event, inputValues } = await callWith(
+      withCapture({ conversationId: false }),
+      ALL_CONVERSATION_KEYS_META,
+      { outcome: "isError" },
+    );
+    expect(event.status).toBe("error");
+    expect(event.error_category).toBe("tool_error");
+    expect(JSON.stringify(inputValues)).toBe(
+      JSON.stringify({ q: "hello", ...WITHOUT_CONVERSATION.true }),
+    );
+    expect(event.session_id).toBe(deriveSessionId(CONVERSATION));
+  });
+
+  it("holds for a tool whose override turns input capture on under a global inputValues: false", async () => {
+    const config: YavioConfig = {
+      ...withCapture({ inputValues: false, conversationId: false }),
+      tools: { conversation_tool: { inputValues: true } },
+    };
+    const { event, inputValues } = await callWith(config, ALL_CONVERSATION_KEYS_META);
+    expect(JSON.stringify(inputValues)).toBe(
+      JSON.stringify({ q: "hello", ...WITHOUT_CONVERSATION.true }),
+    );
+    expect(event.subject_id).toBe("v1/subject-test-0001");
+    const serialized = leakScan(event, deriveSessionId(CONVERSATION));
+    for (const value of CONVERSATION_VALUES) expect(serialized, value).not.toContain(value);
+  });
+
+  it("fails closed on a value that never went through resolveConfig", async () => {
+    // A hand-built config with the string "true": the keys go, as for false.
+    for (const conversationId of ["true", 1, undefined]) {
+      const { inputValues } = await callWith(
+        withCapture({ conversationId: conversationId as never }),
+        CHATGPT_SHAPED_META,
+      );
+      expect(inputValues._meta, String(conversationId)).not.toHaveProperty("openai/session");
+      expect(inputValues._metaDroppedKeys).toEqual(["openai/session", "sessionId", "windowId"]);
+    }
   });
 });
 
