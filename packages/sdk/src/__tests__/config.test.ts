@@ -528,6 +528,26 @@ describe("capture.conversationId (#204)", () => {
     },
   );
 
+  it("does not warn for a per-tool geo or conversationId equal to the global value (review round 2)", () => {
+    const config = resolveConfig({
+      apiKey: "test",
+      capture: { geo: "country", conversationId: false },
+      tools: {
+        same: { geo: "country", conversationId: false } as never,
+        other: { geo: "region", conversationId: true } as never,
+      },
+    });
+    expect(config?.capture.geo).toBe("country");
+    expect(config?.capture.conversationId).toBe(false);
+    expect(Object.hasOwn(config?.tools ?? {}, "same")).toBe(false);
+    expect(Object.hasOwn(config?.tools ?? {}, "other")).toBe(false);
+    // Only the differing tool: the same value changes nothing.
+    const lines = warn.mock.calls.map((args: unknown[]) => String(args[0]));
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("tools.other.geo is ignored");
+    expect(lines[1]).toContain("tools.other.conversationId is ignored");
+  });
+
   it("warns for a per-tool conversationId in .yaviorc.json too, and the file's global value applies", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "yavio-conversation-tools-test-"));
     const originalCwd = process.cwd;
