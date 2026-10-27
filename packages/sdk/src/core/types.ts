@@ -204,7 +204,8 @@ export interface CaptureConfig {
    *   raw id this removes is the only per-conversation id in the event.
    * Global only: a `tools` entry that sets it is ignored, with one
    * `YAVIO-1006` warning when its value differs from this one (one
-   * conversation would be split into rows with the id and rows without it). Forward only: stored events keep their ids.
+   * conversation would be split into rows with the id and rows without
+   * it). Forward only: stored events keep their ids.
    */
   conversationId?: boolean;
   tokens: boolean;

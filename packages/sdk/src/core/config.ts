@@ -142,9 +142,9 @@ const GLOBAL_ONLY_CAPTURE_KEYS = ["geo", "conversationId"] as const;
  * by field per tool (code wins), the same way `capture` merges. Only the known
  * keys survive (an unknown key is ignored; a global-only flag is ignored, with
  * a warning when it differs from `capture`, see GLOBAL_ONLY_CAPTURE_KEYS), and
- * like the global flags they fail closed: the file is hand-written JSON, and a `"false"` string must not
- * silently drop the override and leave the tool on the global default — it
- * becomes `false` with one warning.
+ * like the global flags they fail closed: the file is hand-written JSON, and a
+ * `"false"` string must not silently drop the override and leave the tool on
+ * the global default — it becomes `false` with one warning.
  */
 function resolveTools(
   capture: ResolvedCaptureConfig,
