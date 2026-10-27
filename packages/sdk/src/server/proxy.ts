@@ -1736,8 +1736,8 @@ function extractInputTypes(args: unknown): Record<string, unknown> | undefined {
  *   `traceparent`) and, with `conversationId: false`, the conversation keys
  *   that were sent; only the per-key baggage carriers are counted.
  * - `_taskId`: MCP task id, for correlating task-based flows.
- * - `_requestInfo`: allow-listed headers and the URL sans query, see
- *   sanitizeRequestInfo.
+ * - `_requestInfo`: allow-listed headers, and the URL sans query when a
+ *   custom transport passes it as a string; see sanitizeRequestInfo.
  *
  * Dropped in 0.4.0 after an inventory (input-values-extra-fields.md):
  * `_requestId` (a per-connection counter, on ~every call, says nothing),
