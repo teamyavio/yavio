@@ -115,8 +115,8 @@ importers:
         specifier: workspace:*
         version: link:../db
       '@yavio/sdk':
-        specifier: ^0.5.5
-        version: 0.5.5(@modelcontextprotocol/sdk@1.32.1(zod@4.6.7))(@modelcontextprotocol/server@2.3.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+        specifier: ^0.5.6
+        version: 0.5.6(@modelcontextprotocol/sdk@1.32.1(zod@4.6.7))(@modelcontextprotocol/server@2.3.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@yavio/shared':
         specifier: workspace:*
         version: link:../shared
@@ -2893,8 +2893,8 @@ packages:
   '@vitest/utils@4.1.12':
     resolution: {integrity: sha512-Q3awXrwOfEV+qc3WmO5ONyE0yO7Q1gQ9/oyHxGLZ/pl7N3NO/ZztqQwKLuwMkV+CA1JYSIeO3gkHnRDIo4AVaA==}
 
-  '@yavio/sdk@0.5.5':
-    resolution: {integrity: sha512-3Raom0uxL9wFAzaw7WGXZOXRg2VfggCuG/YZmvGidVZEOAF6Vb7CkA0unhpQY6ATl6gMGdwhkPrjdFQ0ihPcDA==}
+  '@yavio/sdk@0.5.6':
+    resolution: {integrity: sha512-OKS20qKNkkVYyRLGJgWIDk1RwQdrPdh50MqC+tKdlNIF1RoVhXEpWwD95w/m0gODvKOvVydPalNDw4nmg9NJPg==}
     engines: {node: '>=20.0.0'}
     peerDependencies:
       '@modelcontextprotocol/sdk': '>=1.24.0'
@@ -7751,7 +7751,7 @@ snapshots:
       convert-source-map: 2.0.0
       tinyrainbow: 3.2.0
 
-  '@yavio/sdk@0.5.5(@modelcontextprotocol/sdk@1.32.1(zod@4.6.7))(@modelcontextprotocol/server@2.3.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)':
+  '@yavio/sdk@0.5.6(@modelcontextprotocol/sdk@1.32.1(zod@4.6.7))(@modelcontextprotocol/server@2.3.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)':
     dependencies:
       nanoid: 5.1.16
     optionalDependencies:
