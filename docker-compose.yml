@@ -42,7 +42,7 @@ services:
     logging: *logging
     # Exact pin, upgrades are one-way (#95). Dependabot proposes patch updates;
     # docker-compose.test.yml must carry the same tag (ch-image-pins.test.ts).
-    image: clickhouse/clickhouse-server:26.8.26.12
+    image: clickhouse/clickhouse-server:26.8.36.3
     restart: unless-stopped
     environment:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is not set. Run ./scripts/setup-env.sh, or add it to .env — it must never fall back to a published default. This user is unrestricted and can manage access.}
